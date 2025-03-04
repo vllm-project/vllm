@@ -33,9 +33,12 @@ from transformers.modeling_outputs import (BaseModelOutput,
                                            BaseModelOutputWithPooling)
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import (ModelOutput, add_start_docstrings,
-                                add_start_docstrings_to_model_forward,
-                                is_flash_attn_2_available, logging,
+                                add_start_docstrings_to_model_forward, logging,
                                 replace_return_docstrings)
+
+from vllm.platforms import _Backend
+
+from .vision import get_vit_attn_backend
 
 logger = logging.get_logger(__name__)
 
@@ -375,11 +378,6 @@ SIGLIP_PRETRAINED_MODEL_ARCHIVE_LIST = [
     "google/siglip-base-patch16-224",
     # See all SigLIP models at https://huggingface.co/models?filter=siglip
 ]
-
-if is_flash_attn_2_available():
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import pad_input  # noqa
-    from flash_attn.bert_padding import index_first_axis, unpad_input
 
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
@@ -841,6 +839,14 @@ class SiglipFlashAttention2(SiglipAttention):
         super().__init__(*args, **kwargs)
         self.is_causal = False  # Hack to make sure we don't use a causal mask
 
+        # Detect attention implementation.
+        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+        if self.attn_backend != _Backend.FLASH_ATTN:
+            raise RuntimeError(
+                "Phi-4-multimodal-instruct model does not support"\
+                    " {self.attn_backend} backend now."
+            )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -959,6 +965,8 @@ class SiglipFlashAttention2(SiglipAttention):
                 The scaling of QK^T before applying softmax. Default to 1 / 
                 sqrt(head_dim)
         """
+        from flash_attn import flash_attn_func, flash_attn_varlen_func
+        from flash_attn.bert_padding import pad_input  # noqa
 
         # TODO: Remove the `query_length != 1` check once Flash Attention for
         # RoCm is bumped to 2.1. For details, please see the comment in
@@ -1003,6 +1011,7 @@ class SiglipFlashAttention2(SiglipAttention):
 
     def _upad_input(self, query_layer, key_layer, value_layer, attention_mask,
                     query_length):
+        from flash_attn.bert_padding import index_first_axis, unpad_input
         indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(
             attention_mask)
         batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
