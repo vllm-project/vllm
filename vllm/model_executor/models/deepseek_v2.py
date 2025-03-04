@@ -57,6 +57,9 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
+from vllm.model_executor.layers.quantization.utils.int8_utils import (
+    block_dequant as int8_block_dequant,
+)
 
 class DeepseekV2MLP(nn.Module):
 
