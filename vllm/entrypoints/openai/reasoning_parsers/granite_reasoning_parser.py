@@ -48,8 +48,96 @@ class GraniteReasoningParser(ReasoningParser):
         self.longest_think_start = max(
             len(think_start) for think_start in self.valid_think_starts)
 
-    def _get_delta_message_with_no_reasoning_bounds(self, current_text,
-                                                    delta_text):
+    def extract_reasoning_content(
+            self, model_output: str, request: ChatCompletionRequest
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Extract the reasoning content & content sections, respectively.
+        If the sequence doesn't match what we expect, i.e., the model generates
+        something else, all content is considered non-reasoning content.
+
+        Args:
+            model_output (str): Output of the model to be parsed.
+            request (ChatCompletionReqest): Request being processed.
+
+        Returns:
+            Tuple[Optional[str], Optional[str]]: Tuple pair containing the
+            reasoning content and non-reasoning content.
+        """
+        re_match = self.reasoning_regex.findall(model_output)
+        if not re_match:
+            return None, model_output
+        reasoning_content, response_content = re_match[0]
+        if not response_content:
+            return reasoning_content, None
+        return reasoning_content, response_content
+
+    def extract_reasoning_content_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> Union[DeltaMessage, None]:
+        """Extract the reasoning content / content emitted by granite models;
+        If the sequence doesn't match what we expect, i.e., the model generates
+        something else, all content is considered non-reasoning content.
+
+        NOTE: Granite models do not use a special token to start their reasoning
+        and response sections; instead they have token sequences, e.g.,
+
+                Here is my thought process: Foo Here is my response: Bar
+
+        This increases the complexity of correctly handling streams by a lot,
+        since we need to watch for specific sequences and correctly handle
+        parsing them without dropping content that is potentially overlapping
+        & spanning across multiple delta messages.
+
+        Args:
+            previous_text (str): Previous text outside of this delta message.
+            current_text (str): Previous text + delta text.
+            delta_text (str): Text to consider and parse content from.
+            previous_token_ids (Sequence[int]): Token IDs of previous_text.
+            current_token_ids (Sequence[int]): Token IDs of current_text.
+            delta_token_ids (Sequence[int]): Token IDs of delta_text.
+
+        Returns:
+            Union[DeltaMessage, None]
+                DeltaMessage with either reasoning content or content, or None.
+        """
+        reasoning_content, response_content = self._get_content_sections(
+            current_text)
+        if not reasoning_content:
+            delta_message = self._get_delta_message_with_no_reasoning_bounds(
+                current_text, delta_text)
+        # We have a start of reasoning message, but not the response message yet
+        elif not response_content:
+            delta_message = self._get_delta_message_with_no_response_bounds(
+                current_text, reasoning_content, delta_text)
+        else:
+            delta_message = self._get_delta_message_with_both_bounds(
+                delta_text, reasoning_content, response_content, current_text)
+        if not delta_message.content and not delta_message.reasoning_content:
+            return None
+        return delta_message
+
+    #### Implementation details of stream parsing for granite models
+    def _get_delta_message_with_no_reasoning_bounds(
+        self,
+        current_text: str,
+        delta_text: str,
+    ) -> DeltaMessage:
+        """Parse the delta message when the current text has not yet completed
+        its start of reasoning sequence.
+
+        Args:
+            current_text (str): The full previous + delta text.
+            delta_text (str): Text to consider and parse content from.
+
+        Returns:
+            DeltaMessage: Message containing the parsed content.
+        """
         # Even before this, we already had a longer text str than any expected
         # message; The output is not parsable; assume we rectified this
         # previously and just add the delta text to the content.
@@ -76,9 +164,22 @@ class GraniteReasoningParser(ReasoningParser):
         # corrected; just return the delta text as normal content.
         return DeltaMessage(reasoning_content=None, content=delta_text)
 
-    def _get_delta_message_with_no_response_bounds(self, current_text,
-                                                   reasoning_content,
-                                                   delta_text):
+    def _get_delta_message_with_no_response_bounds(
+            self, current_text: str, reasoning_content: str,
+            delta_text: str) -> DeltaMessage:
+        """Parse the delta message when the current text has both reasoning
+        content with no (response) content. NOTE that we may have overlapping
+        tokens with the start of reasoning / start of response sequences on
+        either side of the delta text.
+
+        Args:
+            current_text (str): The full previous + delta text.
+            reasoning_content (str): reasoning content parsed from current_text.
+            delta_text (str): Text to consider and parse content from.
+
+        Returns:
+            DeltaMessage: Message containing the parsed content.
+        """
         # If we have no reasoning content or explicitly end with the start of
         # response sequence, we are in transition to the response; need to be
         # careful here, since the final token (:) will match the reasoning
@@ -137,9 +238,25 @@ class GraniteReasoningParser(ReasoningParser):
                             delta_text,
                             content=None)
 
-    def _get_delta_message_with_both_bounds(self, delta_text,
-                                            reasoning_content,
-                                            response_content, current_text):
+    def _get_delta_message_with_both_bounds(
+        self,
+        delta_text: str,
+        reasoning_content: str,
+        response_content: str,
+        current_text: str,
+    ) -> DeltaMessage:
+        """Parse the delta message when the current text has both reasoning
+        content and normal (response) content.
+
+        Args:
+            delta_text (str): Text to consider and parse content from.
+            reasoning_content (str): reasoning content parsed from current_text.
+            response_content (str): response content parsed from current_text.
+            current_text (str): The full previous + delta text.
+
+        Returns:
+            DeltaMessage: Message containing the parsed content.
+        """
         # We have reasoning and response content, but it may not all be in the
         # delta text; we need to consider the length of the start of response
         # sequence and divide just the delta text part.
@@ -173,8 +290,18 @@ class GraniteReasoningParser(ReasoningParser):
             content=delta_content,
         )
 
-    def get_content_sections(self, current_text: str):
+    def _get_content_sections(
+            self, current_text: str) -> Tuple[Optional[str], Optional[str]]:
+        """Parse the text to extract the reasoning content / content
+        if we have them.
 
+        Args:
+            current_text (str): The full previous + delta text.
+
+        Returns:
+            Tuple[Optional[str], Optional[str]]: Tuple pair containing the
+            reasoning content and non-reasoning content.
+        """
         delimiter_idxs = [
             idx for idx, char in enumerate(current_text)
             if char == self.seq_boundary_end
@@ -211,39 +338,3 @@ class GraniteReasoningParser(ReasoningParser):
         if start_reasoning_content and start_response_content is None:
             return current_text[start_reasoning_content:], None
         return None, None
-
-    def extract_reasoning_content_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
-        reasoning_content, response_content = self.get_content_sections(
-            current_text)
-        if not reasoning_content:
-            delta_message = self._get_delta_message_with_no_reasoning_bounds(
-                current_text, delta_text)
-        # We have a start of reasoning message, but not the response message yet
-        elif not response_content:
-            delta_message = self._get_delta_message_with_no_response_bounds(
-                current_text, reasoning_content, delta_text)
-        else:
-            delta_message = self._get_delta_message_with_both_bounds(
-                delta_text, reasoning_content, response_content, current_text)
-        if not delta_message.content and not delta_message.reasoning_content:
-            return None
-        return delta_message
-
-    def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
-    ) -> Tuple[Optional[str], Optional[str]]:
-        re_match = self.reasoning_regex.findall(model_output)
-        if not re_match:
-            return None, model_output
-        reasoning_content, response_content = re_match[0]
-        if not response_content:
-            return reasoning_content, None
-        return reasoning_content, response_content
