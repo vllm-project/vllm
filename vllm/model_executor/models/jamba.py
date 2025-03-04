@@ -101,7 +101,8 @@ class JambaMLP(JambaMoE):
                          top_k=1,
                          params_dtype=params_dtype,
                          tp_size=tp_size,
-                         quant_config=quant_config)
+                         quant_config=quant_config,
+                         prefix=prefix)
 
 
 class JambaMambaDecoderLayer(nn.Module):
@@ -112,6 +113,7 @@ class JambaMambaDecoderLayer(nn.Module):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  is_lora_enabled: Optional[bool] = False,
+                 prefix: str = "",
                  **kwargs) -> None:
         super().__init__()
         self.config = config
@@ -132,7 +134,9 @@ class JambaMambaDecoderLayer(nn.Module):
 
         num_experts = config.layers_num_experts[layer_idx]
         ffn_layer_class = JambaMoE if num_experts > 1 else JambaMLP
-        self.feed_forward = ffn_layer_class(config, quant_config=quant_config)
+        self.feed_forward = ffn_layer_class(config,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.feed_forward")
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size,
