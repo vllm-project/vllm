@@ -181,17 +181,17 @@ def show_mem_info(logger=None, msg="", loglevel="info"):
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
     if rank == 0:
         show_fn(f"[Rank {rank}] {msg}")
-        show_fn(f"[Rank {rank}] Used HPU memory: {hpu_mem_mb // 1000} GB {hpu_mem_mb % 1000} MB")
         cpu_mem_mb = get_used_cpu_mem_MB()
-        show_fn(f"[Rank {rank}] Used CPU memory: {cpu_mem_mb // 1000} GB {cpu_mem_mb % 1000} MB")
+        show_fn(f"[Rank {rank}] Used HPU: {hpu_mem_mb // 1000} GB {hpu_mem_mb % 1000:.2f} MB; CPU: {cpu_mem_mb // 1000} GB {cpu_mem_mb % 1000:.2f} MB")
     
 
 def get_used_hpu_mem_MB():
     """Get HPU used memory: MiB."""
     import torch
     import numpy as np
+    import habana_frameworks.torch as htorch
     from habana_frameworks.torch.hpu import memory_stats
-
+    htorch.core.mark_step()
     torch.hpu.synchronize()
     mem_stats = memory_stats()
     used_hpu_mem = np.round(mem_stats["InUse"] / 1024**2, 3)
