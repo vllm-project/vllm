@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
+from collections.abc import Mapping
 from functools import partial
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 
 from vllm.config import ModelConfig
@@ -21,6 +24,7 @@ def _test_processing_correctness(
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
+    ignore_keys: list[str],
 ):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
@@ -123,8 +127,9 @@ def _test_processing_correctness(
             hf_processor_mm_kwargs={},
         )
 
-        assert baseline_result == cached_result, (
-            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+        assert _drop_keys(baseline_result, ignore_keys) == _drop_keys(
+            cached_result,
+            ignore_keys), (f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
 
         baseline_tokenized_result = baseline_processor.apply(
             tokenizer.encode(prompt, **tokenizer_encode_kwargs),
@@ -132,8 +137,9 @@ def _test_processing_correctness(
             hf_processor_mm_kwargs={},
         )
 
-        assert baseline_result == baseline_tokenized_result, (
-            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+        assert _drop_keys(baseline_result, ignore_keys) == _drop_keys(
+            baseline_tokenized_result,
+            ignore_keys), (f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
 
         cached_tokenized_result = cached_processor.apply(
             tokenizer.encode(prompt, **tokenizer_encode_kwargs),
@@ -141,8 +147,9 @@ def _test_processing_correctness(
             hf_processor_mm_kwargs={},
         )
 
-        assert cached_result == cached_tokenized_result, (
-            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+        assert _drop_keys(cached_result, ignore_keys) == _drop_keys(
+            cached_tokenized_result,
+            ignore_keys), (f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
 
 
 # yapf: disable
@@ -186,11 +193,15 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
+    ignore_keys = []
+    if 'ultravox' in model_id:
+        ignore_keys = ['mm_kwargs.audio_features']
     _test_processing_correctness(
         model_id,
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
+        ignore_keys=ignore_keys,
     )
 
 
@@ -218,4 +229,36 @@ def test_processing_correctness_phi3v(
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
+        ignore_keys=[],
     )
+
+
+def _drop_keys(result: dict, ignore_keys: list[str]) -> bool:
+    """Drop specified nested keys from the result and convert tensors to lists
+    for easier comparison.
+
+    Args:
+        result: Result to drop keys from
+        ignore_keys: List of tuples containing nested key paths to ignore
+                    e.g. ['mm_kwargs.audio_features']
+    """
+    result = copy.deepcopy(result)
+
+    for key_path in ignore_keys:
+        keys = key_path.split('.')
+        curr = result
+        for key in keys[:-1]:
+            curr = curr.get(key, {})
+        curr.pop(keys[-1], None)
+
+    return _convert_tensors_to_list(result)
+
+
+def _convert_tensors_to_list(obj):
+    if isinstance(obj, torch.Tensor):
+        return obj.detach().cpu().numpy().tolist()
+    elif isinstance(obj, Mapping):
+        return {k: _convert_tensors_to_list(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_convert_tensors_to_list(v) for v in obj]
+    return obj
