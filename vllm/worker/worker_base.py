@@ -551,13 +551,6 @@ class WorkerWrapperBase:
             "vllm_config is required to initialize the worker")
         enable_trace_function_call_for_thread(self.vllm_config)
 
-        if self.vllm_config.model_config.enable_sleep_mode:
-            conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", None)
-            assert "expandable_segments:True" not in conf, \
-                ("Expandable segments are not compatible with sleep mode. "
-                "Please track https://github.com/pytorch/pytorch/issues/147851 "
-                "for the latest updates.")
-
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
