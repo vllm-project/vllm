@@ -65,12 +65,7 @@ struct cutlass_sparse_3x_gemm {
       typename std::conditional<std::is_same_v<ElementAB, int8_t>, int32_t,
                                 float>::type;
 
-  using EpilogueDescriptor =
-      cutlass::epilogue::collective::detail::EpilogueDescriptor<
-          TileShape, cutlass::epilogue::collective::EpilogueTileAuto, ElementD,
-          ElementD, EpilogueSchedule>;
-
-  using Epilogue = Epilogue_<ElementAcc, ElementD, EpilogueDescriptor>;
+  using Epilogue = Epilogue_<ElementAcc, ElementD, TileShape>;
 
   using ElementC = void;
   using LayoutC = cutlass::layout::RowMajor;
