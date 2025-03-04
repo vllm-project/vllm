@@ -302,15 +302,16 @@ class InputBatch:
             self.has_allowed_token_ids.add(req_id)
             if self.allowed_token_ids_mask_cpu_tensor is None:
                 # Lazy allocation for this tensor, which can be large.
-                self.allowed_token_ids_mask = torch.ones(self.max_num_reqs,
-                                                         self.vocab_size,
-                                                         dtype=torch.bool,
-                                                         device=self.device)
-                self.allowed_token_ids_mask_cpu_tensor = torch.ones(
+                self.allowed_token_ids_mask = torch.zeros(self.max_num_reqs,
+                                                          self.vocab_size,
+                                                          dtype=torch.bool,
+                                                          device=self.device)
+                self.allowed_token_ids_mask_cpu_tensor = torch.zeros(
                     self.max_num_reqs,
                     self.vocab_size,
                     dtype=torch.bool,
                     device="cpu")
+            self.allowed_token_ids_mask_cpu_tensor[req_index] = True
             self.allowed_token_ids_mask_cpu_tensor[req_index][
                 sampling_params.allowed_token_ids] = False
 
