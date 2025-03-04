@@ -3,6 +3,7 @@
 from typing import List, Optional, Tuple, Union
 
 import torch
+from vllm_hpu_extension.ops import get_hpu_gaudi2_scale_factor, is_hpu_gaudi2
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
@@ -101,10 +102,8 @@ def requantize_with_max_scale(
         logical_widths: List[int]) -> Tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
-    if current_platform.is_hpu() and htexp._get_device_type(
-    ) == htexp.synDeviceType.synDeviceGaudi2:
-        max_w_scale = max_w_scale * (torch.finfo(torch.float8_e4m3fn).max /
-                                     torch.finfo(torch.float8_e4m3fnuz).max)
+    if is_hpu_gaudi2():
+        max_w_scale = max_w_scale * get_hpu_gaudi2_scale_factor()
     # QKV / MLP is fused in the on disk checkpoint if any of the
     # weight scales are still set to the default since we initialize
     # N weight scales for N shards but we only load 1 weight scale

@@ -167,7 +167,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
         self.attn_type = attn_type
         if (self.attn_type != AttentionType.DECODER
-                and self.attn_type != AttentionType.ENCODER_DECODER):
+                and self.attn_type != AttentionType.ENCODER_DECODER
+                and self.attn_type != AttentionType.ENCODER_ONLY):
             raise NotImplementedError("Encoder self-attention "
                                       "is not implemented for "
                                       "HPUAttentionImpl")
@@ -213,7 +214,9 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         value = value.view(-1, self.num_kv_heads, self.head_size)
         block_indices = attn_metadata.block_indices
         block_offsets = attn_metadata.block_offsets
-        if attn_metadata.is_prompt and attn_metadata.block_list is None:
+        if attn_metadata.is_prompt and self.attn_type \
+            is not AttentionType.ENCODER_ONLY \
+            and attn_metadata.block_list is None:
             key = key.unflatten(0, (block_indices.size(0), -1))
             value = value.unflatten(0, (block_indices.size(0), -1))
         num_blocks = kv_cache[0].shape[0]
@@ -245,6 +248,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
             kv_shape = (batch_size, seq_len_kv, self.num_kv_heads,
                         self.head_size)
+
             if attn_metadata is None or attn_metadata.block_list is None:
                 if not self.prefill_use_fusedsdpa:
                     # TODO: move this outside of model
@@ -259,7 +263,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                             (1, self.num_kv_heads, 1, 1))
                         attn_bias.add_(position_bias)
                 else:
-                    attn_bias = None
+                    attn_bias = attn_metadata.attn_bias
 
                 out = ops.prompt_attention(
                     query.view(query_shape),
@@ -272,7 +276,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                     softmax_op=self.softmax,
                     matmul_av_op=self.matmul_av,
                     valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                    fsdpa_op=self.fused_scaled_dot_product_attention,
+                    fsdpa_op=self.fused_scaled_dot_product_attention
+                    if self.prefill_use_fusedsdpa else None,
                 )
             else:
                 # TODO: enable FusedSDPA
@@ -338,13 +343,11 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         if attn_metadata.is_prompt:
             batch_size = attn_metadata.num_prefills
             batched_tokens, _ = query.shape
-            if key is not None:
-                batched_kv_tokens, _, _ = key.shape
+            batched_kv_tokens, _, _ = key.shape
             assert batch_size > 0, (
                 "In prefill stage the num_prefills should be > 0")
             assert batched_tokens % batch_size == 0
-            if key is not None:
-                assert batched_kv_tokens % batch_size == 0
+            assert batched_kv_tokens % batch_size == 0
             seq_len = batched_tokens // batch_size
 
         query = query.view(-1, self.num_heads, self.head_size)
@@ -386,12 +389,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                     device=query.device,
                                     dtype=torch.bool)
 
-            # NOTE(kzawora): mllama prefill fwd pass doesn't pass keys and
-            # values in profile_run. No idea why. This is a dirty workaround.
-            if key is None:
-                key = query
-            if value is None:
-                value = query
             out = ops.prompt_attention(
                 query.view(query_shape),
                 key.view(kv_shape),
@@ -402,7 +399,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 matmul_qk_op=self.matmul_qk,
                 softmax_op=self.softmax,
                 matmul_av_op=self.matmul_av,
-                fsdpa_op=self.fused_scaled_dot_product_attention,
+                fsdpa_op=self.fused_scaled_dot_product_attention
+                if self.prefill_use_fusedsdpa else None,
             )
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:

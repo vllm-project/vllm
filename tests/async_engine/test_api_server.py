@@ -98,7 +98,7 @@ def test_api_server(api_server, tokenizer_pool_size: int,
 
         # check cancellation stats
         # give it some times to update the stats
-        time.sleep(1)
+        time.sleep(3)
 
         num_aborted_requests = requests.get(
             "http://localhost:8000/stats").json()["num_aborted_requests"]

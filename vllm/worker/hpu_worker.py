@@ -33,6 +33,7 @@ from vllm.utils import (bind_kv_cache, hpu_backend_string, hpu_device_string,
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.hpu_enc_dec_model_runner import HPUEncoderDecoderModelRunner
 from vllm.worker.hpu_model_runner import HPUModelRunner, HPUModelRunnerBase
+from vllm.worker.hpu_pooling_model_runner import HPUPoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
@@ -83,7 +84,9 @@ class HPUWorker(LocalOrDistributedWorkerBase):
 
         is_encoder_decoder_model = self._is_encoder_decoder_model()
         ModelRunnerClass: Type[HPUModelRunnerBase] = HPUModelRunner
-        if is_encoder_decoder_model:
+        if self.model_config.runner_type == "pooling":
+            ModelRunnerClass = HPUPoolingModelRunner
+        elif is_encoder_decoder_model:
             ModelRunnerClass = HPUEncoderDecoderModelRunner
         self.model_runner: HPUModelRunnerBase = ModelRunnerClass(
             vllm_config=vllm_config,
@@ -219,6 +222,13 @@ class HPUWorker(LocalOrDistributedWorkerBase):
 
     def load_model(self):
         self.model_runner.load_model()
+        if isinstance(self.model_runner, HPUPoolingModelRunner):
+            # recipes we will use the extra memory for graphs/blocks
+            free_hpu_memory = torch.hpu.mem_get_info()[0]
+            hpu_memory_margin = free_hpu_memory * (
+                1 - self.cache_config.gpu_memory_utilization)
+            self.model_runner.mem_margin = hpu_memory_margin
+            self._warm_up_model()
 
     def execute_model(
         self,
@@ -390,8 +400,11 @@ class HPUWorker(LocalOrDistributedWorkerBase):
     def _warm_up_model(self) -> None:
         # NOTE(kzawora): We should use virtual engine index here
         # for pipeline parallelism. Using 0 for now.
-        assert self.hpu_cache is not None
-        self.model_runner.warmup_model(self.hpu_cache[0])
+        if not isinstance(self.model_runner, HPUPoolingModelRunner):
+            assert self.hpu_cache is not None
+            self.model_runner.warmup_model(self.hpu_cache[0])
+        else:
+            self.model_runner.warmup_model(None)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)

@@ -3,13 +3,14 @@
 import sys
 from contextlib import nullcontext
 
+import pytest
 from vllm_test_utils import BlameResult, blame
 
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 
 
-def run_normal():
+def run_normal(enforce_eager):
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -20,6 +21,7 @@ def run_normal():
 
     # Create an LLM without guided decoding as a baseline.
     llm = LLM(model="/mnt/weka/data/pytorch/llama3.2/Meta-Llama-3.2-1B",
+              enforce_eager=enforce_eager,
               gpu_memory_utilization=0.3)
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
@@ -32,9 +34,10 @@ def run_normal():
     cleanup_dist_env_and_memory()
 
 
-def run_lmfe(sample_regex):
+def run_lmfe(sample_regex, enforce_eager):
     # Create an LLM with guided decoding enabled.
     llm = LLM(model="/mnt/weka/data/pytorch/llama3.2/Meta-Llama-3.2-1B",
+              enforce_eager=enforce_eager,
               guided_decoding_backend="lm-format-enforcer",
               gpu_memory_utilization=0.3)
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
@@ -52,7 +55,8 @@ def run_lmfe(sample_regex):
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
-def test_lazy_outlines(sample_regex):
+@pytest.mark.parametrize("enforce_eager", [False, True])
+def test_lazy_outlines(sample_regex, enforce_eager):
     """If users don't use guided decoding, outlines should not be imported.
     """
     # make sure outlines is not imported
@@ -66,8 +70,8 @@ def test_lazy_outlines(sample_regex):
     context = blame(
         lambda: module_name in sys.modules) if use_blame else nullcontext()
     with context as result:
-        run_normal()
-        run_lmfe(sample_regex)
+        run_normal(enforce_eager)
+        run_lmfe(sample_regex, enforce_eager)
     if use_blame:
         assert isinstance(result, BlameResult)
         print(f"the first import location is:\n{result.trace_stack}")
