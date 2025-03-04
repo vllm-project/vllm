@@ -65,9 +65,9 @@ def cuda_platform_plugin() -> Optional[str]:
                        and not vllm_version_matches_substr("cpu"))
             if pynvml.nvmlDeviceGetCount() <= 0:
                 logger.debug(
-                    "Cuda platform is not available because no GPU is found.")
+                    "CUDA platform is not available because no GPU is found.")
             if vllm_version_matches_substr("cpu"):
-                logger.debug("Cuda platform is not available because"
+                logger.debug("CUDA platform is not available because"
                              " vLLM is built with CPU.")
             if is_cuda:
                 logger.debug("Confirmed CUDA platform is available.")
