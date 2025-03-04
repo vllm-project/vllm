@@ -64,6 +64,9 @@ Although we have re-implemented and partially optimized many features and models
 
 #### Unoptimized Features
 
+These features are already supported in vLLM V1, but their optimization is still
+in progress.
+
 - **LoRA**: LoRA is functionally working on vLLM V1 but its performance is
   inferior to that of V0. The team is actively working on improving its
   performance
@@ -83,7 +86,7 @@ Although we have re-implemented and partially optimized many features and models
 
 #### Unsupported Models
 
-vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol, 
+vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol,
 and the majority fall into the following categories. V1 support for these models will be added eventually.
 
 **Embedding Models**  
