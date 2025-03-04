@@ -14,7 +14,7 @@ import math
 import os
 import time
 from array import array
-from enum import IntEnum
+from enum import Enum, IntEnum
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
                     Optional, Set, Tuple, Type, TypeVar, Union)
 
@@ -78,6 +78,12 @@ _PAD_SLOT_ID = 0
 _PAD_BLOCK_ID = 0
 
 LORA_WARMUP_RANK = 8
+
+
+class PhaseType(Enum):
+    PREFILL = 'prefill'
+    PREFIX_PREFILL = 'prefix_prefill'
+    DECODE = 'decode'
 
 
 def subtuple(obj: object,
@@ -883,14 +889,37 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def _is_valid_bucket(self, bucket):
         return bucket[0] * bucket[1] <= self.max_num_batched_tokens
 
-    def _check_config(self, batch_size, seq_len, is_prompt, warmup_mode):
-        cfg = (batch_size, seq_len, is_prompt)
+    def _num_blocks(self, attn_metadata):
+        if attn_metadata.block_list is None:
+            return 0
+        return attn_metadata.block_list.numel()
+
+    def _phase(self, attn_metadata):
+        phase_type: PhaseType
+        is_prompt = attn_metadata.is_prompt
+        is_prefix_prefill = is_prompt and attn_metadata.block_list is not None
+        if is_prompt and is_prefix_prefill:
+            phase_type = PhaseType.PREFIX_PREFILL
+        elif is_prompt and not is_prefix_prefill:
+            phase_type = PhaseType.PREFILL
+        elif not is_prompt:
+            phase_type = PhaseType.DECODE
+        else:
+            raise ValueError("Unrecognized pass type, likely due to malformed "
+                             "attention metadata")
+        return phase_type
+
+    def _check_config(self, batch_size, seq_len, attn_metadata, warmup_mode):
+        phase = self._phase(attn_metadata)
+        num_blocks = self._num_blocks(attn_metadata)
+        cfg = (batch_size, seq_len, num_blocks, phase)
         seen = cfg in self.seen_configs
         self.seen_configs.add(cfg)
         if not seen and not warmup_mode:
-            phase = 'prompt' if is_prompt else 'decode'
-            logger.warning("Configuration: (%s, %s, %s) was not warmed-up!",
-                           phase, batch_size, seq_len)
+            phase = phase.value
+            logger.warning(
+                "Configuration: (%s, %s, %s, %s) was not warmed-up!", phase,
+                batch_size, seq_len, num_blocks)
 
     def _prepare_prompt(
         self,
@@ -1027,7 +1056,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         assert max_query_len > 0
 
         max_prompt_len = max(
-            self.bucketing_ctx.get_padded_prompt_seq_len(max(seq_lens)),
+            self.bucketing_ctx.get_padded_prompt_seq_len(max_query_len),
             self.block_size)
 
         lora_ids: List[int] = []
@@ -2336,7 +2365,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             batch_size = input_tokens.size(0)
             seq_len = self._seq_len(attn_metadata)
             use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
-            self._check_config(batch_size, seq_len, is_prompt, warmup_mode)
+            self._check_config(batch_size, seq_len, attn_metadata, warmup_mode)
 
             lora_mask: torch.Tensor = None
             lora_logits_mask: torch.Tensor = None
