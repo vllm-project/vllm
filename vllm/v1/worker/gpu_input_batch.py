@@ -300,17 +300,17 @@ class InputBatch:
             self.has_allowed_token_ids.add(req_id)
             if self.allowed_token_ids_mask_cpu_tensor is None:
                 # Lazy allocation for this tensor, which can be large.
-                self.allowed_token_ids_mask = torch.zeros(self.max_num_reqs,
-                                                          self.vocab_size,
-                                                          dtype=torch.bool,
-                                                          device=self.device)
-                self.allowed_token_ids_mask_cpu_tensor = torch.zeros(
+                self.allowed_token_ids_mask = torch.ones(self.max_num_reqs,
+                                                         self.vocab_size,
+                                                         dtype=torch.bool,
+                                                         device=self.device)
+                self.allowed_token_ids_mask_cpu_tensor = torch.ones(
                     self.max_num_reqs,
                     self.vocab_size,
                     dtype=torch.bool,
                     device="cpu")
             self.allowed_token_ids_mask_cpu_tensor[req_index][
-                sampling_params.allowed_token_ids] = True
+                sampling_params.allowed_token_ids] = False
 
         # Add request lora ID
         if request.lora_request:
@@ -359,7 +359,7 @@ class InputBatch:
         self.logit_bias[req_index] = None
         self.has_allowed_token_ids.discard(req_id)
         if self.allowed_token_ids_mask_cpu_tensor is not None:
-            self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
+            self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(True)
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
