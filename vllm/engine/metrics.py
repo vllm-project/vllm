@@ -197,24 +197,35 @@ class Metrics:
             "Histogram of time spent in DECODE phase for request.",
             labelnames=labelnames,
             buckets=request_latency_buckets)
+        # Deprecated in 0.8 - duplicates vllm:request_queue_time_seconds:
+        # TODO: in 0.9, only enable if show_hidden_metrics=True
         self.histogram_time_in_queue_request = self._histogram_cls(
             name="vllm:time_in_queue_requests",
-            documentation=
-            "Histogram of time the request spent in the queue in seconds.",
+            documentation=(
+                "Histogram of time the request spent in the queue in seconds. "
+                "DEPRECATED: use vllm:request_queue_time_seconds instead."),
             labelnames=labelnames,
             buckets=request_latency_buckets)
+
+        # Deprecated in 0.8 - use prefill/decode/inference time metrics
+        # TODO: in 0.9, only enable if show_hidden_metrics=True
         self.histogram_model_forward_time_request = self._histogram_cls(
             name="vllm:model_forward_time_milliseconds",
-            documentation=
-            "Histogram of time spent in the model forward pass in ms.",
+            documentation=(
+                "Histogram of time spent in the model forward pass in ms. "
+                "DEPRECATED: use prefill/decode/inference time metrics instead."
+            ),
             labelnames=labelnames,
             buckets=build_1_2_3_5_8_buckets(3000))
         self.histogram_model_execute_time_request = self._histogram_cls(
             name="vllm:model_execute_time_milliseconds",
-            documentation=
-            "Histogram of time spent in the model execute function in ms.",
+            documentation=(
+                "Histogram of time spent in the model execute function in ms."
+                "DEPRECATED: use prefill/decode/inference time metrics instead."
+            ),
             labelnames=labelnames,
             buckets=build_1_2_3_5_8_buckets(3000))
+
         #   Metadata
         self.histogram_num_prompt_tokens_request = self._histogram_cls(
             name="vllm:request_prompt_tokens",
