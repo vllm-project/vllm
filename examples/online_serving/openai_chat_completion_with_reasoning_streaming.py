@@ -42,6 +42,7 @@ model = models["data"][0]["id"]
 # Streaming chat completions
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
 
+# For granite models, add "chat_template_kwargs": {"thinking": True} to `json`.
 response = requests.post(
     f"{openai_api_base}/chat/completions",
     headers={"Authorization": f"Bearer {openai_api_key}"},
