@@ -42,7 +42,7 @@ def tpu_platform_plugin() -> Optional[str]:
         is_tpu = True
         logger.debug("Confirmed TPU platform is available.")
     except Exception as e:
-        logger.debug("TPU platform is not available because of %s", str(e))
+        logger.debug("TPU platform is not available because: %s", str(e))
         pass
 
     return "vllm.platforms.tpu.TpuPlatform" if is_tpu else None
@@ -91,8 +91,7 @@ def cuda_platform_plugin() -> Optional[str]:
             logger.debug("Confirmed CUDA platform is available on Jetson.")
             is_cuda = True
         else:
-            logger.debug("CUDA platform is not available because of %s",
-                         str(e))
+            logger.debug("CUDA platform is not available because: %s", str(e))
 
     return "vllm.platforms.cuda.CudaPlatform" if is_cuda else None
 
@@ -110,7 +109,7 @@ def rocm_platform_plugin() -> Optional[str]:
         finally:
             amdsmi.amdsmi_shut_down()
     except Exception as e:
-        logger.debug("ROCm platform is not available because of %s", str(e))
+        logger.debug("ROCm platform is not available because: %s", str(e))
         pass
 
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
@@ -128,7 +127,7 @@ def hpu_platform_plugin() -> Optional[str]:
             logger.debug("HPU platform is not available because "
                          "habana_frameworks is not found.")
     except Exception as e:
-        logger.debug("HPU platform is not available because of %s", str(e))
+        logger.debug("HPU platform is not available because: %s", str(e))
         pass
 
     return "vllm.platforms.hpu.HpuPlatform" if is_hpu else None
@@ -146,7 +145,7 @@ def xpu_platform_plugin() -> Optional[str]:
             is_xpu = True
             logger.debug("Confirmed XPU platform is available.")
     except Exception as e:
-        logger.debug("XPU platform is not available because of %s", str(e))
+        logger.debug("XPU platform is not available because: %s", str(e))
         pass
 
     return "vllm.platforms.xpu.XPUPlatform" if is_xpu else None
@@ -168,7 +167,7 @@ def cpu_platform_plugin() -> Optional[str]:
                              " because the machine is ARM.")
 
     except Exception as e:
-        logger.debug("CPU platform is not available because of %s", str(e))
+        logger.debug("CPU platform is not available because: %s", str(e))
         pass
 
     return "vllm.platforms.cpu.CpuPlatform" if is_cpu else None
@@ -183,7 +182,7 @@ def neuron_platform_plugin() -> Optional[str]:
         logger.debug("Confirmed Neuron platform is available because"
                      " transformers_neuronx is found.")
     except ImportError as e:
-        logger.debug("Neuron platform is not available because of %s", str(e))
+        logger.debug("Neuron platform is not available because: %s", str(e))
         pass
 
     return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
