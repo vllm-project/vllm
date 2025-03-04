@@ -201,8 +201,8 @@ class Gemma2DecoderLayer(nn.Module):
         self.mlp = Gemma2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
-            hidden_activation=config.hidden_activation,
+            hidden_act=getattr(config, "hidden_act", None),
+            hidden_activation=getattr(config, "hidden_activation", None),
             quant_config=quant_config,
         )
         self.input_layernorm = GemmaRMSNorm(config.hidden_size,
