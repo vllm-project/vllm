@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from packaging import version
 from torch.nn import Module
 from torch.nn.parameter import Parameter
+from torchao.quantization.utils import recommended_inductor_config_setter
 
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
@@ -15,16 +16,32 @@ from vllm.model_executor.layers.quantization.torchao_utils import (
     torchao_quantize_param_data)
 from vllm.model_executor.utils import set_weight_attrs
 
+recommended_inductor_config_setter()
+
 
 class TorchAOConfig(QuantizationConfig):
-    """Config class for torchao.
+    """Config class for torchao."""
 
-    """
+    torchao_config: str
+    load_quantized: bool
 
-    def __init__(self, torchao_config: Optional[str] = None) -> None:
+    def __init__(self,
+                 torchao_config: Optional[str] = None,
+                 load_quantized: bool = False) -> None:
         if torchao_config is None:
             torchao_config = "int4wo-128"
         self.torchao_config = torchao_config
+
+        # Determine based on torchao version
+        self.load_quantized = load_quantized
+        if self.load_quantized:
+            torchao_version = version.parse(
+                importlib.metadata.version("torchao"))
+            assert torchao_version >= version.parse(
+                "0.9.0"
+            ), "torchao version must be >= 0.9.0 to load quantized models"
+            self.quantize_after_loading = torchao_version <= version.parse(
+                "0.9.0")
 
     def __repr__(self) -> str:
         return f"TorchAOConfig({self.torchao_config})"
@@ -45,9 +62,12 @@ class TorchAOConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "TorchAOConfig":
+        print("config", config)
         torchao_config = cls.get_from_keys_or(config, ["torchao_config"],
                                               "int4wo-128")
-        return cls(torchao_config)
+        load_quantized = cls.get_from_keys_or(config, ["load_quantized"],
+                                              False)
+        return cls(torchao_config, load_quantized)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["TorchAOLinearMethod"]:
@@ -70,21 +90,28 @@ class TorchAOLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: TorchAOConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, layer: torch.nn.Module,
-                       input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
-                       **extra_weight_attrs):
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=params_dtype),
-                           requires_grad=False)
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: List[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        weight = Parameter(
+            torch.empty(
+                sum(output_partition_sizes),
+                input_size_per_partition,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
         # we load quantized model in versions after 0.9.0 and do on the fly
         # quantization in torchao versions before 0.9.0
-        if version.parse(importlib.metadata.version(
-                "torchao")) > version.parse("0.9.0"):
-            torchao_config = self.quant_config.torchao_config
-            weight = torchao_quantize_param_data(weight, torchao_config)
+        if self.quant_config.load_quantized:
+            weight = torchao_quantize_param_data(weight, self.torchao_config)
 
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
 
@@ -92,15 +119,17 @@ class TorchAOLinearMethod(LinearMethodBase):
         set_weight_attrs(weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        if version.parse(importlib.metadata.version(
-                "torchao")) <= version.parse("0.9.0"):
+        # We aren't loading a quantized weight, we quantize on the fly
+        if not self.quant_config.load_quantized:
             torchao_config = self.quant_config.torchao_config
             layer.weight = torchao_quantize_param_data(layer.weight,
                                                        torchao_config)
 
-    @torch.compile
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    @torch.compile(mode="max-autotune-no-cudagraphs")
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         return F.linear(x, layer.weight, bias)
