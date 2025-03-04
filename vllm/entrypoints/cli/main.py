@@ -5,7 +5,7 @@ import os
 import signal
 import sys
 
-import vllm.entrypoints.cli.benchmark
+import vllm.entrypoints.cli.benchmark.main
 import vllm.entrypoints.cli.openai
 import vllm.entrypoints.cli.serve
 import vllm.version
@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 CMD_MODULES = [
     vllm.entrypoints.cli.openai,
     vllm.entrypoints.cli.serve,
-    vllm.entrypoints.cli.benchmark,
+    vllm.entrypoints.cli.benchmark.main,
 ]
 
 

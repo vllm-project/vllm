@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 
-import vllm.entrypoints.cli.benchmark_serving
+import vllm.entrypoints.cli.benchmark.serve
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.utils import FlexibleArgumentParser
 
 BENCHMARK_CMD_MODULES = [
-    vllm.entrypoints.cli.benchmark_serving,
+    vllm.entrypoints.cli.benchmark.serve,
 ]
 
 

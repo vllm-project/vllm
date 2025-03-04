@@ -1,26 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 r"""Benchmark online serving throughput.
 
-On the server side, run one of the following commands:
-    vLLM OpenAI API server
-    vllm serve <your_model> \
-        --swap-space 16 \
-        --disable-log-requests
-
-    (TGI backend: currently unavailable)
-    ./launch_tgi_server.sh <your_model> <max_batch_total_tokens>
+On the server side, run one of the following commands
+to launch the vLLM OpenAI API server:
+    vllm serve <your_model> <engine arguments>        
 
 On the client side, run:
-    vllm bench serving \
+    vllm bench serve \
         --backend <backend> \
         --model <your_model> \
         --dataset-name random \
         --request-rate <request_rate> \ # By default <request_rate> is inf
         --num-prompts <num_prompts> # By default <num_prompts> is 1000
-
-    when using tgi backend, add
-        --endpoint /generate_stream
-    to the end of the command above.
 """
 import argparse
 import asyncio
@@ -39,22 +30,12 @@ import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
-from vllm.benchmarks.backend_request_func import (ASYNC_REQUEST_FUNCS,
-                                                  RequestFuncInput,
-                                                  RequestFuncOutput)
-
-try:
-    from vllm.transformers_utils.tokenizer import get_tokenizer
-except ImportError:
-    from backend_request_func import get_tokenizer
-
-try:
-    from vllm.utils import FlexibleArgumentParser
-except ImportError:
-    from argparse import ArgumentParser as FlexibleArgumentParser
-
+from vllm.benchmarks.endpoint_request_func import (ASYNC_REQUEST_FUNCS,
+                                                   RequestFuncInput,
+                                                   RequestFuncOutput)
 from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
                                    write_to_json)
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -173,10 +154,22 @@ def calculate_metrics(
     outputs: list[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
-    selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
 ) -> tuple[BenchmarkMetrics, list[int]]:
+    """Calculate the metrics for the benchmark.
+
+    Args:
+        input_requests: The input requests.
+        outputs: The outputs of the requests.
+        dur_s: The duration of the benchmark.
+        tokenizer: The tokenizer to use.
+        selected_percentiles: The percentiles to select.
+        goodput_config_dict: The goodput configuration.
+
+    Returns:
+        A tuple of the benchmark metrics and the actual output lengths.
+    """
     actual_output_lens: list[int] = []
     total_input = 0
     completed = 0
@@ -427,7 +420,6 @@ async def benchmark(
         outputs=outputs,
         dur_s=benchmark_duration,
         tokenizer=tokenizer,
-        selected_percentile_metrics=selected_percentile_metrics,
         selected_percentiles=selected_percentiles,
         goodput_config_dict=goodput_config_dict,
     )
@@ -921,11 +913,3 @@ def main(args: argparse.Namespace):
         with open(file_name, "w", encoding='utf-8') as outfile:
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
-
-
-if __name__ == "__main__":
-    parser = FlexibleArgumentParser(
-        description="Benchmark the online serving throughput.")
-    add_cli_args(parser)
-    args = parser.parse_args()
-    main(args)

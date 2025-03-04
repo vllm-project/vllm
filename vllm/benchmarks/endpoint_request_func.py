@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+"""The request function for API endpoints."""
 
 import json
 import os
@@ -16,6 +17,7 @@ AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
 @dataclass
 class RequestFuncInput:
+    """The input for the request function."""
     prompt: str
     api_url: str
     prompt_len: int
@@ -31,6 +33,7 @@ class RequestFuncInput:
 
 @dataclass
 class RequestFuncOutput:
+    """The output of the request function including metrics."""
     generated_text: str = ""
     success: bool = False
     latency: float = 0.0
@@ -47,6 +50,15 @@ async def async_request_openai_completions(
     request_func_input: RequestFuncInput,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
+    """The async request function for the OpenAI Completions API.
+
+    Args:
+        request_func_input: The input for the request function.
+        pbar: The progress bar to display the progress.
+
+    Returns:
+        The output of the request function.
+    """
     api_url = request_func_input.api_url
     assert api_url.endswith(
         ("completions", "profile")
@@ -142,10 +154,7 @@ async def async_request_openai_completions(
     return output
 
 
+# TODO: Add more request functions for different API protocols.
 ASYNC_REQUEST_FUNCS = {
     "vllm": async_request_openai_completions,
-    "lmdeploy": async_request_openai_completions,
-    "openai": async_request_openai_completions,
-    "scalellm": async_request_openai_completions,
-    "sglang": async_request_openai_completions,
 }
