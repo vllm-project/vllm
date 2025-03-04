@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
-from typing import List, Tuple
 
 from vllm import CompletionOutput
 
 
-def get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
+def get_test_batch(batch_logprobs_composition: str) -> list[tuple]:
     """Generate logprobs configs for a batch of requests
     
     A given request's logprobs configuration is (1) num_sample_logprobs and (2)
@@ -32,7 +31,7 @@ def get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
 
     Returns:
 
-      List of (Optional[num_sample_logprobs], Optional[num_prompt_logprobs])
+      list of (Optional[num_sample_logprobs], Optional[num_prompt_logprobs])
       tuples
     """
     if batch_logprobs_composition == "NONE":

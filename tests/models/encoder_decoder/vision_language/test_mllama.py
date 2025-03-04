@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional, Tuple, Type, overload
+from typing import Optional, overload
 
 import pytest
 import torch
@@ -64,7 +64,7 @@ prompt_data = {
 }
 
 
-def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+def vllm_to_hf_output(vllm_output: tuple[list[int], str,
                                          Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
@@ -91,9 +91,9 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 def _get_inputs(
     image_assets: _ImageAssets,
     *,
-    size_factors: Optional[List[float]] = None,
-    sizes: Optional[List[Tuple[int, int]]] = None,
-) -> List[Tuple[List[str], PromptImageInput]]:
+    size_factors: Optional[list[float]] = None,
+    sizes: Optional[list[tuple[int, int]]] = None,
+) -> list[tuple[list[str], PromptImageInput]]:
     images = [asset.pil_image for asset in image_assets]
 
     if size_factors is not None:
@@ -123,12 +123,12 @@ def _get_inputs(
 
 @overload
 def run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
     image_assets: _ImageAssets,
     model: str,
     *,
-    size_factors: List[float],
+    size_factors: list[float],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -140,12 +140,12 @@ def run_test(
 
 @overload
 def run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
     image_assets: _ImageAssets,
     model: str,
     *,
-    sizes: List[Tuple[int, int]],
+    sizes: list[tuple[int, int]],
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -156,13 +156,13 @@ def run_test(
 
 
 def run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
     image_assets: _ImageAssets,
     model: str,
     *,
-    size_factors: Optional[List[float]] = None,
-    sizes: Optional[List[Tuple[int, int]]] = None,
+    size_factors: Optional[list[float]] = None,
+    sizes: Optional[list[tuple[int, int]]] = None,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -183,9 +183,9 @@ def run_test(
 
 
 def _run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], PromptImageInput]],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    inputs: list[tuple[list[str], PromptImageInput]],
     model: str,
     *,
     dtype: str,
@@ -479,8 +479,9 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
 
         # Regression tests for https://github.com/vllm-project/vllm/issues/10648
 
-        # Number of image tags is greater than the number of images provided
-        prompt = "<|begin_of_text|><|image|><|image|> Compare the two images"  # noqa: E501
+        # Number of groups of image tokens is greater than the number of images
+        # provided (the whitespace between the tags is necessary)
+        prompt = "<|begin_of_text|><|image|> <|image|> Compare the two images"  # noqa: E501
         image = stop_sign
         with pytest.raises(ValueError):
             vllm_model.generate_greedy_logprobs([prompt],

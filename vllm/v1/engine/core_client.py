@@ -8,8 +8,9 @@ import uuid
 import weakref
 from abc import ABC, abstractmethod
 from concurrent.futures import Future
+from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Optional, Union
 
 import zmq
 import zmq.asyncio
@@ -47,7 +48,7 @@ class EngineCoreClient(ABC):
         multiprocess_mode: bool,
         asyncio_mode: bool,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
     ) -> "EngineCoreClient":
 
@@ -93,10 +94,19 @@ class EngineCoreClient(ABC):
     async def execute_dummy_batch_async(self) -> None:
         raise NotImplementedError
 
-    def abort_requests(self, request_ids: List[str]) -> None:
+    def abort_requests(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        raise NotImplementedError
+
+    def remove_lora(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    def list_loras(self) -> set[int]:
+        raise NotImplementedError
+
+    def pin_lora(self, lora_id: int) -> bool:
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -117,10 +127,19 @@ class EngineCoreClient(ABC):
     async def wake_up_async(self) -> None:
         raise NotImplementedError
 
-    async def abort_requests_async(self, request_ids: List[str]) -> None:
+    async def abort_requests_async(self, request_ids: list[str]) -> None:
         raise NotImplementedError
 
-    async def add_lora_async(self, lora_request: LoRARequest) -> None:
+    async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+        raise NotImplementedError
+
+    async def remove_lora_async(self, lora_id: int) -> bool:
+        raise NotImplementedError
+
+    async def list_loras_async(self) -> set[int]:
+        raise NotImplementedError
+
+    async def pin_lora_async(self, lora_id: int) -> bool:
         raise NotImplementedError
 
 
@@ -143,7 +162,7 @@ class InprocClient(EngineCoreClient):
     def add_request(self, request: EngineCoreRequest) -> None:
         self.engine_core.add_request(request)
 
-    def abort_requests(self, request_ids: List[str]) -> None:
+    def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
             self.engine_core.abort_requests(request_ids)
 
@@ -165,8 +184,42 @@ class InprocClient(EngineCoreClient):
     def execute_dummy_batch(self) -> None:
         self.engine_core.execute_dummy_batch()
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
-        self.engine_core.add_lora(lora_request)
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.engine_core.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.engine_core.remove_lora(lora_id)
+
+    def list_loras(self) -> set[int]:
+        return self.engine_core.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.engine_core.pin_lora(lora_id)
+
+
+@dataclass
+class BackgroundResources:
+    """Used as a finalizer for clean shutdown, avoiding
+    circular reference back to the client object."""
+
+    ctx: Union[zmq.Context, zmq.asyncio.Context] = None
+    output_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
+    input_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
+    proc_handle: Optional[BackgroundProcHandle] = None
+
+    def __call__(self):
+        """Clean up background resources."""
+
+        if self.proc_handle is not None:
+            self.proc_handle.shutdown()
+        # ZMQ context termination can hang if the sockets
+        # aren't explicitly closed first.
+        if self.output_socket is not None:
+            self.output_socket.close(linger=0)
+        if self.input_socket is not None:
+            self.input_socket.close(linger=0)
+        if self.ctx is not None:
+            self.ctx.destroy(linger=0)
 
 
 class MPClient(EngineCoreClient):
@@ -186,7 +239,7 @@ class MPClient(EngineCoreClient):
         self,
         asyncio_mode: bool,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
     ):
         # The child processes will send SIGUSR1 when unrecoverable
@@ -212,21 +265,22 @@ class MPClient(EngineCoreClient):
             zmq.asyncio.Context()  # type: ignore[attr-defined]
             if asyncio_mode else zmq.Context())  # type: ignore[attr-defined]
 
-        # Note(rob): shutdown function cannot be a bound method,
-        # else the gc cannot collect the object.
-        self._finalizer = weakref.finalize(self, lambda x: x.destroy(linger=0),
-                                           self.ctx)
+        # This will ensure resources created so far are closed
+        # when the client is garbage collected,  even if an
+        # exception is raised mid-construction.
+        resources = BackgroundResources(ctx=self.ctx)
+        self._finalizer = weakref.finalize(self, resources)
 
         # Paths and sockets for IPC.
         output_path = get_open_zmq_ipc_path()
         input_path = get_open_zmq_ipc_path()
-        self.output_socket = make_zmq_socket(self.ctx, output_path,
-                                             zmq.constants.PULL)
-        self.input_socket = make_zmq_socket(self.ctx, input_path,
-                                            zmq.constants.PUSH)
+        resources.output_socket = make_zmq_socket(self.ctx, output_path,
+                                                  zmq.constants.PULL)
+        resources.input_socket = make_zmq_socket(self.ctx, input_path,
+                                                 zmq.constants.PUSH)
 
         # Start EngineCore in background process.
-        self.proc_handle = BackgroundProcHandle(
+        resources.proc_handle = BackgroundProcHandle(
             input_path=input_path,
             output_path=output_path,
             process_name="EngineCore",
@@ -237,18 +291,16 @@ class MPClient(EngineCoreClient):
                 "log_stats": log_stats,
             })
 
-        self.utility_results: Dict[int, AnyFuture] = {}
+        self.output_socket = resources.output_socket
+        self.input_socket = resources.input_socket
+        self.utility_results: dict[int, AnyFuture] = {}
 
     def shutdown(self):
-        """Clean up background resources."""
-        if hasattr(self, "proc_handle"):
-            self.proc_handle.shutdown()
-
         self._finalizer()
 
 
 def _process_utility_output(output: UtilityOutput,
-                            utility_results: Dict[int, AnyFuture]):
+                            utility_results: dict[int, AnyFuture]):
     """Set the result from a utility method in the waiting future"""
     future = utility_results.pop(output.call_id)
     if output.failure_message is not None:
@@ -260,7 +312,7 @@ def _process_utility_output(output: UtilityOutput,
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig, executor_class: Type[Executor],
+    def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
                  log_stats: bool):
         super().__init__(
             asyncio_mode=False,
@@ -321,7 +373,7 @@ class SyncMPClient(MPClient):
         request.prompt = None
         self._send_input(EngineCoreRequestType.ADD, request)
 
-    def abort_requests(self, request_ids: List[str]) -> None:
+    def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
@@ -331,8 +383,17 @@ class SyncMPClient(MPClient):
     def reset_prefix_cache(self) -> None:
         self._call_utility("reset_prefix_cache")
 
-    def add_lora(self, lora_request: LoRARequest) -> None:
-        self._call_utility("add_lora", lora_request)
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self._call_utility("add_lora", lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self._call_utility("remove_lora", lora_id)
+
+    def list_loras(self) -> set[int]:
+        return self._call_utility("list_loras")
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self._call_utility("pin_lora", lora_id)
 
     def sleep(self, level: int = 1) -> None:
         self._call_utility("sleep", level)
@@ -347,7 +408,7 @@ class SyncMPClient(MPClient):
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig, executor_class: Type[Executor],
+    def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
                  log_stats: bool):
         super().__init__(
             asyncio_mode=True,
@@ -410,7 +471,7 @@ class AsyncMPClient(MPClient):
         request.prompt = None
         await self._send_input(EngineCoreRequestType.ADD, request)
 
-    async def abort_requests_async(self, request_ids: List[str]) -> None:
+    async def abort_requests_async(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
@@ -429,5 +490,14 @@ class AsyncMPClient(MPClient):
     async def execute_dummy_batch_async(self) -> None:
         await self._call_utility_async("execute_dummy_batch")
 
-    async def add_lora_async(self, lora_request: LoRARequest) -> None:
-        await self._call_utility_async("add_lora", lora_request)
+    async def add_lora_async(self, lora_request: LoRARequest) -> bool:
+        return await self._call_utility_async("add_lora", lora_request)
+
+    async def remove_lora_async(self, lora_id: int) -> bool:
+        return await self._call_utility_async("remove_lora", lora_id)
+
+    async def list_loras_async(self) -> set[int]:
+        return await self._call_utility_async("list_loras")
+
+    async def pin_lora_async(self, lora_id: int) -> bool:
+        return await self._call_utility_async("pin_lora", lora_id)

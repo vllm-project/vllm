@@ -167,8 +167,8 @@ struct ScaledEpilogue
     auto a_args = SUPER::template args_from_tensor<ScaleA, float>(a_scales);
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
 
-    typename EVTCompute0::Arguments evt0_args{b_args};
-    return ArgumentType{a_args, evt0_args};
+    typename EVTCompute0::Arguments evt0_args{b_args, {}, {}};
+    return ArgumentType{a_args, evt0_args, {}};
   }
 };
 
@@ -214,8 +214,8 @@ struct ScaledEpilogueBias
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
     auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
 
-    typename EVTCompute0::Arguments evt0_args{b_args};
-    return ArgumentType{a_args, evt0_args, bias_args};
+    typename EVTCompute0::Arguments evt0_args{b_args, {}, {}};
+    return ArgumentType{a_args, evt0_args, bias_args, {}};
   }
 };
 
@@ -257,8 +257,8 @@ struct ScaledEpilogueColumnBias
     auto b_args = SUPER::template args_from_tensor<ScaleB, float>(b_scales);
     auto bias_args = SUPER::template args_from_tensor<Bias, ElementD>(bias);
 
-    typename EVTCompute0::Arguments evt0_args{b_args};
-    return ArgumentType{a_args, evt0_args, bias_args};
+    typename EVTCompute0::Arguments evt0_args{b_args, {}, {}};
+    return ArgumentType{a_args, evt0_args, bias_args, {}};
   }
 };
 
@@ -318,9 +318,10 @@ struct ScaledEpilogueBiasAzp
     auto azp_adj_args =
         SUPER::template args_from_tensor<AzpWithAdj, int32_t>(azp_adj);
 
-    typename EVTComputeAzp::Arguments evt_azp_args{{}, azp_adj_args};
-    typename EVTComputeScaleB::Arguments evt_scale_b_args{b_args, evt_azp_args};
-    return ArgumentType{a_args, evt_scale_b_args, bias_args};
+    typename EVTComputeAzp::Arguments evt_azp_args{{}, azp_adj_args, {}};
+    typename EVTComputeScaleB::Arguments evt_scale_b_args{
+        b_args, evt_azp_args, {}};
+    return ArgumentType{a_args, evt_scale_b_args, bias_args, {}};
   }
 };
 
@@ -395,10 +396,11 @@ struct ScaledEpilogueBiasAzpToken
     auto azp_adj_args =
         SUPER::template args_from_tensor<AzpAdj, int32_t>(azp_adj);
 
-    typename EVTComputeAzp::Arguments evt_azp_args{azp_args, azp_adj_args};
-    typename EVTComputeAcc::Arguments evt_acc_args{{}, evt_azp_args};
-    typename EVTComputeScaleB::Arguments evt_scale_b_args{b_args, evt_acc_args};
-    return ArgumentType{a_args, evt_scale_b_args, bias_args};
+    typename EVTComputeAzp::Arguments evt_azp_args{azp_args, azp_adj_args, {}};
+    typename EVTComputeAcc::Arguments evt_acc_args{{}, evt_azp_args, {}};
+    typename EVTComputeScaleB::Arguments evt_scale_b_args{
+        b_args, evt_acc_args, {}};
+    return ArgumentType{a_args, evt_scale_b_args, bias_args, {}};
   }
 };
 
@@ -442,8 +444,8 @@ struct ScaledEpilogueArray
     auto b_args = SUPER::template args_from_tensor<ScaleBArray, float>(
         b_scales_ptr, b_row_broadcast);
 
-    typename EVTCompute0::Arguments evt0_args{b_args};
-    return ArgumentType{a_args, evt0_args};
+    typename EVTCompute0::Arguments evt0_args{b_args, {}, {}};
+    return ArgumentType{a_args, evt0_args, {}};
   }
 };
 

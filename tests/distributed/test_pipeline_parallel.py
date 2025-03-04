@@ -9,7 +9,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import json
 import os
 from dataclasses import dataclass
-from typing import List, Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple, Optional
 
 import pytest
 
@@ -38,14 +38,14 @@ class PPTestOptions(NamedTuple):
 
 @dataclass
 class PPTestSettings:
-    parallel_setups: List[ParallelSetup]
+    parallel_setups: list[ParallelSetup]
     # NOTE: the length of distributed_backends and
     # vllm_major_versions should be the same, and they
     # are first zipped together to iterate over all
     # test settings.
-    distributed_backends: List[str]
+    distributed_backends: list[str]
     # vllm major version: "0" for V0, "1" for V1
-    vllm_major_versions: List[str]
+    vllm_major_versions: list[str]
     task: TaskOption
     test_options: PPTestOptions
 
@@ -324,8 +324,8 @@ def _compare_tp(
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
     if distributed_backend == "ray" and (vllm_major_version == "1"
                                          or specific_case):
-        # For V1, test Ray ADAG for all the tests
-        # For V0, test Ray ADAG for a subset of the tests
+        # For V1, test Ray Compiled Graph for all the tests
+        # For V0, test Ray Compiled Graph for a subset of the tests
         pp_env = {
             "VLLM_USE_V1": vllm_major_version,
             "VLLM_USE_RAY_COMPILED_DAG": "1",
@@ -333,7 +333,7 @@ def _compare_tp(
             "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
         }
         # Temporary. Currently when zeromq + SPMD is used, it does not properly
-        # terminate because of aDAG issue.
+        # terminate because of a Ray Compiled Graph issue.
         common_args.append("--disable-frontend-multiprocessing")
     else:
         pp_env = None
@@ -367,8 +367,9 @@ def _compare_tp(
         if pp_env is None:
             raise
         else:
-            # Ray ADAG tests are flaky, so we don't want to fail the test
-            logger.exception("Ray ADAG tests failed")
+            # Ray Compiled Graph tests are flaky,
+            # so we don't want to fail the test
+            logger.exception("Ray Compiled Graph tests failed")
 
 
 @pytest.mark.parametrize(
