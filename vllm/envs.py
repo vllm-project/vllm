@@ -79,7 +79,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_BSCALED_MOE: bool = True
     VLLM_ROCM_USE_AITER_NORM: bool = True
-    VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = True
+    VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -555,9 +555,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
      ("true", "1")),
 
     # use aiter paged attention if aiter ops are enabled.
+    # this is disabled by default
     "VLLM_ROCM_USE_AITER_PAGED_ATTN":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in
-             ("false", "0")),
+             ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
