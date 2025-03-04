@@ -6,7 +6,9 @@ name: Create Release
 on:
   push:
     tags:
-      - v*
+      # NOTE: Binary build pipelines should only get triggered on release candidate builds
+      # Release candidate tags look like: v0.7.3-rc1
+      - v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+
 
 # Needed to create release and upload assets
 permissions:
@@ -39,7 +41,7 @@ jobs:
             const script = require('.github/workflows/scripts/create_release.js')
             await script(github, context, core)
 
-  # NOTE(simon): No longer build wheel using Github Actions. See buildkite's release workflow. 
+  # NOTE(simon): No longer build wheel using Github Actions. See buildkite's release workflow.
   # wheel:
   #   name: Build Wheel
   #   runs-on: ${{ matrix.os }}
