@@ -302,6 +302,13 @@ class MLACommonMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
+    # New for MLA (compared to FlashAttention)
+    # For handling prefill decode split
+    num_decodes: int
+    num_decode_tokens: int
+    num_prefills: int
+    has_context: bool
+
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
@@ -309,21 +316,18 @@ class MLACommonMetadata:
     head_dim: Optional[int] = None
 
     # New for MLA (compared to FlashAttention)
-    # For chunked prefill
-    num_decodes: Optional[int] = None
-    num_decode_tokens: Optional[int] = None
-    num_prefills: Optional[int] = None
-    has_context: bool = False
-
+    # For handling chunked prefill
     context_chunk_cu_seq_lens: Optional[torch.Tensor] = None
     context_chunk_starts: Optional[torch.Tensor] = None
     context_chunk_seq_tot: Optional[list[int]] = None
     context_chunk_max_seq_lens: Optional[list[int]] = None
     chunked_prefill_workspace: Optional[torch.Tensor] = None
 
-    # Computed in __post_init__
+    # New for MLA (compared to FlashAttention)
+    # For handling prefill decode split
     prefill_query_start_loc: Optional[torch.Tensor] = None
     prefill_max_query_len: Optional[int] = None
+    prefill_block_table: Optional[torch.Tensor] = None
     decode_seq_lens: Optional[torch.Tensor] = None
     decode_block_table: Optional[torch.Tensor] = None
 
@@ -342,6 +346,7 @@ class MLACommonMetadata:
             self.prefill_query_start_loc = \
                 self.query_start_loc[start:] - self.query_start_loc[start]
             self.prefill_max_query_len = self.seq_lens[start:].max().item()
+            self.prefill_block_table = self.block_table[start:, ...]
 
         if self.num_decodes is not None and self.num_decodes > 0:
             self.decode_seq_lens = self.seq_lens[:self.num_decodes]
@@ -453,6 +458,8 @@ class MLACommonMetadataBuilder(Generic[T]):
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int) -> T:
+        assert self._num_decodes + self._num_prefills == num_reqs
+
         device = self.runner.device
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
         query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
@@ -473,19 +480,23 @@ class MLACommonMetadataBuilder(Generic[T]):
 
         num_computed_tokens_cpu_tensor = \
             self.runner.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
-        context_lens_tensor = \
-            num_computed_tokens_cpu_tensor.to(device, non_blocking=True)
+        prefill_context_lens_tensor = \
+            num_computed_tokens_cpu_tensor[self._num_decodes:]\
+                .to(device, non_blocking=True)
+
+        has_context = False
 
         if self.chunked_prefill_enabled and self._num_prefills > 0 \
-            and context_lens_tensor[self._num_decodes:].max() > 0:
+            and prefill_context_lens_tensor.max() > 0:
+
             # NOTE: it is recommend you read the `Chunked Prefill` section in
             # the comment at the top of the file before trying to understand
             # the following code
 
-            self.has_context = True
+            has_context = True
 
             num_prefills_with_context = \
-                (context_lens_tensor[self._num_decodes:] > 0).sum().item()
+                (prefill_context_lens_tensor > 0).sum().item()
 
             # currently we allocate an equal amount of workspace for each
             # prefill in the batch, we could probably use a more advanced
@@ -499,7 +510,8 @@ class MLACommonMetadataBuilder(Generic[T]):
             # `context_chunk_starts` that are not aligned to page_size
             max_context_chunk = round_down(max_context_chunk, self.page_size)
             assert max_context_chunk > 0
-            num_chunks = cdiv(context_lens_tensor.max(), max_context_chunk)
+            num_chunks = cdiv(prefill_context_lens_tensor.max(),
+                              max_context_chunk)
 
             # if `max_context_chunk = 256`, `num_chunks = 3`, and
             #   `num_prefills_with_context = 4`, create a tensor that looks like
@@ -508,7 +520,7 @@ class MLACommonMetadataBuilder(Generic[T]):
                 torch.arange(num_chunks, device=device, dtype=torch.int32) \
                 .unsqueeze(1).expand(-1, self._num_prefills) \
                 * max_context_chunk
-            chunk_ends = torch.min(context_lens_tensor[self._num_decodes:] \
+            chunk_ends = torch.min(prefill_context_lens_tensor \
                 .unsqueeze(0), context_chunk_starts + max_context_chunk)
             chunk_seq_lens = (chunk_ends - context_chunk_starts).clamp(min=0)
             _context_chunk_cu_seq_lens = chunk_seq_lens.cumsum(dim=1).to(
@@ -537,10 +549,12 @@ class MLACommonMetadataBuilder(Generic[T]):
             num_decodes=self._num_decodes,
             num_decode_tokens=self._num_decode_tokens,
             num_prefills=self._num_prefills,
+            has_context=has_context,
             context_chunk_cu_seq_lens=context_chunk_cu_seq_lens,
             context_chunk_starts=context_chunk_starts,
             context_chunk_seq_tot=context_chunk_seq_tot,
             context_chunk_max_seq_lens=context_chunk_max_seq_lens,
+            chunked_prefill_workspace=self.chunked_prefill_workspace,
         )
 
 
@@ -824,6 +838,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         assert attn_metadata.context_chunk_max_seq_lens is not None
         assert attn_metadata.prefill_query_start_loc is not None
         assert attn_metadata.prefill_max_query_len is not None
+        assert attn_metadata.prefill_block_table is not None
 
         output = None
         iters = len(attn_metadata.context_chunk_seq_tot)
@@ -837,7 +852,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             ops.gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
-                block_table=attn_metadata.block_table,
+                block_table=attn_metadata.prefill_block_table,
                 cu_seq_lens=attn_metadata.context_chunk_cu_seq_lens[i],
                 batch_size=attn_metadata.num_prefills,
                 seq_starts=attn_metadata.context_chunk_starts[i],
