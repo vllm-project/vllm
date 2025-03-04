@@ -110,6 +110,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
+    VLLM_ALLOW_SERVER_PLUGINS: bool = False
 
 
 def get_default_cache_root():
@@ -727,6 +728,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # limit will actually be zero-copy decoded.
     "VLLM_MSGPACK_ZERO_COPY_THRESHOLD":
     lambda: int(os.getenv("VLLM_MSGPACK_ZERO_COPY_THRESHOLD", "256")),
+
+    # Whether to allow server plugins to be loaded,
+    # default is False
+    "VLLM_ALLOW_SERVER_PLUGINS":
+    lambda: bool(int(os.getenv("VLLM_ALLOW_SERVER_PLUGINS", "0"))),
 }
 
 # end-env-vars-definition

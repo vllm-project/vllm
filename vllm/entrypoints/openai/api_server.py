@@ -43,6 +43,7 @@ from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
+from vllm.entrypoints.openai.plugins import ServerPlugin, load_server_plugins
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -1038,7 +1039,9 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     return sock
 
 
-async def run_server(args, **uvicorn_kwargs) -> None:
+async def run_server(args,
+                     plugins: dict[str, ServerPlugin] = None,
+                     **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
@@ -1079,6 +1082,14 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
+        if plugins:
+            for plugin_name, plugin in plugins.items():
+                try:
+                    plugin.apply_plugin(app, engine_client, vllm_config,
+                                        app.state, args)
+                except Exception as e:
+                    logger.warning("Failed to apply plugin %s: %s",
+                                   plugin_name, e)
 
         def _listen_addr(a: str) -> str:
             if is_valid_ipv6_address(a):
@@ -1123,7 +1134,23 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
     parser = make_arg_parser(parser)
+
+    # Load server plugins
+    if envs.VLLM_ALLOW_SERVER_PLUGINS:
+        logger.warning("Server plugins are enabled in the API server. "
+                       "This may introduce security vulnerabilities. "
+                       "Only use plugins from trusted sources.")
+        plugins: dict[str, ServerPlugin] = load_server_plugins()
+        for plugin_name, plugin in plugins.items():
+            logger.info("Loaded server plugin: %s", plugin_name)
+            # Add plugin-specific arguments to the parser
+            plugin.make_arg_parser(parser)
+            # Register the plugin's parser
+            plugin.register_parser()
+    else:
+        plugins = {}
+
     args = parser.parse_args()
     validate_parsed_serve_args(args)
 
-    uvloop.run(run_server(args))
+    uvloop.run(run_server(args, plugins=plugins))
