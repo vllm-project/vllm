@@ -356,9 +356,12 @@ class FusedMoE(torch.nn.Module):
         self.global_num_experts = num_experts
 
         if envs.VLLM_TEST_ENABLE_EP:
-            self.ep_size = self.tp_size * self.dp_size
+            # Set TP size to 1 to adjust for EP and adjust EP size and rank
+            # for DP attention.
             self.ep_rank = (get_tensor_model_parallel_rank() +
                             self.tp_size * self.dp_rank)
+            self.tp_rank = 0
+            self.ep_size = self.tp_size * self.dp_size
             self.tp_size = 1
 
             self.local_num_experts, self.expert_map = determine_expert_map(
@@ -366,6 +369,11 @@ class FusedMoE(torch.nn.Module):
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts)
         else:
+            # Adjust TP size for DP attention
+            self.tp_rank = (get_tensor_model_parallel_rank() +
+                            self.tp_size * self.dp_rank)
+            self.ep_rank = 0
+            self.tp_size = self.tp_size * self.dp_size
             self.ep_size = 1
             self.local_num_experts = self.global_num_experts
             self.expert_map = None
@@ -542,9 +550,6 @@ class FusedMoE(torch.nn.Module):
         if expert_id == -1:
             return
 
-        # TP rank is set to 0 if EP is enabled
-        tp_rank = 0 if self.ep_size > 1 else get_tensor_model_parallel_rank()
-
         # compressed-tensors checkpoints with packed weights are stored flipped
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
@@ -588,8 +593,7 @@ class FusedMoE(torch.nn.Module):
             final_shape = list(loaded_weight.shape)
             if shard_id in ["w1", "w3"]:
                 final_shape[1] *= 2
-            final_shape[shard_dim] = final_shape[
-                shard_dim] // get_tensor_model_parallel_world_size()
+            final_shape[shard_dim] = final_shape[shard_dim] // self.tp_size
             param.materialize(final_shape, dtype=loaded_weight.dtype)
 
         expert_data = param.data if full_load else param.data[expert_id]
@@ -616,7 +620,7 @@ class FusedMoE(torch.nn.Module):
                              shard_id=shard_id,
                              loaded_weight=loaded_weight,
                              expert_data=expert_data,
-                             tp_rank=tp_rank)
+                             tp_rank=self.tp_rank)
             return
 
         # Case weight scales and zero_points
@@ -633,7 +637,7 @@ class FusedMoE(torch.nn.Module):
                     shard_dim=shard_dim,
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
-                    tp_rank=tp_rank)
+                    tp_rank=self.tp_rank)
             elif quant_method in [
                     FusedMoeWeightScaleSupported.GROUP.value,
                     FusedMoeWeightScaleSupported.BLOCK.value,
@@ -643,7 +647,7 @@ class FusedMoE(torch.nn.Module):
                     shard_dim=shard_dim,
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
-                    tp_rank=tp_rank,
+                    tp_rank=self.tp_rank,
                     load_full_w2=getattr(param, "load_full_w2", False))
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(shard_id=shard_id,
@@ -670,7 +674,7 @@ class FusedMoE(torch.nn.Module):
                 shard_dim=shard_dim,
                 loaded_weight=loaded_weight,
                 expert_data=expert_data,
-                tp_rank=tp_rank)
+                tp_rank=self.tp_rank)
             return
 
     @staticmethod
