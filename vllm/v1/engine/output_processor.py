@@ -159,7 +159,8 @@ class RequestState:
         delta = self.output_kind == RequestOutputKind.DELTA
 
         # Prepare text and token_ids, based on delta mode
-        text = self.detokenizer.get_next_output_text(finished, delta) if self.detokenize else ""
+        text = self.detokenizer.get_next_output_text(
+            finished, delta) if self.detokenize else ""
         if not delta:
             token_ids = self.detokenizer.output_token_ids
 
