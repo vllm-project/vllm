@@ -839,15 +839,6 @@ class SiglipFlashAttention2(SiglipAttention):
         super().__init__(*args, **kwargs)
         self.is_causal = False  # Hack to make sure we don't use a causal mask
 
-        # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
-        if self.attn_backend != _Backend.FLASH_ATTN:
-            # Only print out errors for now to make ci/pr/basic-models-test
-            # happy since the testing environment does not have flash_attn
-            # installed.
-            logger.error("Phi-4-multimodal-instruct model does not support "\
-                         "%s backend now.", self.attn_backend)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1959,6 +1950,11 @@ def get_siglip_vision_model(_flash_attn_2_enabled=True, **kwargs):
         "num_hidden_layers": 27,
         "patch_size": 14,
     }
+
+    # Detect attention implementation.
+    attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
+    if attn_backend != _Backend.FLASH_ATTN:
+        _flash_attn_2_enabled = False
 
     model_config = SiglipVisionConfig(
         **siglip_vision_config,
