@@ -21,13 +21,14 @@ class GraniteReasoningParser(ReasoningParser):
 
     IBM granite models currently use "Here is my thought process:"
     and "Here is my response:" to separate its thinking / response outputs.
-    NOTE: There have been some observed occurrences of quantized instances of
-    the current models using "Here's" instead of "Here is", so to be safe, we
-    match on both
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
+
+        # NOTE: There have been some observed occurrences of quantized
+        # instances of the current models using "Here's" instead of "Here is",
+        # so to be safe, we match on both.
         self.think_start_expr = r"(?:Here's|Here is) my thought process:"
         self.response_start_expr = r"(?:Here's|Here is) my response:"
 
@@ -41,6 +42,8 @@ class GraniteReasoningParser(ReasoningParser):
         self.valid_response_starts = [
             "Here's my response:", "Here is my response:"
         ]
+
+        # Substrings to match for sequence boundaries on raw text
         self.seq_boundary_end = ":"
         self.seq_boundary_start = "Here"
 
@@ -89,10 +92,10 @@ class GraniteReasoningParser(ReasoningParser):
 
                 Here is my thought process: Foo Here is my response: Bar
 
-        This increases the complexity of correctly handling streams by a lot,
-        since we need to watch for specific sequences and correctly handle
-        parsing them without dropping content that is potentially overlapping
-        & spanning across multiple delta messages.
+        This increases the complexity of correctly handling streams, since we
+        need to watch for specific sequences and correctly parse them without
+        dropping content that is potentially overlapping & spanning multiple
+        delta messages.
 
         Args:
             previous_text (str): Previous text outside of this delta message.
@@ -108,13 +111,17 @@ class GraniteReasoningParser(ReasoningParser):
         """
         reasoning_content, response_content = self._get_content_sections(
             current_text)
+        # Either we haven't finished the start of the reasoning sequence,
+        # or the model is generating something unexpected.
         if not reasoning_content:
             delta_message = self._get_delta_message_with_no_reasoning_bounds(
                 current_text, delta_text)
-        # We have a start of reasoning message, but not the response message yet
+        # We have a start of reasoning message, but have not yet finished
+        # the start of response sequence.
         elif not response_content:
             delta_message = self._get_delta_message_with_no_response_bounds(
                 current_text, reasoning_content, delta_text)
+        # We've finished both the start of reasoning and start of response seq.
         else:
             delta_message = self._get_delta_message_with_both_bounds(
                 delta_text, reasoning_content, response_content, current_text)
@@ -123,6 +130,32 @@ class GraniteReasoningParser(ReasoningParser):
         return delta_message
 
     #### Implementation details of stream parsing for granite models
+    def _is_reasoning_start_substr(self, text: str) -> bool:
+        """Check if a text matches one of the possible start reasoning seqs.
+
+        Args:
+            text (str): Text to check for leading substr.
+        
+        Returns:
+            bool: True if any of the possible reasoning start seqs match.
+        """
+        return any(
+            think_start.startswith(text)
+            for think_start in self.valid_think_starts)
+
+    def _is_response_start_substr(self, text: str) -> bool:
+        """Check if a text matches one of the possible start response seqs.
+
+        Args:
+            text (str): Text to check for leading substr.
+        
+        Returns:
+            bool: True if any of the possible response start seqs match.
+        """
+        return any(
+            response_start.startswith(text)
+            for response_start in self.valid_response_starts)
+
     def _get_delta_message_with_no_reasoning_bounds(
         self,
         current_text: str,
@@ -138,19 +171,13 @@ class GraniteReasoningParser(ReasoningParser):
         Returns:
             DeltaMessage: Message containing the parsed content.
         """
-        # Even before this, we already had a longer text str than any expected
-        # message; The output is not parsable; assume we rectified this
-        # previously and just add the delta text to the content.
         prev_longest_length = len(current_text) - len(delta_text)
-        if prev_longest_length > self.longest_think_start:
-            return DeltaMessage(reasoning_content=None, content=delta_text)
+        is_substr = self._is_reasoning_start_substr(current_text)
+        was_substr = self._is_reasoning_start_substr(
+            current_text[:prev_longest_length])
 
-        is_substr = any(current_text in think_start
-                        for think_start in self.valid_think_starts)
-        was_substr = any(current_text[:prev_longest_length] in think_start
-                         for think_start in self.valid_think_starts)
         # Check if we just generated something NOT in the special token seq;
-        # if so, we add everything that we previously skipped with this delta
+        # if so, add everything that we previously skipped with this delta
         # message and append everything to content in the future.
         if was_substr and not is_substr:
             return DeltaMessage(
@@ -165,8 +192,11 @@ class GraniteReasoningParser(ReasoningParser):
         return DeltaMessage(reasoning_content=None, content=delta_text)
 
     def _get_delta_message_with_no_response_bounds(
-            self, current_text: str, reasoning_content: str,
-            delta_text: str) -> DeltaMessage:
+        self,
+        current_text: str,
+        reasoning_content: str,
+        delta_text: str,
+    ) -> DeltaMessage:
         """Parse the delta message when the current text has both reasoning
         content with no (response) content. NOTE that we may have overlapping
         tokens with the start of reasoning / start of response sequences on
@@ -199,44 +229,38 @@ class GraniteReasoningParser(ReasoningParser):
         prev_idx = previous_text.rfind(self.seq_boundary_start)
         delta_idx = delta_text.rfind(self.seq_boundary_start)
 
-        # And check if either we had one in the previous text, or have on
-        prev_was_substr = any(
-            previous_text[prev_idx:] in response_start for response_start in
-            self.valid_response_starts) if prev_idx >= 0 else False
-        delta_continues_substr = any(
-            current_text[prev_idx:] in response_start for response_start in
-            self.valid_response_starts) if prev_idx >= 0 else False
-        delta_new_substr = any(
-            delta_text[delta_idx:] in response_start for response_start in
-            self.valid_response_starts) if delta_idx >= 0 else False
-        # It was a substring before, and all delta tokens are
-        # part of the potential start of response sequence
+        # Check the state of potential start of response substring matches.
+        prev_was_substr = self._is_response_start_substr(
+            previous_text[prev_idx:]) if prev_idx >= 0 else False
+        delta_continues_substr = self._is_response_start_substr(
+            current_text[prev_idx:]) if prev_idx >= 0 else False
+        delta_new_substr = self._is_response_start_substr(
+            delta_text[delta_idx:]) if delta_idx >= 0 else False
 
-        if prev_was_substr and delta_continues_substr:
+        # Delta only contains potential continued response sequence text.
+        if delta_continues_substr:
             return DeltaMessage(reasoning_content=None, content=None)
 
         if not prev_was_substr:
-            # Don't add the potential unfinished response sequence
+            # Delta may be starting a new response seq but has other text too.
             if delta_new_substr:
                 return DeltaMessage(reasoning_content=delta_text[:delta_idx],
                                     content=None)
-            # No possible places to start the response seq; continue normally
+            # Normal case for most reasoning text (no potential special seqs).
             return DeltaMessage(reasoning_content=delta_text, content=None)
-        # The substring being continued is the same one as before;
-        # the whole delta message is part of the potential response seq
-        if delta_continues_substr:
-            return DeltaMessage(reasoning_content=None, content=None)
         # The substring that previously seemed to be a potential response
         # seq wasn't one; we need to add the content to the delta message,
         # and also slice off the potential response sequence
         elif delta_new_substr:
-            return DeltaMessage(reasoning_content=previous_text[prev_idx:] +
-                                delta_text[:delta_idx],
+            reasoning_content = previous_text[
+                prev_idx:] + delta_text[:delta_idx]
+            return DeltaMessage(reasoning_content=reasoning_content,
                                 content=None)
         # No new substring yet, and we broke our old one; take the whole delta
-        return DeltaMessage(reasoning_content=previous_text[prev_idx:] +
-                            delta_text,
-                            content=None)
+        return DeltaMessage(
+            reasoning_content=previous_text[prev_idx:] + delta_text,
+            content=None,
+        )
 
     def _get_delta_message_with_both_bounds(
         self,
