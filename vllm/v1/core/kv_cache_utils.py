@@ -3,7 +3,7 @@
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, List, NamedTuple, Optional, Tuple
+from typing import Any, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -25,7 +25,7 @@ class BlockHashType(NamedTuple):
     # Hash value of the block in an integer.
     hash_value: int
     # Token IDs in the block.
-    token_ids: Tuple[int, ...]
+    token_ids: tuple[int, ...]
     # Extra keys for the block.
     extra_keys: Optional[Any] = None
 
@@ -45,7 +45,7 @@ class PrefixCachingMetrics:
         self.aggregated_query_total = 0
         self.aggregated_query_hit = 0
         # A deque of (requests, queries, hits) for the most recent requests.
-        self.query_queue: deque[Tuple[int, int, int]] = deque()
+        self.query_queue: deque[tuple[int, int, int]] = deque()
 
     def observe(self, stats: PrefixCacheStats):
         """Observe the prefix caching for a set of requests.
@@ -128,6 +128,19 @@ class KVCacheBlock:
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
 
+    def __repr__(self) -> str:
+        # Use block_id instead of KVCacheBlock object to avoid calling __repr__
+        # on KVCacheBlock object recursively.
+        prev_block_id = self.prev_free_block.block_id \
+            if self.prev_free_block else None
+        next_block_id = self.next_free_block.block_id \
+            if self.next_free_block else None
+        return (f"KVCacheBlock(block_id={self.block_id}, "
+                f"ref_cnt={self.ref_cnt}, "
+                f"_block_hash={self._block_hash}, "
+                f"prev_free_block={prev_block_id}, "
+                f"next_free_block={next_block_id})")
+
 
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
@@ -151,7 +164,7 @@ class FreeKVCacheBlockQueue:
         blocks: A list of KVCacheBlock objects.
     """
 
-    def __init__(self, blocks: List[KVCacheBlock]) -> None:
+    def __init__(self, blocks: list[KVCacheBlock]) -> None:
         self.num_free_blocks = len(blocks)
 
         # Initialize the doubly linked list of free blocks.
@@ -220,7 +233,7 @@ class FreeKVCacheBlockQueue:
         block.next_free_block = None
         self.num_free_blocks += 1
 
-    def get_all_free_blocks(self) -> List[KVCacheBlock]:
+    def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
         
         Returns:
@@ -251,7 +264,7 @@ def need_extra_keys(request: Request) -> bool:
 
 def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
                             end_token_idx: int,
-                            start_mm_idx: int) -> Tuple[List[Any], int]:
+                            start_mm_idx: int) -> tuple[list[Any], int]:
     """Generate extra keys related to MultiModal request for block hash
     computation. For multi-modal inputs, the extra keys are
     (mm_hash, start_offset) that indicate a mm input contained in the
@@ -266,7 +279,7 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     Returns:
         A tuple of extra keys and the next multi-modal index.
     """
-    extra_keys: List[Any] = []
+    extra_keys: list[Any] = []
 
     mm_positions, mm_hashes = request.mm_positions, request.mm_hashes
     if not mm_positions:
@@ -318,7 +331,7 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> List[int]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
     """Generate extra keys related to LoRA for block hash computation.
     
     Args:
@@ -335,7 +348,7 @@ def _gen_lora_extra_hash_keys(request: Request) -> List[int]:
 
 def generate_block_hash_extra_keys(
         request: Request, start_token_idx: int, end_token_idx: int,
-        start_mm_idx: int) -> Tuple[Optional[Tuple[Any, ...]], int]:
+        start_mm_idx: int) -> tuple[Optional[tuple[Any, ...]], int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs and request specific metadata (e.g., LoRA ID).
     
@@ -348,12 +361,12 @@ def generate_block_hash_extra_keys(
     Returns:
         A tuple of extra keys and the next multi-modal index.
     """
-    mm_extra_keys: List[Any]
+    mm_extra_keys: list[Any]
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx)
-    lora_extra_keys: List[int] = _gen_lora_extra_hash_keys(request)
+    lora_extra_keys: list[int] = _gen_lora_extra_hash_keys(request)
 
-    extra_keys: List[Any] = lora_extra_keys + mm_extra_keys
+    extra_keys: list[Any] = lora_extra_keys + mm_extra_keys
 
     if not extra_keys:
         return None, new_start_mm_idx
@@ -364,7 +377,7 @@ def generate_block_hash_extra_keys(
 def hash_block_tokens(
         parent_block_hash: Optional[int],
         curr_block_token_ids: Sequence[int],
-        extra_keys: Optional[Tuple[Any, ...]] = None) -> BlockHashType:
+        extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHashType:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
     prefix caching. We use LRU cache for this function to avoid recomputing
@@ -397,7 +410,7 @@ def hash_block_tokens(
 
 
 def hash_request_tokens(block_size: int,
-                        request: Request) -> List[BlockHashType]:
+                        request: Request) -> list[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
@@ -541,8 +554,8 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
 
 
 def get_kv_cache_configs(vllm_config: VllmConfig,
-                         kv_cache_specs: List[KVCacheSpec],
-                         available_memory: int) -> List[KVCacheConfig]:
+                         kv_cache_specs: list[KVCacheSpec],
+                         available_memory: int) -> list[KVCacheConfig]:
     """
     Generates the KV cache configuration for a model
     TODO: support hybrid models with more than one type of KV cache.

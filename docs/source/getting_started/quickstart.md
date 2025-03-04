@@ -24,6 +24,12 @@ source myenv/bin/activate
 uv pip install vllm
 ```
 
+Another delightful way is to use `uv run` with `--with [dependency]` option, which allows you to run commands such as `vllm serve` without creating an environment:
+
+```console
+uv run --with vllm vllm --help
+```
+
 You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments.
 
 ```console

@@ -9,7 +9,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from functools import cache
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import torch
 import uvloop
@@ -75,12 +75,12 @@ def lora_path_on_disk(lora_path: str) -> str:
     return get_adapter_absolute_path(lora_path)
 
 
-lora_tokenizer_cache: Dict[int, AnyTokenizer] = {}
+lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
 
 
 def get_random_lora_request(
         args: argparse.Namespace
-) -> Tuple[LoRARequest, Optional[AnyTokenizer]]:
+) -> tuple[LoRARequest, Optional[AnyTokenizer]]:
     global lora_tokenizer_cache
     lora_id = random.randint(1, args.max_loras)
     lora_request = LoRARequest(lora_name=str(lora_id),
@@ -92,7 +92,7 @@ def get_random_lora_request(
 
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
-                    args: argparse.Namespace) -> List[SampleRequest]:
+                    args: argparse.Namespace) -> list[SampleRequest]:
 
     dataset_path: str = args.dataset
     num_requests: int = args.num_prompts
@@ -110,7 +110,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
     random.shuffle(dataset)
 
     # Filter out sequences that are too long or too short
-    filtered_dataset: List[SampleRequest] = []
+    filtered_dataset: list[SampleRequest] = []
     for data in tqdm(dataset,
                      total=len(filtered_dataset),
                      desc="sampling requests"):
@@ -166,7 +166,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
 
 
 def run_vllm(
-    requests: List[SampleRequest],
+    requests: list[SampleRequest],
     n: int,
     engine_args: EngineArgs,
 ) -> float:
@@ -222,8 +222,8 @@ def run_vllm(
     llm = LLM(**dataclasses.asdict(engine_args))
 
     # Add the requests to the engine.
-    prompts: List[TextPrompt] = []
-    sampling_params: List[SamplingParams] = []
+    prompts: list[TextPrompt] = []
+    sampling_params: list[SamplingParams] = []
     for request in requests:
         prompts.append(
             TextPrompt(prompt=request.prompt,
@@ -236,7 +236,7 @@ def run_vllm(
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
             ))
-    lora_requests: Optional[List[LoRARequest]] = None
+    lora_requests: Optional[list[LoRARequest]] = None
     if engine_args.enable_lora:
         lora_requests = [request.lora_request for request in requests]
 
@@ -274,7 +274,7 @@ def run_vllm(
 
 
 async def run_vllm_async(
-    requests: List[SampleRequest],
+    requests: list[SampleRequest],
     n: int,
     engine_args: AsyncEngineArgs,
     disable_frontend_multiprocessing: bool = False,
@@ -285,9 +285,9 @@ async def run_vllm_async(
             engine_args, disable_frontend_multiprocessing) as llm:
 
         # Add the requests to the engine.
-        prompts: List[TextPrompt] = []
-        sampling_params: List[SamplingParams] = []
-        lora_requests: List[Optional[LoRARequest]] = []
+        prompts: list[TextPrompt] = []
+        sampling_params: list[SamplingParams] = []
+        lora_requests: list[Optional[LoRARequest]] = []
         for request in requests:
             prompts.append(
                 TextPrompt(prompt=request.prompt,
@@ -319,7 +319,7 @@ async def run_vllm_async(
 
 
 def run_hf(
-    requests: List[SampleRequest],
+    requests: list[SampleRequest],
     model: str,
     tokenizer: PreTrainedTokenizerBase,
     n: int,
@@ -335,7 +335,7 @@ def run_hf(
 
     pbar = tqdm(total=len(requests))
     start = time.perf_counter()
-    batch: List[str] = []
+    batch: list[str] = []
     max_prompt_len = 0
     max_output_len = 0
     for i in range(len(requests)):
@@ -377,7 +377,7 @@ def run_hf(
 
 
 def run_mii(
-    requests: List[SampleRequest],
+    requests: list[SampleRequest],
     model: str,
     tensor_parallel_size: int,
     output_len: int,

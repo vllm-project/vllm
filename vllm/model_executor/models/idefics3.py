@@ -16,8 +16,8 @@
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
 import math
-from typing import (Dict, Iterable, List, Literal, Mapping, Optional, Set,
-                    Tuple, TypedDict, Union)
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Dict, List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.utils.checkpoint
@@ -41,7 +41,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo,
                                         MultiModalDataItems,
                                         MultiModalFieldConfig,
-                                        PromptReplacement)
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -274,12 +274,12 @@ class Idefics3MultimodalProcessor(
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         image_token = hf_processor.image_token.content

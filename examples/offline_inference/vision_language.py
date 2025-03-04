@@ -82,6 +82,22 @@ def run_deepseek_vl2(question: str, modality: str):
     return llm, prompt, stop_token_ids
 
 
+# Florence2
+def run_florence2(question: str, modality: str):
+    assert modality == "image"
+
+    llm = LLM(model="microsoft/Florence-2-large",
+              tokenizer="facebook/bart-large",
+              max_num_seqs=8,
+              trust_remote_code=True,
+              dtype="bfloat16",
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+
+    prompt = "<MORE_DETAILED_CAPTION>"
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 # Fuyu
 def run_fuyu(question: str, modality: str):
     assert modality == "image"
@@ -571,6 +587,7 @@ model_example_map = {
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
     "deepseek_vl_v2": run_deepseek_vl2,
+    "florence2": run_florence2,
     "fuyu": run_fuyu,
     "glm4v": run_glm4v,
     "h2ovl_chat": run_h2ovl,

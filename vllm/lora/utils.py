@@ -15,17 +15,17 @@ from vllm.logger import init_logger
 from vllm.lora.fully_sharded_layers import (
     ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora, QKVParallelLinearWithShardedLora,
+    MergedQKVParallelLinearWithShardedLoRA, QKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA)
 # being imported for _all_lora_classes below
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLora,
+                              LinearScalingRotaryEmbeddingWithLoRA,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
-                              MergedQKVParallelLinearWithLora,
-                              QKVParallelLinearWithLora,
+                              MergedQKVParallelLinearWithLoRA,
+                              QKVParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
@@ -41,17 +41,17 @@ _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
-    QKVParallelLinearWithLora,
-    MergedQKVParallelLinearWithLora,
+    QKVParallelLinearWithLoRA,
+    MergedQKVParallelLinearWithLoRA,
     RowParallelLinearWithLoRA,
     ReplicatedLinearWithLoRA,
     LogitsProcessorWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
-    QKVParallelLinearWithShardedLora,
+    QKVParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora,
+    MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
-    LinearScalingRotaryEmbeddingWithLora,
+    LinearScalingRotaryEmbeddingWithLoRA,
 }
 
 
@@ -66,17 +66,20 @@ def from_layer(layer: nn.Module,
                                       lora_config=lora_config,
                                       packed_modules_list=packed_modules_list,
                                       model_config=model_config):
-            ret = lora_cls(layer)
-            ret.create_lora_weights(max_loras, lora_config, model_config)
-            return ret
+            instance_layer = lora_cls(layer)
+            if layer.__class__.__name__ == "HFCompatibleLinear":
+                # HACK:  Make the forward method compatible with the original
+                # forward method of the instance_layer.
+                original_forward = instance_layer.forward
 
-    # The Case for HFCompatibleLinear
-    if (hasattr(layer, "get_lora_class")
-            and layer.__class__.__name__ == "HFCompatibleLinear"):
-        lora_cls = layer.get_lora_class(lora_config.fully_sharded_loras)
-        ret = lora_cls(layer)
-        ret.create_lora_weights(max_loras, lora_config, model_config)
-        return ret
+                def new_forward(input):
+                    input = input.squeeze(0)
+                    return original_forward(input)[0]  # noqa: B023
+
+                instance_layer.forward = new_forward
+            instance_layer.create_lora_weights(max_loras, lora_config,
+                                               model_config)
+            return instance_layer
     return layer
 
 

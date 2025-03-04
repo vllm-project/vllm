@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Optional
 
 import torch
 
@@ -13,14 +13,11 @@ class SamplingMetadata:
     all_greedy: bool
     all_random: bool
 
-    # None when there are no speculated tokens.
-    spec_token_ids: Optional[List[List[int]]]
-
     top_p: Optional[torch.Tensor]
     top_k: Optional[torch.Tensor]
     min_p: Optional[torch.Tensor]
 
-    generators: Dict[int, torch.Generator]
+    generators: dict[int, torch.Generator]
 
     # None means no logprobs, 0 means sampled token logprobs only
     max_num_logprobs: Optional[int]
@@ -31,12 +28,12 @@ class SamplingMetadata:
     presence_penalties: torch.Tensor
     repetition_penalties: torch.Tensor
 
-    output_token_ids: List[List[int]]
+    output_token_ids: list[list[int]]
 
     # req_index -> (min_tokens, stop_token_ids)
-    min_tokens: Dict[int, Tuple[int, Set[int]]]
+    min_tokens: dict[int, tuple[int, set[int]]]
 
-    logit_bias: List[Optional[Dict[int, float]]]
+    logit_bias: list[Optional[dict[int, float]]]
 
     # `allowed_token_ids_mask` is a 2D bool tensor of shape (max batch size,
     # vocab size).
