@@ -353,7 +353,7 @@ class ModelConfig:
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         has_interleaved_attention = (sliding_window is not None) and (
             isinstance(sliding_window, list) or
-            (self.hf_text_config.model_type in ["gemma2", "cohere2"]))
+            (self.hf_text_config.model_type in ["gemma2", "gemma3", "cohere2"]))
 
         if (not self.disable_sliding_window and has_interleaved_attention):
             if (backend :=
