@@ -398,7 +398,7 @@ class PhiMoEDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
-            prefix=f"{prefix}.moe",
+            prefix=f"{prefix}.block_sparse_moe",
         )
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.rms_norm_eps,

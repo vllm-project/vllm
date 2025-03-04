@@ -278,10 +278,9 @@ class Qwen2MoeDecoderLayer(nn.Module):
         if (layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):
-            self.mlp = Qwen2MoeSparseMoeBlock(
-                config=config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.block_sparse_moe")
+            self.mlp = Qwen2MoeSparseMoeBlock(config=config,
+                                              quant_config=quant_config,
+                                              prefix=f"{prefix}.mlp")
         else:
             self.mlp = Qwen2MoeMLP(
                 hidden_size=config.hidden_size,

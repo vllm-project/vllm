@@ -295,7 +295,7 @@ class DbrxBlock(nn.Module):
             cache_config,
             quant_config,
             prefix=f"{prefix}.norm_attn_norm")
-        self.ffn = DbrxMoE(config, quant_config, prefix=f"{prefix}.moe")
+        self.ffn = DbrxMoE(config, quant_config, prefix=f"{prefix}.ffn")
 
     def forward(
         self,

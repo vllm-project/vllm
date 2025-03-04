@@ -216,7 +216,7 @@ class JambaAttentionDecoderLayer(nn.Module):
         ffn_layer_class = JambaMoE if num_experts > 1 else JambaMLP
         self.feed_forward = ffn_layer_class(config,
                                             quant_config=quant_config,
-                                            prefix=f"{prefix}.ffn")
+                                            prefix=f"{prefix}.feed_forward")
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size,

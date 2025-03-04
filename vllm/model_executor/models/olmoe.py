@@ -213,7 +213,7 @@ class OlmoeDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
-            prefix=f"{prefix}.moe",
+            prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
