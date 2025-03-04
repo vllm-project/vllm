@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
+                                           PackedColumnParameter,
                                            PackedvLLMParameter,
                                            RowvLLMParameter)
 from vllm.scalar_type import scalar_types
@@ -120,13 +121,34 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 dtype=params_dtype,
             )
         }
+
+        zeros_args = {
+            "data":
+            torch.zeros(
+                output_size_per_partition // self.pack_factor,
+                scales_and_zp_size,
+                dtype=torch.int32,
+            ),
+            "weight_loader":
+            weight_loader
+        }
+
         if not partition_scales:
             weight_scale = ChannelQuantScaleParameter(output_dim=0,
                                                       **weight_scale_args)
+            qzeros = PackedColumnParameter(output_dim=0,
+                                           packed_dim=0,
+                                           packed_factor=self.pack_factor,
+                                           **zeros_args)
         else:
             weight_scale = GroupQuantScaleParameter(output_dim=0,
                                                     input_dim=1,
                                                     **weight_scale_args)
+            qzeros = PackedvLLMParameter(input_dim=1,
+                                         output_dim=0,
+                                         packed_dim=0,
+                                         packed_factor=self.pack_factor,
+                                         **zeros_args)
 
         # A 2D array defining the original shape of the weights
         # before packing
@@ -137,6 +159,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         layer.register_parameter("weight_packed", weight)
         layer.register_parameter("weight_scale", weight_scale)
         layer.register_parameter("weight_shape", weight_shape)
+        layer.register_parameter("weight_zero_point", qzeros)
 
         # group index (for activation reordering)
         if self.has_g_idx:
@@ -151,7 +174,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.kernel = kernel_type(mp_linear_kernel_config,
                                   w_q_param_name="weight_packed",
                                   w_s_param_name="weight_scale",
-                                  w_zp_param_name=None,
+                                  w_zp_param_name="weight_zero_point",
                                   w_gidx_param_name="weight_g_idx")
 
     # Checkpoints are serialized in compressed-tensors format, which is
