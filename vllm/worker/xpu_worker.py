@@ -18,13 +18,13 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import Worker
-from vllm.worker.worker_base import LoRANotSupportedWorkerBase, WorkerBase
+from vllm.worker.worker_base import WorkerBase
 from vllm.worker.xpu_model_runner import XPUModelRunner
 
 logger = init_logger(__name__)
 
 
-class XPUWorker(LoRANotSupportedWorkerBase, Worker):
+class XPUWorker(Worker):
     """A worker class that executes (a partition of) the model on a GPU.
     
     Each worker is associated with a single XPU device. The worker is 
@@ -135,8 +135,11 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
         return num_gpu_blocks, num_cpu_blocks
 
     def _warm_up_model(self) -> None:
-        # IPEX don't support capture graph yet
-        pass
+        if not self.model_config.enforce_eager:
+            self.model_runner.capture_model(self.gpu_cache)
+        # Reset the seed to ensure that the random state is not affected by
+        # the model initialization and profiling.
+        set_random_seed(self.model_config.seed)
 
     def init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
@@ -157,12 +160,12 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
                 "distributed_init_method must be set if torch.distributed "
                 "is not already initialized")
         else:
-            # use sockets as default Level zero IPC exchange backend. By
-            # default oneccl will use `drmfd` as mechanism which need extra
-            # dependency (libdrm and drm headers) on your system.
+            # oneapi 2025 will use pidfd as default
+            ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE", "drmfd")
             ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
             ENV_LOCAL_WORLD_SIZE = os.getenv("LOCAL_WORLD_SIZE",
                                              str(parallel_config.world_size))
+            os.environ["CCL_ZE_IPC_EXCHANGE"] = ENV_CCL_ZE_IPC_EXCHANGE
             os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
             os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
             os.environ["LOCAL_RANK"] = str(self.local_rank)

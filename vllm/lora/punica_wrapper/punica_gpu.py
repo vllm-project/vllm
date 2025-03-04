@@ -10,14 +10,23 @@ from typing import Optional, Tuple, Union, final
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
-if HAS_TRITON:
+if HAS_TRITON and not current_platform.is_xpu():
     from vllm.lora.ops.triton_ops import bgmv_expand
     from vllm.lora.ops.triton_ops import bgmv_expand_slice
     from vllm.lora.ops.triton_ops import bgmv_shrink
     from vllm.lora.ops.triton_ops import sgmv_expand
     from vllm.lora.ops.triton_ops import sgmv_shrink
+elif current_platform.is_xpu():
+    from vllm._ipex_ops import ipex_ops
+    bgmv_expand = ipex_ops.bgmv_expand
+    bgmv_expand_slice = ipex_ops.bgmv_expand_slice
+    bgmv_shrink = ipex_ops.bgmv_shrink
+    sgmv_expand = ipex_ops.sgmv_expand
+    sgmv_expand_slice = ipex_ops.sgmv_expand_slice
+    sgmv_shrink = ipex_ops.sgmv_shrink
 
 from .punica_base import PunicaWrapperBase
 
@@ -118,7 +127,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         x = x.view(-1, x.shape[-1])
 
-        if self.is_prefill:
+        if self.is_prefill and not current_platform.is_xpu():
             # NOTE fused kernel
             self._apply_shrink_prefill(y, x, lora_a_stacked, scale)
         else:
@@ -160,7 +169,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         if lora_bias_stacked is not None:
             self._apply_bias(self.token_lora_indices, y, output_slices,
                              lora_bias_stacked)
-        if self.is_prefill:
+        if self.is_prefill and not current_platform.is_xpu():
             # NOTE fused kernel
             self._apply_expand_prefill(y,
                                        x,
@@ -200,7 +209,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             add_inputs (bool): Default to True.
         """
 
-        if self.is_prefill:
+        if self.is_prefill and not current_platform.is_xpu():
             sgmv_expand(
                 x.unsqueeze(dim=0),
                 [lora_b_stacked],

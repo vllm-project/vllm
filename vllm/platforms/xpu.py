@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
@@ -33,8 +34,13 @@ class XPUPlatform(Platform):
                              use_mla: bool) -> str:
         if selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
-        logger.info("Using IPEX attention backend.")
-        return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
+        use_v1 = envs.VLLM_USE_V1
+        if use_v1:
+            logger.info("Using IPEX_V1 attention backend.")
+            return "vllm.v1.attention.backends.ipex_attn.IPEXAttentionBackend"
+        else:
+            logger.info("Using IPEX attention backend.")
+            return "vllm.attention.backends.ipex_attn.IpexAttnBackend"
 
     @staticmethod
     def get_device_capability(device_id: int = 0) -> DeviceCapability:
@@ -45,6 +51,10 @@ class XPUPlatform(Platform):
     @staticmethod
     def get_device_name(device_id: int = 0) -> str:
         return torch.xpu.get_device_name(device_id)
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -63,7 +73,7 @@ class XPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            cache_config.block_size = 64
 
         # check and update model config
         model_config = vllm_config.model_config
@@ -77,10 +87,7 @@ class XPUPlatform(Platform):
                     cls.get_device_name())
                 model_config.dtype = torch.float16
         if not model_config.enforce_eager:
-            logger.warning(
-                "CUDA graph is not supported on XPU, fallback to the eager "
-                "mode.")
-            model_config.enforce_eager = True
+            logger.warning("XPU graph support is experimental currently!")
 
         if vllm_config.speculative_config is not None:
             raise NotImplementedError(
@@ -92,20 +99,25 @@ class XPUPlatform(Platform):
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
+            if envs.VLLM_USE_V1:
+                parallel_config.worker_cls =\
+                    "vllm.v1.worker.xpu_worker.XPUWorker"
+            else:
+                parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
 
         if parallel_config.distributed_executor_backend is None:
-            parallel_config.distributed_executor_backend = "ray"
+            if parallel_config.world_size > 1:
+                parallel_config.distributed_executor_backend = "ray"
+            else:
+                parallel_config.distributed_executor_backend = "uni"
         elif parallel_config.distributed_executor_backend == "mp":
             # FIXME(kunshang):
             # spawn needs calling `if __name__ == '__main__':``
             # fork is not supported for xpu start new process.
-            logger.error(
-                "Both start methods (spawn and fork) have issue "
-                "on XPU if you use mp backend, setting it to ray instead.")
-            parallel_config.distributed_executor_backend = "ray"
-
-        elif parallel_config.distributed_executor_backend != "ray":
+            logger.warning(
+                "Please use spawn as start method if you want to use mp.")
+        elif parallel_config.distributed_executor_backend != "ray" and \
+                parallel_config.distributed_executor_backend != "uni":
             logger.warning(
                 "%s is not supported on XPU, fallback to ray distributed"
                 " executor backend.",

@@ -3332,7 +3332,7 @@ class VllmConfig:
             quant_config = get_quant_config(model_config, load_config)
             capability_tuple = current_platform.get_device_capability()
 
-            if capability_tuple is not None:
+            if capability_tuple is not None and not current_platform.is_xpu():
                 capability = capability_tuple.to_int()
                 if capability < quant_config.get_min_capability():
                     raise ValueError(
@@ -3510,7 +3510,7 @@ class VllmConfig:
             if self.model_config is not None and \
                 not self.model_config.enforce_eager:
                 batch_size_capture_list = [1, 2, 4
-                                           ] + [i for i in range(8, 513, 8)]
+                                           ] + [i for i in range(8, 33, 8)]
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)

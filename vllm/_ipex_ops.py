@@ -3,6 +3,8 @@
 from typing import Optional
 
 import torch
+from torch.library import register_fake
+from vllm.utils import direct_register_custom_op
 
 from vllm.logger import init_logger
 
@@ -12,6 +14,85 @@ try:
     import intel_extension_for_pytorch as ipex
 except ImportError as e:
     logger.warning("Import error msg: %s", e.msg)
+
+
+@register_fake("torch_ipex::silu_and_mul")
+def silu_and_mul_fake(out: torch.Tensor, x: torch.Tensor) -> None:
+    return None
+
+
+#@torch.library.custom_op("vllm::silu_and_mul",
+#                         mutates_args=[])
+#def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
+#    ipex.llm.functional.silu_and_mul(x, out)
+
+#@torch.library.register_kernel("vllm::silu_and_mul",
+#                         "xpu")
+#def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
+#    ipex.llm.functional.silu_and_mul(x, out)
+
+#@register_fake("torch_ipex::rms_norm_impl")
+#@register_fake("torch_ipex::rms_norm.xpu")
+#def rms_norm_fake(input: torch.Tensor, shape: List[int], weight: torch.Tensor,
+#                 epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
+#    return torch.empty_like(input), torch.empty_like(input)
+
+
+@register_fake("torch_ipex::rotary_embedding")
+def rotary_embedding_fake(
+    positions: torch.Tensor,  # [batch_size, seq_len]
+    query: torch.Tensor,  # [batch_size, seq_len, num_heads*head_size]
+    key: torch.Tensor,  # [batch_size, seq_len, num_kv_heads*head_size]
+    head_size: int,
+    cos_sin_cache: torch.Tensor,  # [cos_sin_dim, rot_dim]
+    is_neox: bool,
+    rot_dim: int,
+) -> None:
+    return None
+
+
+#@torch.library.custom_op("vllm::rms_norm",
+#                         mutates_args=[])
+#def rms_norm(input: torch.Tensor, weight: torch.Tensor,
+#             epsilon: float) -> torch.Tensor:
+#    return ipex.llm.functional.rms_norm(input, weight, epsilon)
+#
+#@register_fake("vllm::rms_norm")
+#def rms_norm_fake(input: torch.Tensor, weight: torch.Tensor,
+#                 epsilon: float) -> torch.Tensor:
+#    return torch.empty_like(input)
+
+
+@register_fake("torch_ipex::add_rms_norm")
+def add_rms_norm_fake(residual: torch.Tensor, input: torch.Tensor,
+                      shape: List[int], weight: torch.Tensor,
+                      bias: torch.Tensor, epsilon: float,
+                      add_back: bool) -> torch.Tensor:
+    return torch.empty_like(input)
+
+
+def rms_norm_(input: torch.Tensor, weight: torch.Tensor,
+              epsilon: float) -> torch.Tensor:
+    return ipex.llm.functional.rms_norm(input, weight, epsilon)
+
+
+def rms_norm_fake_(input: torch.Tensor, weight: torch.Tensor,
+                   epsilon: float) -> torch.Tensor:
+    return torch.empty_like(input)
+
+
+direct_register_custom_op("rms_norm",
+                          rms_norm_, [],
+                          rms_norm_fake_,
+                          dispatch_key="XPU")
+
+#@register_fake("torch_ipex::batched_rotary_embedding")
+#def batched_rotary_embedding_fake(positions: torch.Tensor, query: torch.Tensor,
+#                                 key: torch.Tensor, head_size: int,
+#                                 cos_sin_cache: torch.Tensor, is_neox: bool,
+#                                 rot_dim: int,
+#                                 cos_sin_cache_offsets: torch.Tensor) -> None:
+#    return None
 
 
 class ipex_ops:
@@ -160,7 +241,8 @@ class ipex_ops:
     @staticmethod
     def rms_norm(input: torch.Tensor, weight: torch.Tensor,
                  epsilon: float) -> torch.Tensor:
-        return ipex.llm.functional.rms_norm(input, weight, epsilon)
+        # return ipex.llm.functional.rms_norm(input, weight, epsilon)
+        return torch.ops.vllm.rms_norm(input, weight, epsilon)
 
     @staticmethod
     def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
@@ -198,6 +280,62 @@ class ipex_ops:
                                              logits_soft_cap)
 
     @staticmethod
+    def reshape_and_cache_flash(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: float,
+        v_scale: float,
+    ) -> None:
+        assert kv_cache_dtype == "auto"
+        ipex.llm.modules.PagedAttention.reshape_and_cache_flash(
+            key, value, key_cache, value_cache, slot_mapping)
+
+
+    @staticmethod
+    def chunked_prefill(
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        seq_used_k: Optional[torch.Tensor],
+        block_table: torch.Tensor,
+        alibi_slopes: Optional[torch.Tensor],
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        p_dropout: float,
+        softmax_scale: float,
+        zero_tensors: bool,
+        is_casual: bool,
+        return_softmax: bool,
+        gen_: Optional[torch.Generator],
+    ):
+        return torch.ops.torch_ipex.chunked_prefill(
+            query.contiguous(),
+            key_cache,
+            value_cache,
+            output,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            seq_used_k,
+            block_table,
+            alibi_slopes,
+            max_seqlen_q,
+            max_seqlen_k,
+            p_dropout,
+            softmax_scale,
+            zero_tensors,
+            is_casual,
+            return_softmax,
+            gen_,
+        )
+
+    @staticmethod
     def reshape_and_cache(
         key: torch.Tensor,
         value: torch.Tensor,
@@ -226,3 +364,90 @@ class ipex_ops:
     def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                     block_mapping: torch.Tensor) -> None:
         torch.xpu.swap_blocks(src, dst, block_mapping)  # type: ignore
+
+    @staticmethod
+    def bgmv_shrink(inputs: torch.Tensor,
+                    lora_a_weights: torch.Tensor,
+                    output_tensor: torch.Tensor,
+                    lora_indices_tensor: torch.Tensor,
+                    scaling: float = 1.0) -> None:
+        ipex.llm.functional.bgmv_shrink(inputs, lora_a_weights, output_tensor,
+                                        lora_indices_tensor, scaling)
+
+    @staticmethod
+    def bgmv_expand(inputs: torch.Tensor,
+                    lora_b_weights: torch.Tensor,
+                    output_tensor: torch.Tensor,
+                    lora_indices_tensor: torch.Tensor,
+                    add_inputs: bool = True) -> None:
+        ipex.llm.functional.bgmv_expand(inputs, lora_b_weights, output_tensor,
+                                        lora_indices_tensor, add_inputs)
+
+    @staticmethod
+    def bgmv_expand_slice(inputs: torch.Tensor,
+                          lora_b_weights: torch.Tensor,
+                          output_tensor: torch.Tensor,
+                          lora_indices_tensor: torch.Tensor,
+                          slice_offset: int,
+                          slice_size: int,
+                          add_inputs: bool = True) -> None:
+        ipex.llm.functional.bgmv_expand_slice(inputs, lora_b_weights,
+                                              output_tensor,
+                                              lora_indices_tensor,
+                                              slice_offset, slice_size,
+                                              add_inputs)
+
+    @staticmethod
+    def sgmv_shrink(inputs: torch.Tensor,
+                    lora_a_weights: torch.Tensor,
+                    output_tensor: torch.Tensor,
+                    b_seq_start_loc: torch.Tensor,
+                    seq_len_tensor: torch.Tensor,
+                    lora_indices_tensor: torch.Tensor,
+                    batches: int,
+                    max_seq_length: int,
+                    token_nums: int,
+                    scaling: float = 1.0) -> None:
+        assert inputs.size(0) == token_nums
+        ipex.llm.functional.sgmv_shrink(inputs, lora_a_weights, output_tensor,
+                                        b_seq_start_loc, seq_len_tensor,
+                                        lora_indices_tensor, batches,
+                                        max_seq_length, scaling)
+
+    @staticmethod
+    def sgmv_expand(inputs: torch.Tensor,
+                    lora_b_weights: torch.Tensor,
+                    output_tensor: torch.Tensor,
+                    b_seq_start_loc: torch.Tensor,
+                    seq_len_tensor: torch.Tensor,
+                    lora_indices_tensor: torch.Tensor,
+                    batches: int,
+                    max_seq_length: int,
+                    token_nums: int,
+                    add_inputs: bool = False) -> None:
+        assert inputs.size(0) == token_nums
+        ipex.llm.functional.sgmv_expand(inputs, lora_b_weights, output_tensor,
+                                        b_seq_start_loc, seq_len_tensor,
+                                        lora_indices_tensor, batches,
+                                        max_seq_length, add_inputs)
+
+    @staticmethod
+    def sgmv_expand_slice(inputs: torch.Tensor,
+                          lora_b_weights: torch.Tensor,
+                          output_tensor: torch.Tensor,
+                          b_seq_start_loc: torch.Tensor,
+                          seq_len_tensor: torch.Tensor,
+                          lora_indices_tensor: torch.Tensor,
+                          batches: int,
+                          max_seq_length: int,
+                          token_nums: int,
+                          slice_offset: int,
+                          slice_size: int,
+                          add_inputs: bool = False) -> None:
+        assert inputs.size(0) == token_nums
+        ipex.llm.functional.sgmv_expand_slice(inputs, lora_b_weights,
+                                              output_tensor, b_seq_start_loc,
+                                              seq_len_tensor,
+                                              lora_indices_tensor, batches,
+                                              max_seq_length, slice_offset,
+                                              slice_size, add_inputs)
