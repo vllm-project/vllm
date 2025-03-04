@@ -2,7 +2,7 @@
 
 import enum
 import time
-from typing import Any, List, Optional, Union
+from typing import Any, Optional, Union
 
 import msgspec
 
@@ -51,10 +51,10 @@ class EngineCoreRequest(
     # NOTE(ywang96): original text prompt is needed when a request is added to
     # Detokenizer, but set to None when it is added to EngineCoreClient.
     prompt: Optional[str]
-    prompt_token_ids: List[int]
-    mm_inputs: Optional[List[Optional[MultiModalKwargs]]]
-    mm_hashes: Optional[List[str]]
-    mm_placeholders: Optional[List[PlaceholderRange]]
+    prompt_token_ids: list[int]
+    mm_inputs: Optional[list[Optional[MultiModalKwargs]]]
+    mm_hashes: Optional[list[str]]
+    mm_placeholders: Optional[list[PlaceholderRange]]
     sampling_params: SamplingParams
     eos_token_id: Optional[int]
     arrival_time: float
@@ -65,6 +65,7 @@ class EngineCoreEventType(enum.IntEnum):
     """The type of engine core request event."""
     QUEUED = 1
     SCHEDULED = 2
+    PREEMPTED = 3
 
 
 class EngineCoreEvent(msgspec.Struct):
@@ -92,14 +93,14 @@ class EngineCoreOutput(
         gc=False):  # type: ignore[call-arg]
 
     request_id: str
-    new_token_ids: List[int]
+    new_token_ids: list[int]
 
     new_logprobs: Optional[LogprobsLists] = None
     new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
 
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None
-    events: Optional[List[EngineCoreEvent]] = None
+    events: Optional[list[EngineCoreEvent]] = None
 
     @property
     def finished(self) -> bool:
@@ -128,7 +129,7 @@ class EngineCoreOutputs(
     # e.g. columnwise layout
 
     # [num_reqs]
-    outputs: List[EngineCoreOutput] = []
+    outputs: list[EngineCoreOutput] = []
     scheduler_stats: Optional[SchedulerStats] = None
     timestamp: float = 0.0
 

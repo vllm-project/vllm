@@ -29,9 +29,8 @@ def modelscope_list_repo_files(
 ) -> List[str]:
     """List files in a modelscope repo."""
     from modelscope.hub.api import HubApi
-    from modelscope.utils.hf_util import _try_login
-    _try_login(token)
     api = HubApi()
+    api.login(token)
     # same as huggingface_hub.list_repo_files
     files = [
         file['Path'] for file in api.get_model_files(

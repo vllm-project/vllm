@@ -160,7 +160,7 @@ class MultiModalProfiler(Generic[_I]):
 
         if mm_counts.keys() != mm_max_tokens_per_item.keys():
             raise AssertionError(
-                "The keys returned by `get_supported_mm_limits`"
+                "The keys returned by `get_supported_mm_limits` "
                 f"({set(mm_counts.keys())}) should be the same as those "
                 "returned by `get_mm_max_tokens_per_item` "
                 f"({set(mm_max_tokens_per_item.keys())})")
@@ -204,9 +204,11 @@ class MultiModalProfiler(Generic[_I]):
                     "and/or reduce `mm_counts`.", seq_len, total_len,
                     total_placeholders_by_modality)
 
+            num_tokens_to_pad = max(total_len, seq_len) - total_len
+            prompt_token_ids.extend([0] * num_tokens_to_pad)
+
             return DummyData(
-                seq_data=SequenceData.from_prompt_token_counts(
-                    (0, max(seq_len, total_len))),
+                seq_data=SequenceData.from_seqs(prompt_token_ids),
                 multi_modal_data=None,
                 multi_modal_placeholders=None,
             )

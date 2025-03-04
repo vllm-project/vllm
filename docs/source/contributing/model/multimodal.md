@@ -16,8 +16,6 @@ Further update the model as follows:
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
   +     pixel_values: torch.Tensor,
     ) -> SamplerOutput:
   ```
@@ -722,13 +720,13 @@ def _get_mm_fields_config(
 
 :::::
 
-### Prompt replacements
+### Prompt updates
 
-Override {meth}`~vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_replacements` to
-return a list of {class}`~vllm.multimodal.processing.PromptReplacement` instances.
+Override {meth}`~vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates` to
+return a list of {class}`~vllm.multimodal.processing.PromptUpdate` instances.
 
-Each {class}`~vllm.multimodal.processing.PromptReplacement` instance specifies a find-and-replace
-operation performed by the HF processor.
+Each {class}`~vllm.multimodal.processing.PromptUpdate` instance specifies an update operation
+(e.g.: insertion, replacement) performed by the HF processor.
 
 ::::{tab-set}
 :::{tab-item} Basic example: LLaVA
@@ -745,15 +743,15 @@ for sample in text:
 ```
 
 It simply repeats each input `image_token` a number of times equal to the number of placeholder feature tokens (`num_image_tokens`).
-Based on this, we override {meth}`~vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_replacements` as follows:
+Based on this, we override {meth}`~vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates` as follows:
 
 ```python
-def _get_prompt_replacements(
+def _get_prompt_updates(
     self,
     mm_items: MultiModalDataItems,
     hf_processor_mm_kwargs: Mapping[str, object],
     out_mm_kwargs: MultiModalKwargs,
-) -> list[PromptReplacement]:
+) -> Sequence[PromptUpdate]:
     hf_config = self.info.get_hf_config()
     image_token_id = hf_config.image_token_index
 
@@ -861,7 +859,7 @@ prompt_tokens, prompts_length = _tokenize_prompts_with_image_and_batch(
 )
 ```
 
-To accommodate this, instead of a string you can return an instance of `PromptReplacementDetails`
+To accommodate this, instead of a string you can return an instance of `PromptUpdateDetails`
 with different `full` and `feature` attributes:
 
 ```python
@@ -880,7 +878,7 @@ def get_replacement_fuyu(item_idx: int):
     image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
                     [_NEWLINE_TOKEN_ID]) * nrows
 
-    return PromptReplacementDetails(
+    return PromptUpdateDetails(
         full=image_tokens + [bos_token_id],
         features=image_tokens,
     )
@@ -890,12 +888,12 @@ Finally, noticing that the HF processor removes the `|ENDOFTEXT|` token from the
 we can search for it to conduct the replacement at the start of the string:
 
 ```python
-def _get_prompt_replacements(
+def _get_prompt_updates(
     self,
     mm_items: MultiModalDataItems,
     hf_processor_mm_kwargs: Mapping[str, object],
     out_mm_kwargs: MultiModalKwargs,
-) -> list[PromptReplacement]:
+) -> Sequence[PromptUpdate]:
     hf_config = self.info.get_hf_config()
     bos_token_id = hf_config.bos_token_id
     assert isinstance(bos_token_id, int)
@@ -915,7 +913,7 @@ def _get_prompt_replacements(
         image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
                         [_NEWLINE_TOKEN_ID]) * nrows
 
-        return PromptReplacementDetails(
+        return PromptUpdateDetails(
             full=image_tokens + [bos_token_id],
             features=image_tokens,
         )

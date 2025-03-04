@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """A TPU worker class."""
 import os
-from typing import Dict, List, Optional
+from typing import Optional
 
 import torch
 import torch.distributed
 import torch.nn as nn
 import torch_xla.core.xla_model as xm
+import torch_xla.debug.profiler as xp
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
@@ -21,7 +22,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
-from vllm.v1.worker.tpu_model_runner import ExecutionMode, TPUModelRunner
+from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -65,6 +66,15 @@ class TPUWorker:
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
+        self.profiler = None
+        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
+            # For TPU, we can only have 1 active profiler session for 1 profiler
+            # server. So we only profile on rank0.
+            self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        self.profile_dir)
+            self.profiler = xp.start_server(9012)
+
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
         torch.set_grad_enabled(False)
@@ -103,7 +113,7 @@ class TPUWorker:
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
-        kv_caches: Dict[str, torch.Tensor] = {}
+        kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, FullAttentionSpec):
@@ -118,7 +128,7 @@ class TPUWorker:
             else:
                 raise NotImplementedError
 
-        runner_kv_caches: List[torch.Tensor] = []
+        runner_kv_caches: list[torch.Tensor] = []
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
@@ -126,9 +136,7 @@ class TPUWorker:
 
         self.model_runner.dummy_run(
             runner_kv_caches,
-            num_tokens=1,
-            seq_len=self.scheduler_config.max_num_batched_tokens,
-            exec_mode=ExecutionMode.PREFILL,
+            num_tokens=self.scheduler_config.max_num_batched_tokens,
         )
 
         # Synchronize before measuring the memory usage.
@@ -153,6 +161,15 @@ class TPUWorker:
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
         return output if self.is_driver_worker else None
+
+    def profile(self, is_start: bool = True):
+        if self.rank < 1:
+            if self.profiler is None:
+                raise RuntimeError("Profiler is not enabled.")
+            if is_start:
+                xp.start_trace(self.profile_dir)
+            else:
+                xp.stop_trace()
 
     def load_model(self) -> None:
         self.model_runner.load_model()

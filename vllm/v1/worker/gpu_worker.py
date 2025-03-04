@@ -250,6 +250,15 @@ class Worker(WorkerBase):
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_runner.remove_lora(lora_id)
+
+    def list_loras(self) -> set[int]:
+        return self.model_runner.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)
+
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
@@ -287,5 +296,5 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
-                "You can use float16 instead by explicitly setting the"
+                "You can use float16 instead by explicitly setting the "
                 "`dtype` flag in CLI, for example: --dtype=half.")
