@@ -202,6 +202,7 @@ class EngineArgs:
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = "auto"
+    worker_adapter_cls: str = ""
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
