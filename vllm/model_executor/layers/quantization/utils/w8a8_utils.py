@@ -4,9 +4,15 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.platforms import current_platform
+
+USE_ROCM_AITER_LINEAR = envs.VLLM_ROCM_USE_AITER_LINEAR \
+    and current_platform.is_rocm()
+if USE_ROCM_AITER_LINEAR:
+    from aiter.tuned_gemm import tgemm as aiter_tgemm
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
@@ -177,12 +183,20 @@ def apply_fp8_linear(
 
         if per_tensor_weights and per_tensor_activations:
             # Fused GEMM_DQ
-            output = torch._scaled_mm(qinput,
-                                      weight,
-                                      out_dtype=input.dtype,
-                                      scale_a=x_scale,
-                                      scale_b=weight_scale,
-                                      bias=bias)
+            if USE_ROCM_AITER_LINEAR:
+                output = aiter_tgemm.mm(qinput,
+                                        weight.t(),
+                                        otype=input.dtype,
+                                        scale_a=x_scale,
+                                        scale_b=weight_scale,
+                                        bias=bias)
+            else:
+                output = torch._scaled_mm(qinput,
+                                          weight,
+                                          out_dtype=input.dtype,
+                                          scale_a=x_scale,
+                                          scale_b=weight_scale,
+                                          bias=bias)
             # A fix for discrepancy in scaled_mm which returns tuple
             # for torch < 2.5 and a single value in torch >= 2.5
             if type(output) is tuple and len(output) == 2:
