@@ -810,11 +810,11 @@ class ModelWrapperV1(nn.Module):
         """Executes the forward pass of the model and samples the next token.
 
         Args:
-            input_ids: The input token IDs of shape [batch_size, seq_len].
-            positions: The input position IDs of shape [batch_size, seq_len].
+            input_ids: The input token IDs of shape [num_tokens].
+            positions: The input position IDs of shape [num_tokens].
             kv_caches: The key and value caches. They can be None during the
                 memory profiling at initialization.
-            inputs_embeds: The input embeddings of shape [batch_size, seq_len,
+            inputs_embeds: The input embeddings of shape [num_tokens,
                 hidden_size]. It is used for multimodal models.
         """
         # Skip this in memory profiling at initialization.
