@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 from typing import Optional
 
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
+from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -36,13 +37,20 @@ def create_scheduler(
         swap_space=0,
         cache_dtype="auto",
     )
+    vllm_config = VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+    )
     cache_config.num_gpu_blocks = 10000
-    return Scheduler(scheduler_config,
-                     model_config,
-                     cache_config,
-                     speculative_config=None,
-                     lora_config=None,
-                     log_stats=True)
+    return Scheduler(
+        scheduler_config,
+        model_config,
+        cache_config,
+        speculative_config=None,
+        lora_config=None,
+        log_stats=True,
+        guided_decoding_manager=GuidedDecodingManager(vllm_config))
 
 
 def create_requests(
@@ -249,7 +257,9 @@ def test_stop_via_update_from_output():
                                        },
                                        num_common_prefix_blocks=0,
                                        finished_req_ids=set(),
-                                       free_encoder_input_ids=[])
+                                       free_encoder_input_ids=[],
+                                       guided_decoding_request_ids={},
+                                       grammar_bitmask=None)
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
@@ -299,7 +309,9 @@ def test_stop_via_update_from_output():
                                        },
                                        num_common_prefix_blocks=0,
                                        finished_req_ids=set(),
-                                       free_encoder_input_ids=[])
+                                       free_encoder_input_ids=[],
+                                       guided_decoding_request_ids={},
+                                       grammar_bitmask=None)
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
@@ -347,7 +359,9 @@ def test_stop_via_update_from_output():
                                        },
                                        num_common_prefix_blocks=0,
                                        finished_req_ids=set(),
-                                       free_encoder_input_ids=[])
+                                       free_encoder_input_ids=[],
+                                       guided_decoding_request_ids={},
+                                       grammar_bitmask=None)
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
@@ -392,7 +406,9 @@ def test_stop_via_update_from_output():
         },
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[])
+        free_encoder_input_ids=[],
+        guided_decoding_request_ids={},
+        grammar_bitmask=None)
 
     model_output = ModelRunnerOutput(
         req_ids=[requests[0].request_id],
