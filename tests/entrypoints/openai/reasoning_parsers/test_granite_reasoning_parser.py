@@ -54,30 +54,76 @@ MULTIPLE_LINES_WITH_THINK = {
 }
 
 TEST_CASES = [
-    pytest.param(False, SIMPLE_REASONING, id="simple_reasoning"),
-    pytest.param(False, COMPLETE_REASONING, id="complete_reasoning"),
-    pytest.param(False, NO_REASONING, id="no_reasoning"),
-    pytest.param(False, MULTIPLE_LINES, id="multiple_lines"),
-    pytest.param(False, REASONING_WITH_THINK, id="reasoning_with_think"),
-    pytest.param(False,
-                 COMPLETE_REASONING_WITH_THINK,
-                 id="complete_reasoning_with_think"),
-    pytest.param(False,
-                 MULTIPLE_LINES_WITH_THINK,
-                 id="multiple_lines_with_think"),
-    pytest.param(True, SIMPLE_REASONING, id="simple_reasoning_streaming"),
-    pytest.param(True, COMPLETE_REASONING, id="complete_reasoning_streaming"),
-    pytest.param(True, NO_REASONING, id="no_reasoning_streaming"),
-    pytest.param(True, MULTIPLE_LINES, id="multiple_lines_streaming"),
-    pytest.param(True,
-                 REASONING_WITH_THINK,
-                 id="reasoning_with_think_streaming"),
-    pytest.param(True,
-                 COMPLETE_REASONING_WITH_THINK,
-                 id="complete_reasoning_with_think_streaming"),
-    pytest.param(True,
-                 MULTIPLE_LINES_WITH_THINK,
-                 id="multiple_lines_with_think_streaming"),
+    pytest.param(
+        False,
+        SIMPLE_REASONING,
+        id="simple_reasoning",
+    ),
+    pytest.param(
+        False,
+        COMPLETE_REASONING,
+        id="complete_reasoning",
+    ),
+    pytest.param(
+        False,
+        NO_REASONING,
+        id="no_reasoning",
+    ),
+    pytest.param(
+        False,
+        MULTIPLE_LINES,
+        id="multiple_lines",
+    ),
+    pytest.param(
+        False,
+        REASONING_WITH_THINK,
+        id="reasoning_with_think",
+    ),
+    pytest.param(
+        False,
+        COMPLETE_REASONING_WITH_THINK,
+        id="complete_reasoning_with_think",
+    ),
+    pytest.param(
+        False,
+        MULTIPLE_LINES_WITH_THINK,
+        id="multiple_lines_with_think",
+    ),
+    pytest.param(
+        True,
+        SIMPLE_REASONING,
+        id="simple_reasoning_streaming",
+    ),
+    pytest.param(
+        True,
+        COMPLETE_REASONING,
+        id="complete_reasoning_streaming",
+    ),
+    pytest.param(
+        True,
+        NO_REASONING,
+        id="no_reasoning_streaming",
+    ),
+    pytest.param(
+        True,
+        MULTIPLE_LINES,
+        id="multiple_lines_streaming",
+    ),
+    pytest.param(
+        True,
+        REASONING_WITH_THINK,
+        id="reasoning_with_think_streaming",
+    ),
+    pytest.param(
+        True,
+        COMPLETE_REASONING_WITH_THINK,
+        id="complete_reasoning_with_think_streaming",
+    ),
+    pytest.param(
+        True,
+        MULTIPLE_LINES_WITH_THINK,
+        id="multiple_lines_with_think_streaming",
+    ),
 ]
 
 # Global tokenizer initialization to avoid repeated loading
@@ -210,22 +256,67 @@ STREAMING_12 = {
     "reasoning_content": None,
     "content": None,
 }
+STREAMING_13 = {
+    "previous_text": "Here is my thought process: foo Here",
+    "current_text": "Here is my thought process: foo Here was",
+    "delta_text": " was",
+    "reasoning_content": "Here was",
+    "content": None,
+}
+
 STREAMING_SUBCASES = [
-    pytest.param(STREAMING_1, id="Starting reasoning special sequence"),
-    pytest.param(STREAMING_2, id="Unexpected start reasoning sequence"),
-    pytest.param(STREAMING_3,
-                 id="Continuing unexpected start reasoning sequence"),
-    pytest.param(STREAMING_4,
-                 id="Only start reasoning sequence and nothing else"),
-    pytest.param(STREAMING_5, id="Reasoning content has started"),
-    pytest.param(STREAMING_6, id="Response special sequence has started"),
-    pytest.param(STREAMING_7, id="Response special sequence reset"),
-    pytest.param(STREAMING_8, id="Response text has started"),
-    pytest.param(STREAMING_9, id="Delta contains everything"),
-    pytest.param(STREAMING_10,
-                 id="Delta contains some reasoning and response"),
-    pytest.param(STREAMING_11, id="Delta starts response sequence"),
-    pytest.param(STREAMING_12, id="Delta finishes response sequence"),
+    pytest.param(
+        STREAMING_1,
+        id="Starting reasoning special sequence",
+    ),
+    pytest.param(
+        STREAMING_2,
+        id="Unexpected start reasoning sequence",
+    ),
+    pytest.param(
+        STREAMING_3,
+        id="Continuing unexpected start reasoning sequence",
+    ),
+    pytest.param(
+        STREAMING_4,
+        id="Only start reasoning sequence and nothing else",
+    ),
+    pytest.param(
+        STREAMING_5,
+        id="Reasoning content has started",
+    ),
+    pytest.param(
+        STREAMING_6,
+        id="Response special sequence has started",
+    ),
+    pytest.param(
+        STREAMING_7,
+        id="Response special sequence reset",
+    ),
+    pytest.param(
+        STREAMING_8,
+        id="Response text has started",
+    ),
+    pytest.param(
+        STREAMING_9,
+        id="Delta contains everything",
+    ),
+    pytest.param(
+        STREAMING_10,
+        id="Delta contains some reasoning and response",
+    ),
+    pytest.param(
+        STREAMING_11,
+        id="Delta starts response sequence",
+    ),
+    pytest.param(
+        STREAMING_12,
+        id="Delta finishes response sequence",
+    ),
+    pytest.param(
+        STREAMING_13,
+        id="Delta breaks potential responise sequence",
+    ),
 ]
 
 
@@ -235,12 +326,8 @@ def test_streaming_subcases(param_dict):
     previous_token_ids = tokenizer.encode(
         param_dict["previous_text"]
     ) if param_dict["previous_text"] is not None else []
-    current_token_ids = tokenizer.encode(
-        param_dict["current_text"]
-    ) if param_dict["current_text"] is not None else []
-    delta_token_ids = tokenizer.encode(
-        param_dict["delta_text"]
-    ) if param_dict["delta_text"] is not None else []
+    current_token_ids = tokenizer.encode(param_dict["current_text"])
+    delta_token_ids = tokenizer.encode(param_dict["delta_text"])
 
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
         parser_name)(tokenizer)
@@ -253,6 +340,8 @@ def test_streaming_subcases(param_dict):
         current_token_ids=current_token_ids,
         delta_token_ids=delta_token_ids,
     )
+    # Streaming currently expects at least one of reasoning content / content,
+    # so the response should return None in that case.
     if param_dict["reasoning_content"] is None and param_dict[
             "content"] is None:
         assert response is None
