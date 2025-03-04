@@ -54,7 +54,7 @@ _LORA_A_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
 _LORA_B_PTR_DICT: Dict[Tuple[int, ...], Tuple[torch.tensor, ...]] = {}
 
 
-def _get_lora_a_ptr(lora_a_weights: List[torch.Tensor], device: str):
+def _get_lora_a_ptr(lora_a_weights: List[torch.Tensor], device: torch.device):
     """
     `_LORA_A_PTR_DICT` collects the required information during `profile_run`, 
     After this, it remains constant and subsequent usage is through LUT.
@@ -100,7 +100,7 @@ def _get_lora_a_ptr(lora_a_weights: List[torch.Tensor], device: str):
 
 
 def _get_lora_b_ptr(lora_weights: List[torch.Tensor], offset_start: int,
-                    device: str):
+                    device: torch.device):
     """ 
      `_LORA_B_PTR_DICT` collects the required information during `profile_run`, 
     After this, it remains constant and subsequent usage is through LUT.
