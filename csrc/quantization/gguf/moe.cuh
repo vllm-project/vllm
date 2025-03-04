@@ -59,14 +59,13 @@ static __device__ __forceinline__ void moe_q(
                threadIdx.x, blocks_per_row_x);
 
 #pragma unroll
-    for (int ir = 0; ir < qr; ++ir) {
+    for (int ir = 0; ir < qr && ib0 * qk + ir * ((qk*blocks_per_warp)/qr) < ncols_x; ++ir) {
       const int kqs = ir * WARP_SIZE_GGUF + threadIdx.x;
       const int kbxd = kqs / QI8_1;
 
 #pragma unroll
       for (int i = 0; i < mmq_x; i += nwarps) {
         const int col_y_eff = token_ids[i / nwarps];
-        // ncols_y - 1);  // to prevent out-of-bounds memory accesses
         const int block_x = ib0 * (qk / QK8_1) + kbxd;
         const block_q8_1* by0 = &y[col_y_eff * blocks_per_col_y + block_x];
         const int index_y =
@@ -105,17 +104,12 @@ static __device__ __forceinline__ void moe_q(
 
       // #pragma unroll // unrolling this loop causes too much register pressure
       for (int k = ir * WARP_SIZE_GGUF / qr;
-           k < (ir + 1) * WARP_SIZE_GGUF / qr && ib0 * qk + k * qi < ncols_x;
+           k < (ir + 1) * WARP_SIZE_GGUF / qr;
            k += vdr) {
 #pragma unroll
         for (int j = 0; j < mmq_x; j += nwarps) {
 #pragma unroll
           for (int i = 0; i < mmq_y; i += WARP_SIZE_GGUF) {
-            // if (blockIdx.x == 0 && blockIdx.y == 0)
-            // {
-            //     printf("thread %d/%d doing vecdot for ir %d, ib0 %d for k %d
-            //     \n", threadIdx.x, threadIdx.y, ir, ib0, k);
-            // }
             sum[i / WARP_SIZE_GGUF][j / nwarps] +=
                 vec_dot(tile_x_ql, tile_x_dm, tile_x_qh, tile_x_sc, tile_y_qs,
                         tile_y_ds, threadIdx.x + i, threadIdx.y + j, k);
