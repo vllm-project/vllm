@@ -32,11 +32,9 @@ def run_aria(questions: list[str], modality: str):
               dtype="bfloat16",
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
 
-    prompts = [
-        (f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>{question}"
-         "<|im_end|>\n<|im_start|>assistant\n")
-        for question in questions
-    ]
+    prompts = [(f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>{question}"
+                "<|im_end|>\n<|im_start|>assistant\n")
+               for question in questions]
 
     stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
     return llm, prompts, stop_token_ids
@@ -48,10 +46,7 @@ def run_blip2(questions: list[str], modality: str):
 
     # BLIP-2 prompt format is inaccurate on HuggingFace model repository.
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
-    prompts = [
-        f"Question: {question} Answer:"
-        for question in questions
-    ]
+    prompts = [f"Question: {question} Answer:" for question in questions]
     llm = LLM(model="Salesforce/blip2-opt-2.7b",
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
@@ -62,10 +57,7 @@ def run_blip2(questions: list[str], modality: str):
 def run_chameleon(questions: list[str], modality: str):
     assert modality == "image"
 
-    prompts = [
-        f"{question}<image>"
-        for question in questions
-    ]
+    prompts = [f"{question}<image>" for question in questions]
     llm = LLM(model="facebook/chameleon-7b",
               max_model_len=4096,
               max_num_seqs=2,
@@ -114,10 +106,7 @@ def run_florence2(question: str, modality: str):
 def run_fuyu(questions: list[str], modality: str):
     assert modality == "image"
 
-    prompts = [
-        f"{question}\n"
-        for question in questions
-    ]
+    prompts = [f"{question}\n" for question in questions]
     llm = LLM(model="adept/fuyu-8b",
               max_model_len=2048,
               max_num_seqs=2,
@@ -141,8 +130,7 @@ def run_glm4v(questions: list[str], modality: str):
 
     prompts = [
         f"<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>\
-        {question}<|assistant|>"
-        for question in questions
+        {question}<|assistant|>" for question in questions
     ]
 
     stop_token_ids = [151329, 151336, 151338]
@@ -165,10 +153,12 @@ def run_h2ovl(questions: list[str], modality: str):
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
     prompts = [
-        tokenizer.apply_chat_template(
-            [{'role': 'user', 'content': f"<image>\n{question}"}],
-            tokenize=False,
-            add_generation_prompt=True)
+        tokenizer.apply_chat_template([{
+            'role': 'user',
+            'content': f"<image>\n{question}"
+        }],
+                                      tokenize=False,
+                                      add_generation_prompt=True)
         for question in questions
     ]
 
@@ -197,12 +187,9 @@ def run_idefics3(questions: list[str], modality: str):
         },
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
-    prompts = [
-        (
-            f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"
-        )
-        for question in questions
-    ]
+    prompts = [(
+        f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"
+    ) for question in questions]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -223,10 +210,12 @@ def run_internvl(questions: list[str], modality: str):
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
     prompts = [
-        tokenizer.apply_chat_template(
-            [{'role': 'user', 'content': f"<image>\n{question}"}],
-            tokenize=False,
-            add_generation_prompt=True)
+        tokenizer.apply_chat_template([{
+            'role': 'user',
+            'content': f"<image>\n{question}"
+        }],
+                                      tokenize=False,
+                                      add_generation_prompt=True)
         for question in questions
     ]
 
@@ -244,8 +233,7 @@ def run_llava(questions: list[str], modality: str):
     assert modality == "image"
 
     prompts = [
-        f"USER: <image>\n{question}\nASSISTANT:"
-        for question in questions
+        f"USER: <image>\n{question}\nASSISTANT:" for question in questions
     ]
 
     llm = LLM(model="llava-hf/llava-1.5-7b-hf",
@@ -259,10 +247,7 @@ def run_llava(questions: list[str], modality: str):
 def run_llava_next(questions: list[str], modality: str):
     assert modality == "image"
 
-    prompts = [
-        f"[INST] <image>\n{question} [/INST]"
-        for question in questions
-    ]
+    prompts = [f"[INST] <image>\n{question} [/INST]" for question in questions]
     llm = LLM(model="llava-hf/llava-v1.6-mistral-7b-hf",
               max_model_len=8192,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
@@ -276,8 +261,7 @@ def run_llava_next_video(questions: list[str], modality: str):
     assert modality == "video"
 
     prompts = [
-        f"USER: <video>\n{question} ASSISTANT:"
-        for question in questions
+        f"USER: <video>\n{question} ASSISTANT:" for question in questions
     ]
     llm = LLM(model="llava-hf/LLaVA-NeXT-Video-7B-hf",
               max_model_len=8192,
@@ -292,15 +276,13 @@ def run_llava_onevision(questions: list[str], modality: str):
     if modality == "video":
         prompts = [
             f"<|im_start|>user <video>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
-            for question in questions
+        <|im_start|>assistant\n" for question in questions
         ]
 
     elif modality == "image":
         prompts = [
             f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
-            for question in questions
+        <|im_start|>assistant\n" for question in questions
         ]
 
     llm = LLM(model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
@@ -379,10 +361,13 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
     }
 
     prompts = [
-        tokenizer.apply_chat_template([{
-            'role': 'user',
-            'content': f"{modality_placeholder[modality]}\n{question}"
-        }], tokenize=False, add_generation_prompt=True) for question in questions
+        tokenizer.apply_chat_template(
+            [{
+                'role': 'user',
+                'content': f"{modality_placeholder[modality]}\n{question}"
+            }],
+            tokenize=False,
+            add_generation_prompt=True) for question in questions
     ]
     return llm, prompts, stop_token_ids
 
@@ -425,8 +410,8 @@ def run_mllama(questions: list[str], modality: str):
         }]
     } for question in questions]
     prompts = tokenizer.apply_chat_template(messages,
-                                           add_generation_prompt=True,
-                                           tokenize=False)
+                                            add_generation_prompt=True,
+                                            tokenize=False)
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -446,8 +431,7 @@ def run_molmo(questions: list[str], modality: str):
 
     prompts = [
         f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
-        for question in questions
+        <|im_start|>assistant\n" for question in questions
     ]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
@@ -470,10 +454,13 @@ def run_nvlm_d(questions: list[str], modality: str):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
-    messages = [{'role': 'user', 'content': f"<image>\n{question}"} for question in questions]
+    messages = [{
+        'role': 'user',
+        'content': f"<image>\n{question}"
+    } for question in questions]
     prompts = tokenizer.apply_chat_template(messages,
-                                           tokenize=False,
-                                           add_generation_prompt=True)
+                                            tokenize=False,
+                                            add_generation_prompt=True)
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -550,10 +537,7 @@ def run_pixtral_hf(questions: list[str], modality: str):
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
-    prompts = [
-        f"<s>[INST]{question}\n[IMG][/INST]"
-        for question in questions
-    ]
+    prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -571,10 +555,7 @@ def run_qwen_vl(questions: list[str], modality: str):
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
-    prompts = [
-        f"{question}Picture 1: <img></img>\n"
-        for question in questions
-    ]
+    prompts = [f"{question}Picture 1: <img></img>\n" for question in questions]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -605,8 +586,7 @@ def run_qwen2_vl(questions: list[str], modality: str):
         ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
          f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
          f"{question}<|im_end|>\n"
-         "<|im_start|>assistant\n")
-        for question in questions
+         "<|im_start|>assistant\n") for question in questions
     ]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
@@ -638,8 +618,7 @@ def run_qwen2_5_vl(questions: list[str], modality: str):
         ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
          f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
          f"{question}<|im_end|>\n"
-         "<|im_start|>assistant\n")
-        for question in questions
+         "<|im_start|>assistant\n") for question in questions
     ]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
@@ -714,7 +693,8 @@ def get_multi_modal_input(args):
     raise ValueError(msg)
 
 
-def apply_image_repeat(image_repeat_prob, num_prompts, data, prompts: list[str], modality):
+def apply_image_repeat(image_repeat_prob, num_prompts, data,
+                       prompts: list[str], modality):
     """Repeats images with provided probability of "image_repeat_prob". 
     Used to simulate hit/miss for the MM preprocessor cache.
     """
@@ -753,9 +733,12 @@ def main(args):
     data = mm_input["data"]
     questions = mm_input["questions"]
 
-    llm, prompts, stop_token_ids = model_example_map[model](questions, modality)
+    llm, prompts, stop_token_ids = model_example_map[model](questions,
+                                                            modality)
     # Don't want to check the flag multiple times, so just hijack `prompts`.
-    prompts = prompts if args.use_different_prompt_per_request else [prompts[0]]
+    prompts = prompts if args.use_different_prompt_per_request else [
+        prompts[0]
+    ]
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
