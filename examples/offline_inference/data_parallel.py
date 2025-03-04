@@ -53,7 +53,7 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
                                      max_tokens=16 * (dp_rank + 1))
 
     # Create an LLM.
-    llm = LLM(model="Qwen/Qwen1.5-MoE-A2.7B",
+    llm = LLM(model="ibm-research/PowerMoE-3b",
               tensor_parallel_size=GPUs_per_dp_rank,
               enforce_eager=True)
     outputs = llm.generate(prompts, sampling_params)
