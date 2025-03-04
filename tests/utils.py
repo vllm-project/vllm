@@ -610,9 +610,7 @@ def multi_process_parallel(
 
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
-    # NOTE: We need to set working_dir for distributed tests,
-    # otherwise we may get import errors on ray workers
-    ray.init(runtime_env={"working_dir": VLLM_PATH})
+    ray.init()
 
     distributed_init_port = get_open_port()
     refs = []
