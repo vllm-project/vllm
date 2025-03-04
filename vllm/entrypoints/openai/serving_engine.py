@@ -467,8 +467,44 @@ class OpenAIServing:
         for index in range(len(engine_prompt.\
             get("multi_modal_data", {}).get("image", [])) - 1, -1, -1):
             """
-            convert image_embeds: [image_embeds] to image_embeds: image_embeds
-            
+            prompt_token_ids: "This is a test prompt."
+            multi_modal_data = {
+                "image": [{ 
+                    "image_embeds": image_embeds_1,
+                    # image_grid_thw is needed to calculate positional encoding.
+                    "image_grid_thw": torch.load(...),  # torch.Tensor of shape (1, 3),
+                },
+                { 
+                    "image_embeds": image_embeds_2,
+                    # image_grid_thw is needed to calculate positional encoding.
+                    "image_grid_thw": torch.load(...),  # torch.Tensor of shape (1, 3),
+                },
+                ] #### <<<<<<- This is a list.
+            }
+            # convert the list to a dict
+            [
+              {
+                prompt_token_ids: "This is a test prompt."
+                multi_modal_data = {
+                    "image": {
+                        "image_embeds": image_embeds_1,
+                        # image_grid_thw is needed to calculate positional encoding.
+                        "image_grid_thw": torch.load(...),  # torch.Tensor of shape (1, 3),
+                    } #### <<<<<- This is a dict.
+                }
+              },
+              {
+                prompt_token_ids: "This is a test prompt."
+                multi_modal_data = {
+                    "image": {
+                        "image_embeds": image_embeds_2,
+                        # image_grid_thw is needed to calculate positional encoding.
+                        "image_grid_thw": torch.load(...),  # torch.Tensor of shape (1, 3),
+                    } #### <<<<<- This is a dict.
+                }
+              }, 
+            ]
+
             """
             image_data = engine_prompt["multi_modal_data"]["image"][index]
             if isinstance(image_data, dict):
