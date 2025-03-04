@@ -150,8 +150,6 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
-        self.guided_decoding_manager.remove_requests(request_ids)
-
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 

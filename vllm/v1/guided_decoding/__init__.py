@@ -4,7 +4,6 @@ from __future__ import annotations
 import copy
 import enum
 import multiprocessing
-import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -108,8 +107,6 @@ class GuidedDecodingManager:
         # compilation, so we set it to half the number of CPUs.
         max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self.requests: set[Request] = set()
-        self._requests_lock = threading.Lock()
         self._grammar_bitmask = xgr.allocate_token_bitmask(
             self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
 
@@ -123,13 +120,6 @@ class GuidedDecodingManager:
                 self.request_key_to_grammar[key] = value
             return value
         return None
-
-    def remove_requests(self, request_ids: list[str]) -> None:
-        with self._requests_lock:
-            self.requests = {
-                req
-                for req in self.requests if req.request_id not in request_ids
-            }
 
     def populate_cache(self, request: Request) -> None:
         if not request.use_guided_decoding:
@@ -145,8 +135,6 @@ class GuidedDecodingManager:
 
     def _executor_loop(self, request: Request) -> Grammar:
         key = request.guided_decoding_key
-        with self._requests_lock:
-            self.requests.add(request)
         grammar = self.request_key_to_grammar.get(key)
         if grammar is not None:
             return copy.copy(grammar)
