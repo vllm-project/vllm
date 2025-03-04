@@ -28,7 +28,7 @@ MODELS = [
 def test_model_load_and_run(vllm_runner, model_id: str, force_marlin: bool,
                             use_rocm_aiter: bool, monkeypatch) -> None:
     if use_rocm_aiter:
-        monkeypatch.setenv("VLLM_ROCM_AITER_USE_AITER", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     if force_marlin:
         monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
@@ -58,7 +58,7 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str,
                                      use_rocm_aiter: bool, monkeypatch):
 
     if use_rocm_aiter:
-        monkeypatch.setenv("VLLM_ROCM_AITER_USE_AITER", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     with vllm_runner(model_id, kv_cache_dtype="fp8") as llm:
 
@@ -102,7 +102,7 @@ def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
                          use_rocm_aiter: bool, monkeypatch) -> None:
 
     if use_rocm_aiter:
-        monkeypatch.setenv("VLLM_ROCM_AITER_USE_AITER", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     if force_marlin:
         monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")

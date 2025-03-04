@@ -26,7 +26,7 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
                 dtype: str, max_tokens: int, num_logprobs: int,
                 use_rocm_aiter: bool, monkeypatch) -> None:
     if use_rocm_aiter:
-        monkeypatch.setenv("VLLM_ROCM_AITER_USE_AITER", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(

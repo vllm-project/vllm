@@ -210,7 +210,7 @@ def test_mixtral_moe(dtype: torch.dtype, use_rocm_aiter: bool, monkeypatch):
     huggingface."""
 
     if use_rocm_aiter:
-        monkeypatch.setenv("VLLM_ROCM_AITER_USE_AITER", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     # Instantiate our and huggingface's MoE blocks
     config = MixtralConfig()
     hf_moe = MixtralSparseMoeBlock(config).to(dtype).to("cuda")
