@@ -370,9 +370,11 @@ class MLACommonMetadata(Generic[D]):
                             FlashInferPrefillMetadata,
                             CudnnPrefillMetadata]] = None
 
-    # Computed in __post_init__
+    # New for MLA (compared to FlashAttention)
+    # For handling prefill decode split
     prefill_query_start_loc: Optional[torch.Tensor] = None
     prefill_max_query_len: Optional[int] = None
+    prefill_block_table: Optional[torch.Tensor] = None
     decode_seq_lens: Optional[torch.Tensor] = None
     decode_block_table: Optional[torch.Tensor] = None
 
@@ -387,6 +389,7 @@ class MLACommonMetadata(Generic[D]):
             self.prefill_query_start_loc = \
                 self.query_start_loc[start:] - self.query_start_loc[start]
             self.prefill_max_query_len = self.seq_lens[start:].max().item()
+            self.prefill_block_table = self.block_table[start:, ...]
 
         if self.num_decodes is not None and self.num_decodes > 0:
             self.decode_seq_lens = self.seq_lens[:self.num_decodes]
