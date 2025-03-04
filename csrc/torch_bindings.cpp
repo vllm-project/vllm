@@ -21,6 +21,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 
+  ops.def(
+     "gen_w8a8_block_fp8_matmul("
+     "    Tensor! out, Tensor a, Tensor b, Tensor As, Tensor Bs,"
+     "    int block_n, int block_k) -> ()");
+  ops.impl("gen_w8a8_block_fp8_matmul", torch::kCUDA, &gen_w8a8_block_fp8_matmul);
+
   // Attention ops
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
