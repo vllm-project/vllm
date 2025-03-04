@@ -135,8 +135,14 @@ class EngineCoreOutputs(
 
     utility_output: Optional[UtilityOutput] = None
     finished_requests: list[str] = []
+
     # In DP case, used to signal that the engine is paused.
-    global_finished: bool = False
+    engine_paused: bool = False
+
+    # Set to True to indicate stats should be accumulated rather than
+    # recorded, when there are remaining outputs from other engines
+    # for this iteration.
+    accumulate_stats: bool = False
 
     def __post_init__(self):
         if self.timestamp == 0.0:

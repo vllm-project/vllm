@@ -496,7 +496,7 @@ class DPEngineCoreProc(EngineCoreProc):
             if not self.global_unfinished_reqs:
                 # Notify client that we are pausing the loop.
                 self.output_queue.put_nowait(
-                    EngineCoreOutputs(global_finished=True))
+                    EngineCoreOutputs(engine_paused=True))
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
 

@@ -598,6 +598,7 @@ class DPAsyncMPClient(AsyncMPClient):
         self.reqs_in_flight: dict[str, CoreEngine] = {}
 
         self.output_processor = DPAsyncMPClient.process_engine_outputs  # type: ignore[assignment]
+        self.outputs_counter = 0
 
     def _init_core_engines(
         self,
@@ -656,7 +657,7 @@ class DPAsyncMPClient(AsyncMPClient):
                 if engine := self.reqs_in_flight.pop(req_id, None):
                     engine.num_reqs_in_flight -= 1
 
-        if outputs.global_finished:
+        if outputs.engine_paused:
             assert self.num_engines_running >= 1
             self.num_engines_running -= 1
             if self.num_engines_running == 0 and self.reqs_in_flight:
@@ -672,6 +673,15 @@ class DPAsyncMPClient(AsyncMPClient):
                 ]
                 if coros:
                     await asyncio.gather(*coros)
+
+        if outputs.scheduler_stats:
+            # Set the accumulate flag if we haven't yet received outputs
+            # from all engines for this step.
+            self.outputs_counter += 1
+            if self.outputs_counter == len(self.core_engines):
+                self.outputs_counter = 0
+            else:
+                outputs.accumulate_stats = True
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if not request_ids:

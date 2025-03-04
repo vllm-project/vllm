@@ -22,6 +22,12 @@ class PrefixCacheStats:
     # The number of hits in these requests.
     hits: int = 0
 
+    def add(self, other: "PrefixCacheStats"):
+        """Aggregate another set of SchedulerStats into this one."""
+        self.requests += other.requests
+        self.queries += other.queries
+        self.hits += other.hits
+
 
 @dataclass
 class SchedulerStats:
@@ -34,6 +40,16 @@ class SchedulerStats:
 
     prefix_cache_stats: PrefixCacheStats = field(
         default_factory=PrefixCacheStats)
+
+    def add(self, other: "SchedulerStats"):
+        """Aggregate another set of SchedulerStats into this one."""
+        self.num_running_reqs += other.num_running_reqs
+        self.num_waiting_reqs += other.num_waiting_reqs
+
+        #TODO assumes caches are the same size
+        self.gpu_cache_usage = (self.gpu_cache_usage +
+                                other.gpu_cache_usage) * 0.5
+        self.prefix_cache_stats.add(other.prefix_cache_stats)
 
 
 @dataclass
@@ -88,6 +104,18 @@ class IterationStats:
         self.time_per_output_tokens_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
+
+    def clear(self):
+        self.num_generation_tokens = 0
+        self.num_prompt_tokens = 0
+        self.num_preempted_reqs = 0
+        self.finished_requests.clear()
+        self.max_num_generation_tokens_iter.clear()
+        self.n_params_iter.clear()
+        self.time_to_first_tokens_iter.clear()
+        self.time_per_output_tokens_iter.clear()
+        self.waiting_lora_adapters.clear()
+        self.running_lora_adapters.clear()
 
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
