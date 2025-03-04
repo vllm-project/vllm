@@ -1022,6 +1022,226 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data.copy_(loaded_weight)
 
 
+class _WeightWrapper:
+    '''
+    Wrapper for weight matrices. Helper class for
+    :class:`QCrossKVParallelLinear`.
+
+    Generally speaking, the quantized & unquantized linear method
+    implementations look like the following:
+     
+    ```
+    some_linear_function(x, layer.weight, bias)
+    ```
+      
+    i.e. they expect the `layer` argument to be a class with a `weight` member,
+    mirroring :class:`Linear`.
+
+    :class:`QCrossKVParallelLinear` wraps W_Q and [W_K W_V]
+    (two views of `self.weight`) in :class:`_WeightWrapper` instances, which
+    can both be passed to the linear method as the `layer` argument.
+    '''
+
+    def __init__(
+        self,
+        weight: torch.Tensor,
+    ) -> None:
+        self.weight = torch.nn.Parameter(weight)
+
+
+class QCrossKVParallelLinear(QKVParallelLinear):
+    """Linear layer for the linear transformation of the query, key, and
+    value vectors in the cross-attention layer. 
+
+    Q is computed from the previous decoder layer outputs;
+    KV are computed from the encoder output hidden states
+    during prefill; thus, `forward()` takes two tensor
+    arguments.
+    
+    The weight matrix is concatenated along the output dimension. However,
+    Q and KV are computed in two steps, which operate respectively on W_Q
+    and [W_K W_V] (two views obtained by slicing `self.weight`.)
+    
+    The layer is parallelized along the head dimension.
+    When the number of key/value heads is smaller than the number
+    of query heads (e.g., multi-query/grouped-query attention), the key/value
+    head may be replicated while the query heads are partitioned.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        head_size: int,
+        total_num_heads: int,
+        total_num_kv_heads: Optional[int] = None,
+        bias: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        '''
+        The :class:`QKVParallelLinear` parent class packs [W_Q W_K W_V]
+        and the corresponding bias vectors into `self.weight` and `self.bias`
+        (respectively) during weight loading. 
+        
+        However cross-attention QKV computation requires that we
+        (1) partially unpack `self.weights` into the W_Q weights matrix &
+            the packed [W_K W_V] weights matrix,
+        (2) partially unpack `self.bias` into the Q bias vector,
+            and the packed KV bias vector. 
+
+        To avoid recomputing these views of the underlying `self.weight`
+        and `self.bias`, we cache them.
+        '''
+        self._param_views_not_cached: bool = True
+        self._cached_q_weights_wrapper: Optional[_WeightWrapper] = None
+        self._cached_kv_weights_wrapper: Optional[_WeightWrapper] = None
+        self._cached_q_bias: Optional[torch.Tensor] = None
+        self._cached_kv_bias: Optional[torch.Tensor] = None
+
+        super().__init__(hidden_size=hidden_size,
+                         head_size=head_size,
+                         total_num_heads=total_num_heads,
+                         total_num_kv_heads=total_num_kv_heads,
+                         bias=bias,
+                         skip_bias_add=skip_bias_add,
+                         params_dtype=params_dtype,
+                         quant_config=quant_config,
+                         prefix=prefix)
+
+    def _maybe_cache_param_views(self) -> None:
+        '''
+        Compute the W_Q weights, packed [W_K W_V] weights, Q bias vector, and
+        packed KV bias vector once, in order to cache them.
+        '''
+
+        if self._param_views_not_cached:
+            q_shard_begin_offset = self._get_shard_offset_mapping('q')
+            kv_shards_begin_offset = self._get_shard_offset_mapping('k')
+            self._cached_q_weights_wrapper = _WeightWrapper(
+                self.weight[q_shard_begin_offset:kv_shards_begin_offset, :])
+            self._cached_kv_weights_wrapper = _WeightWrapper(
+                self.weight[kv_shards_begin_offset:, :])
+            self._cached_q_bias = self.bias[
+                q_shard_begin_offset:kv_shards_begin_offset]
+            self._cached_kv_bias = self.bias[kv_shards_begin_offset:]
+            self._param_views_not_cached = False
+
+    def _maybe_gather_output(
+        self,
+        q_output_parallel: torch.Tensor,
+        kv_output_parallel: Optional[torch.Tensor],
+        is_decode_phase: bool,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        '''
+        Perform all-gather, if required.
+
+        Arguments:
+
+        * `q_output_parallel`: computed Q on current GPU
+        * `kv_output_parallel`: computed KV on current GPU
+        * `is_decode_phase`: skip KV all-gather if True
+
+        Returns:
+
+        * Q all-gather result if required, otherwise `q_output_parallel`
+        * For KV:
+            * If all-gather required,
+                * KV all-gather result if in prefill-phase
+                * None if in decode-phase
+            * `kv_output_parallel` otherwise
+        '''
+
+        if self.gather_output:
+            # All-gather across the partitions.
+            return (
+                tensor_model_parallel_all_gather(q_output_parallel),
+                (None if is_decode_phase else
+                 tensor_model_parallel_all_gather(kv_output_parallel)),
+            )
+
+        return (
+            q_output_parallel,
+            kv_output_parallel,  # None if skip_cross_kvs
+        )
+
+    def _apply_w_conditional_bias(
+        self,
+        weights: _WeightWrapper,
+        input: torch.Tensor,
+        bias: torch.Tensor,
+    ) -> torch.Tensor:
+        '''
+        Invoke linear method, utilizing bias argument if required.
+
+        Arguments:
+
+        * `weights`: parameter matrix
+        * `input`: hidden states
+        * `bias`: bias
+
+        Returns:
+
+        * `weights` * `input` if `self.skip_bias_add`
+        * `weights` * `input` + `bias` otherwise
+        '''
+        assert self.quant_method is not None
+        return self.quant_method.apply(weights, input,
+                                       None if self.skip_bias_add else bias)
+
+    def forward(
+        self,
+        decoder_input_: torch.Tensor,
+        encoder_input_: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
+        '''
+        Arguments:
+
+        * `decoder_input_`: Q will be computed using these hidden states
+        * `encoder_input_`: KV is computed using these hidden states
+            * If `None`, KV computations are skipped (implicitly decode-phase)
+
+        Returns:
+
+        * Q  = (`decoder_input_`) x W_Q
+        * KV  = (`encoder_input_`) x [W_K, W_V]
+            * (`None` if `encoder_input_ `is `None`)
+        * Q bias vector
+        * KV bias vector (`None` if `encoder_input_` is `None`)
+        '''
+        self._maybe_cache_param_views()
+        assert self._cached_q_weights_wrapper is not None
+        assert self._cached_kv_weights_wrapper is not None
+        assert self._cached_q_bias is not None
+        assert self._cached_kv_bias is not None
+
+        # Compute Q and maybe KV
+        is_decode_phase = encoder_input_ is None
+        q_output_parallel = self._apply_w_conditional_bias(
+            self._cached_q_weights_wrapper, decoder_input_,
+            self._cached_q_bias)
+        kv_output_parallel = None if is_decode_phase else (
+            self._apply_w_conditional_bias(self._cached_kv_weights_wrapper,
+                                           encoder_input_,
+                                           self._cached_kv_bias))
+
+        # All-gather if needed
+        (
+            q_output,
+            kv_output,
+        ) = self._maybe_gather_output(q_output_parallel, kv_output_parallel,
+                                      is_decode_phase)
+
+        return (
+            q_output,
+            kv_output,
+            self._cached_q_bias if self.skip_bias_add else None,
+            self._cached_kv_bias if self.skip_bias_add else None,
+        )
+
+
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
 
