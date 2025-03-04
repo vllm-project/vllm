@@ -183,17 +183,6 @@ class GuidedDecodingManager:
                        vocab_size=self.vocab_size,
                        ctx=ctx)
 
-    def setup_grammars(self):
-        with self._requests_lock:
-            for req in self.requests:
-                if req.grammar is not None:
-                    continue
-
-                # Check if grammar is ready in cache
-                grammar = self[req.guided_decoding_key]
-                if grammar is not None:
-                    req.grammar = copy.copy(grammar)
-
     def grammar_bitmask(self, requests: dict[str, Request],
                         guided_decoding_request_ids: dict[str, int],
                         batch_len: int) -> Optional[np.ndarray]:

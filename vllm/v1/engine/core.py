@@ -159,10 +159,6 @@ class EngineCore:
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
 
-        # Check cache for compiled grammars and add them to requests
-        # when they're ready.
-        self.guided_decoding_manager.setup_grammars()
-
         scheduler_output = self.scheduler.schedule()
 
         # This case may occur when the only unfinished requests are
