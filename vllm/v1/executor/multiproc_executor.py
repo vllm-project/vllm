@@ -6,6 +6,7 @@ import signal
 import sys
 import time
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
@@ -57,10 +58,11 @@ class MultiprocExecutor(Executor):
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
-        assert self.world_size == tensor_parallel_size, (
+        pp_parallel_size = self.parallel_config.pipeline_parallel_size
+        assert self.world_size == tensor_parallel_size * pp_parallel_size, (
             f"world_size ({self.world_size}) must be equal to the "
-            f"tensor_parallel_size ({tensor_parallel_size}). "
-            f"Pipeline parallelism is not yet implemented in v1")
+            f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
+            f" parallel_size ({pp_parallel_size}). ")
 
         # Set multiprocessing envs that are common to V0 and V1
         set_multiprocessing_worker_envs(self.parallel_config)
@@ -91,11 +93,21 @@ class MultiprocExecutor(Executor):
         for w in self.workers:
             w.worker_response_mq.wait_until_ready()
 
+        # For pipeline parallel, we use a thread pool for asynchronous
+        # execute_model.
+        self.io_thread_pool: Optional[ThreadPoolExecutor] = None
+        if self.max_concurrent_batches > 1:
+            # Note: must use only 1 IO thread to keep dequeue sequence
+            # from the response queue
+            self.io_thread_pool = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="mp_exec_io")
+
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: tuple = (),
-                       kwargs: Optional[dict] = None) -> list[Any]:
+                       kwargs: Optional[dict] = None,
+                       non_block: bool = False) -> list[Any]:
         start_time = time.monotonic()
         kwargs = kwargs or {}
 
@@ -110,10 +122,8 @@ class MultiprocExecutor(Executor):
                     method, protocol=pickle.HIGHEST_PROTOCOL)
             self.rpc_broadcast_mq.enqueue((send_method, args, kwargs))
 
-            responses = [None] * self.world_size
-            for w in self.workers:
-                dequeue_timeout = timeout - (time.monotonic() - start_time
-                                             ) if timeout is not None else None
+            def get_response(w: WorkerProcHandle,
+                             dequeue_timeout: Optional[float] = None):
                 status, result = w.worker_response_mq.dequeue(
                     timeout=dequeue_timeout)
 
@@ -122,6 +132,20 @@ class MultiprocExecutor(Executor):
                         raise result
                     else:
                         raise RuntimeError("Worker failed")
+
+                return result
+
+            responses: list[Optional[Any]] = [None] * self.world_size
+            for w in self.workers:
+                dequeue_timeout = timeout - (time.monotonic() - start_time
+                                             ) if timeout is not None else None
+
+                if non_block:
+                    assert self.io_thread_pool is not None
+                    result = self.io_thread_pool.submit(
+                        get_response, w, dequeue_timeout)  # type: ignore
+                else:
+                    result = get_response(w, dequeue_timeout)
 
                 responses[w.rank] = result
 
@@ -172,6 +196,11 @@ class MultiprocExecutor(Executor):
         """Properly shut down the executor and its workers"""
         if not getattr(self, 'shutting_down', False):
             self.shutting_down = True
+
+            if self.io_thread_pool is not None:
+                self.io_thread_pool.shutdown(wait=False, cancel_futures=True)
+                self.io_thread_pool = None
+
             for w in self.workers:
                 w.worker_response_mq = None
             self._ensure_worker_termination()
@@ -181,6 +210,10 @@ class MultiprocExecutor(Executor):
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)
         return
+
+    @property
+    def max_concurrent_batches(self) -> int:
+        return self.parallel_config.pipeline_parallel_size
 
 
 @dataclass
@@ -206,6 +239,8 @@ class WorkerProc:
         ready_path: str,
     ):
         self.rank = rank
+        driver_worker_rank = (vllm_config.parallel_config.world_size -
+                              vllm_config.parallel_config.tensor_parallel_size)
         wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
@@ -216,7 +251,7 @@ class WorkerProc:
             "local_rank": local_rank,
             "rank": rank,
             "distributed_init_method": distributed_init_method,
-            "is_driver_worker": rank == 0,
+            "is_driver_worker": rank == driver_worker_rank,
         }
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper

@@ -78,12 +78,18 @@ class Executor(ExecutorBase):
         scheduler_output,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
         output = self.collective_rpc("execute_model",
-                                     args=(scheduler_output, ))
-        return output[0]
+                                     args=(scheduler_output, ),
+                                     non_block=self.max_concurrent_batches > 1)
+        return output[self.driver_worker_rank]
 
     @property
     def max_concurrent_batches(self) -> int:
         return 1
+
+    @property
+    def driver_worker_rank(self) -> int:
+        return (self.parallel_config.world_size -
+                self.parallel_config.tensor_parallel_size)
 
     def profile(self, is_start: bool = True):
         self.collective_rpc("profile", args=(is_start, ))

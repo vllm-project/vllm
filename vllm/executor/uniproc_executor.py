@@ -50,7 +50,8 @@ class UniProcExecutor(ExecutorBase):
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       kwargs: Optional[Dict] = None,
+                       non_block: bool = False) -> List[Any]:
         if kwargs is None:
             kwargs = {}
         answer = run_method(self.driver_worker, method, args, kwargs)

@@ -862,7 +862,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Union[ModelRunnerOutput, torch.Tensor]:
+    ) -> Union[ModelRunnerOutput, IntermediateTensors]:
         self._update_states(scheduler_output)
 
         if self.is_multimodal_model:

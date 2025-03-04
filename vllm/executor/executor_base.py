@@ -61,7 +61,8 @@ class ExecutorBase(ABC):
                        method: Union[str, Callable[..., _R]],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
-                       kwargs: Optional[Dict[str, Any]] = None) -> List[_R]:
+                       kwargs: Optional[Dict[str, Any]] = None,
+                       non_block: bool = False) -> List[_R]:
         """
         Execute an RPC call on all workers.
 
@@ -76,6 +77,9 @@ class ExecutorBase(ABC):
                 :exc:`TimeoutError` on timeout. `None` means wait indefinitely.
             args: Positional arguments to pass to the worker method.
             kwargs: Keyword arguments to pass to the worker method.
+            non_block: If the non_block is `True`, the function will not wait
+              for all workers finish the method and return future objects of 
+              each worker executions immediately.
 
         Returns:
             A list containing the results from each worker.
@@ -312,7 +316,8 @@ class DistributedExecutorBase(ExecutorBase):
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       kwargs: Optional[Dict] = None,
+                       non_block: bool = False) -> List[Any]:
         return self._run_workers(method, *args, **(kwargs or {}))
 
     @abstractmethod
