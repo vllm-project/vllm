@@ -7,18 +7,18 @@ architectures in a hybrid model optimized for efficient sequence modeling. The
 model alternates between state space model layers and attention-based layers.
 """
 from itertools import cycle
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Dict, Iterable, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import Zamba2Config
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (divide, get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather)
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -40,8 +40,6 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid
 from .utils import maybe_prefix
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class Zamba2Attention(nn.Module):
@@ -106,8 +104,10 @@ class Zamba2Attention(nn.Module):
                                         bias=False,
                                         quant_config=quant_config)
 
-        # Need to define separate Attention objects, because in recent vLLM
-        # KV cache tensors are tied to specific Attention objects.
+        # Even though in Zamba2 weights are shared between attention layers, KV
+        # cache is unique for every attention layer. Hence, we need to define
+        # separate Attention objects, because in recent vLLM KV cache tensors
+        # are tied to specific Attention objects.
 
         # Initialize attention blocks with proper indexing
         self.dpa_list = nn.ModuleList([])
@@ -188,13 +188,10 @@ class Zamba2Attention(nn.Module):
             )
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            layer_idx: int,
-            position_ids: torch.Tensor,
-            kv_caches: List[KVCache],
-            attn_metadata:
-        AttentionMetadata,  # See Zamba2Attention.forward for details
+        self,
+        hidden_states: torch.Tensor,
+        layer_idx: int,
+        position_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass through the attention layer.
         
@@ -202,17 +199,6 @@ class Zamba2Attention(nn.Module):
             hidden_states: Input tensor [batch_size, seq_len, hidden_size]
             position_ids: Position IDs for positional embeddings
             layer_idx: Current layer index
-            kv_caches: List of key-value cache tuples
-            attn_metadata: Metadata required for attention computation, 
-                including:
-                - block_tables: Mapping of sequence blocks to physical storage
-                - context_lens: Length of context for each sequence
-                - max_context_len: Maximum context length in the batch
-                - query_start_loc: Starting positions of queries in the batch
-                - num_queries: Number of query tokens to process
-                - num_prefills: Number of tokens being prefilled (vs generated)
-                Used to handle variable sequence lengths and enable efficient
-                batched attention computation across multiple sequences.
             
         Returns:
             Output tensor [batch_size, seq_len, hidden_size]
@@ -253,10 +239,7 @@ class Zamba2Attention(nn.Module):
                                                        query_states,
                                                        key_states)
 
-        # NOTE: No need anymore to pass specific kv_cache tensor,
-        # but keeping it for API compatibility
-        y = self.dpa_list[block_idx](query_states, key_states, value_states,
-                                     kv_caches[block_idx], attn_metadata)
+        y = self.dpa_list[block_idx](query_states, key_states, value_states)
         y, _ = self.o_proj(y)
         return y
 
@@ -424,14 +407,11 @@ class Zamba2AttentionDecoderLayer(nn.Module):
                                         eps=config.rms_norm_eps)
 
     def forward(
-            self,
-            hidden_states: torch.Tensor,
-            original_hidden_states: torch.Tensor,
-            layer_idx: int,
-            positions: torch.Tensor,
-            kv_caches: List[KVCache],
-            attn_metadata:
-        AttentionMetadata,  # See Zamba2Attention.forward for details
+        self,
+        hidden_states: torch.Tensor,
+        original_hidden_states: torch.Tensor,
+        layer_idx: int,
+        positions: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass through the decoder layer.
         
@@ -441,10 +421,6 @@ class Zamba2AttentionDecoderLayer(nn.Module):
                 connection
             layer_idx: Current layer index
             positions: IDs for positional embeddings
-            kv_caches: List of key-value cache tuples
-            attn_metadata: Metadata for sequence processing and attention 
-                computation
-
             
         Returns:
             Transformed hidden states after attention and feed-forward
@@ -465,8 +441,6 @@ class Zamba2AttentionDecoderLayer(nn.Module):
             hidden_states,
             position_ids=positions,
             layer_idx=layer_idx,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
         )
 
         # Layer norm before feed-forward
@@ -524,22 +498,17 @@ class Zamba2MambaDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata:
-        AttentionMetadata,  # See Zamba2Attention.forward for details
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
         transformer_hidden_states: Optional[torch.Tensor] = None,
         positions: Optional[torch.Tensor] = None,
         original_hidden_states: Optional[torch.Tensor] = None,
         layer_idx: Optional[int] = None,
-        kv_caches: Optional[List[KVCache]] = None,
     ) -> torch.Tensor:
         """Forward pass through the Mamba decoder layer.
         
         Args:
             hidden_states: Input tensor [batch_size, seq_len, hidden_size]
-            attn_metadata: Metadata for sequence processing and attention 
-                computation
             mamba_cache_params: Parameters for Mamba's state caches 
                 (one for conv, one for ssm)
             sequence_idx: Index tensor for identifying sequences in batch
@@ -549,7 +518,6 @@ class Zamba2MambaDecoderLayer(nn.Module):
             positions: Optional position IDs (unused in Mamba)
             original_hidden_states: Optional original inputs (unused in Mamba)
             layer_idx: Optional layer index (unused in Mamba)
-            kv_caches: Optional KV caches (unused in Mamba)
             
         Returns:
             Transformed hidden states with residual connection applied
@@ -572,7 +540,6 @@ class Zamba2MambaDecoderLayer(nn.Module):
         # Process through Mamba mixer
         hidden_states = self.mamba(
             hidden_states,
-            attn_metadata=attn_metadata,
             mamba_cache_params=mamba_cache_params,
             sequence_idx=sequence_idx,
         )
@@ -620,9 +587,6 @@ class Zamba2HybridLayer(nn.Module):
         original_hidden_states: torch.Tensor,
         layer_idx: int,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        attn_metadata:
-        AttentionMetadata,  # See Zamba2Attention.forward for details
         mamba_cache_params: Optional[MambaCacheParams] = None,
         sequence_idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -640,9 +604,6 @@ class Zamba2HybridLayer(nn.Module):
                 connection
             layer_idx: Current layer index for block mapping
             positions: Position IDs for positional embeddings
-            kv_caches: Key-value caches for attention
-            attn_metadata: Metadata for sequence processing and attention 
-                computation
             mamba_cache_params: Parameters for Mamba's state caches 
                 (one for conv, one for ssm)
             sequence_idx: Indices for identifying sequences in batch,
@@ -657,8 +618,6 @@ class Zamba2HybridLayer(nn.Module):
             original_hidden_states=original_hidden_states,
             layer_idx=layer_idx,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
         )
 
         # Project transformer output
@@ -668,7 +627,6 @@ class Zamba2HybridLayer(nn.Module):
         layer_outputs = self.mamba_decoder(
             hidden_states,
             transformer_hidden_states=transformer_hidden_states,
-            attn_metadata=attn_metadata,
             mamba_cache_params=mamba_cache_params,
             sequence_idx=sequence_idx,
         )
@@ -760,9 +718,6 @@ class Zamba2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        attn_metadata:
-        AttentionMetadata,  # See Zamba2Attention.forward for details
         mamba_cache_params: MambaCacheParams,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -771,8 +726,6 @@ class Zamba2Model(nn.Module):
         Args:
             input_ids: Input token IDs
             positions: Position IDs for embeddings
-            kv_caches: List of key-value cache tuples
-            attn_metadata: Metadata for attention computation
             mamba_cache_params: Parameters for Mamba's state caches 
                 (one for conv, one for ssm)
             inputs_embeds: Optional pre-computed input embeddings
@@ -790,6 +743,7 @@ class Zamba2Model(nn.Module):
         # proper continuous batching computation including
         # chunked prefill
         seq_idx = None
+        attn_metadata = get_forward_context().attn_metadata
         if attn_metadata.num_prefills > 0:
             seq_idx = torch.zeros_like(input_ids, dtype=torch.int32)
             for i, (srt, end) in enumerate(
@@ -808,8 +762,6 @@ class Zamba2Model(nn.Module):
                 original_hidden_states=original_hidden_states,
                 layer_idx=layer_idx,
                 positions=positions,
-                kv_caches=kv_caches,
-                attn_metadata=attn_metadata,
                 mamba_cache_params=mamba_cache_params.at_layer_idx(layer_idx),
                 sequence_idx=seq_idx,
             )
@@ -891,23 +843,16 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         """
         return self.model.get_input_embeddings(input_ids)
 
-    def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[KVCache],
-            attn_metadata:
-        AttentionMetadata,  # See Zamba2Attention.forward for details
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
-            **kwargs) -> torch.Tensor:
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                inputs_embeds: Optional[torch.Tensor] = None,
+                **kwargs) -> torch.Tensor:
         """Forward pass through the model.
         
         Args:
             input_ids: Input token IDs
             positions: Position IDs for embeddings
-            kv_caches: List of key-value cache tuples
-            attn_metadata: Metadata for attention computation
             inputs_embeds: Optional pre-computed input embeddings
             **kwargs: Additional arguments passed to cache manager
             
@@ -928,8 +873,6 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         hidden_states = self.model(
             input_ids,
             positions,
-            kv_caches,
-            attn_metadata,
             mamba_cache_params,
             inputs_embeds,
         )
