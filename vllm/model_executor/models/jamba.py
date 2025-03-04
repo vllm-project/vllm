@@ -30,7 +30,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.utils import LayerBlockType
 
-from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
+from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
+                         SupportsV0Only)
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -353,7 +354,7 @@ class JambaModel(nn.Module):
 
 
 class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
-                       IsHybrid):
+                       IsHybrid, SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

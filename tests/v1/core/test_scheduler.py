@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import List, Optional
+from typing import Optional
 
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
@@ -48,9 +48,9 @@ def create_scheduler(
 def create_requests(
     num_requests: int,
     num_tokens: int = 10,
-    mm_positions: Optional[List[PlaceholderRange]] = None,
+    mm_positions: Optional[list[PlaceholderRange]] = None,
     max_tokens: int = 16,
-    stop_token_ids: Optional[List[int]] = None,
+    stop_token_ids: Optional[list[int]] = None,
 ):
     sampling_params = SamplingParams(ignore_eos=False,
                                      max_tokens=max_tokens,

@@ -50,12 +50,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
     """
 
     def __init__(self, model_runner: ModelRunnerBase):
-        if hasattr(
-                model_runner,
-                "return_hidden_states") and model_runner.return_hidden_states:
-            raise ValueError(
-                "return_hidden_states is not supported for TP1DraftModelRunner."
-            )
         super().__init__(model_runner)
 
         self.indices_of_seq_with_bonus_tokens = None
@@ -153,7 +147,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 return False
 
         # TODO: Add support for other attn backends
-        if self.attn_backend.get_name() not in ("FLASH_ATTN", "TRITON_MLA"):
+        if self.attn_backend.get_name() not in ("FLASH_ATTN", ):
             return False
 
         # TODO: Add support for LORA
@@ -306,6 +300,9 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 sampling_metadata=model_input.sampling_metadata,
             )
             outputs.append(output)
+
+            if self.return_hidden_states and is_fallback:
+                output.hidden_states = hidden_states
 
             if model_input.attn_metadata.num_prefills == 0 \
                 and self.indices_of_seq_with_bonus_tokens is not None:
