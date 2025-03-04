@@ -628,7 +628,7 @@ tqdm==4.66.6
     #   transformers
 tqdm-multiprocess==0.0.11
     # via lm-eval
-transformers==4.48.2
+transformers @ git+https://github.com/huggingface/transformers@a957b7911a758d54597914b4479fe6e81424d64f
     # via
     #   -r requirements-test.in
     #   genai-perf

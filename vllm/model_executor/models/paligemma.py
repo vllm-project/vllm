@@ -5,7 +5,8 @@ from typing import (Iterable, Literal, Mapping, Optional, Set, Tuple,
 
 import torch
 from torch import nn
-from transformers import PaliGemmaConfig
+from transformers import (PaliGemmaConfig, Siglip2VisionConfig,
+                          SiglipVisionConfig)
 
 from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
@@ -21,6 +22,8 @@ from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from .interfaces import SupportsMultiModal, SupportsPP, SupportsV0Only
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
+from .siglip2 import (Siglip2VisionModel, dummy_image_for_siglip2,
+                      dummy_seq_data_for_siglip2, get_max_siglip2_image_tokens)
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -49,8 +52,12 @@ PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs,
 def get_max_paligemma_image_tokens(ctx: InputContext):
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
     vision_config = hf_config.vision_config
-
-    return get_max_siglip_image_tokens(vision_config)
+    if isinstance(vision_config, SiglipVisionConfig):
+        return get_max_siglip_image_tokens(vision_config)
+    elif isinstance(vision_config, Siglip2VisionConfig):
+        return get_max_siglip2_image_tokens(vision_config)
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
 
 
 def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
@@ -59,15 +66,26 @@ def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
     vision_config = hf_config.vision_config
     num_images = mm_counts["image"]
 
-    seq_data, ranges = dummy_seq_data_for_siglip(
-        vision_config,
-        seq_len,
-        num_images,
-        image_token_id=hf_config.image_token_index,
-    )
-
-    mm_data = dummy_image_for_siglip(vision_config, num_images)
-    return DummyData(seq_data, mm_data, ranges)
+    if isinstance(vision_config, SiglipVisionConfig):
+        seq_data, ranges = dummy_seq_data_for_siglip(
+            vision_config,
+            seq_len,
+            num_images,
+            image_token_id=hf_config.image_token_index,
+        )
+        mm_data = dummy_image_for_siglip(vision_config, num_images)
+        return DummyData(seq_data, mm_data, ranges)
+    elif isinstance(vision_config, Siglip2VisionConfig):
+        seq_data, ranges = dummy_seq_data_for_siglip2(
+            vision_config,
+            seq_len,
+            num_images,
+            image_token_id=hf_config.image_token_index,
+        )
+        mm_data = dummy_image_for_siglip2(vision_config, num_images)
+        return DummyData(seq_data, mm_data, ranges)
+    msg = f"Unsupported vision config: {type(vision_config)}"
+    raise NotImplementedError(msg)
 
 
 def input_processor_for_paligemma(ctx: InputContext,
@@ -157,10 +175,16 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.vision_tower = SiglipVisionModel(config.vision_config,
-                                              quant_config,
-                                              prefix=maybe_prefix(
-                                                  prefix, "vision_tower"))
+        if isinstance(config.vision_config, SiglipVisionConfig):
+            self.vision_tower = SiglipVisionModel(config.vision_config,
+                                                  quant_config,
+                                                  prefix=maybe_prefix(
+                                                      prefix, "vision_tower"))
+        elif isinstance(config.vision_config, Siglip2VisionConfig):
+            self.vision_tower = Siglip2VisionModel(config.vision_config,
+                                                   quant_config,
+                                                   prefix=maybe_prefix(
+                                                       prefix, "vision_tower"))
         self.multi_modal_projector = PaliGemmaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             projection_dim=config.vision_config.projection_dim)
@@ -237,7 +261,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _image_pixels_to_features(
         self,
-        vision_tower: SiglipVisionModel,
+        vision_tower: Union[SiglipVisionModel, Siglip2VisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
 

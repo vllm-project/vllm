@@ -11,7 +11,7 @@ import torch.nn as nn
 from packaging.version import Version
 from transformers import (BatchFeature, CLIPVisionConfig, LlavaConfig,
                           PixtralVisionConfig, PretrainedConfig,
-                          SiglipVisionConfig)
+                          Siglip2VisionConfig, SiglipVisionConfig)
 from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.llava import LlavaProcessor
 from transformers.models.pixtral import PixtralProcessor
@@ -41,6 +41,7 @@ from .interfaces import SupportsMultiModal, SupportsPP
 from .pixtral import (PixtralHFVisionModel,
                       get_pixtral_hf_image_feature_grid_size)
 from .siglip import SiglipVisionModel
+from .siglip2 import Siglip2VisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
@@ -469,6 +470,14 @@ def init_vision_tower_for_llava(
             require_post_norm=require_post_norm,
             prefix=prefix,
         )
+    elif isinstance(vision_config, Siglip2VisionConfig):
+        return Siglip2VisionModel(
+            vision_config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers,
+            require_post_norm=require_post_norm,
+            prefix=prefix,
+        )
     elif isinstance(vision_config, PixtralVisionConfig):
         return PixtralHFVisionModel(
             vision_config,
@@ -604,7 +613,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def _image_pixels_to_features(
         self,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel,
-                            PixtralHFVisionModel],
+                            Siglip2VisionModel, PixtralHFVisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
 

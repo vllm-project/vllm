@@ -60,6 +60,7 @@ def get_vision_encoder_info(
     from .clip import CLIPEncoderInfo, CLIPVisionConfig
     from .pixtral import PixtralHFEncoderInfo, PixtralVisionConfig
     from .siglip import SiglipEncoderInfo, SiglipVisionConfig
+    from .siglip2 import Siglip2EncoderInfo, Siglip2VisionConfig
 
     vision_config = hf_config.vision_config
     if isinstance(vision_config, CLIPVisionConfig):
@@ -68,6 +69,8 @@ def get_vision_encoder_info(
         return PixtralHFEncoderInfo(vision_config)
     if isinstance(vision_config, SiglipVisionConfig):
         return SiglipEncoderInfo(vision_config)
+    if isinstance(vision_config, Siglip2VisionConfig):
+        return Siglip2EncoderInfo(vision_config)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)

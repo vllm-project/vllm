@@ -34,6 +34,7 @@ from .llava import LlavaDummyInputsBuilder, init_vision_tower_for_llava
 from .llava_next import (BaseLlavaNextMultiModalProcessor, LlavaNextLikeConfig,
                          LlavaNextProcessingInfo)
 from .siglip import SiglipVisionModel
+from .siglip2 import Siglip2VisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -616,7 +617,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _image_pixels_to_features(
         self,
-        vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
+        vision_tower: Union[CLIPVisionModel, SiglipVisionModel,
+                            Siglip2VisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
 
@@ -791,7 +793,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _video_pixels_to_features(
         self,
-        vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
+        vision_tower: Union[CLIPVisionModel, SiglipVisionModel,
+                            Siglip2VisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
 
