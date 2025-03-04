@@ -694,7 +694,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             block_n, block_k = block_shape[0], block_shape[1]
             A, A_scale = per_token_group_quant_fp8(A, block_k)
             assert triton.cdiv(A.shape[-1], block_k) == A_scale.shape[-1]
-            assert triton.cdiv(B.shape[-2], block_n) == B_scale.shape[-2]
+            assert triton.cdiv(B.shape[-2], block_n) == B_scale.shape[
+                -2], f"{B.shape[-2]}/{block_n}, {B_scale.shape[-2]}"
             assert triton.cdiv(B.shape[-1], block_k) == B_scale.shape[-1]
     elif use_int8_w8a16 or use_int4_w4a16:
         assert B_scale is not None
@@ -703,6 +704,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         assert A_scale is None
         assert B_scale is None
 
+    # EM = num_groups
     EM = sorted_token_ids.shape[0]
     if A.shape[0] < config["BLOCK_SIZE_M"]:
         # optimize for small batch_size.
@@ -758,6 +760,10 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         )
 
     else:
+        #print(f"GOT HERE B {sorted_token_ids}")
+        #print(f"B:\n{B}")
+        #print(f"B_scale:\n{B_scale}")
+
         fused_moe_kernel[grid](
             A,
             B,
@@ -1316,6 +1322,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
                                 block_shape=block_shape)
+
+        #print(f"FUSED_MOE {intermediate_cache1.shape} {intermediate_cache1}")
 
         if activation == "silu":
             torch.ops._C.silu_and_mul(intermediate_cache2,
