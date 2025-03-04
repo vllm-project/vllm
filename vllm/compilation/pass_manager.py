@@ -2,6 +2,7 @@
 
 from typing import Any, Dict, List
 
+import torch
 from torch import fx as fx
 
 from vllm.config import CompilationConfig
@@ -10,12 +11,22 @@ from vllm.logger import init_logger
 from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
 from .inductor_pass import InductorPass
-from .reshapes import RedundantReshapesPass
+from .noop_elimination import NoOpEliminationPass
 
 logger = init_logger(__name__)
 
 
-class PostGradPassManager:
+class PlaceHolder:
+    pass
+
+
+if torch.__version__ < "2.6":
+    Parent = PlaceHolder  # type: ignore
+else:
+    Parent = torch._inductor.custom_graph_pass.CustomGraphPass  # type: ignore
+
+
+class PostGradPassManager(Parent):
     """
     The pass manager for post-grad passes.
     It handles configuration, adding custom passes, and running passes.
@@ -25,7 +36,7 @@ class PostGradPassManager:
 
     The order of the post-grad post-passes is:
     1. passes (constructor parameter)
-    2. default passes (RedundantReshapesPass, FusionPass)
+    2. default passes (NoopEliminationPass, FusionPass)
     3. config["post_grad_custom_post_pass"] (if it exists)
     4. fix_functionalization
     This way, all passes operate on a functionalized graph.
@@ -43,8 +54,8 @@ class PostGradPassManager:
 
     def configure(self, pass_config: CompilationConfig.PassConfig):
         self.pass_config = pass_config
-        if pass_config.enable_reshape:
-            self.passes += [RedundantReshapesPass(pass_config)]
+        if pass_config.enable_noop:
+            self.passes += [NoOpEliminationPass(pass_config)]
 
         if pass_config.enable_fusion:
             self.passes += [FusionPass.instance(pass_config)]
@@ -54,6 +65,9 @@ class PostGradPassManager:
     def add(self, pass_: InductorPass):
         assert isinstance(pass_, InductorPass)
         self.passes.append(pass_)
+
+    def uuid(self):
+        return self.__getstate__()
 
     def __getstate__(self) -> Dict[str, List[Any]]:
         """

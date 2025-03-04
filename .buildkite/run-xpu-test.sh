@@ -14,6 +14,6 @@ remove_docker_container
 
 # Run the image and test offline inference/tensor parallel
 docker run --name xpu-test --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --entrypoint="" xpu-test sh -c '
-    python3 examples/offline_inference/basic.py
-    python3 examples/offline_inference/cli.py -tp 2
+    python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m
+    python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m -tp 2
 '

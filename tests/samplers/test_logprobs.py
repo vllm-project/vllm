@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List
-
 import pytest
 import torch
 
@@ -9,7 +7,7 @@ from vllm import SamplingParams
 
 from ..conftest import VllmRunner
 
-MODELS = ["facebook/opt-125m"]
+MODELS = ["distilbert/distilgpt2"]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -70,7 +68,7 @@ def test_get_prompt_logprobs(
             assert (len(logprobs) == num_top_logprobs
                     or len(logprobs) == num_top_logprobs + 1)
         output_text = result.outputs[0].text
-        output_string_from_most_likely_tokens_lst: List[str] = []
+        output_string_from_most_likely_tokens_lst: list[str] = []
         for top_logprobs in result.outputs[0].logprobs:
             top_logprob = next(iter(top_logprobs.values()))
             output_string_from_most_likely_tokens_lst.append(

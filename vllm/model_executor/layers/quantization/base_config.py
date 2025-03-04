@@ -60,6 +60,11 @@ def method_has_implemented_embedding(
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
 
+    def __init__(self):
+        super().__init__()
+        # mapping is updated by models as they initialize
+        self.packed_modules_mapping: Dict[str, List[str]] = dict()
+
     @abstractmethod
     def get_name(self) -> str:
         """Name of the quantization method."""

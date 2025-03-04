@@ -3,10 +3,9 @@
 import asyncio
 import json
 import time
-from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, Final, List,
-                    Optional)
-from typing import Sequence as GenericSequence
-from typing import Union
+from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import Sequence as GenericSequence
+from typing import Callable, Final, Optional, Union
 
 from fastapi import Request
 
@@ -28,12 +27,15 @@ from vllm.entrypoints.openai.reasoning_parsers import (ReasoningParser,
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
+    MistralToolCall)
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
+from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
+                                                truncate_tool_call_ids)
 
 logger = init_logger(__name__)
 
@@ -138,7 +140,7 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            model_name = self.models.model_name(lora_request)
+            model_name = self._get_model_name(request.model, lora_request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
@@ -150,11 +152,12 @@ class OpenAIServingChat(OpenAIServing):
                 return self.create_error_response(
                     "tool_choice = \"required\" is not supported!")
 
-            # because of issues with pydantic we need to potentially
-            # re-serialize the tool_calls field of the request
-            # for more info: see comment in `maybe_serialize_tool_calls`
             if isinstance(tokenizer, MistralTokenizer):
+                # because of issues with pydantic we need to potentially
+                # re-serialize the tool_calls field of the request
+                # for more info: see comment in `maybe_serialize_tool_calls`
                 maybe_serialize_tool_calls(request)
+                truncate_tool_call_ids(request)
 
             if (request.tool_choice == "auto" and
                     not (self.enable_auto_tools and tool_parser is not None)
@@ -201,7 +204,7 @@ class OpenAIServingChat(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[RequestOutput, None]] = []
+        generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
@@ -278,7 +281,7 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         model_name: str,
-        conversation: List[ConversationMessage],
+        conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
@@ -306,7 +309,7 @@ class OpenAIServingChat(OpenAIServing):
         should_stream_with_reasoning_parsing = (
             self._should_stream_with_reasoning_parsing(request))
 
-        all_previous_token_ids: Optional[List[List[int]]]
+        all_previous_token_ids: Optional[list[list[int]]]
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
@@ -335,7 +338,7 @@ class OpenAIServingChat(OpenAIServing):
         # Prepare the tool parser if it's needed
         try:
             if tool_choice_auto and self.tool_parser:
-                tool_parsers: List[Optional[ToolParser]] = [
+                tool_parsers: list[Optional[ToolParser]] = [
                     self.tool_parser(tokenizer)
                 ] * num_choices
             else:
@@ -402,7 +405,7 @@ class OpenAIServingChat(OpenAIServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
-                        last_msg_content: Union[str, List[Dict[str, str]]] = ""
+                        last_msg_content: Union[str, list[dict[str, str]]] = ""
                         if conversation and "content" in conversation[
                                 -1] and conversation[-1].get("role") == role:
                             last_msg_content = conversation[-1]["content"] or ""
@@ -670,7 +673,7 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         model_name: str,
-        conversation: List[ConversationMessage],
+        conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
@@ -689,7 +692,7 @@ class OpenAIServingChat(OpenAIServing):
 
         assert final_res is not None
 
-        choices: List[ChatCompletionResponseChoice] = []
+        choices: list[ChatCompletionResponseChoice] = []
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
@@ -745,11 +748,13 @@ class OpenAIServingChat(OpenAIServing):
             elif request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
 
+                tool_call_class = MistralToolCall if isinstance(
+                    tokenizer, MistralTokenizer) else ToolCall
                 message = ChatMessage(
                     role=role,
                     content="",
                     tool_calls=[
-                        ToolCall(function=FunctionCall(
+                        tool_call_class(function=FunctionCall(
                             name=request.tool_choice.function.name,
                             arguments=output.text))
                     ])
@@ -806,7 +811,7 @@ class OpenAIServingChat(OpenAIServing):
             choices.append(choice_data)
 
         if request.echo:
-            last_msg_content: Union[str, List[Dict[str, str]]] = ""
+            last_msg_content: Union[str, list[dict[str, str]]] = ""
             if conversation and "content" in conversation[-1] and conversation[
                     -1].get("role") == role:
                 last_msg_content = conversation[-1]["content"] or ""
@@ -847,8 +852,8 @@ class OpenAIServingChat(OpenAIServing):
         return response
 
     def _get_top_logprobs(
-            self, logprobs: Dict[int, Logprob], top_logprobs: Optional[int],
-            tokenizer: AnyTokenizer) -> List[ChatCompletionLogProb]:
+            self, logprobs: dict[int, Logprob], top_logprobs: Optional[int],
+            tokenizer: AnyTokenizer) -> list[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(token=(token := self._get_decoded_token(
                 p[1],
@@ -865,12 +870,12 @@ class OpenAIServingChat(OpenAIServing):
     def _create_chat_logprobs(
         self,
         token_ids: GenericSequence[int],
-        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
+        top_logprobs: GenericSequence[Optional[dict[int, Logprob]]],
         tokenizer: AnyTokenizer,
         num_output_top_logprobs: Optional[int] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
-        logprobs_content: List[ChatCompletionLogProbsContent] = []
+        logprobs_content: list[ChatCompletionLogProbsContent] = []
 
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]

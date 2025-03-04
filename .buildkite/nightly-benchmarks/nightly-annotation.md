@@ -9,20 +9,19 @@ This file contains the downloading link for benchmarking results.
 
 Please download the visualization scripts in the post
 
-
 ## Results reproduction
 
 - Find the docker we use in `benchmarking pipeline`
 - Deploy the docker, and inside the docker:
-  - Download `nightly-benchmarks.zip`. 
-  - In the same folder, run the following code
-```
-export HF_TOKEN=<your HF token>
-apt update
-apt install -y git
-unzip nightly-benchmarks.zip
-VLLM_SOURCE_CODE_LOC=./ bash .buildkite/nightly-benchmarks/scripts/run-nightly-benchmarks.sh
-```
+  - Download `nightly-benchmarks.zip`.
+  - In the same folder, run the following code:
+
+  ```console
+  export HF_TOKEN=<your HF token>
+  apt update
+  apt install -y git
+  unzip nightly-benchmarks.zip
+  VLLM_SOURCE_CODE_LOC=./ bash .buildkite/nightly-benchmarks/scripts/run-nightly-benchmarks.sh
+  ```
 
 And the results will be inside `./benchmarks/results`.
-

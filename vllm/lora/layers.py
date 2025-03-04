@@ -16,8 +16,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
-                              tensor_model_parallel_all_reduce,
-                              tensor_model_parallel_gather)
+                              tensor_model_parallel_all_reduce)
 from vllm.distributed.utils import divide
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -364,7 +363,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         embeddings_tensor: Optional[torch.Tensor],
         lora_bias: Optional[torch.Tensor] = None,
     ):
-        # Except for QKVParallelLinearWithLora and
+        # Except for QKVParallelLinearWithLoRA and
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
         # store weights in a tuple of size 1. These two layers will
         # override this function.
@@ -401,6 +400,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                                             self.lora_bias_stacked, 1.0,
                                             self.output_slices)
         return output
+
+    @classmethod
+    def get_source_layer(cls, source_layer: nn.Module) -> type:
+        # Check parent_cls in case source_layer is a HFCompatibleLinear.
+        return getattr(source_layer, "parent_cls", type(source_layer))
 
 
 class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
@@ -444,7 +448,8 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return type(source_layer) is ReplicatedLinear
+        source_layer = cls.get_source_layer(source_layer)
+        return source_layer is ReplicatedLinear
 
 
 class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
@@ -540,8 +545,9 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return type(source_layer) is ColumnParallelLinear or (
-            type(source_layer) is MergedColumnParallelLinear
+        source_layer = cls.get_source_layer(source_layer)
+        return source_layer is ColumnParallelLinear or (
+            source_layer is MergedColumnParallelLinear
             and len(packed_modules_list) == 1)
 
 
@@ -683,11 +689,12 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return (type(source_layer) is MergedColumnParallelLinear
+        source_layer = cls.get_source_layer(source_layer)
+        return (source_layer is MergedColumnParallelLinear
                 and len(packed_modules_list) == 2)
 
 
-class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
+class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     """
     ColumnParallelLinear layer that is specifically designed for
     qkv_proj. Certain models, such as chatglm3 and baichuan-7b,
@@ -751,11 +758,12 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     def can_replace_layer(cls, source_layer: nn.Module,
                           lora_config: LoRAConfig, packed_modules_list: List,
                           model_config: Optional[PretrainedConfig]) -> bool:
-        return type(source_layer) is QKVParallelLinear and len(
+        source_layer = cls.get_source_layer(source_layer)
+        return source_layer is QKVParallelLinear and len(
             packed_modules_list) == 1
 
 
-class MergedQKVParallelLinearWithLora(MergedColumnParallelLinearWithLoRA):
+class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
     """MergedColumnParallelLinear layer that is composed of 3 sublayers (slices)
     packed together in qkv proj fashion
     (q_proj + k_proj + v_proj -> qkv_proj).
@@ -812,7 +820,8 @@ class MergedQKVParallelLinearWithLora(MergedColumnParallelLinearWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return (type(source_layer) is QKVParallelLinear
+        source_layer = cls.get_source_layer(source_layer)
+        return (source_layer is QKVParallelLinear
                 and len(packed_modules_list) == 3)
 
 
@@ -897,7 +906,8 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return type(source_layer) is RowParallelLinear
+        source_layer = cls.get_source_layer(source_layer)
+        return source_layer is RowParallelLinear
 
 
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
@@ -1040,10 +1050,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
-        logits = lm_head.linear_method.apply(lm_head, hidden_states)
+        logits = lm_head.quant_method.apply(lm_head, hidden_states)
         if embedding_bias is not None:
             logits += embedding_bias
-        logits = tensor_model_parallel_gather(logits)
+
+        # Gather logits for TP
+        logits = self.base_layer._gather_logits(logits)
+
         if logits is None:
             return None
 
@@ -1118,7 +1131,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         return False
 
 
-class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
+class LinearScalingRotaryEmbeddingWithLoRA(BaseLayerWithLoRA):
     """Implements RoPE-scaled embeddings with linear scaling for
     multiple LoRA adapters with a specialized kernel.
 

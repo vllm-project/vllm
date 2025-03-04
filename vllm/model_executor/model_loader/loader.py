@@ -10,6 +10,7 @@ import inspect
 import itertools
 import math
 import os
+import time
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -43,12 +44,13 @@ from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.utils import (ParamMapping,
+                                                    configure_quant_config,
                                                     get_model_architecture,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_gguf_extra_tensor_names, gguf_quant_weights_iterator,
+    get_gguf_extra_tensor_names, get_lock, gguf_quant_weights_iterator,
     initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
     runai_safetensors_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.utils import set_weight_attrs
@@ -113,6 +115,9 @@ def _initialize_model(
     model_config = vllm_config.model_config
     model_class, _ = get_model_architecture(model_config)
 
+    if vllm_config.quant_config is not None:
+        configure_quant_config(vllm_config.quant_config, model_class)
+
     signatures = inspect.signature(model_class.__init__)
     all_params = [param.name for param in signatures.parameters.values()]
     if "vllm_config" in all_params and "prefix" in all_params:
@@ -147,6 +152,30 @@ def _initialize_model(
         kwargs["scheduler_config"] = vllm_config.scheduler_config
     with set_current_vllm_config(vllm_config, check_compile=True):
         return model_class(**kwargs)
+
+
+def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
+                                   target_device: torch.device) -> None:
+    for _, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if isinstance(quant_method, QuantizeMethodBase):
+            # When quant methods need to process weights after loading
+            # (for repacking, quantizing, etc), they expect parameters
+            # to be on the global target device. This scope is for the
+            # case where cpu offloading is used, where we will move the
+            # parameters onto device for processing and back off after.
+            with device_loading_context(module, target_device):
+                quant_method.process_weights_after_loading(module)
+
+    # Currently only used by MLA.
+    # NOTE: This intentionally happens after other modules so we can easily
+    # decompress the weights for MLA.
+    for _, module in model.named_modules():
+        if isinstance(module, Attention) and \
+            hasattr(module, "process_weights_after_loading"):
+            # TODO(lucas): see if there is a way to unify the signatures
+            # of process_weights_after_loading
+            module.process_weights_after_loading(model_config.dtype)
 
 
 class BaseModelLoader(ABC):
@@ -188,6 +217,9 @@ class DefaultModelLoader(BaseModelLoader):
         allow_patterns_overrides: Optional[list[str]] = None
         """If defined, weights will load exclusively using these patterns."""
 
+    counter_before_loading_weights: float = 0.0
+    counter_after_loading_weights: float = 0.0
+
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         if load_config.model_loader_extra_config:
@@ -207,13 +239,17 @@ class DefaultModelLoader(BaseModelLoader):
             from modelscope.hub.snapshot_download import snapshot_download
 
             if not os.path.exists(model):
-                model_path = snapshot_download(
-                    model_id=model,
-                    cache_dir=self.load_config.download_dir,
-                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-                    revision=revision,
-                    ignore_file_pattern=self.load_config.ignore_patterns,
-                )
+                # Use file lock to prevent multiple processes from
+                # downloading the same model weights at the same time.
+                with get_lock(model, self.load_config.download_dir):
+                    model_path = snapshot_download(
+                        model_id=model,
+                        cache_dir=self.load_config.download_dir,
+                        local_files_only=huggingface_hub.constants.
+                        HF_HUB_OFFLINE,
+                        revision=revision,
+                        ignore_file_pattern=self.load_config.ignore_patterns,
+                    )
             else:
                 model_path = model
             return model_path
@@ -336,6 +372,8 @@ class DefaultModelLoader(BaseModelLoader):
 
             weights_iterator = _xla_weights_iterator(weights_iterator)
 
+        if self.counter_before_loading_weights == 0.0:
+            self.counter_before_loading_weights = time.perf_counter()
         # Apply the prefix.
         return ((source.prefix + name, tensor)
                 for (name, tensor) in weights_iterator)
@@ -372,7 +410,6 @@ class DefaultModelLoader(BaseModelLoader):
     def load_model(self, vllm_config: VllmConfig) -> nn.Module:
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
-
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
@@ -381,6 +418,11 @@ class DefaultModelLoader(BaseModelLoader):
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
                 self._get_all_weights(model_config, model))
+            self.counter_after_loading_weights = time.perf_counter()
+            logger.info(
+                "Loading weights took %.2f seconds",
+                self.counter_after_loading_weights -
+                self.counter_before_loading_weights)
             # We only enable strict check for non-quantized models
             # that have loaded weights tracking currently.
             if model_config.quantization is None and loaded_weights is not None:
@@ -390,23 +432,8 @@ class DefaultModelLoader(BaseModelLoader):
                         "Following weights were not initialized from "
                         f"checkpoint: {weights_not_loaded}")
 
-            for _, module in model.named_modules():
-                quant_method = getattr(module, "quant_method", None)
-                if isinstance(quant_method, QuantizeMethodBase):
-                    # When quant methods need to process weights after loading
-                    # (for repacking, quantizing, etc), they expect parameters
-                    # to be on the global target device. This scope is for the
-                    # case where cpu offloading is used, where we will move the
-                    # parameters onto device for processing and back off after.
-                    with device_loading_context(module, target_device):
-                        quant_method.process_weights_after_loading(module)
-                if isinstance(module, Attention) and \
-                    hasattr(module, "process_weights_after_loading"):
-                    # When attention modules need to process weights after
-                    # currently only used by MLA
-                    # TODO(lucas): see if there is a way to unify the signatures
-                    # of process_weights_after_loading
-                    module.process_weights_after_loading(model_config.dtype)
+            _process_weights_after_loading(model, model_config, target_device)
+
         return model.eval()
 
 
@@ -425,29 +452,15 @@ class DummyModelLoader(BaseModelLoader):
     def load_model(self, vllm_config: VllmConfig) -> nn.Module:
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
+        target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
-            with torch.device(device_config.device):
+            with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
             initialize_dummy_weights(model)
 
-            for _, module in model.named_modules():
-                quant_method = getattr(module, "quant_method", None)
-                if quant_method is not None:
-                    # When quant methods need to process weights after loading
-                    # (for repacking, quantizing, etc), they expect parameters
-                    # to be on the global target device. This scope is for the
-                    # case where cpu offloading is used, where we will move the
-                    # parameters onto device for processing and back off after.
-                    with device_loading_context(
-                            module, torch.device(device_config.device)):
-                        quant_method.process_weights_after_loading(module)
-                if isinstance(module, Attention) and \
-                    hasattr(module, "process_weights_after_loading"):
-                    # When attention modules need to process weights after
-                    # currently only used by MLA
-                    module.process_weights_after_loading(model_config.dtype)
+            _process_weights_after_loading(model, model_config, target_device)
         return model.eval()
 
 
@@ -628,6 +641,7 @@ class ShardedStateLoader(BaseModelLoader):
     def load_model(self, vllm_config: VllmConfig) -> nn.Module:
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
+        target_device = torch.device(device_config.device)
         from safetensors.torch import safe_open
 
         from vllm.distributed import get_tensor_model_parallel_rank
@@ -636,18 +650,10 @@ class ShardedStateLoader(BaseModelLoader):
                                                  model_config.revision)
 
         with set_default_torch_dtype(model_config.dtype):
-            with torch.device(device_config.device):
+            with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
-                for _, module in model.named_modules():
-                    quant_method = getattr(module, "quant_method", None)
-                    if quant_method is not None:
-                        quant_method.process_weights_after_loading(module)
-                    if isinstance(module, Attention) and \
-                        hasattr(module, "process_weights_after_loading"):
-                        # When attention modules need to process weights after
-                        # currently only used by MLA
-                        module.process_weights_after_loading(
-                            model_config.dtype)
+                _process_weights_after_loading(model, model_config,
+                                               target_device)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
                 local_model_path,
@@ -803,9 +809,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             iterator = safetensors_weights_iterator(hf_weights_files)
         else:
             iterator = pt_weights_iterator(hf_weights_files)
-        for name, param in iterator:
-            # mapping weight names from transformers to vllm.
-            yield self.weight_mapper(name), param
+        for org_name, param in iterator:
+            # mapping weight names from transformers to vllm while preserving
+            # original names.
+            mapped_name = self.weight_mapper(org_name)
+            yield org_name, mapped_name, param
 
     def _get_quantized_weights_iterator(
         self,
@@ -866,24 +874,30 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def _quantized_8bit_generator(self, hf_weights_files, use_safetensors,
                                   quant_state_dict) -> Generator:
-        for weight_name, weight_tensor in self._hf_weight_iter(
-                hf_weights_files, use_safetensors):
-            if not weight_name.lower().endswith(".scb"):
+        for (
+                org_weight_name,
+                mapped_weight_name,
+                weight_tensor,
+        ) in self._hf_weight_iter(hf_weights_files, use_safetensors):
+            if not mapped_weight_name.lower().endswith(".scb"):
                 continue
 
-            weight_key = weight_name.lower().replace(".scb", ".weight")
+            weight_key = mapped_weight_name.lower().replace(".scb", ".weight")
             quant_state_dict[weight_key] = weight_tensor
 
-        for weight_name, weight_tensor in self._hf_weight_iter(
-                hf_weights_files, use_safetensors):
-            if self._is_8bit_weight_name(weight_name):
+        for (
+                org_weight_name,
+                mapped_weight_name,
+                weight_tensor,
+        ) in self._hf_weight_iter(hf_weights_files, use_safetensors):
+            if self._is_8bit_weight_name(mapped_weight_name):
                 continue
 
-            if weight_name in quant_state_dict:
+            if mapped_weight_name in quant_state_dict:
                 set_weight_attrs(weight_tensor, {"load_in_8bit": True})
-                yield weight_name, weight_tensor
+                yield org_weight_name, weight_tensor
             else:
-                yield weight_name, weight_tensor
+                yield org_weight_name, weight_tensor
 
     def _quantized_4bit_generator(self, hf_weights_files, use_safetensors,
                                   quant_state_dict) -> Generator:
@@ -893,15 +907,19 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         weight_iterator = self._hf_weight_iter(hf_weights_files,
                                                use_safetensors)
         temp_state_dict = {}
-        for weight_name, weight_tensor in weight_iterator:
-            if not self._is_4bit_weight_name(weight_name):
+        for (
+                org_weight_name,
+                mapped_weight_name,
+                weight_tensor,
+        ) in weight_iterator:
+            if not self._is_4bit_weight_name(mapped_weight_name):
                 continue
             # bitsandbytes library requires
             # weight.quant_state.bitsandbytes__* in CPU
-            if "quant_state.bitsandbytes" in weight_name:
-                temp_state_dict[weight_name] = weight_tensor.cpu().data
+            if "quant_state.bitsandbytes" in mapped_weight_name:
+                temp_state_dict[mapped_weight_name] = weight_tensor.cpu().data
             else:
-                temp_state_dict[weight_name] = weight_tensor
+                temp_state_dict[mapped_weight_name] = weight_tensor
 
         # Closure to parse quant_state for each prequant weight
         def _parse_quant_state(param_name: str,
@@ -911,24 +929,29 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 if param_name + "." in k:
                     quant_state[k] = temp_state_dict[k]
 
-            return QuantState.from_dict(quant_state, device="cuda")
+            return QuantState.from_dict(quant_state,
+                                        device=current_platform.device_type)
 
         # Second iterate over all prequant and normal weights
         # pre quantized weights would have a quant_state
-        for weight_name, weight_tensor in self._hf_weight_iter(
-                hf_weights_files, use_safetensors):
-            if self._is_4bit_weight_name(weight_name):
+        for (
+                org_weight_name,
+                mapped_weight_name,
+                weight_tensor,
+        ) in self._hf_weight_iter(hf_weights_files, use_safetensors):
+            if self._is_4bit_weight_name(mapped_weight_name):
                 continue
 
-            if (f"{weight_name}.quant_state.bitsandbytes__nf4"
+            if (f"{mapped_weight_name}.quant_state.bitsandbytes__nf4"
                     in temp_state_dict) or (
-                        f"{weight_name}.quant_state.bitsandbytes__fp4"
+                        f"{mapped_weight_name}.quant_state.bitsandbytes__fp4"
                         in temp_state_dict):
-                quant_state = _parse_quant_state(weight_name, temp_state_dict)
-                quant_state_dict[weight_name] = quant_state
-                yield weight_name, weight_tensor
+                quant_state = _parse_quant_state(mapped_weight_name,
+                                                 temp_state_dict)
+                quant_state_dict[mapped_weight_name] = quant_state
+                yield org_weight_name, weight_tensor
             else:
-                yield weight_name, weight_tensor
+                yield org_weight_name, weight_tensor
 
     def _unquantized_generator(self, hf_weights_files, use_safetensors,
                                quant_state_dict) -> Generator:
@@ -937,18 +960,22 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
 
-        for weight_name, weight_tensor in self._hf_weight_iter(
-                hf_weights_files, use_safetensors):
-            if any(target_module in weight_name for target_module in
-                   self.target_modules) and weight_name.endswith(".weight"):
+        for (
+                org_weight_name,
+                mapped_weight_name,
+                weight_tensor,
+        ) in self._hf_weight_iter(hf_weights_files, use_safetensors):
+            if any(target_module in mapped_weight_name
+                   for target_module in self.target_modules
+                   ) and mapped_weight_name.endswith(".weight"):
                 # Without sharding
                 if any(
-                        weight_name.startswith(module)
+                        mapped_weight_name.startswith(module)
                         for module in self.unsharded_weights_modules):
                     weight_sub_tensor = weight_tensor
                 # Shard by column
                 elif any(
-                        weight_name.startswith(module)
+                        mapped_weight_name.startswith(module)
                         for module in self.column_sharded_weights_modules):
                     total_size = weight_tensor.size(-1)
                     start_index = total_size // tp_size * tp_rank
@@ -958,14 +985,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # Weights have fused on disk. In this case, we assume that the
                 # weight and module use same name.
                 elif any(
-                        weight_name.startswith(module)
+                        mapped_weight_name.startswith(module)
                         for module in self.maybe_fused_weights_modules):
                     # special case for fused weights
                     # get the size of each shard weight tensor
                     total_shard_sizes = next(
                         (sizes for module, sizes in
                          self.maybe_fused_weights_modules.items()
-                         if weight_name.startswith(module)))
+                         if mapped_weight_name.startswith(module)))
                     total_size = weight_tensor.size(0)
                     assert total_size == sum(total_shard_sizes)
                     # get the start/end index of each shard weight tensor
@@ -1008,23 +1035,21 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         quant_type="nf4",
                     )
 
-                quant_state_dict[weight_name] = quant_state
+                quant_state_dict[mapped_weight_name] = quant_state
             else:
                 processed_weight = weight_tensor
-
-            yield weight_name, processed_weight
+            yield org_weight_name, processed_weight
 
     def _get_bnb_target_modules(self, model: nn.Module) -> None:
 
         for name, module in model.named_modules():
             if isinstance(module, (LinearBase, )):
-                last_name = name.split(".")[-1]
-                if sub_modules := self.modules_mapping.packed_mapping.get(
-                        last_name, []):
+                if modules_info := self.modules_mapping.get_sub_modules(name):
                     # Map vllm's names to transformers's names.
+                    rep_name, sub_modules = modules_info
                     for sub_name in sub_modules:
                         self.target_modules.append(
-                            name.replace(last_name, sub_name))
+                            name.replace(rep_name, sub_name))
                 # Add original module name even if the module has stacked map,
                 # in case model has a mixture of disk-merged and disk-splitted
                 # weights with same last name.
@@ -1078,7 +1103,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self.model_type = type(model).__name__
 
         logger.info("Loading weights with BitsAndBytes quantization. "
-                    " May take a while ...")
+                    "May take a while ...")
 
         quant_config = getattr(model_config.hf_config, "quantization_config",
                                None)
@@ -1235,9 +1260,24 @@ class GGUFModelLoader(BaseModelLoader):
         """
         config = model_config.hf_config
         model_type = config.model_type
+        gguf_to_hf_name_map = {}
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
             model_type = "command-r"
+        if model_type in ("deepseek_v3", "deepseek_v2"):
+            model_type = "deepseek2"
+            # GGUF layer map assumes that we will have a merged expert weights
+            # so we need to map them manually
+            for idx in range(config.num_hidden_layers):
+                gguf_to_hf_name_map[f"blk.{idx}.exp_probs_b.bias"] = \
+                        f"model.layers.{idx}.mlp.gate.e_score_correction_bias"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = \
+                        f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():
             if value == model_type:
@@ -1248,10 +1288,10 @@ class GGUFModelLoader(BaseModelLoader):
         num_layers = config.num_hidden_layers
         name_map = gguf.get_tensor_name_map(arch, num_layers)
         with torch.device("meta"):
-            dummy_model = AutoModelForCausalLM.from_config(config)
+            dummy_model = AutoModelForCausalLM.from_config(
+                config, trust_remote_code=model_config.trust_remote_code)
         state_dict = dummy_model.state_dict()
 
-        gguf_to_hf_name_map = {}
         for hf_name in state_dict:
             name, suffix = hf_name.rsplit(".", 1)
             gguf_name = name_map.get_name(name)
@@ -1318,6 +1358,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
+
         is_s3_path = is_s3(model_name_or_path)
         is_local = os.path.isdir(model_name_or_path)
         safetensors_pattern = "*.safetensors"
@@ -1331,7 +1372,6 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                          revision,
                          ignore_patterns=self.load_config.ignore_patterns,
                      ))
-
         if is_s3_path:
             hf_weights_files = s3_glob(path=hf_folder,
                                        allow_pattern=[safetensors_pattern])
@@ -1379,22 +1419,12 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 self._get_weights_iterator(model_weights,
                                            model_config.revision))
 
-            for _, module in model.named_modules():
-                quant_method = getattr(module, "quant_method", None)
-                if quant_method is not None:
-                    with device_loading_context(module, target_device):
-                        quant_method.process_weights_after_loading(module)
-                if isinstance(module, Attention) and \
-                    hasattr(module, "process_weights_after_loading"):
-                    # When attention modules need to process weights after
-                    # currently only used by MLA
-                    module.process_weights_after_loading(model_config.dtype)
+            _process_weights_after_loading(model, model_config, target_device)
         return model.eval()
 
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
-
     if isinstance(load_config.load_format, type):
         return load_config.load_format(load_config)
 

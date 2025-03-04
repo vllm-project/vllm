@@ -9,7 +9,7 @@ On the server side, run one of the following commands:
     ./launch_tgi_server.sh <your_model> <max_batch_total_tokens>
 
 On the client side, run:
-    python benchmarks/benchmark_serving.py \
+    python benchmarks/benchmark_serving_guided.py \
         --backend <backend> \
         --model <your_model> \
         --dataset json \
@@ -30,8 +30,9 @@ import os
 import random
 import time
 import warnings
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import AsyncGenerator, List, Optional, Tuple
+from typing import Optional
 
 import datasets
 import numpy as np
@@ -66,22 +67,22 @@ class BenchmarkMetrics:
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
-    percentiles_ttft_ms: List[Tuple[float, float]]
+    percentiles_ttft_ms: list[tuple[float, float]]
     mean_tpot_ms: float
     median_tpot_ms: float
     std_tpot_ms: float
-    percentiles_tpot_ms: List[Tuple[float, float]]
+    percentiles_tpot_ms: list[tuple[float, float]]
     mean_itl_ms: float
     median_itl_ms: float
     std_itl_ms: float
-    percentiles_itl_ms: List[Tuple[float, float]]
+    percentiles_itl_ms: list[tuple[float, float]]
     # E2EL stands for end-to-end latency per request.
     # It is the time taken on the client side from sending
     # a request to receiving a complete response.
     mean_e2el_ms: float
     median_e2el_ms: float
     std_e2el_ms: float
-    percentiles_e2el_ms: List[Tuple[float, float]]
+    percentiles_e2el_ms: list[tuple[float, float]]
 
 
 @dataclasses.dataclass
@@ -104,7 +105,7 @@ class SampleRequest:
 
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
-                    args: argparse.Namespace) -> List[SampleRequest]:
+                    args: argparse.Namespace) -> list[SampleRequest]:
     if args.dataset == 'json':
         if args.json_schema_path is None:
             dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -187,7 +188,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         ]
 
     elif args.dataset == "xgrammar_bench":
-        requests: List[SampleRequest] = []
+        requests: list[SampleRequest] = []
         dataset = datasets.load_dataset("NousResearch/json-mode-eval",
                                         split="train")
         print(f"dataset has {len(dataset)} entries")
@@ -214,10 +215,10 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
 
 
 async def get_request(
-    input_requests: List[SampleRequest],
+    input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-) -> AsyncGenerator[Tuple[int, SampleRequest], None]:
+) -> AsyncGenerator[tuple[int, SampleRequest], None]:
     """
     Asynchronously generates requests at a specified rate 
     with OPTIONAL burstiness.
@@ -258,22 +259,23 @@ async def get_request(
 
 
 def calculate_metrics(
-    input_requests: List[Tuple[str, int, int]],
-    outputs: List[RequestFuncOutput],
+    input_requests: list[tuple[str, int, int]],
+    outputs: list[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
-    selected_percentile_metrics: List[str],
-    selected_percentiles: List[float],
-) -> Tuple[BenchmarkMetrics, List[int]]:
-    actual_output_lens: List[int] = []
+    selected_percentile_metrics: list[str],
+    selected_percentiles: list[float],
+    goodput_config_dict: Optional[dict[str, float]] = None,
+) -> tuple[BenchmarkMetrics, list[int]]:
+    actual_output_lens: list[int] = []
     total_input = 0
     completed = 0
     good_completed = 0
-    itls: List[float] = []
-    tpots: List[float] = []
-    all_tpots: List[float] = []
-    ttfts: List[float] = []
-    e2els: List[float] = []
+    itls: list[float] = []
+    tpots: list[float] = []
+    all_tpots: list[float] = []
+    ttfts: list[float] = []
+    e2els: list[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             # We use the tokenizer to count the number of output tokens for all
@@ -287,10 +289,10 @@ def calculate_metrics(
             total_input += input_requests[i].prompt_len
             tpot = 0
             if output_len > 1:
-                tpot = (outputs[i].latency - outputs[i].ttft) / (output_len -
-                                                                 1)
+                latency_minus_ttft = outputs[i].latency - outputs[i].ttft
+                tpot = latency_minus_ttft / (output_len - 1)
                 tpots.append(tpot)
-            outputs[i].tpot = sum(tpots) / len(tpots) if len(tpots) else 0
+            outputs[i].tpot = tpot
             # Note: if output_len <= 1, we regard tpot as 0 for goodput
             all_tpots.append(tpot)
             itls += outputs[i].itl
@@ -299,6 +301,28 @@ def calculate_metrics(
             completed += 1
         else:
             actual_output_lens.append(0)
+
+    if goodput_config_dict:
+        valid_metrics = []
+        slo_values = []
+
+        if "ttft" in goodput_config_dict:
+            valid_metrics.append(ttfts)
+            slo_values.append(goodput_config_dict["ttft"] /
+                              MILLISECONDS_TO_SECONDS_CONVERSION)
+        if "tpot" in goodput_config_dict:
+            valid_metrics.append(all_tpots)
+            slo_values.append(goodput_config_dict["tpot"] /
+                              MILLISECONDS_TO_SECONDS_CONVERSION)
+        if "e2el" in goodput_config_dict:
+            valid_metrics.append(e2els)
+            slo_values.append(goodput_config_dict["e2el"] /
+                              MILLISECONDS_TO_SECONDS_CONVERSION)
+
+        for req_metric in zip(*valid_metrics):
+            is_good_req = all([s >= r for s, r in zip(slo_values, req_metric)])
+            if is_good_req:
+                good_completed += 1
 
     if completed == 0:
         warnings.warn(
@@ -345,17 +369,18 @@ async def benchmark(
     base_url: str,
     model_id: str,
     tokenizer: PreTrainedTokenizerBase,
-    input_requests: List[SampleRequest],
+    input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
     profile: bool,
-    selected_percentile_metrics: List[str],
-    selected_percentiles: List[str],
+    selected_percentile_metrics: list[str],
+    selected_percentiles: list[str],
     ignore_eos: bool,
     max_concurrency: Optional[int],
     guided_decoding_ratio: float,
     guided_decoding_backend: str,
+    goodput_config_dict: Optional[dict[str, float]] = None,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -435,8 +460,8 @@ async def benchmark(
                                       pbar=pbar)
 
     benchmark_start_time = time.perf_counter()
-    tasks: List[asyncio.Task] = []
-    expected: List[str] = []
+    tasks: list[asyncio.Task] = []
+    expected: list[str] = []
     async for i, request in get_request(input_requests, request_rate,
                                         burstiness):
         extra_body = prepare_extra_body(
@@ -455,7 +480,7 @@ async def benchmark(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
                                      pbar=pbar)))
-    outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
+    outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if profile:
         print("Stopping profiler...")
@@ -483,6 +508,7 @@ async def benchmark(
         tokenizer=tokenizer,
         selected_percentile_metrics=selected_percentile_metrics,
         selected_percentiles=selected_percentiles,
+        goodput_config_dict=goodput_config_dict,
     )
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
@@ -494,6 +520,9 @@ async def benchmark(
                                  metrics.total_output))
     print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
                                     metrics.request_throughput))
+    if goodput_config_dict:
+        print("{:<40} {:<10.2f}".format("Request goodput (req/s):",
+                                        metrics.request_goodput))
     print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
                                     metrics.output_throughput))
     print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
@@ -617,6 +646,40 @@ def evaluate(ret, args):
             100) if len(not_none_scores) > 0 else None
 
 
+def parse_goodput(slo_pairs):
+    goodput_config_dict = {}
+    try:
+        for slo_pair in slo_pairs:
+            slo_name, slo_val = slo_pair.split(":")
+            goodput_config_dict[slo_name] = float(slo_val)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(
+            "Invalid format found for service level objectives. "
+            "Specify service level objectives for goodput as \"KEY:VALUE\" "
+            "pairs, where the key is a metric name, and the value is a "
+            "number in milliseconds.") from err
+    return goodput_config_dict
+
+
+def check_goodput_args(args):
+    goodput_config_dict = {}
+    VALID_NAMES = ["ttft", "tpot", "e2el"]
+    if args.goodput:
+        goodput_config_dict = parse_goodput(args.goodput)
+        for slo_name, slo_val in goodput_config_dict.items():
+            if slo_name not in VALID_NAMES:
+                raise ValueError(
+                    f"Invalid metric name found, {slo_name}: {slo_val}. "
+                    "The service level objective name should be one of "
+                    f"{str(VALID_NAMES)}. ")
+            if slo_val < 0:
+                raise ValueError(
+                    f"Invalid value found, {slo_name}: {slo_val}. "
+                    "The service level objective value should be "
+                    "non-negative.")
+    return goodput_config_dict
+
+
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
@@ -661,6 +724,8 @@ def main(args: argparse.Namespace):
 
     input_requests = sample_requests(tokenizer, args)
 
+    goodput_config_dict = check_goodput_args(args)
+
     benchmark_result, ret = asyncio.run(
         benchmark(
             backend=backend,
@@ -681,6 +746,7 @@ def main(args: argparse.Namespace):
             max_concurrency=args.max_concurrency,
             guided_decoding_ratio=args.guided_decoding_ratio,
             guided_decoding_backend=args.guided_decoding_backend,
+            goodput_config_dict=goodput_config_dict,
         ))
 
     # Save config and results to json
@@ -731,7 +797,8 @@ if __name__ == "__main__":
         default=None,
         help="Server or API base url if not using http host and port.",
     )
-    parser.add_argument("--host", type=str, default="localhost")
+    # Use 127.0.0.1 here instead of localhost to force the use of ipv4
+    parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
         "--endpoint",
@@ -864,6 +931,18 @@ if __name__ == "__main__":
         "Default value is \"99\". "
         "Use \"--percentile-metrics\" to select metrics.",
     )
+    parser.add_argument(
+        "--goodput",
+        nargs="+",
+        required=False,
+        help="Specify service level objectives for goodput as \"KEY:VALUE\" "
+        "pairs, where the key is a metric name, and the value is in "
+        "milliseconds. Multiple \"KEY:VALUE\" pairs can be provided, "
+        "separated by spaces. Allowed request level metric names are "
+        "\"ttft\", \"tpot\", \"e2el\". For more context on the definition of "
+        "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
+        "and the blog: https://hao-ai-lab.github.io/blogs/distserve")
+
     parser.add_argument("--no-guided-decoding",
                         action='store_true',
                         default=False,

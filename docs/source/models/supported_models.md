@@ -14,8 +14,11 @@ Alongside each architecture, we include some popular models that use it.
 
 By default, vLLM loads models from [HuggingFace (HF) Hub](https://huggingface.co/models).
 
-To determine whether a given model is supported, you can check the `config.json` file inside the HF repository.
-If the `"architectures"` field contains a model architecture listed below, then it should be supported in theory.
+To determine whether a given model is natively supported, you can check the `config.json` file inside the HF repository.
+If the `"architectures"` field contains a model architecture listed below, then it should be natively supported.
+
+Models do not _need_ to be natively supported to be used in vLLM.
+The <project:#transformers-fallback> enables you to run models directly using their Transformers implementation (or even remote code on the Hugging Face Model Hub!).
 
 :::{tip}
 The easiest way to check if your model is really supported at runtime is to run the program below:
@@ -40,42 +43,41 @@ If vLLM successfully returns text (for generative models) or hidden states (for 
 Otherwise, please refer to [Adding a New Model](#new-model) for instructions on how to implement your model in vLLM.
 Alternatively, you can [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) to request vLLM support.
 
+(transformers-fallback)=
+
 ### Transformers fallback
 
-After the merge of <gh-pr:11330>, `vllm` can fallback to models that are available in `transformers`. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
+vLLM can fallback to model implementations that are available in Transformers. This does not work for all models for now, but most decoder language models are supported, and vision language model support is planned!
 
-To check if the backend is `transformers`, you can simply do this:
+To check if the backend is Transformers, you can simply do this:
 
 ```python 
 from vllm import LLM
 llm = LLM(model=..., task="generate")  # Name or path of your model
-llm.apply_model(lambda model: print(model.__class__))
+llm.apply_model(lambda model: print(type(model)))
 ```
 
-If it is `TransformersModel` then it means it's based on `transformers`!
+If it is `TransformersModel` then it means it's based on Transformers!
+
+:::{note}
+vLLM may not fully optimise the Transformers implementation so you may see degraded performance if comparing a native model to a Transformers model in vLLM.
+:::
 
 #### Supported features
 
-##### LORA and quantization
+The Transformers fallback explicitly supports the following features:
 
-Both are not supported yet! Make sure to open an issue and we'll work on this together with the `transformers` team!
+- <project:#quantization-index> (except GGUF)
+- <project:#lora-adapter>
+- <project:#distributed-serving> (pipeline parallel coming soon <gh-pr:12832>!)
 
-Usually `transformers` model load weights via the `load_adapters` API, that depends on PEFT. We need to work a bit to either use this api (for now this would result in some weights not being marked as loaded) or replace modules accordingly.
+#### Remote code
 
-Hints as to how this would look like:
+Earlier we mentioned that the Transformers fallback enables you to run remote code models directly in vLLM.
+If you are interested in this feature, this section is for you!
 
-```python
-class TransformersModel(nn.Module, SupportsLoRA):
-  def __init__(*):
-    ...
-    self.model.load_adapter(vllm_config.load_config.model_loader_extra_config["qlora_adapter_name_or_path"])
-```
-
-Blocker is that you need to specify supported lora layers, when we would ideally want to load whatever is inside the checkpoint!
-
-##### Remote code
-
-This fallback also means that any model on the hub that can be used in `transformers` with `trust_remote_code=True` that correctly implements attention can be used in production!
+Simply set `trust_remote_code=True` and vLLM will run any model on the Model Hub that is compatible with Transformers.
+Provided that the model writer implements their model in a compatible way, this means that you can run new models before they are officially supported in Transformers or vLLM!
 
 ```python 
 from vllm import LLM
@@ -83,16 +85,17 @@ llm = LLM(model=..., task="generate", trust_remote_code=True)  # Name or path of
 llm.apply_model(lambda model: print(model.__class__))
 ```
 
-A model just needs the following two things:
+To make your model compatible with the Transformers fallback, it needs:
 
-```python
+```{code-block} python
+:caption: modeling_my_model.py
+
 from transformers import PreTrainedModel
 from torch import nn
 
 class MyAttention(nn.Module):
 
   def forward(self, hidden_states, **kwargs): # <- kwargs are required
-
     ...
     attention_interface = attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
     attn_output, attn_weights = attention_interface(
@@ -111,8 +114,26 @@ class MyModel(PreTrainedModel):
 Here is what happens in the background:
 
 1. The config is loaded
-2. `MyModel` python class is loaded from the `auto_map`, and we check that the model `_supports_attention_backend`.
-3. The `TransformersModel` backend is used. See `/model_executors/models/transformers`, which leverage `self.config._attn_implementation = "vllm"`, thus the need to use `ALL_ATTENTION_FUNCTION`.
+2. `MyModel` Python class is loaded from the `auto_map`, and we check that the model `_supports_attention_backend`.
+3. The `TransformersModel` backend is used. See <gh-file:vllm/model_executor/models/transformers.py>, which leverage `self.config._attn_implementation = "vllm"`, thus the need to use `ALL_ATTENTION_FUNCTION`.
+
+To make your model compatible with tensor parallel, it needs:
+
+```{code-block} python
+:caption: configuration_my_model.py
+
+from transformers import PretrainedConfig
+
+class MyConfig(PretrainedConfig):
+  base_model_tp_plan = {
+    "layers.*.self_attn.q_proj": "colwise",
+    ...
+  }
+```
+
+:::{tip}
+`base_model_tp_plan` is a `dict` that maps fully qualified layer name patterns to tensor parallel styles (currently only `"colwise"` and `"rowwise"` are supported).
+:::
 
 That's it!
 
@@ -277,9 +298,19 @@ See [this page](#generative-models) for more information on how to use generativ
   * `ibm-granite/granite-3.0-1b-a400m-base`, `ibm-granite/granite-3.0-3b-a800m-instruct`, `ibm/PowerMoE-3b`, etc.
   * ✅︎
   * ✅︎
+- * `GraniteMoeSharedForCausalLM`
+  * Granite MoE Shared
+  * `ibm-research/moe-7b-1b-active-shared-experts` (test model)
+  * ✅︎
+  * ✅︎
 - * `GritLM`
   * GritLM
   * `parasail-ai/GritLM-7B-vllm`.
+  * ✅︎
+  * ✅︎
+- * `Grok1ModelForCausalLM`
+  * Grok1
+  * `hpcai-tech/grok-1`.
   * ✅︎
   * ✅︎
 - * `InternLMForCausalLM`
@@ -429,7 +460,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `TeleChat2ForCausalLM`
   * TeleChat2
-  * `TeleAI/TeleChat2-3B`, `TeleAI/TeleChat2-7B`, `TeleAI/TeleChat2-35B`, etc.
+  * `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc.
   * ✅︎
   * ✅︎
 - * `XverseForCausalLM`
@@ -699,13 +730,20 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
-- * `DeepseekVLV2ForCausalLM`
+- * `DeepseekVLV2ForCausalLM`<sup>^</sup>
   * DeepSeek-VL2
   * T + I<sup>+</sup>
-  * `deepseek-ai/deepseek-vl2-tiny`, `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2` etc. (see note)
+  * `deepseek-ai/deepseek-vl2-tiny`, `deepseek-ai/deepseek-vl2-small`, `deepseek-ai/deepseek-vl2` etc.
   *
   * ✅︎
   * ✅︎
+- * `Florence2ForConditionalGeneration`
+  * Florence-2
+  * T + I
+  * `microsoft/Florence-2-base`, `microsoft/Florence-2-large` etc.
+  *
+  *
+  *
 - * `FuyuForCausalLM`
   * Fuyu
   * T + I
@@ -713,27 +751,27 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
-- * `ChatGLMModel`
+- * `GLM4VForCausalLM`<sup>^</sup>
   * GLM-4V
   * T + I
-  * `THUDM/glm-4v-9b` etc.
+  * `THUDM/glm-4v-9b`, `THUDM/cogagent-9b-20241220` etc.
   * ✅︎
   * ✅︎
-  *
+  * ✅︎
 - * `H2OVLChatModel`
   * H2OVL
   * T + I<sup>E+</sup>
   * `h2oai/h2ovl-mississippi-800m`, `h2oai/h2ovl-mississippi-2b`, etc.
   *
   * ✅︎
-  *
+  * ✅︎\*
 - * `Idefics3ForConditionalGeneration`
   * Idefics3
   * T + I
   * `HuggingFaceM4/Idefics3-8B-Llama3` etc.
   * ✅︎
   *
-  *
+  * ✅︎
 - * `InternVLChatModel`
   * InternVL 2.5, Mono-InternVL, InternVL 2.0
   * T + I<sup>E+</sup>
@@ -793,18 +831,18 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `MolmoForCausalLM`
   * Molmo
   * T + I
-  * `allenai/Molmo-7B-D-0924`, `allenai/Molmo-72B-0924`, etc.
+  * `allenai/Molmo-7B-D-0924`, `allenai/Molmo-7B-O-0924`, etc.
   * ✅︎
   * ✅︎
   * ✅︎
 - * `NVLM_D_Model`
   * NVLM-D 1.0
-  * T + I<sup>E+</sup>
+  * T + I<sup>+</sup>
   * `nvidia/NVLM-D-72B`, etc.
   *
   * ✅︎
   * ✅︎
-- * `PaliGemmaForConditionalGeneration`
+- * `PaliGemmaForConditionalGeneration`\*
   * PaliGemma, PaliGemma 2
   * T + I<sup>E</sup>
   * `google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, `google/paligemma2-3b-ft-docci-448`, etc.
@@ -825,7 +863,7 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
-- * `QWenLMHeadModel`
+- * `QwenVLForConditionalGeneration`<sup>^</sup>
   * Qwen-VL
   * T + I<sup>E+</sup>
   * `Qwen/Qwen-VL`, `Qwen/Qwen-VL-Chat`, etc.
@@ -846,20 +884,30 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `Qwen2_5_VLForConditionalGeneration`
+  * Qwen2.5-VL
+  * T + I<sup>E+</sup> + V<sup>E+</sup>
+  * `Qwen/Qwen2.5-VL-3B-Instruct`, `Qwen/Qwen2.5-VL-72B-Instruct`, etc.
+  * ✅︎
+  * ✅︎
+  * ✅︎
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
-  * `fixie-ai/ultravox-v0_3`
-  *
+  * `fixie-ai/ultravox-v0_5-llama-3_2-1b`
+  * ✅︎
   * ✅︎
   * ✅︎
 :::
 
+<sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.  
+&nbsp;&nbsp;&nbsp;&nbsp;• For example, to use DeepSeek-VL2 series models:  
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`--hf-overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'`  
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 :::{note}
-To use `DeepSeek-VL2` series models, you have to pass `--hf_overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'` when running vLLM.
+`h2oai/h2ovl-mississippi-2b` will be available in V1 once we support backends other than FlashAttention.
 :::
 
 :::{note}
@@ -872,8 +920,15 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 :::
 
 :::{note}
-The chat template for Pixtral-HF is incorrect (see [discussion](https://huggingface.co/mistral-community/pixtral-12b/discussions/22)).
-A corrected version is available at <gh-file:examples/template_pixtral_hf.jinja>.
+Currently the PaliGemma model series is implemented without PrefixLM attention mask. This model series may be deprecated in a future release.
+:::
+
+:::{note}
+`mistral-community/pixtral-12b` does not support V1 yet.
+:::
+
+:::{note}
+To use Qwen2.5-VL series models, you have to install Hugging Face Transformers library from source via `pip install git+https://github.com/huggingface/transformers`.
 :::
 
 ### Pooling Models
@@ -923,6 +978,26 @@ The following table lists those that are tested in vLLM.
   * `MrLight/dse-qwen2-2b-mrl-v1`
   *
   * ✅︎
+:::
+
+#### Transcription (`--task transcription`)
+
+Speech2Text models trained specifically for Automatic Speech Recognition.
+
+:::{list-table}
+:widths: 25 25 25 5 5
+:header-rows: 1
+
+- * Architecture
+  * Models
+  * Example HF Models
+  * [LoRA](#lora-adapter)
+  * [PP](#distributed-serving)
+- * `Whisper`
+  * Whisper-based
+  * `openai/whisper-large-v3-turbo`
+  * 🚧
+  * 🚧
 :::
 
 _________________

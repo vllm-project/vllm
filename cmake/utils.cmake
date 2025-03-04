@@ -257,9 +257,9 @@ endmacro()
 #  where `<=` is the version comparison operator.
 # In other words, for each version in `TGT_CUDA_ARCHS` find the highest version
 #  in `SRC_CUDA_ARCHS` that is less or equal to the version in `TGT_CUDA_ARCHS`.
-# We have special handling for 9.0a, if 9.0a is in `SRC_CUDA_ARCHS` and 9.0 is
-#  in `TGT_CUDA_ARCHS` then we should remove 9.0a from `SRC_CUDA_ARCHS` and add
-#  9.0a to the result (and remove 9.0 from TGT_CUDA_ARCHS). 
+# We have special handling for x.0a, if x.0a is in `SRC_CUDA_ARCHS` and x.0 is
+#  in `TGT_CUDA_ARCHS` then we should remove x.0a from `SRC_CUDA_ARCHS` and add
+#  x.0a to the result (and remove x.0 from TGT_CUDA_ARCHS). 
 # The result is stored in `OUT_CUDA_ARCHS`.
 #
 # Example:
@@ -272,14 +272,22 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   list(REMOVE_DUPLICATES SRC_CUDA_ARCHS)
   set(TGT_CUDA_ARCHS_ ${TGT_CUDA_ARCHS})
 
-  # if 9.0a is in SRC_CUDA_ARCHS and 9.0 is in CUDA_ARCHS then we should
-  # remove 9.0a from SRC_CUDA_ARCHS and add 9.0a to _CUDA_ARCHS
+  # if x.0a is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
+  # remove x.0a from SRC_CUDA_ARCHS and add x.0a to _CUDA_ARCHS
   set(_CUDA_ARCHS)
   if ("9.0a" IN_LIST SRC_CUDA_ARCHS)
     list(REMOVE_ITEM SRC_CUDA_ARCHS "9.0a")
     if ("9.0" IN_LIST TGT_CUDA_ARCHS_)
       list(REMOVE_ITEM TGT_CUDA_ARCHS_ "9.0")
       set(_CUDA_ARCHS "9.0a")
+    endif()
+  endif()
+
+  if ("10.0a" IN_LIST SRC_CUDA_ARCHS)
+    list(REMOVE_ITEM SRC_CUDA_ARCHS "10.0a")
+    if ("10.0" IN_LIST TGT_CUDA_ARCHS)
+      list(REMOVE_ITEM TGT_CUDA_ARCHS_ "10.0")
+      set(_CUDA_ARCHS "10.0a")
     endif()
   endif()
 

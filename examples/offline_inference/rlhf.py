@@ -92,7 +92,7 @@ class MyLLM(LLM):
         # a hack to make the script work.
         # stop ray from manipulating CUDA_VISIBLE_DEVICES
         # at the top-level
-        del os.environ["CUDA_VISIBLE_DEVICES"]
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         super().__init__(*args, **kwargs)
 
 
