@@ -394,7 +394,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T], torch.nn.Module):
             self.W_UV_O = torch.nn.Parameter(self.W_UV_O, requires_grad=False)
             self.W_Q_UK = torch.nn.Parameter(self.W_Q_UK, requires_grad=False)
             self.W_UK = torch.nn.Parameter(self.W_UK, requires_grad=False)
-            # self.W_QR
             self.W_QR = torch.nn.Parameter(self.W_QR, requires_grad=False)
             self.tp_size = get_tensor_model_parallel_world_size()
         else:
