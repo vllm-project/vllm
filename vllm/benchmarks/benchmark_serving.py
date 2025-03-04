@@ -754,14 +754,14 @@ def add_options(parser: argparse.ArgumentParser):
     random_group.add_argument(
         "--random-input-len",
         type=int,
-        default=32,
+        default=1024,
         help=
         "Number of input tokens per request, used only for random sampling.",
     )
     random_group.add_argument(
         "--random-output-len",
         type=int,
-        default=32,
+        default=128,
         help=
         "Number of output tokens per request, used only for random sampling.",
     )
