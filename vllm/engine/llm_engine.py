@@ -483,12 +483,14 @@ class LLMEngine:
     def from_engine_args(
         cls,
         engine_args: EngineArgs,
+        engine_config: Optional[VllmConfig],
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
         # Create the engine configs.
-        engine_config = engine_args.create_engine_config(usage_context)
+        if not engine_config:
+            engine_config = engine_args.create_engine_config(usage_context)
         executor_class = cls._get_executor_cls(engine_config)
         # Create the LLM engine.
         engine = cls(

@@ -711,7 +711,7 @@ class ModelConfig:
                 "when expert parallelism is enabled.")
 
     def verify_async_output_proc(self, parallel_config, speculative_config,
-                                 device_config) -> None:
+                                 device_config, use_v1: bool) -> None:
         if not self.use_async_output_proc:
             # Nothing to check
             return
@@ -1094,6 +1094,7 @@ class CacheConfig:
         enable_prefix_caching: bool = False,
         cpu_offload_gb: float = 0,
         calculate_kv_scales: Optional[bool] = None,
+        use_v1: bool = False,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -1105,6 +1106,7 @@ class CacheConfig:
         self.enable_prefix_caching = enable_prefix_caching
         self.cpu_offload_gb = cpu_offload_gb
         self.calculate_kv_scales = calculate_kv_scales
+        self.use_v1 = use_v1
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -1136,6 +1138,10 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
+            if self.use_v1:
+                raise NotImplementedError(
+                    "V1 does not yet support fp8 KV cache. "
+                    "Set VLLM_USE_V1=0 to enable fp8 kv cache.")
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
@@ -1658,7 +1664,7 @@ class SchedulerConfig:
         self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
-            logger.info(
+            logger.debug(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens)
 
@@ -2969,6 +2975,7 @@ class CompilationConfig(BaseModel):
         sufficient for most cases. It might be beneficial to compile for
         certain small batchsizes, where inductor is good at optimizing.
     """ # noqa
+    use_v1: bool = False
     level: int = 0
     debug_dump_path: str = ""
     cache_dir: str = ""
@@ -3095,16 +3102,7 @@ class CompilationConfig(BaseModel):
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
 
         if self.splitting_ops is None:
-            if envs.VLLM_USE_V1:
-                # v1 must split the graph on attention ops
-                # for piecewise cudagraph
-                self.splitting_ops = [
-                    "vllm.unified_attention",
-                    "vllm.unified_attention_with_output",
-                ]
-            else:
-                # v0 uses full graph compilation
-                self.splitting_ops = []
+            self.splitting_ops = []
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
@@ -3199,6 +3197,14 @@ class CompilationConfig(BaseModel):
         self.bs_to_padded_graph_size[
             self.max_capture_size] = self.max_capture_size
 
+    def set_splitting_ops_for_v1(self):
+        # If default, override splitting ops for piecewise cudagraph on V1.
+        if not self.splitting_ops:
+            self.splitting_ops = [
+                "vllm.unified_attention",
+                "vllm.unified_attention_with_output",
+            ]
+
 
 @dataclass
 class VllmConfig:
@@ -3231,6 +3237,7 @@ class VllmConfig:
     additional_config: SupportsHash = field(default=None,
                                             init=True)  # type: ignore
     instance_id: str = ""
+    use_v1: bool = False
 
     def compute_hash(self) -> str:
         """
@@ -3250,6 +3257,7 @@ class VllmConfig:
         vllm_factors: list[Any] = []
         from vllm import __version__
         vllm_factors.append(__version__)
+        vllm_factors.append(self.use_v1)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
         else:
@@ -3369,7 +3377,8 @@ class VllmConfig:
         if self.model_config is not None:
             self.model_config.verify_async_output_proc(self.parallel_config,
                                                        self.speculative_config,
-                                                       self.device_config)
+                                                       self.device_config,
+                                                       self.use_v1)
             self.model_config.verify_with_parallel_config(self.parallel_config)
 
         if self.cache_config is not None:
@@ -3402,12 +3411,13 @@ class VllmConfig:
 
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
-        if envs.VLLM_USE_V1 and self.model_config is not None and \
+        if self.use_v1 and self.model_config is not None and \
             not self.model_config.enforce_eager:
             # NOTE(woosuk): Currently, we use inductor because the piecewise
             # CUDA graphs do not work properly with the custom CUDA kernels.
             # FIXME(woosuk): Disable inductor to reduce the compilation time
             # and avoid any potential issues with the inductor.
+            # FIXME(rob): Add function to set all of these.
             self.compilation_config.custom_ops = ["none"]
             self.compilation_config.use_cudagraph = True
             self.compilation_config.use_inductor = True
@@ -3415,6 +3425,7 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_noop = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
+            self.compilation_config.set_splitting_ops_for_v1()
 
         self._set_cudagraph_sizes()
 
@@ -3480,7 +3491,7 @@ class VllmConfig:
         """
 
         # calculate the default `batch_size_capture_list`
-        if not envs.VLLM_USE_V1:
+        if not self.use_v1:
             batch_size_capture_list = []
             max_batchsize_to_capture = 0
             if self.scheduler_config is not None and \

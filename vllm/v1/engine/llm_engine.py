@@ -94,6 +94,7 @@ class LLMEngine:
     def from_engine_args(
         cls,
         engine_args: EngineArgs,
+        engine_config: Optional[VllmConfig] = None,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
         enable_multiprocessing: bool = False,
@@ -101,15 +102,16 @@ class LLMEngine:
         """Creates an LLM engine from the engine arguments."""
 
         # Create the engine configs.
-        vllm_config = engine_args.create_engine_config(usage_context)
-        executor_class = Executor.get_class(vllm_config)
+        if engine_config is None:
+            engine_config = engine_args.create_engine_config(usage_context)
+        executor_class = Executor.get_class(engine_config)
 
         if envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.debug("Enabling multiprocessing for LLMEngine.")
             enable_multiprocessing = True
 
         # Create the LLMEngine.
-        return cls(vllm_config=vllm_config,
+        return cls(vllm_config=engine_config,
                    executor_class=executor_class,
                    log_stats=not engine_args.disable_log_stats,
                    usage_context=usage_context,

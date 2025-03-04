@@ -61,6 +61,10 @@ class XPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        if vllm_config.use_v1:
+            raise NotImplementedError(
+                "V1 is not supported on XPU. Set VLLM_USE_V1=0")
+
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16

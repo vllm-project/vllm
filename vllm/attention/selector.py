@@ -86,12 +86,9 @@ def get_attn_backend(
     is_attention_free: bool,
     is_blocksparse: bool = False,
     use_mla: bool = False,
+    use_v1: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
-    # Accessing envs.* behind an @lru_cache decorator can cause the wrong
-    # value to be returned from the cache if the value changes between calls.
-    # To avoid this, we read envs.VLLM_USE_V1 here and pass it explicitly to the
-    # private function.
     return _cached_get_attn_backend(
         head_size=head_size,
         dtype=dtype,
@@ -99,7 +96,7 @@ def get_attn_backend(
         block_size=block_size,
         is_attention_free=is_attention_free,
         is_blocksparse=is_blocksparse,
-        use_v1=envs.VLLM_USE_V1,
+        use_v1=use_v1,
         use_mla=use_mla,
     )
 

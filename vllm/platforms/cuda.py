@@ -91,13 +91,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        if enforce_eager:
-            logger.warning(
-                "To see benefits of async output processing, enable CUDA "
-                "graph. Since, enforce-eager is enabled, async output "
-                "processor cannot be used")
-            return False
-        return True
+        return not enforce_eager
 
     @classmethod
     def is_full_nvlink(cls, device_ids: List[int]) -> bool:
@@ -114,7 +108,7 @@ class CudaPlatformBase(Platform):
 
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
-                if envs.VLLM_USE_V1:
+                if vllm_config.use_v1:
                     raise NotImplementedError(
                         "Multi-step scheduling is not supported (and not "
                         "needed) on VLLM V1. Please launch without "
@@ -123,7 +117,7 @@ class CudaPlatformBase(Platform):
                     parallel_config.worker_cls = \
                         "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
-                if envs.VLLM_USE_V1:
+                if vllm_config.use_v1:
                     parallel_config.worker_cls = \
                             "vllm.v1.worker.gpu_worker.Worker"
                 else:
@@ -132,7 +126,7 @@ class CudaPlatformBase(Platform):
                     parallel_config.sd_worker_cls = \
                         "vllm.worker.worker.Worker"
             else:
-                if envs.VLLM_USE_V1:
+                if vllm_config.use_v1:
                     parallel_config.worker_cls = \
                             "vllm.v1.worker.gpu_worker.Worker"
                 else:
@@ -223,6 +217,7 @@ class CudaPlatformBase(Platform):
                 "Cannot use FlashAttention-2 backend for dtype other than "
                 "torch.float16 or torch.bfloat16.")
             target_backend = _Backend.XFORMERS
+
         elif kv_cache_dtype is not None and \
             kv_cache_dtype.startswith("fp8"):
             logger.info(
@@ -237,7 +232,6 @@ class CudaPlatformBase(Platform):
                 "Cannot use FlashAttention-2 backend for block size not "
                 "divisible by 16.")
             target_backend = _Backend.XFORMERS
-
         # FlashAttn is valid for the model, checking if the package is
         # installed.
         if target_backend == _Backend.FLASH_ATTN:
