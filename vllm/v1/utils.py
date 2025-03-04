@@ -5,8 +5,8 @@ import os
 import weakref
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Generic, List,
-                    Optional, TypeVar, Union, overload)
+from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
+                    Union, overload)
 
 import torch
 
@@ -24,7 +24,7 @@ T = TypeVar("T")
 
 class ConstantList(Generic[T], Sequence):
 
-    def __init__(self, x: List[T]) -> None:
+    def __init__(self, x: list[T]) -> None:
         self._x = x
 
     def append(self, item):
@@ -57,10 +57,10 @@ class ConstantList(Generic[T], Sequence):
         ...
 
     @overload
-    def __getitem__(self, s: slice, /) -> List[T]:
+    def __getitem__(self, s: slice, /) -> list[T]:
         ...
 
-    def __getitem__(self, item: Union[int, slice]) -> Union[T, List[T]]:
+    def __getitem__(self, item: Union[int, slice]) -> Union[T, list[T]]:
         return self._x[item]
 
     @overload
@@ -71,7 +71,7 @@ class ConstantList(Generic[T], Sequence):
     def __setitem__(self, s: slice, value: T, /):
         ...
 
-    def __setitem__(self, item: Union[int, slice], value: Union[T, List[T]]):
+    def __setitem__(self, item: Union[int, slice], value: Union[T, list[T]]):
         raise Exception("Cannot set item in a constant list")
 
     def __delitem__(self, item):
@@ -99,7 +99,7 @@ class BackgroundProcHandle:
         output_path: str,
         process_name: str,
         target_fn: Callable,
-        process_kwargs: Dict[Any, Any],
+        process_kwargs: dict[Any, Any],
     ):
         context = get_mp_context()
         reader, writer = context.Pipe(duplex=False)
@@ -146,9 +146,9 @@ def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
 
 
 def bind_kv_cache(
-    kv_caches: Dict[str, torch.Tensor],
-    forward_context: Dict[str, "Attention"],
-    runner_kv_caches: List[torch.Tensor],
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, "Attention"],
+    runner_kv_caches: list[torch.Tensor],
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -188,3 +188,16 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
         forward_context[layer_name].kv_cache = [kv_cache]
+
+
+def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
+               length: int) -> torch.Tensor:
+    """
+    Copy the first length elements of a tensor into another tensor in a
+    non-blocking manner.
+
+    Used to copy pinned CPU tensor data to pre-allocated GPU tensors.
+
+    Returns the sliced target tensor.
+    """
+    return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)

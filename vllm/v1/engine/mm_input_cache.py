@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from vllm.config import ModelConfig
+from vllm.envs import VLLM_MM_INPUT_CACHE_SIZE
 from vllm.logger import init_logger
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
                              MultiModalKwargs, MultiModalRegistry)
@@ -28,9 +29,8 @@ logger = init_logger(__name__)
 # client (=P0) and server (=P1) processes.
 
 # Both Client and Server must use the same cache size
-# (to perform mirrored caching)
-# TODO: Tune the MM cache size
-MM_CACHE_SIZE = 256
+# (to perform mirrored caching). This cache size is set by the environment
+# variable VLLM_MM_INPUT_CACHE_SIZE.
 
 
 # TODO(ywang96): Deprecate this class once all multimodal models migrate to use
@@ -50,7 +50,8 @@ class MMInputCacheClient:
 
         # Init cache
         self.use_cache = not model_config.disable_mm_preprocessor_cache
-        self.mm_cache = LRUCache[str, MultiModalKwargs](MM_CACHE_SIZE)
+        self.mm_cache = LRUCache[str,
+                                 MultiModalKwargs](VLLM_MM_INPUT_CACHE_SIZE)
 
         # DEBUG: Set to None to disable
         self.mm_debug_cache_hit_ratio_steps = None
@@ -67,10 +68,10 @@ class MMInputCacheClient:
     def process_inputs(
         self,
         mm_data: MultiModalDataDict,
-        mm_hashes: Optional[List[str]],
-        mm_processor_kwargs: Optional[Dict[str, Any]],
-        precomputed_mm_inputs: Optional[List[MultiModalKwargs]],
-    ) -> List[MultiModalKwargs]:
+        mm_hashes: Optional[list[str]],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+        precomputed_mm_inputs: Optional[list[MultiModalKwargs]],
+    ) -> list[MultiModalKwargs]:
         if precomputed_mm_inputs is None:
             image_inputs = mm_data["image"]
             if not isinstance(image_inputs, list):
@@ -87,7 +88,7 @@ class MMInputCacheClient:
         # Process each image input separately, so that later we can schedule
         # them in a fine-grained manner.
         # Apply caching (if enabled) and reuse precomputed inputs (if provided)
-        ret_inputs: List[MultiModalKwargs] = []
+        ret_inputs: list[MultiModalKwargs] = []
         for input_id in range(num_inputs):
             if self.mm_debug_cache_hit_ratio_steps is not None:
                 self.cache_hit_ratio(self.mm_debug_cache_hit_ratio_steps)
@@ -127,13 +128,14 @@ class MMInputCacheServer:
 
     def __init__(self, model_config):
         self.use_cache = not model_config.disable_mm_preprocessor_cache
-        self.mm_cache = LRUCache[str, MultiModalKwargs](MM_CACHE_SIZE)
+        self.mm_cache = LRUCache[str,
+                                 MultiModalKwargs](VLLM_MM_INPUT_CACHE_SIZE)
 
     def get_and_update(
         self,
-        mm_inputs: List[Optional[MultiModalKwargs]],
-        mm_hashes: List[str],
-    ) -> List[MultiModalKwargs]:
+        mm_inputs: list[Optional[MultiModalKwargs]],
+        mm_hashes: list[str],
+    ) -> list[MultiModalKwargs]:
         assert len(mm_inputs) == len(mm_hashes)
 
         if not self.use_cache:

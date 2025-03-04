@@ -1,7 +1,7 @@
 #include <cudaTypedefs.h>
 #include "c3x/scaled_mm_kernels.hpp"
 
-#include "core/math.hpp"
+#include "cuda_utils.h"
 
 /*
    This file defines quantized GEMM operations using the CUTLASS 3.x API, for
@@ -33,7 +33,8 @@ void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
     auto make_group_shape = [](torch::Tensor const& x,
                                torch::Tensor const& s) -> GroupShape {
       TORCH_CHECK(s.dim() == 2, "cutlass_scaled_mm group scales must be 2D");
-      return {ceil_div(x.size(0), s.size(0)), ceil_div(x.size(1), s.size(1))};
+      return {cuda_utils::ceil_div(x.size(0), s.size(0)),
+              cuda_utils::ceil_div(x.size(1), s.size(1))};
     };
 
     GroupShape a_scale_group_shape = make_group_shape(a, a_scales);
@@ -70,3 +71,28 @@ void cutlass_scaled_mm_azp_sm90(torch::Tensor& out, torch::Tensor const& a,
   vllm::cutlass_scaled_mm_azp_sm90_int8(out, a, b, a_scales, b_scales, azp_adj,
                                         azp, bias);
 }
+
+#if defined CUDA_VERSION && CUDA_VERSION >= 12080
+
+void cutlass_scaled_mm_sm100(torch::Tensor& c, torch::Tensor const& a,
+                             torch::Tensor const& b,
+                             torch::Tensor const& a_scales,
+                             torch::Tensor const& b_scales,
+                             std::optional<torch::Tensor> const& bias) {
+  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+
+  int M = a.size(0), N = b.size(1), K = a.size(1);
+  TORCH_CHECK(
+      (a_scales.numel() == 1 || a_scales.numel() == a.size(0)) &&
+          (b_scales.numel() == 1 || b_scales.numel() == b.size(1)),
+      "Currently, block scaled fp8 gemm is not implemented for Blackwell");
+
+  // Standard per-tensor/per-token/per-channel scaling
+  TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
+  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn,
+              "Currently, only fp8 gemm is implemented for Blackwell");
+  vllm::cutlass_scaled_mm_sm100_fp8(c, a, b, a_scales, b_scales, bias);
+}
+
+#endif

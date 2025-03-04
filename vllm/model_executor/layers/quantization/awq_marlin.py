@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.awq import (AWQConfig,
                                                          is_layer_skipped_awq)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
@@ -46,6 +47,7 @@ class AWQMarlinConfig(QuantizationConfig):
                  lm_head_quantized: bool,
                  modules_to_not_convert: Optional[List[str]],
                  full_config: Dict[str, Any]) -> None:
+        super().__init__()
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
         self.zero_point = zero_point
@@ -134,7 +136,12 @@ class AWQMarlinConfig(QuantizationConfig):
                     self.full_config).get_quant_method(layer, prefix)
             return AWQMarlinLinearMethod(self)
         elif isinstance(layer, FusedMoE):
-            return AWQMoEMethod(self)
+            if layer.local_num_experts > 32:
+                # For MoEs with many experts the moe_wna16 kernel is faster
+                return MoeWNA16Config.from_config(
+                    self.full_config).get_quant_method(layer, prefix)
+            else:
+                return AWQMoEMethod(self)
         return None
 
     @classmethod
@@ -457,10 +464,19 @@ class AWQMoEMethod(FusedMoEMethodBase):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
     ) -> torch.Tensor:
+        assert activation == "silu", "Only SiLU activation is supported."
+        if expert_map is not None:
+            raise NotImplementedError(
+                "Expert Parallelism is not supported for "
+                "fused Marlin MoE method.")
+
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,

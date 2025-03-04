@@ -8,6 +8,7 @@ import os
 import tempfile
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import filelock
@@ -15,8 +16,7 @@ import gguf
 import huggingface_hub.constants
 import numpy as np
 import torch
-from huggingface_hub import (HfFileSystem, hf_hub_download, scan_cache_dir,
-                             snapshot_download)
+from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
@@ -68,8 +68,10 @@ class DisabledTqdm(tqdm):
         super().__init__(*args, **kwargs, disable=True)
 
 
-def get_lock(model_name_or_path: str, cache_dir: Optional[str] = None):
+def get_lock(model_name_or_path: Union[str, Path],
+             cache_dir: Optional[str] = None):
     lock_dir = cache_dir or temp_dir
+    model_name_or_path = str(model_name_or_path)
     os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
     model_name = model_name_or_path.replace("/", "-")
     hash_name = hashlib.sha256(model_name.encode()).hexdigest()
@@ -239,7 +241,8 @@ def download_weights_from_hf(
     Returns:
         str: The path to the downloaded model weights.
     """
-    if not huggingface_hub.constants.HF_HUB_OFFLINE:
+    local_only = huggingface_hub.constants.HF_HUB_OFFLINE
+    if not local_only:
         # Before we download we look at that is available:
         fs = HfFileSystem()
         file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
@@ -255,7 +258,6 @@ def download_weights_from_hf(
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
-        start_size = scan_cache_dir().size_on_disk
         start_time = time.perf_counter()
         hf_folder = snapshot_download(
             model_name_or_path,
@@ -264,13 +266,12 @@ def download_weights_from_hf(
             cache_dir=cache_dir,
             tqdm_class=DisabledTqdm,
             revision=revision,
-            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+            local_files_only=local_only,
         )
-        end_time = time.perf_counter()
-        end_size = scan_cache_dir().size_on_disk
-        if end_size != start_size:
-            logger.info("Time took to download weights for %s: %.6f seconds",
-                        model_name_or_path, end_time - start_time)
+        time_taken = time.perf_counter() - start_time
+        if time_taken > 0.5:
+            logger.info("Time spent downloading weights for %s: %.6f seconds",
+                        model_name_or_path, time_taken)
     return hf_folder
 
 
@@ -498,7 +499,6 @@ def gguf_quant_weights_iterator(
             weight = tensor.data
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
-
             if weight_type.name != "F32":
                 name = name.replace("weight", "qweight")
             param = torch.tensor(weight)

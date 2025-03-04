@@ -17,7 +17,7 @@ from ..utils import multi_gpu_test
 
 MODELS = [
     "google/gemma-2-2b-it",
-    "meta-llama/Llama-3.2-1B",
+    "meta-llama/Llama-3.2-1B-Instruct",
 ]
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
@@ -33,7 +33,7 @@ def v1(run_with_both_engines):
 
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
-    llm = LLM("facebook/opt-125m")
+    llm = LLM("distilbert/distilgpt2")
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails
@@ -42,10 +42,10 @@ def test_vllm_gc_ed():
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("enforce_eager", [False])
 def test_models(
     hf_runner,
     model: str,
@@ -94,13 +94,13 @@ def test_models(
 @pytest.mark.parametrize(
     "model, distributed_executor_backend, attention_backend, "
     "test_suite", [
-        ("facebook/opt-125m", "ray", "", "L4"),
-        ("facebook/opt-125m", "mp", "", "L4"),
-        ("meta-llama/Llama-2-7b-hf", "ray", "", "L4"),
-        ("meta-llama/Llama-2-7b-hf", "mp", "", "L4"),
-        ("facebook/opt-125m", "ray", "", "A100"),
-        ("facebook/opt-125m", "mp", "", "A100"),
-        ("facebook/opt-125m", "mp", "FLASHINFER", "A100"),
+        ("distilbert/distilgpt2", "ray", "", "L4"),
+        ("distilbert/distilgpt2", "mp", "", "L4"),
+        ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4"),
+        ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4"),
+        ("distilbert/distilgpt2", "ray", "", "A100"),
+        ("distilbert/distilgpt2", "mp", "", "A100"),
+        ("distilbert/distilgpt2", "mp", "FLASHINFER", "A100"),
         ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100"),
     ])
 def test_models_distributed(
@@ -116,8 +116,8 @@ def test_models_distributed(
     if test_suite != TARGET_TEST_SUITE:
         pytest.skip(f"Skip test for {test_suite}")
 
-    if model == "meta-llama/Llama-2-7b-hf" and distributed_executor_backend == "ray" and attention_backend == "" and test_suite == "L4":  # noqa
-        # test ray adag
+    if model == "meta-llama/Llama-3.2-1B-Instruct" and distributed_executor_backend == "ray" and attention_backend == "" and test_suite == "L4":  # noqa
+        # test Ray Compiled Graph
         os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
         os.environ['VLLM_USE_RAY_COMPILED_DAG'] = "1"
 

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import io
-from typing import AsyncGenerator, Optional, Union, cast
+from collections.abc import AsyncGenerator
+from typing import Optional, Union, cast
 
 from fastapi import Request
 
@@ -295,6 +296,7 @@ class OpenAIServingTranscription(OpenAIServing):
         # TODO(rob): figure out a way to pipe streaming in.
         # Non-streaming response.
         try:
+            assert result_generator is not None
             async for op in result_generator:
                 result = op
             return TranscriptionResponse(text=result.outputs[0].text)

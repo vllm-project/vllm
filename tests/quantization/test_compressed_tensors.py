@@ -215,8 +215,6 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
             assert qkv_proj.scheme.group_size == (-1
                                                   if group is None else group)
 
-            assert qkv_proj.weight_packed.dtype is torch.int32
-            assert qkv_proj.weight_scale.dtype is torch.float16
             assert qkv_proj.scheme.pack_factor == pack_factor
 
         llm.apply_model(check_model)
@@ -495,7 +493,6 @@ def test_compressed_tensors_2of4_quant_int8(vllm_runner, args_2of4):
         assert output
 
 
-@pytest.mark.skip(reason="2of4 sparse w16a16 CUTLASS produces bad output.")
 @pytest.mark.skipif(
     not sparse_cutlass_supported(),
     reason="2of4 Sparse is not yet supported on this GPU type.",

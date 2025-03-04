@@ -2,7 +2,7 @@
 -r requirements-common.txt
 
 # Dependencies for NVIDIA GPUs
-ray[default] >= 2.9
+ray[cgraph] >= 2.43.0 # Ray Compiled Graph, required for pipeline parallelism in V1.
 torch == 2.5.1
 torchaudio==2.5.1
 # These must be updated alongside torch
