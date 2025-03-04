@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# usage: VLLM_USE_V1=1 python examples/offline_inference/data_parallel.py
+# usage:
+# VLLM_TEST_ENABLE_EP=1 VLLM_USE_V1=1 \
+#   python examples/offline_inference/data_parallel.py
 # we need to have a launcher to create multiple data parallel
 # ranks. And each rank will create a vLLM instance to process its own prompts.
 import os
@@ -51,7 +53,7 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
                                      max_tokens=16 * (dp_rank + 1))
 
     # Create an LLM.
-    llm = LLM(model="neuralmagic/Mixtral-8x7B-Instruct-v0.1-FP8",
+    llm = LLM(model="Qwen/Qwen1.5-MoE-A2.7B",
               tensor_parallel_size=GPUs_per_dp_rank,
               enforce_eager=True)
     outputs = llm.generate(prompts, sampling_params)
