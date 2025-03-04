@@ -2,7 +2,6 @@
 import json
 import re
 from copy import deepcopy
-from typing import List
 from unittest.mock import MagicMock
 
 import pytest
@@ -220,7 +219,7 @@ VALID_TOOLS = [t[0] for t in VALID_TOOL_OUTPUTS]
     ])
 def test_guided_json(sample_output, should_match):
     _compile_and_check(tools=TypeAdapter(
-        List[ChatCompletionToolsParam]).validate_python(EXAMPLE_TOOLS),
+        list[ChatCompletionToolsParam]).validate_python(EXAMPLE_TOOLS),
                        sample_output=sample_output,
                        should_match=should_match)
 
@@ -277,7 +276,7 @@ def test_guided_json_without_parameters(sample_output, should_match,
                                         update_parameters):
     updated_tools = [deepcopy(EXAMPLE_TOOLS[0])]
     tools = TypeAdapter(
-        List[ChatCompletionToolsParam]).validate_python(updated_tools)
+        list[ChatCompletionToolsParam]).validate_python(updated_tools)
     tools = list(map(update_parameters, tools))
     assert all([
         tool.function.parameters is None or tool.function.parameters == {}

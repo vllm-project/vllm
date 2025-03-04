@@ -1,20 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Set up this example by starting a vLLM OpenAI-compatible server with tool call
-options enabled. For example:
+To run this example, you can start the vLLM server 
+without any specific flags:
 
-IMPORTANT: for mistral, you must use one of the provided mistral tool call
-templates, or your own - the model default doesn't work for tool calls with vLLM
-See the vLLM docs on OpenAI server & tool calling for more details.
+```bash
+vllm serve unsloth/Llama-3.2-1B-Instruct
+```
 
-vllm serve --model mistralai/Mistral-7B-Instruct-v0.3 \
-            --chat-template examples/tool_chat_template_mistral.jinja \
-            --enable-auto-tool-choice --tool-call-parser mistral
-
-OR
-vllm serve --model NousResearch/Hermes-2-Pro-Llama-3-8B \
-            --chat-template examples/tool_chat_template_hermes.jinja \
-            --enable-auto-tool-choice --tool-call-parser hermes
+This example demonstrates how to generate chat completions 
+using the OpenAI Python client library.
 """
 
 from openai import OpenAI
@@ -116,11 +110,26 @@ messages = [
         "role":
         "user",
         "content":
-        "Can you tell me what the temperate will be in Dallas, in fahrenheit?",
+        "Can you tell me what the current weather is in Dallas \
+            and the forecast for the next 5 days, in fahrenheit?",
     },
 ]
+
+chat_completion = client.chat.completions.create(
+    messages=messages,
+    model=model,
+    tools=tools,
+    tool_choice="required",
+    stream=True  # Enable streaming response
+)
+
+for chunk in chat_completion:
+    if chunk.choices and chunk.choices[0].delta.tool_calls:
+        print(chunk.choices[0].delta.tool_calls)
 
 chat_completion = client.chat.completions.create(messages=messages,
                                                  model=model,
                                                  tools=tools,
                                                  tool_choice="required")
+
+print(chat_completion.choices[0].message.tool_calls)
