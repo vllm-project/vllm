@@ -84,7 +84,7 @@ class TopKTopPSampler(nn.Module):
     def forward_tpu(
         self,
         logits: torch.Tensor,
-        generators: Dict[int, torch.Generator],
+        generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
     ) -> torch.Tensor:
