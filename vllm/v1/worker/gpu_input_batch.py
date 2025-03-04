@@ -302,6 +302,7 @@ class InputBatch:
             self.has_allowed_token_ids.add(req_id)
             if self.allowed_token_ids_mask_cpu_tensor is None:
                 # Lazy allocation for this tensor, which can be large.
+                # False means we don't fill with -inf.
                 self.allowed_token_ids_mask = torch.zeros(self.max_num_reqs,
                                                           self.vocab_size,
                                                           dtype=torch.bool,
@@ -312,6 +313,7 @@ class InputBatch:
                     dtype=torch.bool,
                     device="cpu")
             self.allowed_token_ids_mask_cpu_tensor[req_index] = True
+            # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index][
                 sampling_params.allowed_token_ids] = False
 
@@ -362,7 +364,8 @@ class InputBatch:
         self.logit_bias[req_index] = None
         self.has_allowed_token_ids.discard(req_id)
         if self.allowed_token_ids_mask_cpu_tensor is not None:
-            self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(True)
+            # False means we don't fill with -inf.
+            self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
