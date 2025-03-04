@@ -4,7 +4,8 @@ from typing import Any, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.backends.abstract import (AttentionType,
+                                              is_quantized_kv_cache)
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
@@ -60,6 +61,10 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "TritonMLAImpl")
+
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError(
+                "TritonMLA V1 with FP8 KV cache not yet supported")
 
     def _forward_decode(
         self,
