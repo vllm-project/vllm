@@ -395,6 +395,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type == "phi3_v":
                 # Workaround since this token is not defined in the tokenizer
                 return f"<|image_{current_count}|>"
+            if model_type == "phi4mm":
+                return "<|endoftext10|>"  # 200010 (see vocab.json in hf model)
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<image>./</image>)"
             if model_type in ("blip-2", "chatglm", "fuyu", "paligemma",
@@ -424,6 +426,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         elif modality == "audio":
             if model_type == "ultravox":
                 return "<|audio|>"
+            if model_type == "phi4mm":
+                return "<|endoftext11|>"  # 200011 (see vocab.json in hf model)
             if model_type == "qwen2_audio":
                 return (f"Audio {current_count}: "
                         f"<|audio_bos|><|AUDIO|><|audio_eos|>")
