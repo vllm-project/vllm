@@ -591,7 +591,7 @@ timm==1.0.11
     # via -r requirements-test.in
 tokenizers==0.21.0
     # via transformers
-torch==2.5.1
+torch==2.6.0
     # via
     #   -r requirements-test.in
     #   accelerate
@@ -607,12 +607,12 @@ torch==2.5.1
     #   torchvision
     #   vector-quantize-pytorch
     #   vocos
-torchaudio==2.5.1
+torchaudio==2.6.6
     # via
     #   -r requirements-test.in
     #   encodec
     #   vocos
-torchvision==0.20.1
+torchvision==0.21.0
     # via timm
 tqdm==4.66.6
     # via
