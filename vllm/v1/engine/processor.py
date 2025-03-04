@@ -302,7 +302,7 @@ class Processor:
         if self.model_config.is_multimodal_model:
             max_prompt_len = self.model_config.max_model_len
 
-            if len(prompt_ids) > max_prompt_len:
+            if len(prompt_ids) >= max_prompt_len:
                 raise ValueError(
                     f"The prompt (total length {len(prompt_ids)}) is too long "
                     f"to fit into the model (context length {max_prompt_len}). "
