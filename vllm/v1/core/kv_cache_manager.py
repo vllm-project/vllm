@@ -101,8 +101,9 @@ class KVCacheManager:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
-        if not self.enable_caching:
-            # Prefix caching is disabled.
+        if (not self.enable_caching
+                or request.sampling_params.prompt_logprobs is not None):
+            # Prefix caching is disabled or prompt logprobs request
             return [], 0
 
         computed_blocks = []
