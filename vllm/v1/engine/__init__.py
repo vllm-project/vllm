@@ -134,6 +134,15 @@ class EngineCoreOutputs(
     timestamp: float = 0.0
 
     utility_output: Optional[UtilityOutput] = None
+    finished_requests: list[str] = []
+
+    # In DP case, used to signal that the engine is paused.
+    engine_paused: bool = False
+
+    # Set to True to indicate stats should be accumulated rather than
+    # recorded, when there are remaining outputs from other engines
+    # for this iteration.
+    accumulate_stats: bool = False
 
     def __post_init__(self):
         if self.timestamp == 0.0:
@@ -147,4 +156,5 @@ class EngineCoreRequestType(enum.Enum):
     """
     ADD = b'\x00'
     ABORT = b'\x01'
-    UTILITY = b'\x02'
+    START_DP = b'\x02'
+    UTILITY = b'\x03'

@@ -94,6 +94,8 @@ class AsyncLLM(EngineClient):
 
         self.output_handler: Optional[asyncio.Task] = None
 
+        self.scheduler_stats: Optional[SchedulerStats] = None
+
     @classmethod
     def from_engine_args(
         cls,
@@ -252,11 +254,10 @@ class AsyncLLM(EngineClient):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
 
         try:
+            iteration_stats = IterationStats() if self.log_stats else None
             while True:
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
-
-                iteration_stats = IterationStats() if self.log_stats else None
 
                 # Split outputs into chunks of at most
                 # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
@@ -290,6 +291,7 @@ class AsyncLLM(EngineClient):
                 self._record_stats(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
+                    more_to_come=outputs.accumulate_stats,
                 )
 
         except Exception as e:
@@ -310,15 +312,27 @@ class AsyncLLM(EngineClient):
         self,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
+        more_to_come: bool,
     ):
         if not self.log_stats:
             return
 
         assert scheduler_stats is not None
         assert iteration_stats is not None
-        for stat_logger in self.stat_loggers:
-            stat_logger.record(scheduler_stats=scheduler_stats,
-                               iteration_stats=iteration_stats)
+        if self.scheduler_stats is None:
+            self.scheduler_stats = scheduler_stats
+        else:
+            self.scheduler_stats.add(scheduler_stats)
+
+        if not more_to_come:
+            self.output_processor.lora_states.update_iteration_stats(
+                iteration_stats)
+
+            for stat_logger in self.stat_loggers:
+                stat_logger.record(scheduler_stats=self.scheduler_stats,
+                                   iteration_stats=iteration_stats)
+            self.scheduler_stats = None
+            iteration_stats.clear()
 
     def encode(
         self,
