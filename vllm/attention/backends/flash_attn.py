@@ -626,6 +626,9 @@ class FlashAttentionImpl(AttentionImpl):
         self.sliding_window = ((sliding_window - 1,
                                 0) if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
+        if self.kv_cache_dtype.startswith("fp8"):
+            raise NotImplementedError(
+                "FlashAttention with FP8 KV cache not yet supported")
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0

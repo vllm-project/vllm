@@ -58,6 +58,10 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                       "are not implemented for "
                                       "TritonMLAImpl")
 
+        if self.kv_cache_dtype.startswith("fp8"):
+            raise NotImplementedError(
+                "TritonMLA with FP8 KV cache not yet supported")
+
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
@@ -66,8 +70,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         attn_metadata: MLACommonMetadata,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
-        if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 Triton MLA not yet supported")
 
         decode_meta = attn_metadata.decode_metadata
         assert decode_meta is not None
