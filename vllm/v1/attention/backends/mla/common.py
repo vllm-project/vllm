@@ -224,18 +224,24 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_quantize)
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
+from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
+    is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
     from flash_attn import flash_attn_varlen_func
+    is_vllm_fa = False
+from vllm.attention.ops.triton_flash_attention import triton_attention
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler_output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+is_hip = current_platform.is_rocm()
 
 logger = init_logger(__name__)
 
@@ -579,14 +585,77 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.o_proj = o_proj
         self.vllm_flash_attn_version = get_flash_attn_version()
 
+        self.triton_fa_func = triton_attention
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
         # latter has an additional parameter to control FA2 vs FA3
         self.flash_attn_varlen_func = flash_attn_varlen_func
+        self.vllm_flash_attn_version = get_flash_attn_version()
         if self.vllm_flash_attn_version is not None:
             self.flash_attn_varlen_func = \
                 functools.partial(flash_attn_varlen_func,
                                   fa_version=self.vllm_flash_attn_version)
+
+        # For MLA the v head dim is smaller than qk head dim so we pad out
+        # v with 0s to match the qk head dim for attention backends that do
+        # not support different headdims
+        # We don't need to pad V if we are on a hopper system with FA3
+        self._pad_v = self.vllm_flash_attn_version is None or not (
+            self.vllm_flash_attn_version == 3
+            and current_platform.get_device_capability()[0] == 9)
+
+    def _flash_attn_varlen_diff_headdims(self,
+                                         q,
+                                         k,
+                                         v,
+                                         return_softmax_lse=False,
+                                         softmax_scale=None,
+                                         **kwargs):
+        maybe_padded_v = v
+        if self._pad_v:
+            maybe_padded_v = torch.nn.functional.pad(
+                v, [0, q.shape[-1] - v.shape[-1]], value=0)
+
+        if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN:
+            assert return_softmax_lse is False
+            attn_out = self.triton_fa_func(
+                q,
+                k,
+                maybe_padded_v,
+                sm_scale=softmax_scale,
+                **kwargs,
+            )
+        elif is_vllm_fa:
+            attn_out = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=maybe_padded_v,
+                return_softmax_lse=return_softmax_lse,
+                softmax_scale=softmax_scale,
+                **kwargs,
+            )
+        else:
+            # Use return_attn_probs instead of return_softmax_lse for RoCM
+            attn_out = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=maybe_padded_v,
+                return_attn_probs=return_softmax_lse,
+                softmax_scale=softmax_scale,
+                **kwargs,
+            )
+
+        # Remain consistent with old `flash_attn_varlen_func` where there
+        # is only one output tensor if `return_softmax_lse` is False.
+        # only unpack if it is a tuple to avoid unpacking tensors by accident
+        if isinstance(attn_out, tuple):
+            attn_out, *rest = attn_out
+            # unpad if necessary
+            if self._pad_v:
+                attn_out = attn_out[..., :v.shape[-1]]
+            return attn_out, *rest
+        else:
+            return attn_out[..., :v.shape[-1]] if self._pad_v else attn_out
 
     def _v_up_proj_and_o_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
@@ -835,24 +904,19 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                           dim=-1)
 
-            # For MLA the v head dim is smaller than qk head dim so we pad
-            # out v with 0s to match the qk head dim
-            v_padded = torch.nn.functional.pad(v,
-                                               [0, q.shape[-1] - v.shape[-1]],
-                                               value=0)
-
-            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=attn_metadata.query_start_loc,
-                cu_seqlens_k=attn_metadata.context_chunk_cu_seq_lens[i],
-                max_seqlen_q=attn_metadata.max_query_len,
-                max_seqlen_k=attn_metadata.context_chunk_max_seq_lens[i],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_softmax_lse=True,
-            )
+            attn_output, attn_softmax_lse = \
+                self._flash_attn_varlen_diff_headdims(
+                    q=q,
+                    k=k,
+                    v=v,
+                    cu_seqlens_q=attn_metadata.query_start_loc,
+                    cu_seqlens_k=attn_metadata.context_chunk_cu_seq_lens[i],
+                    max_seqlen_q=attn_metadata.max_query_len,
+                    max_seqlen_k=attn_metadata.context_chunk_max_seq_lens[i],
+                    softmax_scale=self.scale,
+                    causal=False,  # Context is unmasked
+                    return_softmax_lse=True,
+                )
 
             if output is None:
                 output = attn_output
