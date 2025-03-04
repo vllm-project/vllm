@@ -20,6 +20,8 @@ from ..utils import init_test_distributed_environment, multi_process_parallel
 @ray.remote(num_gpus=1, max_calls=1)
 def all_reduce_test_worker(tp_size: int, pp_size: int, rank: int,
                            distributed_init_port: str):
+    from vllm.platforms import current_platform
+    
     # it is important to delete the 
     # `vllm.current_platform.device_control_env_var` environment variable
     # so that each worker can see all the GPUs
@@ -43,6 +45,8 @@ def all_reduce_test_worker(tp_size: int, pp_size: int, rank: int,
 @ray.remote(num_gpus=1, max_calls=1)
 def all_gather_test_worker(tp_size: int, pp_size: int, rank: int,
                            distributed_init_port: str):
+    from vllm.platforms import current_platform
+    
     # it is important to delete the 
     # `vllm.current_platform.device_control_env_var` environment variable
     # so that each worker can see all the GPUs
@@ -72,6 +76,8 @@ def all_gather_test_worker(tp_size: int, pp_size: int, rank: int,
 @ray.remote(num_gpus=1, max_calls=1)
 def broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
                                       distributed_init_port: str):
+    from vllm.platforms import current_platform
+    
     # it is important to delete the 
     # `vllm.current_platform.device_control_env_var` environment variable
     # so that each worker can see all the GPUs
@@ -112,6 +118,8 @@ def broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
 @ray.remote(num_gpus=1, max_calls=1)
 def send_recv_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
                                       distributed_init_port: str):
+    from vllm.platforms import current_platform
+    
     os.environ.pop(current_platform.device_control_env_var, None)
     device = torch.device(f"{current_platform.device_name}:{rank}")
     current_platform.set_device(device)
@@ -152,6 +160,8 @@ def send_recv_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
 @ray.remote(num_gpus=1, max_calls=1)
 def send_recv_test_worker(tp_size: int, pp_size: int, rank: int,
                           distributed_init_port: str):
+    from vllm.platforms import current_platform
+    
     os.environ.pop(current_platform.device_control_env_var, None)
     device = torch.device(f"{current_platform.device_name}:{rank}")
     current_platform.set_device(device)
