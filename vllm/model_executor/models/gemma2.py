@@ -57,8 +57,8 @@ class Gemma2MLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        hidden_act: str,
-        hidden_activation: str,
+        hidden_act: Optional[str] = None,
+        hidden_activation: Optional[str] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -70,7 +70,8 @@ class Gemma2MLP(nn.Module):
                                            hidden_size,
                                            bias=False,
                                            quant_config=quant_config)
-        if not (hidden_act == hidden_activation == "gelu_pytorch_tanh"):
+        if not (hidden_act == "gelu_pytorch_tanh"
+                or hidden_activation == "gelu_pytorch_tanh"):
             raise ValueError(
                 "Gemma2 uses `gelu_pytorch_tanh` as the hidden activation "
                 "function. Please set `hidden_act` and `hidden_activation` to "
