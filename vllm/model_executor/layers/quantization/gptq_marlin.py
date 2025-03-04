@@ -569,7 +569,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w13_scales", marlin_w13_scales)
         marlin_w2_scales = marlin_moe_permute_scales(
             s=layer.w2_scales,
-            size_k=layer.w2_scales.shape[1] * self.quant_config.pack_factor,
+            size_k=layer.w2_scales.shape[1] *
+            (self.quant_config.group_size if self.quant_config.group_size != -1
+             else self.quant_config.pack_factor),
             size_n=layer.w2_scales.shape[2],
             group_size=self.quant_config.group_size,
         )
