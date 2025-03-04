@@ -8,6 +8,7 @@
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
 import dataclasses
+import os
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
@@ -140,6 +141,12 @@ class CuMemAllocator:
         return CuMemAllocator.instance
 
     def __init__(self):
+        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+        assert "expandable_segments:True" not in conf, \
+            ("Expandable segments are not compatible with memory pool. "
+            "Please track https://github.com/pytorch/pytorch/issues/147851 "
+            "for the latest updates.")
+
         self.pointer_to_data: Dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
         self.allocator_and_pools: Dict[str, Any] = {}
