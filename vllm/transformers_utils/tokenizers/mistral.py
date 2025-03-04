@@ -436,9 +436,11 @@ class MistralTokenizer(TokenizerBase):
     def decode(self,
                ids: Union[List[int], int],
                skip_special_tokens: bool = True) -> str:
-        assert (
-            skip_special_tokens
-        ), "skip_special_tokens=False is not supported for Mistral tokenizers."
+        if not skip_special_tokens:
+            logger.warning(
+                "skip_special_tokens=False is not supported for Mistral "
+                "tokenizers, replacing with skip_special_tokens=True.")
+            skip_special_tokens = True
 
         if isinstance(ids, int):
             ids = [ids]
@@ -452,9 +454,11 @@ class MistralTokenizer(TokenizerBase):
         from mistral_common.tokens.tokenizers.base import SpecialTokens
 
         # TODO(Patrick) - potentially allow special tokens to not be skipped
-        assert (
-            skip_special_tokens
-        ), "skip_special_tokens=False is not supported for Mistral tokenizers."
+        if not skip_special_tokens:
+            logger.warning(
+                "skip_special_tokens=False is not supported for Mistral "
+                "tokenizers, replacing with skip_special_tokens=True.")
+            skip_special_tokens = True
 
         assert self.is_tekken or self.is_spm, type(self.tokenizer)
 
