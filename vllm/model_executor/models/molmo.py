@@ -4,7 +4,6 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
-from itertools import chain
 from typing import List, Optional, Set, Tuple, TypedDict, Union, cast
 
 import numpy as np
@@ -51,7 +50,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptInsertion, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.utils import JSONTree, json_map_leaves
+from vllm.utils import flatten_2d_lists, JSONTree, json_map_leaves
 
 from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
                          SupportsQuant)
@@ -1592,7 +1591,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
                 image_input["embed_is_patch"],
             )
         ]
-        return list(chain(*nested_embeds))
+        return flatten_2d_lists(nested_embeds)
 
     def get_input_embeddings(
         self,
