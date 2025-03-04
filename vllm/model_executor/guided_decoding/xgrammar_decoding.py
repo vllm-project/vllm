@@ -392,7 +392,7 @@ class XGrammarLogitsProcessor:
     def clone(self) -> XGrammarLogitsProcessor:
         """Create a new instance with shared compiled grammar
           but separate state"""
-        new_processor = XGrammarLogitsProcessor(self.config)
+        new_processor = XGrammarLogitsProcessor(self.config, self.reasoner)
 
         # Share the compiled grammar context (immutable after compilation)
         new_processor.ctx = self.ctx

@@ -81,7 +81,7 @@ Please note that it is not compatible with the OpenAI Python client library. You
 ## Limitations
 
 - The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`).
-- It is not compatible with [`tool_calling`](#tool_calling).
+- It is not compatible with [`tool_calling`](#tool_calling). `xgrammar` is the only structured output engine that supports reasoning content.
 - The reasoning content is not available for all models. Check the model's documentation to see if it supports reasoning.
 
 ## How to support a new reasoning model
