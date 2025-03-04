@@ -500,6 +500,10 @@ def get_open_zmq_ipc_path() -> str:
     return f"ipc://{base_rpc_path}/{uuid4()}"
 
 
+def get_open_zmq_inproc_path() -> str:
+    return f"inproc://{uuid4()}"
+
+
 def get_open_port() -> int:
     """
     Get an open port for the vLLM process to listen on.
@@ -2108,12 +2112,12 @@ def get_exception_traceback():
 def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
     path: str,
-    type: Any,
+    socket_type: Any,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
     mem = psutil.virtual_memory()
-    socket = ctx.socket(type)
+    socket = ctx.socket(socket_type)
 
     # Calculate buffer size based on system memory
     total_mem = mem.total / 1024**3
@@ -2127,16 +2131,16 @@ def make_zmq_socket(
     else:
         buf_size = -1  # Use system default buffer size
 
-    if type == zmq.constants.PULL:
+    if socket_type == zmq.constants.PULL:
         socket.setsockopt(zmq.constants.RCVHWM, 0)
         socket.setsockopt(zmq.constants.RCVBUF, buf_size)
         socket.bind(path)
-    elif type == zmq.constants.PUSH:
+    elif socket_type == zmq.constants.PUSH:
         socket.setsockopt(zmq.constants.SNDHWM, 0)
         socket.setsockopt(zmq.constants.SNDBUF, buf_size)
         socket.connect(path)
     else:
-        raise ValueError(f"Unknown Socket Type: {type}")
+        raise ValueError(f"Unknown Socket Type: {socket_type}")
 
     return socket
 
@@ -2144,14 +2148,14 @@ def make_zmq_socket(
 @contextlib.contextmanager
 def zmq_socket_ctx(
     path: str,
-    type: Any,
+    socket_type: Any,
     linger: int = 0,
-) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
+) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
-        yield make_zmq_socket(ctx, path, type)
+        yield make_zmq_socket(ctx, path, socket_type)
 
     except KeyboardInterrupt:
         logger.debug("Got Keyboard Interrupt.")
