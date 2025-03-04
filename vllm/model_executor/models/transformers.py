@@ -96,23 +96,12 @@ def replace_linear_class(
         "rowwise": RowParallelLinear,
     }.get(style, ReplicatedLinear)
 
-    class HFCompatibleLinear(vllm_linear_cls):
-        """
-        Wrapper class that removes `output_bias` from returned output.
-        """
-        # NOTE: The LoRA layer needs to use `parent_cls`.
-        @property
-        def parent_cls(self) -> type:
-            return vllm_linear_cls
-
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return super().forward(input)[0]
-
-    return HFCompatibleLinear(
+    return vllm_linear_cls(
         input_size=linear.in_features,
         output_size=linear.out_features,
         bias=linear.bias is not None,
         quant_config=quant_config,
+        return_bias=False,
     )
 
 
