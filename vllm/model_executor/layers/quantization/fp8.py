@@ -35,7 +35,9 @@ from vllm.platforms import current_platform
 
 USE_ROCM_AITER_FMOE = envs.VLLM_ROCM_USE_AITER_MOE \
     and current_platform.is_rocm()
-if USE_ROCM_AITER_FMOE:
+USE_ROCM_AITER_FP8_BLOCK_SCALED_MOE = envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE \
+    and current_platform.is_rocm() # noqa: E501
+if USE_ROCM_AITER_FMOE or USE_ROCM_AITER_FP8_BLOCK_SCALED_MOE:
     from aiter.ops.shuffle import shuffle_weight as rocm_aiter_shuffle_weight
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -561,6 +563,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
+            if USE_ROCM_AITER_FMOE and USE_ROCM_AITER_FP8_BLOCK_SCALED_MOE:
+                layer.w13_weight = torch.nn.Parameter(
+                    rocm_aiter_shuffle_weight(layer.w13_weight.data),
+                    requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(rocm_aiter_shuffle_weight(
+                    layer.w2_weight.data),
+                                                     requires_grad=False)
             return
 
         # If checkpoint is fp16, quantize in place.

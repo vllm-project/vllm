@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
-    VLLM_ROCM_USE_AITER_BSCALED_MOE: bool = True
+    VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = True
     VLLM_ROCM_USE_AITER_NORM: bool = True
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -536,10 +536,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
      ("true", "1")),
 
     # use aiter block scaled moe op if aiter ops are enabled
-    "VLLM_ROCM_USE_AITER_BSCALED_MOE":
+    "VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
-             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_BSCALED_MOE",
-                                         "true").lower() in ("true", "1")),
+             ("true", "1") and os.getenv(
+                 "VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE", "true").lower() in
+             ("true", "1")),
 
     # use aiter linear op if aiter ops are enabled
     "VLLM_ROCM_USE_AITER_LINEAR":

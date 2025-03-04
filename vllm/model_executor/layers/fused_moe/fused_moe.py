@@ -19,7 +19,10 @@ from vllm.utils import direct_register_custom_op
 
 USE_ROCM_AITER_FMOE = envs.VLLM_ROCM_USE_AITER_MOE \
     and current_platform.is_rocm()
-if USE_ROCM_AITER_FMOE:
+USE_ROCM_AITER_FP8_BLOCK_SCALED_MOE = envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE \
+    and current_platform.is_rocm() # noqa: E501
+
+if USE_ROCM_AITER_FMOE or USE_ROCM_AITER_FP8_BLOCK_SCALED_MOE:
     import aiter as rocm_aiter
     import aiter.fused_moe_bf16_asm as rocm_aiter_asm_fmoe
 
@@ -1167,7 +1170,7 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
                              w2_scale: Optional[torch.Tensor] = None,
                              block_shape: Optional[List[int]] = None,
                              expert_mask: Optional[torch.Tensor] = None):
-    if envs.VLLM_ROCM_USE_AITER_BSCALED_MOE and use_fp8_w8a8:
+    if USE_ROCM_AITER_FMOE and use_fp8_w8a8:
         assert w1_scale is not None
         assert w2_scale is not None
 
