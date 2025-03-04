@@ -337,7 +337,7 @@ class MLACommonMetadata:
 
         # Pre-compute prefill/decode tensor slices and other stats
         if self.num_prefills is not None and self.num_prefills > 0:
-            assert self.num_decodes is not None and self.num_decodes > 0
+            assert self.num_decodes is not None
             start = self.num_decodes  # prefill_start
             self.prefill_query_start_loc = \
                 self.query_start_loc[start:] - self.query_start_loc[start]
