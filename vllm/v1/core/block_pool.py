@@ -23,7 +23,7 @@ class BlockPool:
 
     Args:
         num_gpu_blocks: The number of blocks in the pool.
-        enable_caching: Whether prefix caching (APC) is enabled in the engine.
+        enable_caching: Whether to enable prefix caching.
     """
 
     def __init__(self, num_gpu_blocks: int, enable_caching: bool):
@@ -147,15 +147,13 @@ class BlockPool:
             self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
             prev_block_hash_value = block_hash.hash_value
 
-    def get_new_blocks(self, num_blocks: int,
-                       do_apc: bool) -> list[KVCacheBlock]:
+    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
 
         Args:
             num_blocks: The number of blocks to allocate.
-            do_apc: APC is enabled in the engine & for this request
 
         Returns:
             A list of new block.
@@ -172,7 +170,7 @@ class BlockPool:
             assert curr_block.ref_cnt == 0
 
             # If the block is cached, evict it.
-            if do_apc:
+            if self.enable_caching:
                 self._maybe_evict_cached_block(curr_block)
 
             curr_block.incr_ref()

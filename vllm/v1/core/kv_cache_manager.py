@@ -101,8 +101,8 @@ class KVCacheManager:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
-        if not (self.enable_caching
-                and request.sampling_params.prompt_logprobs is None):
+        if (not self.enable_caching
+                or request.sampling_params.prompt_logprobs is not None):
             # Prefix caching is disabled or prompt logprobs request
             return [], 0
 
@@ -164,8 +164,6 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
-        do_apc = (self.enable_caching
-                  and request.sampling_params.prompt_logprobs is None)
         if num_tokens == 0:
             raise ValueError("num_tokens must be greater than 0")
 
@@ -192,7 +190,7 @@ class KVCacheManager:
             return None
 
         # Touch the computed blocks to make sure they won't be evicted.
-        if do_apc:
+        if self.enable_caching:
             self.block_pool.touch(new_computed_blocks)
         else:
             assert not new_computed_blocks, (
@@ -222,10 +220,10 @@ class KVCacheManager:
             assert num_new_blocks > 0
 
             # Concatenate the computed block IDs and the new block IDs.
-            new_blocks = self.block_pool.get_new_blocks(num_new_blocks, do_apc)
+            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
 
-        if not do_apc:
+        if not self.enable_caching:
             return new_blocks
 
         # Use `new_computed_blocks` for a new request, and `num_cached_block`
@@ -262,8 +260,7 @@ class KVCacheManager:
         # Default to [] in case a request is freed (aborted) before alloc.
         blocks = self.req_to_blocks.pop(request.request_id, [])
         ordered_blocks: Iterable[KVCacheBlock] = blocks
-        if (self.enable_caching
-                and request.sampling_params.prompt_logprobs is None):
+        if self.enable_caching:
             # Free blocks in reverse order so that the tail blocks are
             # freed first.
             ordered_blocks = reversed(blocks)
