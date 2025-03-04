@@ -436,6 +436,10 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 
         output_bias = (self.base_layer.bias
                        if self.base_layer.skip_bias_add else None)
+
+        if not self.base_layer.return_bias:
+            return output
+
         return output, output_bias
 
     # ReplicatedLinear should always be replaced, regardless of the fully
@@ -532,6 +536,10 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             output = tensor_model_parallel_all_gather(output_parallel)
         else:
             output = output_parallel
+
+        if not self.base_layer.return_bias:
+            return output
+
         output_bias = (self.base_layer.bias
                        if self.base_layer.skip_bias_add else None)
         return output, output_bias
@@ -890,6 +898,10 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         else:
             output = output_
             output_bias = self.base_layer.bias
+
+        if not self.base_layer.return_bias:
+            return output
+
         return output, output_bias
 
     @property
