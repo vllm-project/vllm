@@ -98,23 +98,21 @@ class AsyncLLM(EngineClient):
     def from_vllm_config(
         cls,
         vllm_config: VllmConfig,
+        start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
-        enable_multiprocessing: bool = False,
-        disable_log_stats: bool = False,
         disable_log_requests: bool = False,
+        disable_log_stats: bool = False,
     ) -> "AsyncLLM":
         if not vllm_config.use_v1:
-            raise ValueError(
-                "Using V1 LLMEngine but VllmConfig.use_v1 is False.")
+            raise ValueError("Using V1 Engine but VllmConfig.use_v1 is False.")
 
         # Create the LLMEngine.
         return cls(
             vllm_config=vllm_config,
             executor_class=Executor.get_class(vllm_config),
+            start_engine_loop=start_engine_loop,
             log_requests=not disable_log_requests,
             log_stats=not disable_log_stats,
-            start_engine_loop=True,
             usage_context=usage_context,
         )
 

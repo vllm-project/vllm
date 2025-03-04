@@ -639,6 +639,8 @@ class AsyncLLMEngine(EngineClient):
         disable_log_requests: bool = False,
         disable_log_stats: bool = False,
     ) -> "AsyncLLMEngine":
+        """Create an AsyncLLMEngine from the EngineArs."""
+
         return cls(
             vllm_config=vllm_config,
             executor_class=cls._get_executor_cls(vllm_config),

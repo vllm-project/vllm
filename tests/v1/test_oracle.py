@@ -50,3 +50,8 @@ def test_unsupported_configs(monkeypatch):
                 model="meta-llama/Llama-3.2-3B-Instruct",
                 guided_decoding_backend="classify",
             ).create_engine_config()
+
+
+def test_enabled(monkeypatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")

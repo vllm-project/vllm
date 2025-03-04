@@ -90,6 +90,7 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
+    enable_v1: bool = False
     model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[str, List[str]]] = None
     tokenizer: Optional[str] = None
@@ -234,7 +235,6 @@ class EngineArgs:
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
-
         # Model arguments
         parser.add_argument(
             '--model',
@@ -1166,17 +1166,26 @@ class EngineArgs:
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
 
-        # TODO(rob): when we want to make V1 the default,
-        # we simply modify the logic here.
+        # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
+        #   and fall back to V0 for experimental or unsupported features.
+        # * If VLLM_USE_V1=1, we enable V1 for supported + experimental
+        #   features and raise error for unsupported features.
+        # * If VLLM_USE_V1=0, we disable V1.
         use_v1 = False
         if self._is_v1_supported_oracle(model_config):
-            if envs.VLLM_USE_V1:
+            # NOTE(rob): remove (not envs.is_set("VLLM_USE_V1")) to
+            # disable V1 by default.
+            if envs.VLLM_USE_V1 or not envs.is_set("VLLM_USE_V1"):
                 use_v1 = True
             else:
                 logger.info(
-                    "Detected that your EngineConfig is compatible with "
-                    "VLLM V1. Launch with VLLM_USE_V1=1 to enable the V1"
-                    "Engine.")
+                    "===================================================\n\n"
+                    "Detected EngineConfig is compatible with VLLM V1"
+                    "Set VLLM_USE_V1=1 before launch to enable V1.\n\n"
+                    "==================================================")
+
+        if envs.is_set("VLLM_USE_V1"):
+            assert use_v1 == envs.VLLM_USE_V1
 
         # Set default arguments for V0 or V1 Engine.
         if use_v1:

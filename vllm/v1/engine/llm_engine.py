@@ -96,30 +96,28 @@ class LLMEngine:
         vllm_config: VllmConfig,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
-        enable_multiprocessing: bool = False,
         disable_log_stats: bool = False,
     ) -> "LLMEngine":
         if not vllm_config.use_v1:
             raise ValueError(
                 "Using V1 LLMEngine but VllmConfig.use_v1 is False.")
 
-        if envs.VLLM_ENABLE_V1_MULTIPROCESSING:
-            logger.debug("Enabling multiprocessing for LLMEngine.")
-            enable_multiprocessing = True
+        if stat_loggers is not None:
+            raise NotImplementedError(
+                "Passing StatLoggers to V1 is not yet supported. "
+                "Set VLLM_USE_V1=0 and file and issue on Github.")
 
-        # Create the LLMEngine.
         return cls(vllm_config=vllm_config,
                    executor_class=Executor.get_class(vllm_config),
-                   log_stats=not disable_log_stats,
+                   log_stats=(not disable_log_stats),
                    usage_context=usage_context,
                    stat_loggers=stat_loggers,
-                   multiprocess_mode=enable_multiprocessing)
+                   multiprocess_mode=envs.VLLM_ENABLE_V1_MULTIPROCESSING)
 
     @classmethod
     def from_engine_args(
         cls,
         engine_args: EngineArgs,
-        engine_config: Optional[VllmConfig] = None,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
         enable_multiprocessing: bool = False,
@@ -127,16 +125,15 @@ class LLMEngine:
         """Creates an LLM engine from the engine arguments."""
 
         # Create the engine configs.
-        if engine_config is None:
-            engine_config = engine_args.create_engine_config(usage_context)
-        executor_class = Executor.get_class(engine_config)
+        vllm_config = engine_args.create_engine_config(usage_context)
+        executor_class = Executor.get_class(vllm_config)
 
         if envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.debug("Enabling multiprocessing for LLMEngine.")
             enable_multiprocessing = True
 
         # Create the LLMEngine.
-        return cls(vllm_config=engine_config,
+        return cls(vllm_config=vllm_config,
                    executor_class=executor_class,
                    log_stats=not engine_args.disable_log_stats,
                    usage_context=usage_context,
