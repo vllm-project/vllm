@@ -172,6 +172,7 @@ class EngineArgs:
 
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: Optional[bool] = None
+    enable_prefix_sorting: Optional[bool] = None
 
     guided_decoding_backend: str = 'xgrammar'
     logits_processor_pattern: Optional[str] = None
@@ -765,6 +766,16 @@ class EngineArgs:
             const="True",
             help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens.')
+        parser.add_argument(
+            '--enable-prefix-sorting',
+            action=StoreBoolean,
+            default=EngineArgs.enable_prefix_sorting,
+            nargs="?",
+            const="True",
+            help='If set, the prefix cache will be sorted based on the prefix '
+            'length. This can improve the throughput of the offline prefix '
+            'generation process (only applicable when enable_prefix_caching '
+            'and enable_chunked_prefill are both set).')
 
         parser.add_argument(
             '--speculative-model',
@@ -1184,6 +1195,14 @@ class EngineArgs:
                            "has been disabled.")
             self.enable_prefix_caching = False
 
+        if self.enable_prefix_sorting and not (self.enable_prefix_caching and
+                                               self.enable_chunked_prefill):
+            logger.warning(
+                "--enable-prefix-sorting is only applicable when "
+                "--enable-prefix-caching and --enable-chunked-prefill "
+                "are both set. It has been disabled.")
+            self.enable_prefix_sorting = False
+            
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1193,6 +1212,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
+            enable_prefix_sorting=self.enable_prefix_sorting,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
         )

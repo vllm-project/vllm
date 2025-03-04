@@ -1092,6 +1092,7 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        enable_prefix_sorting: bool = False,
         cpu_offload_gb: float = 0,
         calculate_kv_scales: Optional[bool] = None,
     ) -> None:
@@ -1103,6 +1104,7 @@ class CacheConfig:
         self.is_attention_free = is_attention_free
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
+        self.enable_prefix_sorting = enable_prefix_sorting
         self.cpu_offload_gb = cpu_offload_gb
         self.calculate_kv_scales = calculate_kv_scales
         self._verify_args()
