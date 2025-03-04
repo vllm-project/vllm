@@ -573,6 +573,13 @@ class WorkerWrapperBase:
                 self.vllm_config.parallel_config.worker_adapter_cls)
             if worker_adapter_class not in worker_class.__bases__:
                 # dynamically inherit the worker adapter class
+                for attr in dir(worker_adapter_class):
+                    if attr.startswith("__"):
+                        continue
+                    assert not hasattr(worker_class, attr), (
+                        f"Worker class {worker_class} already has an attribute"
+                        f" {attr}, which conflicts with the worker"
+                        f" adapter class {worker_adapter_class}.")
                 worker_class.__bases__ = worker_class.__bases__ + (
                     worker_adapter_class, )
         with set_current_vllm_config(self.vllm_config):
