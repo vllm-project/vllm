@@ -5,7 +5,7 @@ See https://github.com/vllm-project/vllm/issues/11926 for more details.
 
 Run `pytest tests/quantization/test_register_quantization_config.py`.
 """
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import pytest
 import torch
@@ -58,7 +58,7 @@ class CustomQuantConfig(QuantizationConfig):
         """Name of the quantization method."""
         return "custom_quant"
 
-    def get_supported_act_dtypes(self) -> List["torch.dtype"]:
+    def get_supported_act_dtypes(self) -> list["torch.dtype"]:
         """List of supported activation dtypes."""
         return [torch.float16, torch.bfloat16]
 
@@ -68,12 +68,12 @@ class CustomQuantConfig(QuantizationConfig):
         return -1
 
     @staticmethod
-    def get_config_filenames() -> List[str]:
+    def get_config_filenames() -> list[str]:
         """List of filenames to search for in the model directory."""
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "CustomQuantConfig":
+    def from_config(cls, config: dict[str, Any]) -> "CustomQuantConfig":
         """Create a config class from the model's quantization config."""
         return CustomQuantConfig(num_bits=config.get("num_bits", 8))
 

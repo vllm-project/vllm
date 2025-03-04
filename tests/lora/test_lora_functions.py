@@ -4,7 +4,6 @@ Script to test add_lora, remove_lora, pin_lora, list_loras functions.
 """
 
 import os
-from typing import List
 
 import pytest
 
@@ -46,7 +45,7 @@ def test_lora_functions_sync():
 
     llm = LLM.get_engine_class().from_engine_args(engine_args)
 
-    def run_check(fn, args, expected: List):
+    def run_check(fn, args, expected: list):
         fn(args)
         assert set(llm.list_loras()) == set(expected)
 
@@ -105,7 +104,7 @@ async def test_lora_functions_async():
                                   gpu_memory_utilization=0.8,
                                   enforce_eager=True)
 
-    async def run_check(fn, args, expected: List):
+    async def run_check(fn, args, expected: list):
         await fn(args)
         assert set(await llm.list_loras()) == set(expected)
 

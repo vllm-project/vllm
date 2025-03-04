@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -95,13 +95,13 @@ class TPUModelRunner:
         )
 
         # Request states.
-        self.requests: Dict[str, CachedRequestState] = {}
+        self.requests: dict[str, CachedRequestState] = {}
 
         # req_id -> (input_id -> encoder_output)
-        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
+        self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
         # KV caches for forward pass
-        self.kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        self.kv_caches: list[tuple[torch.Tensor, torch.Tensor]] = []
 
         # Cached torch/numpy tensor
         # The pytorch tensor and numpy array share the same buffer.
@@ -171,7 +171,7 @@ class TPUModelRunner:
         # then resubmitted with the same ID. In this case, we treat them as two
         # distinct requests - clearing the cached states for the first request
         # and handling the second as a new request.
-        removed_req_indices: List[int] = []
+        removed_req_indices: list[int] = []
         for req_id in scheduler_output.finished_req_ids:
             req_index = self.input_batch.remove_request(req_id)
             if req_index is not None:
@@ -194,7 +194,7 @@ class TPUModelRunner:
             assert req_index is not None
             removed_req_indices.append(req_index)
 
-        req_ids_to_add: List[str] = []
+        req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
@@ -453,7 +453,7 @@ class TPUModelRunner:
         selected_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
 
         # Then, let's update the cache state.
-        request_seq_lens: List[Tuple[int, CachedRequestState, int]] = []
+        request_seq_lens: list[tuple[int, CachedRequestState, int]] = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
             req_state = self.requests[req_id]
@@ -473,9 +473,9 @@ class TPUModelRunner:
         assert all(
             req_id is not None for req_id in
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
-        req_ids = cast(List[str], self.input_batch.req_ids[:num_reqs])
+        req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
 
-        prompt_logprobs_dict: Dict[str, Optional[LogprobsTensors]] = {}
+        prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
@@ -612,7 +612,7 @@ class TPUModelRunner:
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
 
-        kv_caches: Dict[str, torch.Tensor] = {}
+        kv_caches: dict[str, torch.Tensor] = {}
 
         for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
             tensor_config = kv_cache_config.tensors[layer_name]
@@ -649,7 +649,7 @@ class ModelWrapperV1(nn.Module):
         self,
         token_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 
@@ -667,7 +667,7 @@ class ModelWrapperV1(nn.Module):
             # [num_kv_heads, num_blocks, block_size, head_size]. To make it
             # work, we need to flatten the first three dimensions and modify
             # the slot_mapping accordingly.
-            # kv_caches: List[Tuple[torch.Tensor, torch.Tensor]]
+            # kv_caches: list[tuple[torch.Tensor, torch.Tensor]]
             num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
             slot_mapping = attn_metadata.slot_mapping
             slot_mapping = slot_mapping.flatten()

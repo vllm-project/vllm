@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import os
 from collections import defaultdict
 from dataclasses import dataclass
@@ -48,6 +49,24 @@ class RayWorkerMetaData:
 
 
 class RayDistributedExecutor(DistributedExecutorBase):
+    """Ray-based distributed executor"""
+
+    # These env vars are worker-specific, therefore are NOT copied
+    # from the driver to the workers
+    WORKER_SPECIFIC_ENV_VARS = {
+        "VLLM_HOST_IP", "VLLM_HOST_PORT", "LOCAL_RANK", "CUDA_VISIBLE_DEVICES"
+    }
+
+    config_home = envs.VLLM_CONFIG_ROOT
+    # This file contains a list of env vars that should not be copied
+    # from the driver to the Ray workers.
+    non_carry_over_env_vars_file = os.path.join(
+        config_home, "ray_non_carry_over_env_vars.json")
+    if os.path.exists(non_carry_over_env_vars_file):
+        with open(non_carry_over_env_vars_file) as f:
+            non_carry_over_env_vars = set(json.load(f))
+    else:
+        non_carry_over_env_vars = set()
 
     uses_ray: bool = True
 
@@ -311,9 +330,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         # Environment variables to copy from driver to workers
         env_vars_to_copy = [
-            "VLLM_ATTENTION_BACKEND", "TPU_CHIPS_PER_HOST_BOUNDS",
-            "TPU_HOST_BOUNDS", "VLLM_USE_V1", "VLLM_TRACE_FUNCTION",
-            "VLLM_TORCH_PROFILER_DIR", "VLLM_TEST_ENABLE_EP"
+            v for v in envs.environment_variables
+            if v not in self.WORKER_SPECIFIC_ENV_VARS
+            and v not in self.non_carry_over_env_vars
         ]
 
         # Copy existing env vars to each worker's args
@@ -323,9 +342,14 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 if name in os.environ:
                     args[name] = os.environ[name]
 
+        logger.info("non_carry_over_env_vars from config: %s",
+                    self.non_carry_over_env_vars)
         logger.info(
             "Copying the following environment variables to workers: %s",
             [v for v in env_vars_to_copy if v in os.environ])
+        logger.info(
+            "If certain env vars should NOT be copied to workers, add them to "
+            "%s file", self.non_carry_over_env_vars_file)
 
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
@@ -500,7 +524,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         import pkg_resources
         from packaging import version
 
-        required_version = version.parse("2.40")
+        required_version = version.parse("2.43.0")
         current_version = version.parse(
             pkg_resources.get_distribution("ray").version)
         if current_version < required_version:
@@ -512,20 +536,19 @@ class RayDistributedExecutor(DistributedExecutorBase):
             "ray.experimental.compiled_dag_ref")
         if cgraph_spec is None:
             raise ValueError("Ray Compiled Graph is not installed. "
-                             "Run `pip install ray[adag]` to install it.")
+                             "Run `pip install ray[cgraph]` to install it.")
 
         cupy_spec = importlib.util.find_spec("cupy")
         if cupy_spec is None and envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL:
             raise ValueError(
                 "cupy is not installed but required since "
                 "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL is set. "
-                "Run `pip install ray[adag]` and check cupy installation.")
+                "Run `pip install ray[cgraph]` and check cupy installation.")
 
     def _compiled_ray_dag(self, enable_asyncio: bool):
         assert self.parallel_config.use_ray
         self._check_ray_cgraph_installation()
         from ray.dag import InputNode, MultiOutputNode
-        from ray.experimental.channel.torch_tensor_type import TorchTensorType
 
         logger.info("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL = %s",
                     envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL)
@@ -574,8 +597,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
                         if envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL \
                         else "auto"
                     outputs = [
-                        output.with_type_hint(
-                            TorchTensorType(transport=transport))
+                        output.with_tensor_transport(transport=transport)
                         for output in outputs
                     ]
 

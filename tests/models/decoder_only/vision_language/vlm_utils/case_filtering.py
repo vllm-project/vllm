@@ -5,7 +5,7 @@ handling multimodal placeholder substitution, and so on.
 """
 import itertools
 from collections import OrderedDict
-from typing import Dict, Iterable, Tuple
+from collections.abc import Iterable
 
 import pytest
 
@@ -13,9 +13,9 @@ from .types import (EMBEDDING_SIZE_FACTORS, ExpandableVLMTestArgs,
                     ImageSizeWrapper, SizeType, VLMTestInfo, VLMTestType)
 
 
-def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
+def get_filtered_test_settings(test_settings: dict[str, VLMTestInfo],
                                test_type: VLMTestType,
-                               fork_per_test: bool) -> Dict[str, VLMTestInfo]:
+                               fork_per_test: bool) -> dict[str, VLMTestInfo]:
     """Given the dict of potential test settings to run, return a subdict
     of tests who have the current test type enabled with the matching val for
     fork_per_test.
@@ -49,7 +49,7 @@ def get_filtered_test_settings(test_settings: Dict[str, VLMTestInfo],
     return matching_tests
 
 
-def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
+def get_parametrized_options(test_settings: dict[str, VLMTestInfo],
                              test_type: VLMTestType,
                              fork_new_process_for_each_test: bool):
     """Converts all of our VLMTestInfo into an expanded list of parameters.
@@ -121,7 +121,7 @@ def get_parametrized_options(test_settings: Dict[str, VLMTestInfo],
 
 def get_wrapped_test_sizes(
         test_info: VLMTestInfo,
-        test_type: VLMTestType) -> Tuple[ImageSizeWrapper, ...]:
+        test_type: VLMTestType) -> tuple[ImageSizeWrapper, ...]:
     """Given a test info which may have size factors or fixed sizes, wrap them
     and combine them into an iterable, each of which will be used in parameter
     expansion.

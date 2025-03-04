@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A TPU worker class."""
 import os
-from typing import Dict, List, Optional
+from typing import Optional
 
 import torch
 import torch.distributed
@@ -103,7 +103,7 @@ class TPUWorker:
         self.model_runner = TPUModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
-        kv_caches: Dict[str, torch.Tensor] = {}
+        kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, FullAttentionSpec):
@@ -118,7 +118,7 @@ class TPUWorker:
             else:
                 raise NotImplementedError
 
-        runner_kv_caches: List[torch.Tensor] = []
+        runner_kv_caches: list[torch.Tensor] = []
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
