@@ -319,7 +319,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # Only build AllSpark kernels if we are building for at least some compatible archs.
   cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
-  if (ALLSPARK_ARCHS)
+  if (${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND ALLSPARK_ARCHS)
     set(ALLSPARK_SRCS
        "csrc/quantization/gptq_allspark/allspark_repack.cu"
        "csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
@@ -330,7 +330,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building AllSpark kernels for archs: ${ALLSPARK_ARCHS}")
   else()
     message(STATUS "Not building AllSpark kernels as no compatible archs found"
-                   " in CUDA target architectures")
+                   " in CUDA target architectures, or CUDA not >= 12.0")
   endif()
 
   # The cutlass_scaled_mm kernels for Hopper (c3x, i.e. CUTLASS 3.x) require
