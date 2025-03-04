@@ -323,7 +323,7 @@ class GraniteReasoningParser(ReasoningParser):
         """
         current_chunk_start = 0
         start_reasoning_content = None
-        start_response_content = None
+        parsed_content = False
         delimiter_idxs = [
             idx for idx, char in enumerate(current_text)
             if char == self.seq_boundary_end
@@ -340,7 +340,7 @@ class GraniteReasoningParser(ReasoningParser):
                         break
 
             # Check to see if the start of response seq if complete
-            elif start_response_content is None:
+            elif not parsed_content:
                 for response_start in self.valid_response_starts:
                     if current_chunk[-len(response_start) +
                                      1:] == response_start[:-1]:
@@ -354,6 +354,6 @@ class GraniteReasoningParser(ReasoningParser):
                         return reasoning_content, len(
                             response_start), response_content
 
-        if start_reasoning_content and start_response_content is None:
+        if start_reasoning_content and not parsed_content:
             return current_text[start_reasoning_content:], None, None
         return None, None, None
