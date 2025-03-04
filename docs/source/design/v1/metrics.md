@@ -61,7 +61,7 @@ These are documented under [Inferencing and Serving -> Production Metrics](proje
 
 ### Grafana Dashboard
 
-vLLM also provides [a reference example](project:../../getting_started/examples/prometheus_grafana.md) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
+vLLM also provides [a reference example](https://docs.vllm.ai/en/latest/getting_started/examples/prometheus_grafana.html) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
 
 The subset of metrics exposed in the Grafana dashboard gives us an indication of which metrics are especially important:
 
@@ -665,7 +665,7 @@ v0 has support for OpenTelemetry tracing:
 - [OpenTelemetry blog
   post](https://opentelemetry.io/blog/2024/llm-observability/)
 - [User-facing
-  docs](project:../../getting_started/examples/opentelemetry.md)
+  docs](https://docs.vllm.ai/en/latest/getting_started/examples/opentelemetry.html)
 - [Blog
   post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
 - [IBM product
