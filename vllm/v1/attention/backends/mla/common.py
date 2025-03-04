@@ -314,11 +314,18 @@ class MLACommonMetadata:
     num_decode_tokens: Optional[int] = None
     num_prefills: Optional[int] = None
     has_context: bool = False
+
     context_chunk_cu_seq_lens: Optional[torch.Tensor] = None
     context_chunk_starts: Optional[torch.Tensor] = None
     context_chunk_seq_tot: Optional[list[int]] = None
     context_chunk_max_seq_lens: Optional[list[int]] = None
     chunked_prefill_workspace: Optional[torch.Tensor] = None
+
+    # Computed in __post_init__
+    prefill_query_start_loc: Optional[torch.Tensor] = None
+    prefill_max_query_len: Optional[int] = None
+    decode_seq_lens: Optional[torch.Tensor] = None
+    decode_block_table: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         supported_head_sizes = MLACommonBackend.get_supported_head_sizes()
@@ -327,6 +334,18 @@ class MLACommonMetadata:
             raise ValueError(
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f"received {self.head_dim}.")
+
+        # Pre-compute prefill/decode tensor slices and other stats
+        if self.num_prefills is not None and self.num_prefills > 0:
+            assert self.num_decodes is not None and self.num_decodes > 0
+            start = self.num_decodes  # prefill_start
+            self.prefill_query_start_loc = \
+                self.query_start_loc[start:] - self.query_start_loc[start]
+            self.prefill_max_query_len = self.seq_lens[start:].max().item()
+
+        if self.num_decodes is not None and self.num_decodes > 0:
+            self.decode_seq_lens = self.seq_lens[:self.num_decodes]
+            self.decode_block_table = self.block_table[:self.num_decodes, ...]
 
 
 T = TypeVar("T", bound=MLACommonMetadata)
@@ -803,6 +822,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         assert attn_metadata.context_chunk_cu_seq_lens is not None
         assert attn_metadata.context_chunk_starts is not None
         assert attn_metadata.context_chunk_max_seq_lens is not None
+        assert attn_metadata.prefill_query_start_loc is not None
+        assert attn_metadata.prefill_max_query_len is not None
 
         output = None
         iters = len(attn_metadata.context_chunk_seq_tot)
@@ -845,9 +866,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 q=q,
                 k=k,
                 v=v_padded,
-                cu_seqlens_q=attn_metadata.query_start_loc,
+                cu_seqlens_q=attn_metadata.prefill_query_start_loc,
                 cu_seqlens_k=attn_metadata.context_chunk_cu_seq_lens[i],
-                max_seqlen_q=attn_metadata.max_query_len,
+                max_seqlen_q=attn_metadata.prefill_max_query_len,
                 max_seqlen_k=attn_metadata.context_chunk_max_seq_lens[i],
                 softmax_scale=self.scale,
                 causal=False,  # Context is unmasked
@@ -881,6 +902,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
     ) -> torch.Tensor:
+        assert attn_metadata.prefill_query_start_loc is not None
+        assert attn_metadata.prefill_max_query_len is not None
+
         has_context = attn_metadata.has_context
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
@@ -898,10 +922,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             q=q,
             k=k,
             v=v_padded,
-            cu_seqlens_q=attn_metadata.query_start_loc,
-            cu_seqlens_k=attn_metadata.query_start_loc,
-            max_seqlen_q=attn_metadata.max_query_len,
-            max_seqlen_k=attn_metadata.max_seq_len,
+            cu_seqlens_q=attn_metadata.prefill_query_start_loc,
+            cu_seqlens_k=attn_metadata.prefill_query_start_loc,
+            max_seqlen_q=attn_metadata.prefill_max_query_len,
+            max_seqlen_k=attn_metadata.prefill_max_query_len,
             softmax_scale=self.scale,
             causal=True,
             return_softmax_lse=has_context,
