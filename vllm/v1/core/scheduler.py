@@ -127,7 +127,6 @@ class Scheduler:
         scheduled_timestamp = time.monotonic()
 
         # First, schedule the RUNNING requests.
-        bypass_common_prefix = False
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
@@ -191,10 +190,6 @@ class Scheduler:
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
-
-            # Prompt logprobs req disables common prefix check
-            bypass_common_prefix |= (request.sampling_params.prompt_logprobs
-                                     is not None)
 
             # Speculative decode related.
             if request.spec_token_ids:
@@ -297,10 +292,6 @@ class Scheduler:
                     raise RuntimeError(
                         f"Invalid request status: {request.status}")
 
-                # Prompt logprobs req disables common prefix check
-                bypass_common_prefix |= (
-                    request.sampling_params.prompt_logprobs is not None)
-
                 if self.lora_config and request.lora_request:
                     requested_loras.add(request.lora_request.lora_int_id)
                 req_to_new_block_ids[request.request_id] = [
@@ -334,7 +325,7 @@ class Scheduler:
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = 0
-        if self.running and not bypass_common_prefix:
+        if self.running:
             any_request = self.running[0]
             num_common_prefix_blocks = (
                 self.kv_cache_manager.get_num_common_prefix_blocks(
