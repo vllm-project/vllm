@@ -95,21 +95,40 @@ class AsyncLLM(EngineClient):
         self.output_handler: Optional[asyncio.Task] = None
 
     @classmethod
+    def from_vllm_config(
+        cls,
+        vllm_config: VllmConfig,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        enable_multiprocessing: bool = False,
+        disable_log_stats: bool = False,
+        disable_log_requests: bool = False,
+    ) -> "AsyncLLM":
+        if not vllm_config.use_v1:
+            raise ValueError(
+                "Using V1 LLMEngine but VllmConfig.use_v1 is False.")
+
+        # Create the LLMEngine.
+        return cls(
+            vllm_config=vllm_config,
+            executor_class=Executor.get_class(vllm_config),
+            log_requests=not disable_log_requests,
+            log_stats=not disable_log_stats,
+            start_engine_loop=True,
+            usage_context=usage_context,
+        )
+
+    @classmethod
     def from_engine_args(
         cls,
         engine_args: AsyncEngineArgs,
-        engine_config: Optional[VllmConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
         # Create the engine configs.
-        if engine_config is None:
-            vllm_config = engine_args.create_engine_config(usage_context)
-        else:
-            vllm_config = engine_config
-
+        vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
 
         # Create the AsyncLLM.

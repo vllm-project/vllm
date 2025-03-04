@@ -156,11 +156,10 @@ async def build_async_engine_client_from_engine_args(
 
     # Create the EngineConfig (determines if we can use V1).
     usage_context = UsageContext.OPENAI_API_SERVER
-    engine_config = engine_args.create_engine_config(
-        usage_context=usage_context)
+    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     # Try the V1 Engine.
-    if engine_config.use_v1:
+    if vllm_config.use_v1:
         if disable_frontend_multiprocessing:
             logger.warning(
                 "V1 is enabled, but got --disable-frontend-multiprocessing. "
@@ -169,9 +168,7 @@ async def build_async_engine_client_from_engine_args(
         from vllm.v1.engine.async_llm import AsyncLLM
         async_llm: Optional[AsyncLLM] = None
         try:
-            # NOTE: engine_args ignored when we pass engine_config
-            async_llm = AsyncLLM.from_engine_args(engine_args=engine_args,
-                                                  engine_config=engine_config,
+            async_llm = AsyncLLM.from_vllm_config(vllm_config=vllm_config,
                                                   usage_context=usage_context)
             yield async_llm
         finally:

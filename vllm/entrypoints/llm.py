@@ -238,25 +238,11 @@ class LLM:
             **kwargs,
         )
 
-        # Create the Engine
-        engine_config = engine_args.create_engine_config(
-            UsageContext.LLM_CLASS)
-        self.engine_class = LLM.get_engine_class(engine_config.use_v1)
-        self.llm_engine = self.engine_class.from_engine_args(
-            # NOTE: engine_args are ignored if we pass engine_config.
-            engine_args=engine_args,
-            engine_config=engine_config,
-            usage_context=UsageContext.LLM_CLASS)
+        # Create the Engine (autoselects V0 vs V1)/
+        self.llm_engine = LLMEngine.from_engine_args(
+            engine_args=engine_args, usage_context=UsageContext.LLM_CLASS)
 
         self.request_counter = Counter()
-
-    @staticmethod
-    def get_engine_class(use_v1: bool) -> type(LLMEngine):
-        if use_v1:
-            # Lazy import: the v1 package isn't distributed
-            from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
-            return V1LLMEngine  # type: ignore
-        return LLMEngine
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer

@@ -91,6 +91,31 @@ class LLMEngine:
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
 
     @classmethod
+    def from_vllm_config(
+        cls,
+        vllm_config: VllmConfig,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        enable_multiprocessing: bool = False,
+        disable_log_stats: bool = False,
+    ) -> "LLMEngine":
+        if not vllm_config.use_v1:
+            raise ValueError(
+                "Using V1 LLMEngine but VllmConfig.use_v1 is False.")
+
+        if envs.VLLM_ENABLE_V1_MULTIPROCESSING:
+            logger.debug("Enabling multiprocessing for LLMEngine.")
+            enable_multiprocessing = True
+
+        # Create the LLMEngine.
+        return cls(vllm_config=vllm_config,
+                   executor_class=Executor.get_class(vllm_config),
+                   log_stats=not disable_log_stats,
+                   usage_context=usage_context,
+                   stat_loggers=stat_loggers,
+                   multiprocess_mode=enable_multiprocessing)
+
+    @classmethod
     def from_engine_args(
         cls,
         engine_args: EngineArgs,

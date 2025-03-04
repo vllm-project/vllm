@@ -630,32 +630,48 @@ class AsyncLLMEngine(EngineClient):
         return LLMEngine._get_executor_cls(engine_config)
 
     @classmethod
-    def from_engine_args(
+    def from_vllm_config(
         cls,
+        vllm_config: VllmConfig,
+        start_engine_loop: bool = True,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        disable_log_requests: bool = False,
+        disable_log_stats: bool = False,
+    ) -> "AsyncLLMEngine":
+        return cls(
+            vllm_config=vllm_config,
+            executor_class=cls._get_executor_cls(vllm_config),
+            start_engine_loop=start_engine_loop,
+            log_requests=not disable_log_requests,
+            log_stats=not disable_log_stats,
+            usage_context=usage_context,
+            stat_loggers=stat_loggers,
+        )
+
+    @staticmethod
+    def from_engine_args(
         engine_args: AsyncEngineArgs,
-        engine_config: Optional[VllmConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
-        # Create the engine configs.
-        if engine_config is None:
-            engine_config = engine_args.create_engine_config(usage_context)
+        vllm_config = engine_args.create_engine_config(usage_context)
 
-        executor_class = cls._get_executor_cls(engine_config)
+        async_engine_cls = AsyncLLMEngine
+        if vllm_config.use_v1:
+            from vllm.v1.engine.async_llm import AsyncLLM as V1AsyncLLMEngine
+            async_engine_cls = V1AsyncLLMEngine
 
-        # Create the async LLM engine.
-        engine = cls(
-            vllm_config=engine_config,
-            executor_class=executor_class,
-            log_requests=not engine_args.disable_log_requests,
-            log_stats=not engine_args.disable_log_stats,
+        return async_engine_cls.from_vllm_config(
+            vllm_config=vllm_config,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
+            disable_log_stats=engine_args.disable_log_stats,
+            disable_log_requests=engine_args.disable_log_requests,
         )
-        return engine
 
     @property
     def is_running(self) -> bool:
