@@ -62,12 +62,18 @@ class LogprobsProcessor:
 
         token_ids_lst, logprobs_lst, ranks_lst = logprobs_lists
 
+        all_token_ids = [
+            tid for token_ids in token_ids_lst for tid in token_ids
+        ]
+        all_decoded_tokens = convert_ids_list_to_tokens(
+            self.tokenizer, all_token_ids)
+
+        token_idx = 0
         for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst,
                                              token_ids_lst):
-
-            # Detokenize (non-incrementally).
-            decoded_tokens = convert_ids_list_to_tokens(
-                self.tokenizer, token_ids)
+            decoded_tokens = all_decoded_tokens[token_idx:token_idx +
+                                                len(token_ids)]
+            token_idx += len(token_ids)
 
             # Sampler puts the sampled logprob in first.
             sampled_token_logprob = logprobs[0]
