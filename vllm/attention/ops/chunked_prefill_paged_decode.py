@@ -35,6 +35,7 @@ def kernel_paged_attention_2d(
         HEAD_SIZE: tl.constexpr,  # int
         HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
         USE_ALIBI_SLOPES: tl.constexpr,  # bool
+        SLIDING_WINDOW: tl.constexpr,  # int
         x: tl.constexpr,  # int
         stride_k_cache_0: tl.constexpr,  # int
         stride_k_cache_1: tl.constexpr,  # int
@@ -58,7 +59,6 @@ def kernel_paged_attention_2d(
                                               1)
         cur_batch_query_len = cur_batch_in_all_stop_index \
             - cur_batch_in_all_start_index
-
         if cur_batch_query_len > 1:
             return
     else:
@@ -98,7 +98,7 @@ def kernel_paged_attention_2d(
         physical_block_idx = tl.load(block_tables_ptr + block_table_offset + j)
 
         offs_n = tl.arange(0, BLOCK_SIZE)
-        offs_d = tl.arange(0, HEAD_SIZE)
+        offs_d = tl.arange(0, HEAD_SIZE_PADDED)
 
         v_offset = (physical_block_idx * stride_v_cache_0 +
                     kv_head_idx * stride_v_cache_1 +
@@ -138,6 +138,9 @@ def kernel_paged_attention_2d(
         S = tl.where(mask_new, 0.0, float("-inf")).to(tl.float32)
         S += scale * tl.sum(K * Q[:, None], axis=0)
 
+        if SLIDING_WINDOW > 0:
+            S = tl.where((context_len - 1 - tmp) < SLIDING_WINDOW, S, -10000)
+
         if USE_ALIBI_SLOPES:
             S += alibi_slope * (tmp - context_len + 1)
 
@@ -175,83 +178,6 @@ def kernel_paged_attention_2d(
              mask=dim_mask)
 
 
-def paged_attention_triton_2d(
-    output,
-    query,
-    key_cache,
-    value_cache,
-    scale,
-    k_scale,
-    v_scale,
-    kv_cache_dtype,
-    block_tables,
-    context_lens,
-    alibi_slopes,
-    block_size,
-    num_seqs,
-    num_query_heads,
-    num_queries_per_kv,
-    head_size,
-):
-    use_alibi_slopes = alibi_slopes is not None
-
-    # Conversion of FP8 Tensor from uint8 storage to
-    # appropriate torch.dtype for interpretation by Triton
-    if "fp8" in kv_cache_dtype:
-        assert key_cache.dtype == torch.uint8
-        assert value_cache.dtype == torch.uint8
-
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            target_dtype = torch.float8_e4m3fn
-        elif kv_cache_dtype == "fp8_e5m2":
-            target_dtype = torch.float8_e5m2
-        else:
-            raise ValueError("Unsupported FP8 dtype:", kv_cache_dtype)
-
-        key_cache = key_cache.view(target_dtype)
-        value_cache = value_cache.view(target_dtype)
-
-    kernel_paged_attention_2d[(
-        num_seqs,
-        num_query_heads,
-    )](
-        output_ptr=output,
-        query_ptr=query,
-        key_cache_ptr=key_cache,
-        value_cache_ptr=value_cache,
-        block_tables_ptr=block_tables,
-        context_lens_ptr=context_lens,
-        alibi_slopes_ptr=alibi_slopes,
-        scale=scale,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        num_query_heads=num_query_heads,
-        num_queries_per_kv=num_queries_per_kv,
-        block_table_stride=block_tables.stride(0),
-        query_stride_0=query.stride(0),
-        query_stride_1=query.stride(1),
-        output_stride_0=output.stride(0),
-        output_stride_1=output.stride(1),
-        BLOCK_SIZE=block_size,
-        HEAD_SIZE=head_size,
-        HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
-        USE_ALIBI_SLOPES=use_alibi_slopes,
-        x=key_cache.shape[4] if len(key_cache.shape) == 5 else 1,
-        stride_k_cache_0=key_cache.stride(0),
-        stride_k_cache_1=key_cache.stride(1),
-        stride_k_cache_2=key_cache.stride(2),
-        stride_k_cache_3=key_cache.stride(3),
-        stride_k_cache_4=key_cache.stride(4)
-        if len(key_cache.shape) == 5 else 1,
-        stride_v_cache_0=value_cache.stride(0),
-        stride_v_cache_1=value_cache.stride(1),
-        stride_v_cache_2=value_cache.stride(2),
-        stride_v_cache_3=value_cache.stride(3),
-        filter_by_query_len=False,
-        query_start_len_ptr=None,
-    )
-
-
 def chunked_prefill_paged_decode(
     query,
     key,
@@ -266,12 +192,18 @@ def chunked_prefill_paged_decode(
     max_query_len,
     k_scale,
     v_scale,
-    alibi_slopes,
-    sliding_window,
-    scale,
+    alibi_slopes=None,
+    sliding_window=None,
+    sm_scale=None,
 ):
 
+    if sm_scale is None:
+        sm_scale = 1.0 / (query.shape[1]**0.5)
+
     use_alibi_slopes = alibi_slopes is not None
+
+    if sliding_window is None or sliding_window <= 0:
+        sliding_window = 0
 
     context_attention_fwd(
         q=query,
@@ -289,7 +221,7 @@ def chunked_prefill_paged_decode(
         v_scale=v_scale,
         alibi_slopes=alibi_slopes,
         sliding_window=sliding_window,
-        sm_scale=scale,
+        sm_scale=sm_scale,
         skip_decode=True,
     )
 
@@ -326,7 +258,7 @@ def chunked_prefill_paged_decode(
         block_tables_ptr=block_table,
         context_lens_ptr=seq_lens,
         alibi_slopes_ptr=alibi_slopes,
-        scale=scale,
+        scale=sm_scale,
         k_scale=k_scale,
         v_scale=v_scale,
         num_query_heads=num_query_heads,
@@ -340,6 +272,7 @@ def chunked_prefill_paged_decode(
         HEAD_SIZE=head_size,
         HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
         USE_ALIBI_SLOPES=use_alibi_slopes,
+        SLIDING_WINDOW=sliding_window,
         x=key_cache.shape[4],
         stride_k_cache_0=key_cache.stride(0),
         stride_k_cache_1=key_cache.stride(1),
