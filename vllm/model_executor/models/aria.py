@@ -305,7 +305,7 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
         super().__init__(config, cache_config, quant_config, prefix)
         self.mlp = AriaTextMoELayer(config,
                                     quant_config=quant_config,
-                                    prefix=f"{prefix}.moe")
+                                    prefix=f"{prefix}.mlp")
 
 
 class AriaTextModel(LlamaModel, SupportsQuant):
