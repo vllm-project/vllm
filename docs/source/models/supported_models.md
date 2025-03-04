@@ -298,6 +298,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `ibm-granite/granite-3.0-1b-a400m-base`, `ibm-granite/granite-3.0-3b-a800m-instruct`, `ibm/PowerMoE-3b`, etc.
   * ✅︎
   * ✅︎
+- * `GraniteMoeSharedForCausalLM`
+  * Granite MoE Shared
+  * `ibm-research/moe-7b-1b-active-shared-experts` (test model)
+  * ✅︎
+  * ✅︎
 - * `GritLM`
   * GritLM
   * `parasail-ai/GritLM-7B-vllm`.
