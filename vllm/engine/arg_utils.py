@@ -255,7 +255,9 @@ class EngineArgs:
         parser.add_argument(
             '--skip-tokenizer-init',
             action='store_true',
-            help='Skip initialization of tokenizer and detokenizer.')
+            help='Skip tokenizer\detokenizer use during model inference. '
+            'Use of tokenizer\detokenizer increases host overhead and might '
+            'end up of GPU underutilization')
         parser.add_argument(
             '--revision',
             type=nullable_str,

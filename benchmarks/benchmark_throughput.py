@@ -6,7 +6,7 @@ import json
 import random
 import time
 from functools import cache
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import uvloop
@@ -171,7 +171,7 @@ def run_vllm(
     llm = LLM(**dataclasses.asdict(engine_args))
 
     # Add the requests to the engine.
-    prompts: List[TextPrompt | TokensPrompt] = []
+    prompts: List[Union[TextPrompt, TokensPrompt]] = []
     sampling_params: List[SamplingParams] = []
     for request in requests:
         prompts.append(
@@ -232,7 +232,7 @@ async def run_vllm_async(
             engine_args, disable_frontend_multiprocessing) as llm:
 
         # Add the requests to the engine.
-        prompts: List[TextPrompt | TokensPrompt] = []
+        prompts: List[Union[TextPrompt, TokensPrompt]] = []
         sampling_params: List[SamplingParams] = []
         lora_requests: List[Optional[LoRARequest]] = []
         for request in requests:
