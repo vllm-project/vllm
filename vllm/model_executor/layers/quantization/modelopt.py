@@ -321,6 +321,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
     def swizzle_blockscale(self, scales: torch.tensor):
         # Pad and blockwise interleave weight_scale
+        scales_ndim = scales.ndim
         if scales.ndim == 2:
             scales = scales.unsqueeze(0)
         assert scales.ndim == 3
@@ -333,9 +334,16 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         batches, rows, cols = padded_scales.shape
         assert rows % 128 == 0
         assert cols % 4 == 0
-        padded_scales = padded_scales.reshape(batches, rows // 128, 4, 32, cols // 4, 4)
+        padded_scales = padded_scales.reshape(batches, 
+                                              rows // 128,
+                                              4,
+                                              32,
+                                              cols // 4,
+                                              4)
         swizzled_scales = padded_scales.permute((0, 1, 4, 3, 2, 5))
-        return swizzled_scales
+        swizzled_scales = swizzled_scales.contiguous().cuda()
+        return (scales.reshape(M, K) if scales_ndim == 2 
+                                    else scales.reshape(B, M, K))
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # global scales:
@@ -352,6 +360,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # contracting dimension is input dimension
         # block_size = 16
         # w_indim  = input_size_per_partition // self.quant_config.group_size
+        scale_n, scale_k = layer.weight_scale.shape
         assert (layer.weight_scale.shape[1] %
                 16 == 0), "Expected weight_scale.dim(1) to be divisible by 16"
 
@@ -362,8 +371,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # swizzled_weight_scale = swizzled_weight_scale.reshape(
         #     int8_ws.shape).view(torch.float8_e4m3fn)
         layer.weight_scale_swizzled = Parameter(
-                          swizzled_weight_scale.contiguous().cuda(),
-                                                requires_grad=False)
+           swizzled_weight_scale, requires_grad=False)
 
     def apply(
         self,
@@ -384,7 +392,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # validate dtypes of quantized input, weight and weight_sf
         assert (qinput.dtype == torch.uint8)
         assert (layer.weight.dtype == torch.uint8)
-        assert (x_sf_1.dtype == torch.int32)
+        # assert (x_sf_1.dtype == torch.int32)
         assert (layer.alpha.dtype == torch.float32)
 
         out = cutlass_scaled_fp4_mm(qinput, layer.weight, x_sf_1,
