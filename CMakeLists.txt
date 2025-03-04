@@ -438,6 +438,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(SRCS 
       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm100_fp8.cu"
     )
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${BLACKWELL_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     message(STATUS "Building FP8 for archs: ${BLACKWELL_ARCHS}")
   else()
