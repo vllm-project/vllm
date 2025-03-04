@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class GuidedDecodingOptions(enum.Enum):
+class StructOutputOptions(enum.Enum):
     JSON = enum.auto()
     JSON_OBJECT = enum.auto()
     REGEX = enum.auto()
@@ -31,7 +31,7 @@ class GuidedDecodingOptions(enum.Enum):
     CHOICE = enum.auto()
 
 
-GuidedDecodingKey = tuple[GuidedDecodingOptions, str]
+StructOutputKey = tuple[StructOutputOptions, str]
 
 
 @dataclass
@@ -80,7 +80,7 @@ class Grammar:
                        ctx=self.ctx)
 
 
-class GuidedDecodingManager:
+class StructOutputManager:
 
     def __init__(self, vllm_config: VllmConfig, max_cache_size: int = 500):
         tokenizer_group = init_tokenizer_from_configs(
@@ -98,7 +98,7 @@ class GuidedDecodingManager:
         self.compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
 
         self.max_cache_size = max_cache_size
-        self.request_key_to_grammar: OrderedDict[GuidedDecodingKey,
+        self.request_key_to_grammar: OrderedDict[StructOutputKey,
                                                  Grammar] = OrderedDict()
 
         # The default max_workers if not specified is the number of CPUs * 5,
@@ -110,7 +110,7 @@ class GuidedDecodingManager:
         self._grammar_bitmask = xgr.allocate_token_bitmask(
             self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
 
-    def __getitem__(self, key: GuidedDecodingKey) -> Optional[Grammar]:
+    def __getitem__(self, key: StructOutputKey) -> Optional[Grammar]:
         # We need to pop and re-insert the grammar here for LRU cache
         # of request_key_to_grammar
         if key in self.request_key_to_grammar:
@@ -122,9 +122,9 @@ class GuidedDecodingManager:
         return None
 
     def populate_cache(self, request: Request) -> None:
-        if not request.use_guided_decoding:
+        if not request.use_struct_output:
             return
-        grammar = self.request_key_to_grammar.get(request.guided_decoding_key)
+        grammar = self.request_key_to_grammar.get(request.struct_output_key)
         if grammar:
             request.grammar = copy.copy(grammar)
             return
@@ -134,7 +134,7 @@ class GuidedDecodingManager:
         return self.executor.submit(self._executor_loop, request)
 
     def _executor_loop(self, request: Request) -> Grammar:
-        key = request.guided_decoding_key
+        key = request.struct_output_key
         grammar = self.request_key_to_grammar.get(key)
         if grammar is not None:
             return copy.copy(grammar)
@@ -145,21 +145,21 @@ class GuidedDecodingManager:
         self.request_key_to_grammar[key] = grammar
         return copy.copy(grammar)
 
-    def initialize_grammar(self, key: GuidedDecodingKey) -> Grammar:
+    def initialize_grammar(self, key: StructOutputKey) -> Grammar:
         # Note that the request was validated in the engine core client,
         # so at this point we know it is a supported type of request.
         #
         # TODO: we still need to handle xgrammar compilation failures
         request_type, grammar_spec = key
 
-        if request_type == GuidedDecodingOptions.JSON:
+        if request_type == StructOutputOptions.JSON:
             # TODO -- allow any_whitespace to be configurable
             # pending merge of https://github.com/vllm-project/vllm/pull/12744
             ctx = self.compiler.compile_json_schema(grammar_spec,
                                                     any_whitespace=False)
-        elif request_type == GuidedDecodingOptions.JSON_OBJECT:
+        elif request_type == StructOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_builtin_json_grammar()
-        elif request_type == GuidedDecodingOptions.GRAMMAR:
+        elif request_type == StructOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
         else:
             logger.error("Validation should have already occurred. "
@@ -172,17 +172,17 @@ class GuidedDecodingManager:
                        ctx=ctx)
 
     def grammar_bitmask(self, requests: dict[str, Request],
-                        guided_decoding_request_ids: dict[str, int],
+                        struct_output_request_ids: dict[str, int],
                         batch_len: int) -> Optional[np.ndarray]:
-        # Prepare the guided decoding bitmask for this batch.
-        if not guided_decoding_request_ids:
+        # Prepare the structured output bitmask for this batch.
+        if not struct_output_request_ids:
             return None
 
         # Fill the bitmask using the index of each request equal to its
         # position in the batch. Resize the bitmask down to the size of
         # the batch.
         bitmask_tensor = self._grammar_bitmask
-        for req_id, batch_index in guided_decoding_request_ids.items():
+        for req_id, batch_index in struct_output_request_ids.items():
             request = requests[req_id]
             assert request.grammar is not None
             if not request.grammar.matcher.is_terminated():

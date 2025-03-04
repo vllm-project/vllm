@@ -11,8 +11,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
-from vllm.v1.guided_decoding import (Grammar, GuidedDecodingKey,
-                                     GuidedDecodingOptions)
+from vllm.v1.struct_output import Grammar, StructOutputKey, StructOutputOptions
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -150,11 +149,11 @@ class Request:
         return num_tokens
 
     @functools.cached_property
-    def use_guided_decoding(self) -> bool:
+    def use_struct_output(self) -> bool:
         return self.sampling_params.guided_decoding is not None
 
     @functools.cached_property
-    def guided_decoding_key(self) -> GuidedDecodingKey:
+    def struct_output_key(self) -> StructOutputKey:
         params = self.sampling_params.guided_decoding
         assert params is not None, "params can't be None."
         if params.json is not None:
@@ -162,21 +161,21 @@ class Request:
                 json_str = json.dumps(params.json)
             else:
                 json_str = params.json
-            return (GuidedDecodingOptions.JSON, json_str)
+            return (StructOutputOptions.JSON, json_str)
         elif params.json_object:
-            return (GuidedDecodingOptions.JSON_OBJECT, "")
+            return (StructOutputOptions.JSON_OBJECT, "")
         elif params.regex is not None:
-            return (GuidedDecodingOptions.REGEX, params.regex)
+            return (StructOutputOptions.REGEX, params.regex)
         elif params.choice is not None:
             if not isinstance(params.choice, str):
                 json_str = json.dumps(params.choice)
             else:
                 json_str = params.choice
-            return (GuidedDecodingOptions.CHOICE, json_str)
+            return (StructOutputOptions.CHOICE, json_str)
         elif params.grammar is not None:
-            return (GuidedDecodingOptions.GRAMMAR, params.grammar)
+            return (StructOutputOptions.GRAMMAR, params.grammar)
         else:
-            raise ValueError("No valid guided decoding parameter found")
+            raise ValueError("No valid structured output parameter found")
 
     def _check_grammar_completion(self) -> bool:
         if isinstance(self._grammar, Future):

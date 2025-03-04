@@ -2,8 +2,7 @@
 
 import pytest
 
-from vllm.v1.guided_decoding.utils import (
-    has_xgrammar_unsupported_json_features)
+from vllm.v1.struct_output.utils import has_xgrammar_unsupported_json_features
 
 
 @pytest.fixture

@@ -19,7 +19,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
-from vllm.v1.guided_decoding.utils import validate_guided_decoding_request
+from vllm.v1.struct_output.utils import validate_struct_output_request
 
 
 class Processor:
@@ -86,7 +86,7 @@ class Processor:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
 
-    def _validate_guided_decoding(
+    def _validate_struct_output(
             self, params: Union[SamplingParams, PoolingParams]) -> None:
         if not isinstance(params, SamplingParams):
             return
@@ -94,15 +94,15 @@ class Processor:
             return
         if self.decoding_config.guided_decoding_backend != "xgrammar":
             raise ValueError(
-                "Only xgrammar guided decoding is supported in V1.")
+                "Only xgrammar structured output is supported in V1.")
         if (params.guided_decoding.backend
                 and params.guided_decoding.backend != 'xgrammar'):
             raise ValueError(
-                "Only xgrammar guided decoding is supported in V1.")
+                "Only xgrammar structured output is supported in V1.")
         if self.vllm_config.speculative_config:
             raise ValueError("Structured output is not supported with "
                              "speculative decoding.")
-        validate_guided_decoding_request(params)
+        validate_struct_output_request(params)
 
     def _validate_allowed_token_ids(
         self,
@@ -134,7 +134,7 @@ class Processor:
 
         self._validate_logprobs(params)
         self._validate_lora(lora_request)
-        self._validate_guided_decoding(params)
+        self._validate_struct_output(params)
         self._validate_allowed_token_ids(params)
 
         if arrival_time is None:

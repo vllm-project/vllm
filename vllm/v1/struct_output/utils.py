@@ -234,8 +234,8 @@ def choice_as_grammar(choice: list[str]) -> str:
     return grammar
 
 
-def validate_guided_decoding_request(sampling_params: SamplingParams) -> None:
-    """Validate that the request is supported by guided decoding.
+def validate_struct_output_request(sampling_params: SamplingParams) -> None:
+    """Validate that the request is supported by structured output.
 
     Raises ValueError if the request is not supported.
     """
@@ -245,7 +245,7 @@ def validate_guided_decoding_request(sampling_params: SamplingParams) -> None:
     gd_params = sampling_params.guided_decoding
 
     if gd_params.regex:
-        raise ValueError("Regex guided decoding is not supported.")
+        raise ValueError("Regex structured output is not supported.")
 
     if gd_params.choice:
         choice_grammar = choice_as_grammar(gd_params.choice)

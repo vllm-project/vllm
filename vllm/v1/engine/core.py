@@ -26,10 +26,10 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.struct_output import StructOutputManager
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -62,7 +62,7 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        self.guided_decoding_manager = GuidedDecodingManager(vllm_config)
+        self.struct_output_manager = StructOutputManager(vllm_config)
 
         # Setup scheduler.
         self.scheduler = Scheduler(
@@ -72,7 +72,7 @@ class EngineCore:
             lora_config=vllm_config.lora_config,
             speculative_config=vllm_config.speculative_config,
             log_stats=self.log_stats,
-            guided_decoding_manager=self.guided_decoding_manager,
+            struct_output_manager=self.struct_output_manager,
         )
 
         # Setup MM Input Mapper.
@@ -135,9 +135,9 @@ class EngineCore:
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
-        if req.use_guided_decoding:
+        if req.use_struct_output:
             # Start grammar compilation asynchronously
-            self.guided_decoding_manager.populate_cache(req)
+            self.struct_output_manager.populate_cache(req)
 
         self.scheduler.add_request(req)
 
@@ -160,7 +160,7 @@ class EngineCore:
         scheduler_output = self.scheduler.schedule()
 
         # This case may occur when the only unfinished requests are
-        # guided decoding requests where the grammar has not finished
+        # structured output requests where the grammar has not finished
         # compiling yet, so there's nothing to run.
         if scheduler_output.total_num_scheduled_tokens == 0:
             return EngineCoreOutputs(

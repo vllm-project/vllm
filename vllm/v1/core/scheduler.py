@@ -17,10 +17,10 @@ from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreOutput, EngineCoreOutputs)
-from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.struct_output import StructOutputManager
 
 logger = init_logger(__name__)
 
@@ -35,14 +35,14 @@ class Scheduler:
         lora_config: Optional[LoRAConfig],
         speculative_config: Optional[SpeculativeConfig],
         log_stats: bool,
-        guided_decoding_manager: GuidedDecodingManager,
+        struct_output_manager: StructOutputManager,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
         self.speculative_config = speculative_config
         self.log_stats = log_stats
-        self.guided_decoding_manager = guided_decoding_manager
+        self.struct_output_manager = struct_output_manager
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -119,13 +119,13 @@ class Scheduler:
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
-        # NOTE: guided_decoding_request_ids maps
-        # guided request's (request that use structured decoding)
+        # NOTE: struct_output_request_ids maps
+        # a request's (request that uses structured output)
         # request_id to the running request index.
         # This will helps us determine to slice the grammar bitmask
         # and only applies valid mask for requests that
         # uses structured decoding.
-        guided_decoding_request_ids: dict[str, int] = {}
+        struct_output_request_ids: dict[str, int] = {}
 
         req_to_new_block_ids: dict[str, list[int]] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -197,8 +197,8 @@ class Scheduler:
             # Schedule the request.
             scheduled_running_reqs.append(request)
             self.scheduled_req_ids.add(request.request_id)
-            if request.use_guided_decoding:
-                guided_decoding_request_ids[request.request_id] = req_index
+            if request.use_struct_output:
+                struct_output_request_ids[request.request_id] = req_index
             req_to_new_block_ids[request.request_id] = [
                 b.block_id for b in new_blocks
             ]
@@ -249,8 +249,8 @@ class Scheduler:
                     if request.grammar and request.is_grammar_ready:
                         request.status = RequestStatus.WAITING
                     else:
-                        guided_req = self.waiting.popleft()
-                        waiting_for_fsm.appendleft(guided_req)
+                        struct_output_req = self.waiting.popleft()
+                        waiting_for_fsm.appendleft(struct_output_req)
                         continue
 
                 # Check that adding the request still respects the max_loras
@@ -307,8 +307,8 @@ class Scheduler:
                     break
 
                 self.waiting.popleft()
-                if request.use_guided_decoding:
-                    guided_decoding_request_ids[request.request_id] = req_index
+                if request.use_struct_output:
+                    struct_output_request_ids[request.request_id] = req_index
                 req_index += 1
                 self.running.append(request)
                 self.scheduled_req_ids.add(request.request_id)
@@ -364,8 +364,8 @@ class Scheduler:
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
-        grammar_bitmask = self.guided_decoding_manager.grammar_bitmask(
-            self.requests, guided_decoding_request_ids, len(self.running))
+        grammar_bitmask = self.struct_output_manager.grammar_bitmask(
+            self.requests, struct_output_request_ids, len(self.running))
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
@@ -404,7 +404,7 @@ class Scheduler:
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-            guided_decoding_request_ids=guided_decoding_request_ids,
+            struct_output_request_ids=struct_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
 
@@ -602,7 +602,7 @@ class Scheduler:
                     # the outer lists can be of length > 1.
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
 
-            if new_token_ids and request.use_guided_decoding:
+            if new_token_ids and request.use_struct_output:
                 assert request.grammar is not None
                 request.grammar.accept_tokens(request.request_id,
                                               new_token_ids)

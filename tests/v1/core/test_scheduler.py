@@ -5,9 +5,9 @@ from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
-from vllm.v1.guided_decoding import GuidedDecodingManager
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.struct_output import StructOutputManager
 
 EOS_TOKEN_ID = 50256
 
@@ -43,14 +43,13 @@ def create_scheduler(
         cache_config=cache_config,
     )
     cache_config.num_gpu_blocks = 10000
-    return Scheduler(
-        scheduler_config,
-        model_config,
-        cache_config,
-        speculative_config=None,
-        lora_config=None,
-        log_stats=True,
-        guided_decoding_manager=GuidedDecodingManager(vllm_config))
+    return Scheduler(scheduler_config,
+                     model_config,
+                     cache_config,
+                     speculative_config=None,
+                     lora_config=None,
+                     log_stats=True,
+                     struct_output_manager=StructOutputManager(vllm_config))
 
 
 def create_requests(
@@ -258,7 +257,7 @@ def test_stop_via_update_from_output():
                                        num_common_prefix_blocks=0,
                                        finished_req_ids=set(),
                                        free_encoder_input_ids=[],
-                                       guided_decoding_request_ids={},
+                                       struct_output_request_ids={},
                                        grammar_bitmask=None)
 
     model_output = ModelRunnerOutput(
@@ -310,7 +309,7 @@ def test_stop_via_update_from_output():
                                        num_common_prefix_blocks=0,
                                        finished_req_ids=set(),
                                        free_encoder_input_ids=[],
-                                       guided_decoding_request_ids={},
+                                       struct_output_request_ids={},
                                        grammar_bitmask=None)
 
     model_output = ModelRunnerOutput(
@@ -360,7 +359,7 @@ def test_stop_via_update_from_output():
                                        num_common_prefix_blocks=0,
                                        finished_req_ids=set(),
                                        free_encoder_input_ids=[],
-                                       guided_decoding_request_ids={},
+                                       struct_output_request_ids={},
                                        grammar_bitmask=None)
 
     model_output = ModelRunnerOutput(
@@ -407,7 +406,7 @@ def test_stop_via_update_from_output():
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
         free_encoder_input_ids=[],
-        guided_decoding_request_ids={},
+        struct_output_request_ids={},
         grammar_bitmask=None)
 
     model_output = ModelRunnerOutput(

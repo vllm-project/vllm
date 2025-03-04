@@ -52,8 +52,7 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from vllm.v1.guided_decoding.utils import (
-    has_xgrammar_unsupported_json_features)
+from vllm.v1.struct_output.utils import has_xgrammar_unsupported_json_features
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -233,21 +232,21 @@ async def get_request(
     burstiness: float = 1.0,
 ) -> AsyncGenerator[tuple[int, SampleRequest], None]:
     """
-    Asynchronously generates requests at a specified rate 
+    Asynchronously generates requests at a specified rate
     with OPTIONAL burstiness.
-    
+
     Args:
-        input_requests: 
+        input_requests:
             A list of input requests, each represented as a tuple.
-        request_rate: 
+        request_rate:
             The rate at which requests are generated (requests/s).
-        burstiness (optional): 
-            The burstiness factor of the request generation. 
+        burstiness (optional):
+            The burstiness factor of the request generation.
             Only takes effect when request_rate is not inf.
             Default value is 1, which follows a Poisson process.
             Otherwise, the request intervals follow a gamma distribution.
-            A lower burstiness value (0 < burstiness < 1) results 
-            in more bursty requests, while a higher burstiness value 
+            A lower burstiness value (0 < burstiness < 1) results
+            in more bursty requests, while a higher burstiness value
             (burstiness > 1) results in a more uniform arrival of requests.
     """
     input_requests = iter(input_requests)
