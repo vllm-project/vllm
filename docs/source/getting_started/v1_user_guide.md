@@ -60,7 +60,7 @@ to handle request preemptions.
 
 ### Feature & Model Support in Progress
 
-Although the support for many features & models have been re‐implemented or optimized compared to V0, some remain either unsupported or not yet fully optimized on vLLM V1.
+Although we have re-implemented and partially optimized many features and models from V0 in vLLM V1, optimization work is still ongoing for some, and others remain unsupported.
 
 #### Unoptimized Features
 
@@ -70,20 +70,21 @@ Although the support for many features & models have been re‐implemented or op
 (e.g., see [PR #13096](https://github.com/vllm-project/vllm/pull/13096)).
 
 - **Spec Decode**: Currently, only ngram-based spec decode is supported in V1. There
-  will be follow-up work to support other types of spec decode.
+  will be follow-up work to support other types of spec decode (e.g., see [PR #13933](https://github.com/vllm-project/vllm/pull/13933)).
 
 #### Unsupported Features
 
 - **FP8 KV Cache**: While vLLM V1 introduces new FP8 kernels for model weight quantization, support for an FP8 key–value cache is not yet available. Users must continue using FP16 (or other supported precisions) for the KV cache.
 
 - **Structured Generation Fallback**: For structured output tasks, V1 currently
-  supports only the `xgrammar:no_fallback` mode.
+  supports only the `xgrammar:no_fallback` mode, meaning that it will error out if the output schema is unsupported by xgrammar.
   Details about the structured generation can be found
   [here](https://docs.vllm.ai/en/latest/features/structured_outputs.html).
 
 #### Unsupported Models
 
-vLLM V1 excludes model architectures with the `SupportsV0Only` protocol, and the majority fall into the following categories. V1 support for these models will be added eventually.
+vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol, 
+and the majority fall into the following categories. V1 support for these models will be added eventually.
 
 **Embedding Models**  
 vLLM V1 does not yet include a `PoolingModelRunner` to support embedding/pooling
