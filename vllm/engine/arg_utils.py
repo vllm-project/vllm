@@ -1175,7 +1175,9 @@ class EngineArgs:
         if self._is_v1_supported_oracle(model_config):
             # NOTE(rob): remove (not envs.is_set("VLLM_USE_V1")) to
             # disable V1 by default.
-            if envs.VLLM_USE_V1 or not envs.is_set("VLLM_USE_V1"):
+            try_by_default = (not envs.is_set("VLLM_USE_V1")
+                              and envs.VLLM_USE_V1_BY_DEFAULT)
+            if (envs.VLLM_USE_V1 or try_by_default):
                 use_v1 = True
             else:
                 logger.info(

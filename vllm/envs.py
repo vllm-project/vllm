@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = False
+    VLLM_USE_V1_BY_DEFAULT: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -516,6 +517,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, use the V1 code path.
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
+
+    # If set, use the V1 code path.
+    "VLLM_USE_V1_BY_DEFAULT":
+    lambda: bool(int(os.getenv("VLLM_USE_V1_BY_DEFAULT", "0"))),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":

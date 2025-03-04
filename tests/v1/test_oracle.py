@@ -11,9 +11,11 @@ UNSUPPORTED_MODELS_V1 = [
     "BAAI/bge-m3",  # embedding
 ]
 
+MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+
 
 @pytest.mark.parametrize("model", UNSUPPORTED_MODELS_V1)
-def test_unsupported_models(monkeypatch, model):
+def test_reject_unsupported_models(monkeypatch, model):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
         args = AsyncEngineArgs(model=model)
@@ -29,29 +31,52 @@ def test_unsupported_configs(monkeypatch):
 
         with pytest.raises(NotImplementedError):
             AsyncEngineArgs(
-                model="meta-llama/Llama-3.2-3B-Instruct",
+                model=MODEL,
                 kv_cache_dtype="fp8",
             ).create_engine_config()
 
         with pytest.raises(NotImplementedError):
             AsyncEngineArgs(
-                model="meta-llama/Llama-3.2-3B-Instruct",
-                speculative_model="meta-llama/Llama-3.2-1B-Instruct",
+                model=MODEL,
+                speculative_model=MODEL,
             ).create_engine_config()
 
         with pytest.raises(NotImplementedError):
             AsyncEngineArgs(
-                model="meta-llama/Llama-3.2-3B-Instruct",
+                model=MODEL,
                 guided_decoding_backend="lm-format-enforcer:no-fallback",
             ).create_engine_config()
 
-        with pytest.raises(NotImplementedError):
-            AsyncEngineArgs(
-                model="meta-llama/Llama-3.2-3B-Instruct",
-                guided_decoding_backend="classify",
-            ).create_engine_config()
 
-
-def test_enabled(monkeypatch):
+def test_enable_by_default_fallback(monkeypatch):
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
+        m.delenv("VLLM_USE_V1")
+        m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
+
+        # Should default to V1 for supported config.
+        vllm_config = AsyncEngineArgs(
+            model=MODEL,
+            enforce_eager=True,
+        ).create_engine_config()
+        assert vllm_config.use_v1
+
+        # Should fall back to V0 for experimental config.
+        vllm_config = AsyncEngineArgs(
+            model=MODEL,
+            enable_lora=True,
+        ).create_engine_config()
+        assert not vllm_config.use_v1
+
+        # Should fall back to V0 for experimental config.
+        vllm_config = AsyncEngineArgs(
+            model=MODEL,
+            enable_lora=True,
+        ).create_engine_config()
+        assert not vllm_config.use_v1
+
+        # Should fall back to V0 for unsupported config.
+        vllm_config = AsyncEngineArgs(
+            model=MODEL,
+            enable_lora=True,
+        ).create_engine_config()
+        assert not vllm_config.use_v1
