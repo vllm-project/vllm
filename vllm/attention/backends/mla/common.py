@@ -1069,19 +1069,53 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             maybe_padded_v = torch.nn.functional.pad(
                 v, [0, q.shape[-1] - v.shape[-1]], value=0)
 
-        attn_out = self._flash_attn_varlen_func(q, k, maybe_padded_v, **kwargs)
+        if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN:
+            attn_out = self.triton_fa_func(
+                q,
+                k,
+                maybe_padded_v,
+                sm_scale=softmax_scale,
+                **kwargs,
+            )
+        elif is_vllm_fa:
+            attn_out = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=maybe_padded_v,
+                return_softmax_lse=return_softmax_lse,
+                softmax_scale=softmax_scale,
+                **kwargs,
+            )
+        else:
+            # Use return_attn_probs instead of return_softmax_lse for RoCM
+            attn_out = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=maybe_padded_v,
+                return_attn_probs=return_softmax_lse,
+                softmax_scale=softmax_scale,
+                **kwargs,
+            )
+
+        # Unpack the output if there is multiple results,
+        # triton always returns (output, softmax_lse),
+        # vllm_flash_attn returns (output, softmax_lse) when
+        #  `return_softmax_lse = True`
+        # flash_attn (RoCM) returns (output, softmax_lse, ...) when
+        #  `return_attn_probs = True`
+        rest = None
+        if isinstance(attn_out, tuple):
+            attn_out, *rest = attn_out
+
+        # unpad if necessary
+        if self._pad_v:
+            attn_out = attn_out[..., :v.shape[-1]]
 
         # Remain consistent with old `flash_attn_varlen_func` where there
         # is only one output tensor if `return_softmax_lse` is False.
-        # only unpack if it is a tuple to avoid unpacking tensors by accident
-        if isinstance(attn_out, tuple):
-            attn_out, *rest = attn_out
-            # unpad if necessary
-            if self._pad_v:
-                attn_out = attn_out[..., :v.shape[-1]]
-            return attn_out, *rest
-        else:
-            return attn_out[..., :v.shape[-1]] if self._pad_v else attn_out
+        if return_softmax_lse:
+            return attn_out, rest[0]
+        return attn_out
 
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
@@ -1280,61 +1314,22 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        # For MLA the v head dim is smaller than qk head dim so we pad out
-        # v with 0s to match the qk head dim
-        v_dim = v.shape[-1]
-        pad_v = self.vllm_flash_attn_version < 3
-        if pad_v:
-            v = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
-                                        value=0)
-
-        if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN and not has_context:
-            output = self.triton_fa_func(
-                q,
-                k,
-                v_padded,
-                None,
-                prefill_metadata.query_start_loc,
-                prefill_metadata.query_start_loc,
-                prefill_metadata.max_prefill_seq_len,
-                prefill_metadata.max_prefill_seq_len,
-                True,  # causal
-                self.scale,
-                None,  # attn_mask is None unless applying ALiBi mask
-            )
-            ## triton flash attention always return 2 objects
-            if not has_context:
-                output = output[0]
-        elif is_vllm_fa:
-            output = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.query_start_loc,
-                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=has_context,
-            )
-        else:
-            output = self._flash_attn_varlen_diff_headdims(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.query_start_loc,
-                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                return_attn_probs=has_context,
-            )
+        output = self._flash_attn_varlen_diff_headdims(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=prefill_metadata.query_start_loc,
+            cu_seqlens_k=prefill_metadata.query_start_loc,
+            max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+            max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+            softmax_scale=self.scale,
+            causal=True,
+            return_softmax_lse=has_context,
+        )
 
         if has_context:
             # ROCm flash_attn_varlen_func will return 3 objects instead of 2
-            suffix_output, suffix_lse, *rest = output
+            suffix_output, suffix_lse = output
             context_output, context_lse = self._compute_prefill_context( \
                 q, kv_c_and_k_pe_cache, attn_metadata)
 
