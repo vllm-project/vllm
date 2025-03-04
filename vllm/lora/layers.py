@@ -395,6 +395,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+
+        # remove batching dimension
+        if x.ndim == 3 and output.ndim == 3:
+            output = output.flatten(0, 1)
+            x = x.flatten(0, 1)
+
         self.punica_wrapper.add_lora_linear(output, x, self.lora_a_stacked,
                                             self.lora_b_stacked,
                                             self.lora_bias_stacked, 1.0,
