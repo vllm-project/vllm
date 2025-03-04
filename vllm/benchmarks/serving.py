@@ -7,15 +7,14 @@ On the server side, run one of the following commands:
         --swap-space 16 \
         --disable-log-requests
 
-    (TGI backend)
+    (TGI backend: currently unavailable)
     ./launch_tgi_server.sh <your_model> <max_batch_total_tokens>
 
 On the client side, run:
-    python benchmarks/benchmark_serving.py \
+    vllm bench serving \
         --backend <backend> \
         --model <your_model> \
-        --dataset-name sharegpt \
-        --dataset-path <path to dataset> \
+        --dataset-name random \
         --request-rate <request_rate> \ # By default <request_rate> is inf
         --num-prompts <num_prompts> # By default <num_prompts> is 1000
 
@@ -54,8 +53,8 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from vllm.benchmarks.benchmark_utils import (
-    convert_to_pytorch_benchmark_format, write_to_json)
+from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
+                                   write_to_json)
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -571,7 +570,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
         write_to_json(pt_file, pt_records)
 
 
-def add_options(parser: argparse.ArgumentParser):
+def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--backend",
         type=str,
@@ -927,6 +926,6 @@ def main(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description="Benchmark the online serving throughput.")
-    add_options(parser)
+    add_cli_args(parser)
     args = parser.parse_args()
     main(args)

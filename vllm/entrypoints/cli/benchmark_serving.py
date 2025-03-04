@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 
-from vllm.benchmarks.benchmark_serving import add_options, main
+from vllm.benchmarks.serving import add_cli_args, main
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.utils import FlexibleArgumentParser
 
@@ -24,7 +24,7 @@ class BenchmarkServingSubcommand(CLISubcommand):
             "serving",
             help="Benchmark the online serving throughput.",
             usage="vllm bench serving [options]")
-        add_options(parser)
+        add_cli_args(parser)
         return parser
 
 
