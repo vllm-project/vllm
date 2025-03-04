@@ -36,7 +36,9 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[T]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.

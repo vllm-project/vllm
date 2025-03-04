@@ -50,7 +50,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptInsertion, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.utils import flatten_2d_lists, JSONTree, json_map_leaves
+from vllm.utils import JSONTree, flatten_2d_lists, json_map_leaves
 
 from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
                          SupportsQuant)
@@ -1576,7 +1576,9 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
 
         return embeds_in_batch
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
