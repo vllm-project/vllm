@@ -160,11 +160,11 @@ def cpu_platform_plugin() -> Optional[str]:
             logger.debug("Confirmed CPU platform is available because"
                          " vLLM is built with CPU.")
         if not is_cpu:
-            import platform
-            is_cpu = platform.machine().lower().startswith("arm")
+            import sys
+            is_cpu = sys.platform.startswith("darwin")
             if is_cpu:
                 logger.debug("Confirmed CPU platform is available"
-                             " because the machine is ARM.")
+                             " because the machine is MacOS.")
 
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
