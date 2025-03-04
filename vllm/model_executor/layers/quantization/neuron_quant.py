@@ -25,8 +25,8 @@ class NeuronQuantConfig(QuantizationConfig):
         if self.quant_dtype not in SUPPORTED_QUANT_DTYPE_LIST:
             raise ValueError(
                 f"Neuron quantization datatype {self.quant_dtype} is not valid,"
-                f"the quantization datatype should match one of the below types"
-                f"{SUPPORTED_QUANT_DTYPE_LIST}")
+                f" the quantization datatype should match one of the below "
+                f"types {SUPPORTED_QUANT_DTYPE_LIST}")
         self.dequant_dtype = dequant_dtype
         self.quantize_method = quantize_method
 

@@ -16,7 +16,7 @@ The following parameters are supported, which must be added as extra parameters:
 - `guided_json`: the output will follow the JSON schema.
 - `guided_grammar`: the output will follow the context free grammar.
 - `guided_whitespace_pattern`: used to override the default whitespace pattern for guided json decoding.
-- `guided_decoding_backend`: used to select the guided decoding backend to use.
+- `guided_decoding_backend`: used to select the guided decoding backend to use. Additional backend-specific options can be supplied in a comma separated list following a colon after the backend name. For example `"xgrammar:no-fallback"` will not allow vLLM to fallback to a different backend on error.
 
 You can see the complete list of supported parameters on the [OpenAI-Compatible Server](#openai-compatible-server)page.
 
@@ -193,7 +193,7 @@ class Step(BaseModel):
 
 
 class MathResponse(BaseModel):
-    steps: List[Step]
+    steps: list[Step]
     final_answer: str
 
 

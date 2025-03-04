@@ -97,7 +97,7 @@ class OpenVinoPlatform(Platform):
 
         if envs.VLLM_OPENVINO_CPU_KV_CACHE_PRECISION == "u8":
             if not OpenVinoPlatform.is_openvino_cpu():
-                logger.info("VLLM_OPENVINO_CPU_KV_CACHE_PRECISION is"
+                logger.info("VLLM_OPENVINO_CPU_KV_CACHE_PRECISION is "
                             "ignored for GPU, f16 data type will be used.")
                 cache_config.cache_dtype = ov.Type.f16
             else:

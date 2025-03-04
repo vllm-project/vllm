@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with PagedAttention on rocm"""
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Optional
 
 import torch
 
@@ -9,7 +9,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.flash_attn import (
+    FlashAttentionMetadata, FlashAttentionMetadataBuilder)
 
 logger = init_logger(__name__)
 
@@ -19,7 +20,7 @@ class ROCmAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
 
     @staticmethod
@@ -27,11 +28,11 @@ class ROCmAttentionBackend(AttentionBackend):
         return "ROCM_ATTN_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type["ROCmAttentionImpl"]:
+    def get_impl_cls() -> type["ROCmAttentionImpl"]:
         return ROCmAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["AttentionMetadata"]:
         return FlashAttentionMetadata
 
     @staticmethod
@@ -40,7 +41,7 @@ class ROCmAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
@@ -48,6 +49,10 @@ class ROCmAttentionBackend(AttentionBackend):
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
+
+    @staticmethod
+    def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
+        return FlashAttentionMetadataBuilder
 
 
 class ROCmAttentionImpl(AttentionImpl):
@@ -58,10 +63,10 @@ class ROCmAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> None:
@@ -150,17 +155,6 @@ class ROCmAttentionImpl(AttentionImpl):
             layer._v_scale,
         )
 
-        # TODO(sage): Refactor the context_attention_fwd kernel so that this
-        # overhead can be removed
-        context_lens = torch.empty_like(attn_metadata.seq_lens)
-        batch_size = len(attn_metadata.query_start_loc) - 1
-        assert len(context_lens) == batch_size
-        for i in range(batch_size):
-            query_start = attn_metadata.query_start_loc[i]
-            query_end = attn_metadata.query_start_loc[i + 1]
-            context_lens[i] = attn_metadata.seq_lens[i] - (query_end -
-                                                           query_start)
-
         # Compute attention and update output up to `num_actual_tokens`.
         context_attention_fwd(q=query[:num_actual_tokens],
                               k=key[:num_actual_tokens],
@@ -172,7 +166,6 @@ class ROCmAttentionImpl(AttentionImpl):
                               b_loc=attn_metadata.block_table,
                               b_start_loc=attn_metadata.query_start_loc,
                               b_seq_len=attn_metadata.seq_lens,
-                              b_ctx_len=context_lens,
                               max_input_len=attn_metadata.max_query_len,
                               k_scale=layer._k_scale,
                               v_scale=layer._v_scale,
