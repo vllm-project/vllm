@@ -7,6 +7,7 @@ import torch.nn as nn
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+import vllm.envs as envs
 
 logger = init_logger(__name__)
 
@@ -69,6 +70,9 @@ class CustomOp(nn.Module):
         # PyTorch-native implementation.
         return self.forward_native(*args, **kwargs)
 
+    def forward_triton(self, *args, **kwargs):
+        return self.forward_native(*args, **kwargs)
+
     def dispatch_forward(self):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
@@ -82,6 +86,12 @@ class CustomOp(nn.Module):
 
         if not enabled:
             return self.forward_native
+
+        # Here, we first assume that all platforms support basic Triton operators.
+        # If any platform does not support them, we can add checks here to
+        # print a warning and roll back to the original default operator path.
+        if (envs.VLLM_USE_TRITON_NON_ATTN):
+            return self.forward_triton
 
         if current_platform.is_rocm():
             return self.forward_hip
