@@ -344,7 +344,7 @@ class FusedMoE(torch.nn.Module):
         # For smuggling this layer into the fused moe custom op
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
-            raise ValueError(f"Duplicate layer name: {prefix}")
+            raise ValueError("Duplicate layer name: {}".format(prefix))
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
         self.use_direct_call = not envs.VLLM_TEST_ENABLE_EP
@@ -746,7 +746,7 @@ class FusedMoE(torch.nn.Module):
 
         if self.dp_size > 1:
             cu_tokens_across_dp_cpu = get_forward_context(
-            ).cu_tokens_across_dp_cpu
+            ).dp_metadata.cu_tokens_across_dp_cpu
 
             hidden_states = self.naive_multicast(hidden_states,
                                                  cu_tokens_across_dp_cpu)

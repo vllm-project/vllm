@@ -26,6 +26,12 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 
 
 @dataclass
+class DPMetadata:
+    num_tokens_across_dp: list[int]
+    cu_tokens_across_dp_cpu: torch.Tensor
+
+
+@dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
@@ -34,7 +40,7 @@ class ForwardContext:
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
-    cu_tokens_across_dp_cpu: Optional[torch.Tensor] = None
+    dp_metadata: Optional[DPMetadata] = None
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -61,7 +67,7 @@ def set_forward_context(attn_metadata: Any,
     need_to_track_batchsize = track_batchsize and attn_metadata is not None
     if need_to_track_batchsize:
         forward_start_time = time.perf_counter()
-    cu_tokens_across_dp_cpu = None
+    dp_metadata: Optional[DPMetadata] = None
     if vllm_config.parallel_config.data_parallel_size > 1:
         dp_size = vllm_config.parallel_config.data_parallel_size
         dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -83,6 +89,7 @@ def set_forward_context(attn_metadata: Any,
         from vllm.distributed.parallel_state import get_dp_group
         dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)
+        dp_metadata = DPMetadata(num_tokens_across_dp, cu_tokens_across_dp_cpu)
 
     global _forward_context
     prev_context = _forward_context
@@ -91,7 +98,7 @@ def set_forward_context(attn_metadata: Any,
         static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
-        cu_tokens_across_dp_cpu=cu_tokens_across_dp_cpu)
+        dp_metadata=dp_metadata)
     try:
         yield
     finally:
