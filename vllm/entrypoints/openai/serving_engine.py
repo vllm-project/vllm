@@ -452,8 +452,79 @@ class OpenAIServing:
             engine_prompt["multi_modal_data"] = mm_data
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+        return self._postprocess_chat(conversation, request_prompt, engine_prompt)
 
-        return conversation, [request_prompt], [engine_prompt]
+    def _postprocess_chat(
+        self,
+        conversation: List[ConversationMessage],
+        request_prompt: RequestPrompt,
+        engine_prompt: TokensPrompt,
+        ) -> Tuple[List[ConversationMessage], Sequence[RequestPrompt],
+               List[TokensPrompt]]:
+        processed_engine_prompts: List[TokensPrompt] = []
+        origin_engine_prompts: List[TokensPrompt] = [engine_prompt]
+        # handle multi_modal_data for image_embeds
+        for index in range(len(engine_prompt.\
+            get("multi_modal_data", {}).get("image", [])) - 1, -1, -1):
+            """
+            prompt_token_ids: "This is a test prompt."
+            multi_modal_data = {
+                "image": [{ 
+                    "image_embeds": image_embeds_1,
+                    # image_grid_thw is needed to calculate positional encoding.
+                    "image_grid_thw": torch.load(...),  # torch.Tensor of shape (1, 3),
+                },
+                { 
+                    "image_embeds": image_embeds_2,
+                    # image_grid_thw is needed to calculate positional encoding.
+                    "image_grid_thw": torch.load(...),  # torch.Tensor of shape (1, 3),
+                },
+                ] #### <<<<<<- This is a list.
+            }
+            # convert the list to a dict
+            [
+              {
+                prompt_token_ids: "This is a test prompt."
+                multi_modal_data = {
+                    "image": {
+                        "image_embeds": image_embeds_1,
+                        # image_grid_thw is needed to calculate positional encoding.
+                        "image_grid_thw": torch.load(...),  # torch.Tensor of shape (1, 3),
+                    } #### <<<<<- This is a dict.
+                }
+              },
+              {
+                prompt_token_ids: "This is a test prompt."
+                multi_modal_data = {
+                    "image": {
+                        "image_embeds": image_embeds_2,
+                        # image_grid_thw is needed to calculate positional encoding.
+                        "image_grid_thw": torch.load(...),  # torch.Tensor of shape (1, 3),
+                    } #### <<<<<- This is a dict.
+                }
+              }, 
+            ]
+
+            """
+            image_data = engine_prompt["multi_modal_data"]["image"][index]
+            if isinstance(image_data, dict):
+                if not 'image_embeds' in image_data:
+                    continue
+                processed_engine_prompts.append(TokensPrompt(
+                        prompt_token_ids=\
+                            engine_prompt.get("prompt_token_ids"),
+                        multi_modal_data=\
+                            {"image": image_data},
+                        mm_processor_kwargs=\
+                            engine_prompt.get("mm_processor_kwargs")
+                            ))
+                # remove the image embeds from the original engine prompt
+                engine_prompt["multi_modal_data"]["image"].pop(index)
+        engine_prompts = processed_engine_prompts + origin_engine_prompts
+        return (conversation,
+                request_prompt * len(engine_prompts),
+                engine_prompts
+                )
 
     def _log_inputs(
         self,
