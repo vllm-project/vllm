@@ -924,6 +924,35 @@ def try_get_optimal_moe_config(
     return config
 
 
+def rocm_aiter_topk_softmax(topk_weights: torch.Tensor,
+                            topk_indices: torch.Tensor,
+                            token_expert_indices: torch.Tensor,
+                            gating_output: torch.Tensor,
+                            renormalize: bool) -> None:
+    import aiter as rocm_aiter
+    rocm_aiter.topk_softmax(topk_weights, topk_indices, token_expert_indices,
+                            gating_output, renormalize)
+
+
+def vllm_topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
+                      token_expert_indices: torch.Tensor,
+                      gating_output: torch.Tensor, renormalize: bool) -> None:
+    ops.topk_softmax(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+    )
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+
+def dispatch_topk_func() -> Callable[..., torch.Tensor]:
+    if rocm_aiter_moe_enabled():
+        return rocm_aiter_topk_softmax
+    return vllm_topk_softmax
+
+
 def fused_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -948,22 +977,10 @@ def fused_topk(
                                         dtype=torch.int32,
                                         device=hidden_states.device)
 
-    if rocm_aiter_moe_enabled():
-        import aiter as rocm_aiter
+    gating_output_float = gating_output.float()  # TODO(woosuk): Optimize this.
 
-        rocm_aiter.topk_softmax(topk_weights, topk_ids, token_expert_indicies,
-                                gating_output.float(), renormalize)
-    else:
-        ops.topk_softmax(
-            topk_weights,
-            topk_ids,
-            token_expert_indicies,
-            gating_output.float(),  # TODO(woosuk): Optimize this.
-        )
-
-        if renormalize:
-            topk_weights = topk_weights / topk_weights.sum(dim=-1,
-                                                           keepdim=True)
+    dispatch_topk_func()(topk_weights, topk_ids, token_expert_indicies,
+                         gating_output_float, renormalize)
 
     del token_expert_indicies  # Not used. Will be used in the future.
     return topk_weights, topk_ids
@@ -1155,16 +1172,21 @@ direct_register_custom_op(
 )
 
 
-def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
-                             w1: torch.Tensor,
-                             w2: torch.Tensor,
-                             topk_weights: torch.Tensor,
-                             topk_ids: torch.Tensor,
-                             use_fp8_w8a8: bool = False,
-                             w1_scale: Optional[torch.Tensor] = None,
-                             w2_scale: Optional[torch.Tensor] = None,
-                             block_shape: Optional[List[int]] = None,
-                             expert_mask: Optional[torch.Tensor] = None):
+def rocm_aiter_fused_experts(
+        *,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        use_fp8_w8a8: bool = False,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        block_shape: Optional[List[int]] = None,
+        expert_mask: Optional[torch.Tensor] = None,
+        **kwagrs  # Ignore additional keyword arguments
+) -> torch.Tensor:
+
     import aiter as rocm_aiter
     import aiter.fused_moe_bf16_asm as rocm_aiter_asm_fmoe
 
@@ -1229,51 +1251,72 @@ def rocm_aiter_fused_experts(hidden_states: torch.Tensor,
                                            fc1_smooth_scale=None,
                                            fc2_smooth_scale=None,
                                            a16=False)
-    else:
-        return rocm_aiter.ck_moe(hidden_states=hidden_states,
-                                 w1=w1,
-                                 w2=w2,
-                                 topk_weights=topk_weights,
-                                 topk_ids=topk_ids)
+
+    return rocm_aiter.ck_moe(hidden_states=hidden_states,
+                             w1=w1,
+                             w2=w2,
+                             topk_weights=topk_weights,
+                             topk_ids=topk_ids)
 
 
-def fused_experts(hidden_states: torch.Tensor,
-                  w1: torch.Tensor,
-                  w2: torch.Tensor,
-                  topk_weights: torch.Tensor,
-                  topk_ids: torch.Tensor,
-                  inplace: bool = False,
-                  activation: str = "silu",
-                  use_fp8_w8a8: bool = False,
-                  use_int8_w8a16: bool = False,
-                  use_int4_w4a16: bool = False,
-                  global_num_experts: int = -1,
-                  expert_map: Optional[torch.Tensor] = None,
-                  w1_scale: Optional[torch.Tensor] = None,
-                  w2_scale: Optional[torch.Tensor] = None,
-                  w1_zp: Optional[torch.Tensor] = None,
-                  w2_zp: Optional[torch.Tensor] = None,
-                  a1_scale: Optional[torch.Tensor] = None,
-                  a2_scale: Optional[torch.Tensor] = None,
-                  block_shape: Optional[List[int]] = None,
-                  expert_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+def torch_vllm_inplace_fused_experts(**kwargs) -> torch.Tensor:
+    hidden_states = kwargs['hidden_states']
+    torch.ops.vllm.inplace_fused_experts(**kwargs)
+    return hidden_states
+
+
+def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
+    return torch.ops.vllm.outplace_fused_experts(**kwargs)
+
+
+def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
     if rocm_aiter_moe_enabled():
-        return rocm_aiter_fused_experts(hidden_states, w1, w2, topk_weights,
-                                        topk_ids, use_fp8_w8a8, w1_scale,
-                                        w2_scale, block_shape, expert_mask)
+        return rocm_aiter_fused_experts
     if inplace:
-        torch.ops.vllm.inplace_fused_experts(
-            hidden_states, w1, w2, topk_weights, topk_ids, activation,
-            use_fp8_w8a8, use_int8_w8a16, use_int4_w4a16, global_num_experts,
-            expert_map, w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
-            block_shape)
-        return hidden_states
-    else:
-        return torch.ops.vllm.outplace_fused_experts(
-            hidden_states, w1, w2, topk_weights, topk_ids, activation,
-            use_fp8_w8a8, use_int8_w8a16, use_int4_w4a16, global_num_experts,
-            expert_map, w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
-            block_shape)
+        return torch_vllm_inplace_fused_experts
+    return torch_vllm_outplace_fused_experts
+
+
+def fused_experts(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool = False,
+    activation: str = "silu",
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
+    use_int4_w4a16: bool = False,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    w1_zp: Optional[torch.Tensor] = None,
+    w2_zp: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    block_shape: Optional[List[int]] = None,
+) -> torch.Tensor:
+    return dispatch_fused_experts_func(inplace)(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        activation=activation,
+        use_fp8_w8a8=use_fp8_w8a8,
+        use_int8_w8a16=use_int8_w8a16,
+        use_int4_w4a16=use_int4_w4a16,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_zp=w1_zp,
+        w2_zp=w2_zp,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        block_shape=block_shape)
 
 
 def fused_experts_impl(hidden_states: torch.Tensor,
