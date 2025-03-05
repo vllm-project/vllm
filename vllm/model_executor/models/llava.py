@@ -367,8 +367,11 @@ class PixtralHFMultiModalProcessor(
             ]
             num_crops = torch.tensor([(ncols + 1) * nrows
                                       for ncols, nrows in tile_sizes])
-            embed_is_patch = [([True] * ncols + [False]) * nrows
-                              for ncols, nrows in tile_sizes]
+            # Each image may result to masks of different sizes, so we need to
+            # flatten the list and later use `num_crops` to get per-image masks.
+            embed_is_patch = torch.tensor(
+                flatten_2d_lists([([True] * ncols + [False]) * nrows
+                                  for ncols, nrows in tile_sizes]))
             processed_outputs["num_crops"] = num_crops
             processed_outputs["embed_is_patch"] = embed_is_patch
             processed_outputs["feat_is_patch"] = embed_is_patch
@@ -380,13 +383,12 @@ class PixtralHFMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        num_crops = hf_inputs.get("num_crops", torch.empty(0))
-        num_images = len(num_crops)
-
+        num_crops = hf_inputs.get("num_crops", torch.empty(0)).view(-1)
         return dict(
             feat_is_patch=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_crops),
-            embed_is_patch=MultiModalFieldConfig.shared("image", num_images),
+            embed_is_patch=MultiModalFieldConfig.flat_from_sizes(
+                "image", num_crops),
             num_crops=MultiModalFieldConfig.batched("image"),
             pixel_values=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
@@ -781,7 +783,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         if image_input is None:
             return None
         vision_embeddings = self._process_image_input(image_input)
-        if image_input["feat_is_patch"] is None:
+        if kwargs.get("v0_path", False):
             return vision_embeddings
         else:
             nested_emb = [
@@ -859,6 +861,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
+            kwargs.update({"v0_path": True})
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
