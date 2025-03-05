@@ -15,16 +15,6 @@ using namespace cute;
   #define ENABLE_SM90_KERNEL_LEVEL 1
 #endif
 
-// for debugging
-// __global__ void print_elements(int64_t* tensor, int64_t elements) {
-//   if (threadIdx.x == 0) {
-//     for (int64_t i = 0; i < elements; ++i) {
-//       printf("%ld ", tensor[i]);
-//     }
-//     printf("\n---\n");
-//   }
-// }
-
 __global__ void get_group_gemm_starts(
     int32_t* expert_offsets, int64_t* a_offsets, int64_t* b_offsets,
     int64_t* out_offsets, int64_t* a_scales_offsets, int64_t* b_scales_offsets,
@@ -105,32 +95,6 @@ struct cutlass_3x_group_gemm {
 
   struct GemmKernel : public KernelType {};
 };
-
-template <typename T>
-struct ItemDeleter {
-  void operator()(T* ptr) {
-    cudaFree(ptr);  // noexcept
-  }
-};
-
-template <typename T>
-cutlass::platform::unique_ptr<T, ItemDeleter<T>> make_device_ptr(
-    std::vector<T>& data_host) {
-  T* data_device;
-  int count = data_host.size();
-  cudaMalloc(&data_device, count * sizeof(T));
-  cudaMemcpy(data_device, data_host.data(), count * sizeof(T),
-             cudaMemcpyHostToDevice);
-  return cutlass::platform::unique_ptr<T, ItemDeleter<T>>(data_device);
-}
-
-template <typename T>
-cutlass::platform::unique_ptr<T, ItemDeleter<T>> allocate_device_ptr(
-    int count) {
-  T* data_device;
-  cudaMalloc(&data_device, count * sizeof(T));
-  return cutlass::platform::unique_ptr<T, ItemDeleter<T>>(data_device);
-}
 
 template <typename Gemm>
 void cutlass_group_gemm_caller(

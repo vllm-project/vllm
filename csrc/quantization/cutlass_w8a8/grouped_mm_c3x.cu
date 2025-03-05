@@ -138,12 +138,10 @@ void cutlass_grouped_mm_sm90(
 }
 
 // basic correctness, currently unused, run with <<<1, num_experts>>>
-__global__ void get_grouped_mm_data(const int* __restrict__ topk_ids,
-                                    int32_t* expert_offsets,
-                                    int32_t* problem_sizes1,
-                                    int32_t* problem_sizes2, int32_t* arg_sort,
-                                    int32_t* arg_sort_prim, int topk_length,
-                                    int n, int k, int topk) {
+__global__ void get_grouped_mm_data_kernel(
+    const int* __restrict__ topk_ids, int32_t* expert_offsets,
+    int32_t* problem_sizes1, int32_t* problem_sizes2, int32_t* arg_sort,
+    int32_t* arg_sort_prim, int topk_length, int n, int k, int topk) {
   int expert_id = threadIdx.x;
   int num_experts = blockDim.x;
 
@@ -243,12 +241,10 @@ constexpr int THREADS_PER_EXPERT_2 = 32;
 
 // 1 warp per expert
 // 4 experts per block
-__global__ void compute_problem_sizes_2(const int* __restrict__ topk_ids,
-                                        int32_t* problem_sizes1,
-                                        int32_t* problem_sizes2,
-                                        int32_t* atomic_buffer,
-                                        const int topk_length, const int n,
-                                        const int k) {
+__global__ void compute_problem_sizes_multi_expert(
+    const int* __restrict__ topk_ids, int32_t* problem_sizes1,
+    int32_t* problem_sizes2, int32_t* atomic_buffer, const int topk_length,
+    const int n, const int k) {
   int expert_id = blockIdx.x * 4 + threadIdx.x / THREADS_PER_EXPERT_2;
   int start = threadIdx.x % THREADS_PER_EXPERT_2;
 
@@ -273,10 +269,9 @@ __global__ void compute_problem_sizes_2(const int* __restrict__ topk_ids,
   }
 }
 
-__global__ void compute_arg_sorts_2(const int* __restrict__ topk_ids,
-                                    int32_t* arg_sort, int32_t* arg_sort_prim,
-                                    int32_t* atomic_buffer,
-                                    const int topk_length, const int topk) {
+__global__ void compute_arg_sorts_multi_expert(
+    const int* __restrict__ topk_ids, int32_t* arg_sort, int32_t* arg_sort_prim,
+    int32_t* atomic_buffer, const int topk_length, const int topk) {
   int expert_id = blockIdx.x * 4 + threadIdx.x / THREADS_PER_EXPERT_2;
   int start = threadIdx.x % THREADS_PER_EXPERT_2;
 
@@ -300,11 +295,11 @@ void get_grouped_mm_data_caller(
   torch::Tensor atomic_buffer = torch::zeros(num_experts, options_int32);
 
   // TODO this is an alternative way to block kernels
-  constexpr bool multi_expert_blocks = true;
+  constexpr bool multi_expert_blocks = false;
   if constexpr (multi_expert_blocks) {
     int num_blocks = (num_experts + 3) / 4;
     int num_threads = THREADS_PER_EXPERT_2 * 4;
-    compute_problem_sizes_2<<<num_blocks, num_threads, 0, stream>>>(
+    compute_problem_sizes_multi_expert<<<num_blocks, num_threads, 0, stream>>>(
         (const int32_t*)topk_ids.data_ptr(),
         (int32_t*)problem_sizes1.data_ptr(),
         (int32_t*)problem_sizes2.data_ptr(), (int32_t*)atomic_buffer.data_ptr(),
@@ -313,7 +308,7 @@ void get_grouped_mm_data_caller(
         (const int32_t*)problem_sizes1.data_ptr(),
         (int32_t*)expert_offsets.data_ptr(), (int32_t*)atomic_buffer.data_ptr(),
         num_experts);
-    compute_arg_sorts_2<<<num_blocks, num_threads, 0, stream>>>(
+    compute_arg_sorts_multi_expert<<<num_blocks, num_threads, 0, stream>>>(
         (const int32_t*)topk_ids.data_ptr(), (int32_t*)arg_sort.data_ptr(),
         (int32_t*)arg_sort_prim.data_ptr(), (int32_t*)atomic_buffer.data_ptr(),
         topk_ids.numel(), topk_ids.size(1));

@@ -401,8 +401,10 @@ struct ScaledEpilogueBiasAzpToken
 };
 
 /*
-TODO document
-This is an epilogue with ptr arrays to a_scales and b_scales
+    This epilogue works like ScaledEpilogue, but ScaleA and ScaleB are pointers
+    to arrays containing different scales used in group gemm. The number of
+   pointers in ScaleA and the number of pointers in ScaleB are equal to the
+   group size.
 */
 template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
 struct ScaledEpilogueArray

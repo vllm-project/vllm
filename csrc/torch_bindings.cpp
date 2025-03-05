@@ -331,7 +331,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
 
-  // CUTLASS w8a8 grouped GEMM // TODO complete this
+  // CUTLASS w8a8 grouped GEMM
   ops.def(
       "cutlass_grouped_mm(Tensor! out_tensors,"
       "                   Tensor a_tensors,"

@@ -118,7 +118,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                  Tensor b, Tensor a_scales,"
       "                  Tensor b_scales, Tensor? bias) -> ()");
   ops.impl("cutlass_scaled_mm", torch::kCPU, &int8_scaled_mm);
-
   // w8a8 GEMM, supporting asymmetric per-tensor or per-row/column
   // quantization.
   ops.def(
