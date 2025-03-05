@@ -42,9 +42,9 @@ K = [256, 4096, 5120, 3884, 13824, 16384]
 M_moe = [128, 512, 2048]
 N_moe = [128, 256, 4608]  # [128, 4608, 13824]
 K_moe = [256, 512, 7168]  # [256, 7168, 13824]
-M_moe_small = [128, 512]
-N_moe_small = [128, 256]
-K_moe_small = [256, 512]
+M_moe_small = [128, 512, 2048]
+N_moe_small = [128, 256, 4608]
+K_moe_small = [256, 512, 7168]
 BLOCK_SIZE = [[128, 128]]
 E = [2, 8] #, 16]  # 24   # [8, 24, 128, 256]
 TOP_KS = [1, 2, 6]  # [1, 2, 6]
@@ -228,13 +228,13 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 
 
 def p(s, t):
-    print(f"{s}: {t.shape}, {t.dtype}\n{t}")
+    #print(f"{s}: {t.shape}, {t.dtype}\n{t}")
     #print(f"{s}: {t.shape}, {t.dtype}\n{t.flatten()}")
     pass
 
 
 def pp(x):
-    print(x)
+    #print(x)
     pass
 
 
@@ -516,7 +516,7 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     a_q = a_q.view(a_q.shape[0], -1, a_q.shape[1]).repeat(1, topk, 1).reshape(-1, a_q.shape[1]) # orig
     a_s = a_s.view(a_s.shape[0], -1, a_s.shape[1]).repeat(1, topk, 1).reshape(-1, a_s.shape[1]) # orig
 
-    print(f"max = {topk*M}")
+    pp(f"max = {topk*M}")
     # gather?
     a_q = a_q.view(dtype=torch.uint8)[sorted_token_ids, ...].view(dtype=torch.float8_e4m3fn)
     a_s = a_s[sorted_token_ids]
@@ -610,9 +610,9 @@ def iota(shape: Tuple[int, ...], dim: int = 0, **kwargs) -> torch.Tensor:
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
     #itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
-    #itertools.product(M_moe_small, N_moe_small, K_moe_small, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
+    itertools.product(M_moe_small, N_moe_small, K_moe_small, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
     #itertools.product([512], [128], [256], [2], [1], [[128, 128]], DTYPES, SEEDS))
-    itertools.product([128], [128], [256], [2], [2], [[128, 128]], DTYPES, SEEDS))
+    #itertools.product([128], [128], [256], [2], [2], [[128, 128]], DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed):
@@ -621,7 +621,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
     if (M % 128 != 0 or N % 128 != 0 or K % 128 != 0 or topk == 1 or topk > E):
         pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}, {topk}")
 
-    print(f"\nTEST M={M}, N={N}, K={K}, E/num_groups={E}, topk={topk}, block_size={block_size}, dtype={dtype}")
+    pp(f"\nTEST M={M}, N={N}, K={K}, E/num_groups={E}, topk={topk}, block_size={block_size}, dtype={dtype}")
 
     torch.set_printoptions(profile="full")
 
