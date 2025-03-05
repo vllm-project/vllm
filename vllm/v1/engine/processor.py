@@ -131,6 +131,7 @@ class Processor:
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            return_mm_hashes=self.use_hash,
         )
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
