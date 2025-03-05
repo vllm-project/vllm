@@ -15,8 +15,6 @@ DTYPE = "half"
 def _vllm_model(apc: bool, vllm_runner, monkeypatch):
     """Set up VllmRunner instance."""
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    # TODO(nick): Single-proc to work around a ZMQ shutdown hang for now.
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     return vllm_runner(
         MODEL,
         dtype=DTYPE,

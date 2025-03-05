@@ -7,6 +7,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 import torch_xla.core.xla_model as xm
+import torch_xla.debug.profiler as xp
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
@@ -64,6 +65,15 @@ class TPUWorker:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
+
+        self.profiler = None
+        if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
+            # For TPU, we can only have 1 active profiler session for 1 profiler
+            # server. So we only profile on rank0.
+            self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        self.profile_dir)
+            self.profiler = xp.start_server(9012)
 
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
@@ -124,7 +134,7 @@ class TPUWorker:
             self.vllm_config.compilation_config.static_forward_context,
             runner_kv_caches)
 
-        self.model_runner.dummy_run(
+        self.model_runner._dummy_run(
             runner_kv_caches,
             num_tokens=self.scheduler_config.max_num_batched_tokens,
         )
@@ -151,6 +161,15 @@ class TPUWorker:
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
         return output if self.is_driver_worker else None
+
+    def profile(self, is_start: bool = True):
+        if self.rank < 1:
+            if self.profiler is None:
+                raise RuntimeError("Profiler is not enabled.")
+            if is_start:
+                xp.start_trace(self.profile_dir)
+            else:
+                xp.stop_trace()
 
     def load_model(self) -> None:
         self.model_runner.load_model()

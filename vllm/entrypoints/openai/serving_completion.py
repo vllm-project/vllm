@@ -23,7 +23,8 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               RequestResponseMetadata,
                                               UsageInfo)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
+                                                    clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -316,6 +317,8 @@ class OpenAIServingCompletion(OpenAIServing):
                             num_output_top_logprobs=request.logprobs,
                             tokenizer=tokenizer,
                             initial_text_offset=previous_text_lens[i],
+                            return_as_token_id=request.
+                            return_tokens_as_token_ids,
                         )
                     else:
                         logprobs = None
@@ -395,13 +398,7 @@ class OpenAIServingCompletion(OpenAIServing):
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
-            prompt_logprobs = final_res.prompt_logprobs
-            if prompt_logprobs:
-                for logprob_dict in prompt_logprobs:
-                    if logprob_dict:
-                        for logprob_values in logprob_dict.values():
-                            if logprob_values.logprob == float('-inf'):
-                                logprob_values.logprob = -9999.0
+            prompt_logprobs = clamp_prompt_logprobs(final_res.prompt_logprobs)
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]
@@ -442,6 +439,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         top_logprobs=out_logprobs,
                         tokenizer=tokenizer,
                         num_output_top_logprobs=request.logprobs,
+                        return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
                     logprobs = None
@@ -483,6 +481,7 @@ class OpenAIServingCompletion(OpenAIServing):
         num_output_top_logprobs: int,
         tokenizer: AnyTokenizer,
         initial_text_offset: int = 0,
+        return_as_token_id: Optional[bool] = None,
     ) -> CompletionLogProbs:
         """Create logprobs for OpenAI Completion API."""
         out_text_offset: list[int] = []
@@ -492,11 +491,13 @@ class OpenAIServingCompletion(OpenAIServing):
 
         last_token_len = 0
 
+        should_return_as_token_id = return_as_token_id if \
+            return_as_token_id is not None else self.return_tokens_as_token_ids
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 token = tokenizer.decode(token_id)
-                if self.return_tokens_as_token_ids:
+                if should_return_as_token_id:
                     token = f"token_id:{token_id}"
 
                 out_tokens.append(token)
@@ -509,7 +510,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     step_token,
                     token_id,
                     tokenizer,
-                    return_as_token_id=self.return_tokens_as_token_ids,
+                    return_as_token_id=should_return_as_token_id,
                 )
                 token_logprob = max(step_token.logprob, -9999.0)
 
@@ -526,7 +527,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     self._get_decoded_token(top_lp[1],
                                             top_lp[0],
                                             tokenizer,
-                                            return_as_token_id=self.return_tokens_as_token_ids):
+                                            return_as_token_id=should_return_as_token_id):
                     max(top_lp[1].logprob, -9999.0)
                     for i, top_lp in enumerate(step_top_logprobs.items())
                     if num_output_top_logprobs >= i
