@@ -330,6 +330,7 @@ class FusedMoE(torch.nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
         ep_size: Optional[int] = None,
+        dp_size: Optional[int] = None,
         prefix: str = "",
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
@@ -349,17 +350,21 @@ class FusedMoE(torch.nn.Module):
         self.layer_name = prefix
         self.use_direct_call = not envs.VLLM_TEST_ENABLE_EP
 
+        # Note: here we guard against accessing the TP and DP groups when
+        # uninitialized (this happens when testing)
         self.tp_size = (tp_size if tp_size is not None else
                         get_tensor_model_parallel_world_size())
-        self.dp_size = get_dp_group().world_size
-        self.dp_rank = get_dp_group().rank_in_group
+        tp_rank = 0 if self.tp_size == 1 else get_tensor_model_parallel_rank()
+        self.dp_size = (dp_size
+                        if dp_size is not None else get_dp_group().world_size)
+        self.dp_rank = (0
+                        if self.dp_size == 1 else get_dp_group().rank_in_group)
         self.global_num_experts = num_experts
 
         if envs.VLLM_TEST_ENABLE_EP:
             # Set TP size to 1 to adjust for EP and adjust EP size and rank
             # for DP attention.
-            self.ep_rank = (get_tensor_model_parallel_rank() +
-                            self.tp_size * self.dp_rank)
+            self.ep_rank = tp_rank + self.tp_size * self.dp_rank
             self.tp_rank = 0
             self.ep_size = self.tp_size * self.dp_size
             self.tp_size = 1
@@ -370,8 +375,7 @@ class FusedMoE(torch.nn.Module):
                 global_num_experts=self.global_num_experts)
         else:
             # Adjust TP size for DP attention
-            self.tp_rank = (get_tensor_model_parallel_rank() +
-                            self.tp_size * self.dp_rank)
+            self.tp_rank = tp_rank + self.tp_size * self.dp_rank
             self.ep_rank = 0
             self.tp_size = self.tp_size * self.dp_size
             self.ep_size = 1
