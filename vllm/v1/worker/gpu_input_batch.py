@@ -298,6 +298,11 @@ class InputBatch:
         if sampling_params.logit_bias is not None:
             self.logit_bias[req_index] = sampling_params.logit_bias
 
+        # FIXME: this implementation is incorrect. We create this mask
+        # then apply -inf to these specific tokens, which means we never
+        # select the allowed tokens! We cannot do the reverse, since
+        # this will impact the requests that do not have allowed_token_ids.
+        # This feature is currently disabled on V1 (we reject in Processor).
         if sampling_params.allowed_token_ids:
             self.has_allowed_token_ids.add(req_id)
             if self.allowed_token_ids_mask_cpu_tensor is None:
