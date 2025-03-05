@@ -1540,6 +1540,16 @@ class EngineArgs:
                 _fallback_info(feature_name=current_platform.device_type)
                 return False
 
+        #############################################################
+        V1_BACKENDS = [
+            "FLASH_ATTN_VLLM_V1", "PALLAS_VLLM_V1", "TRITON_MLA", "FLASHMLA"
+        ]
+        if (envs.is_set("VLLM_ATTENTION_BACKEND")
+                and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
+            _raise_or_warning(feature_name="--otlp-traces-endpoint",
+                              recommend_to_remove=False)
+            return False
+
         return True
 
     def _set_default_args_v0(self, model_config: ModelConfig) -> None:
