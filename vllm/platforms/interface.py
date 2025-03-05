@@ -332,12 +332,16 @@ class Platform:
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        """Returns whether the current platform supports F8 types."""
+        """
+        Returns whether the current platform supports F8 types.
+        """
         return False
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
-        """Returns whether the preferred F8 type is fnuz on the current platform."""
+        """
+        Returns whether the preferred F8 type is fnuz on the current platform.
+        """
         return False
 
     @classmethod

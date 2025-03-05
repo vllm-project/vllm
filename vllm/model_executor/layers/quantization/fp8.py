@@ -560,7 +560,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # If checkpoint is fp16, quantize in place.
         if not self.quant_config.is_checkpoint_fp8_serialized:
             fp8_dtype = torch.float8_e4m3fnuz \
-                        if current_platform.is_fp8_fnuz() else torch.float8_e4m3fn
+                        if current_platform.is_fp8_fnuz() \
+                        else torch.float8_e4m3fn
             w13_weight = torch.empty_like(layer.w13_weight.data,
                                           dtype=fp8_dtype)
             w2_weight = torch.empty_like(layer.w2_weight.data, dtype=fp8_dtype)

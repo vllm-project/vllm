@@ -30,7 +30,8 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
     fp8_type* __restrict__ out, float* __restrict__ scale,
     scalar_t const* __restrict__ input, float const* __restrict__ scale_ub,
     const int hidden_size) {
-  float const min_scaling_factor = 1.0f / (FP8_E4M3_ADJUSTED_MAX<fp8_type>::val() * 512.f);
+  float const min_scaling_factor =
+      1.0f / (FP8_E4M3_ADJUSTED_MAX<fp8_type>::val() * 512.f);
 
   int const tid = threadIdx.x;
   int const token_idx = blockIdx.x;
@@ -66,7 +67,8 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
       token_scale = block_absmax_val_maybe;
     }
     // token scale computation
-    token_scale = max(token_scale / FP8_E4M3_ADJUSTED_MAX<fp8_type>::val(), min_scaling_factor);
+    token_scale = max(token_scale / FP8_E4M3_ADJUSTED_MAX<fp8_type>::val(),
+                      min_scaling_factor);
     scale[token_idx] = token_scale;
   }
   __syncthreads();
@@ -98,18 +100,20 @@ void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   if (is_fp8_ocp()) {
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
-          vllm::scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fn><<<grid, block, 0, stream>>>(
-              out.data_ptr<c10::Float8_e4m3fn>(), input.data_ptr<scalar_t>(),
-              scale.data_ptr<float>(), num_elems);
+          vllm::scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fn>
+              <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fn>(),
+                                           input.data_ptr<scalar_t>(),
+                                           scale.data_ptr<float>(), num_elems);
         });
   }
 #ifdef USE_ROCM
   else {
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
-          vllm::scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fnuz><<<grid, block, 0, stream>>>(
-              out.data_ptr<c10::Float8_e4m3fnuz>(), input.data_ptr<scalar_t>(),
-              scale.data_ptr<float>(), num_elems);
+          vllm::scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fnuz>
+              <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fnuz>(),
+                                           input.data_ptr<scalar_t>(),
+                                           scale.data_ptr<float>(), num_elems);
         });
   }
 #endif
@@ -128,22 +132,28 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   if (is_fp8_ocp()) {
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
-          vllm::segmented_max_reduction<scalar_t, c10::Float8_e4m3fn><<<grid, block, 0, stream>>>(
-              scale.data_ptr<float>(), input.data_ptr<scalar_t>(), num_elems);
-          vllm::scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fn><<<grid, block, 0, stream>>>(
-              out.data_ptr<c10::Float8_e4m3fn>(), input.data_ptr<scalar_t>(),
-              scale.data_ptr<float>(), num_elems);
+          vllm::segmented_max_reduction<scalar_t, c10::Float8_e4m3fn>
+              <<<grid, block, 0, stream>>>(scale.data_ptr<float>(),
+                                           input.data_ptr<scalar_t>(),
+                                           num_elems);
+          vllm::scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fn>
+              <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fn>(),
+                                           input.data_ptr<scalar_t>(),
+                                           scale.data_ptr<float>(), num_elems);
         });
   }
 #ifdef USE_ROCM
   else {
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
-          vllm::segmented_max_reduction<scalar_t, c10::Float8_e4m3fnuz><<<grid, block, 0, stream>>>(
-              scale.data_ptr<float>(), input.data_ptr<scalar_t>(), num_elems);
-          vllm::scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fnuz><<<grid, block, 0, stream>>>(
-              out.data_ptr<c10::Float8_e4m3fnuz>(), input.data_ptr<scalar_t>(),
-              scale.data_ptr<float>(), num_elems);
+          vllm::segmented_max_reduction<scalar_t, c10::Float8_e4m3fnuz>
+              <<<grid, block, 0, stream>>>(scale.data_ptr<float>(),
+                                           input.data_ptr<scalar_t>(),
+                                           num_elems);
+          vllm::scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fnuz>
+              <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fnuz>(),
+                                           input.data_ptr<scalar_t>(),
+                                           scale.data_ptr<float>(), num_elems);
         });
   }
 #endif
@@ -166,7 +176,8 @@ void dynamic_per_token_scaled_fp8_quant(
   if (is_fp8_ocp()) {
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "dynamic_per_token_scaled_fp8_quant_kernel", [&] {
-          vllm::dynamic_per_token_scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fn>
+          vllm::dynamic_per_token_scaled_fp8_quant_kernel<scalar_t,
+                                                          c10::Float8_e4m3fn>
               <<<grid, block, 0, stream>>>(
                   out.data_ptr<c10::Float8_e4m3fn>(), scales.data_ptr<float>(),
                   input.data_ptr<scalar_t>(),
@@ -178,10 +189,11 @@ void dynamic_per_token_scaled_fp8_quant(
   else {
     VLLM_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "dynamic_per_token_scaled_fp8_quant_kernel", [&] {
-          vllm::dynamic_per_token_scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fnuz>
+          vllm::dynamic_per_token_scaled_fp8_quant_kernel<scalar_t,
+                                                          c10::Float8_e4m3fnuz>
               <<<grid, block, 0, stream>>>(
-                  out.data_ptr<c10::Float8_e4m3fnuz>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_t>(),
+                  out.data_ptr<c10::Float8_e4m3fnuz>(),
+                  scales.data_ptr<float>(), input.data_ptr<scalar_t>(),
                   scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
                   hidden_size);
         });

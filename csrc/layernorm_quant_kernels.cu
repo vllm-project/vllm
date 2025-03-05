@@ -51,8 +51,8 @@ __global__ void rms_norm_static_fp8_quant_kernel(
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)input[blockIdx.x * hidden_size + idx];
     float const out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
-    scaled_fp8_conversion<true, fp8_type>(
-        out[blockIdx.x * hidden_size + idx], out_norm, scale_inv);
+    scaled_fp8_conversion<true, fp8_type>(out[blockIdx.x * hidden_size + idx],
+                                          out_norm, scale_inv);
   }
 }
 
@@ -113,8 +113,8 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     temp *= weight_v[idx];
 #pragma unroll
     for (int i = 0; i < width; ++i) {
-      scaled_fp8_conversion<true, fp8_type>(
-          out[id * width + i], float(temp.data[i]), scale_inv);
+      scaled_fp8_conversion<true, fp8_type>(out[id * width + i],
+                                            float(temp.data[i]), scale_inv);
     }
   }
 }
@@ -157,8 +157,8 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)residual[blockIdx.x * hidden_size + idx];
     float const out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
-    scaled_fp8_conversion<true, fp8_type>(
-        out[blockIdx.x * hidden_size + idx], out_norm, scale_inv);
+    scaled_fp8_conversion<true, fp8_type>(out[blockIdx.x * hidden_size + idx],
+                                          out_norm, scale_inv);
   }
 }
 
@@ -198,14 +198,15 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
 #endif
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width, fp8_type)                                   \
-  VLLM_DISPATCH_FLOATING_TYPES(                                                      \
-      input.scalar_type(), "fused_add_rms_norm_kernel", [&] {                        \
-        vllm::fused_add_rms_norm_static_fp8_quant_kernel<scalar_t, width, fp8_type>  \
-            <<<grid, block, 0, stream>>>(                                            \
-                out.data_ptr<fp8_type>(), input.data_ptr<scalar_t>(),                \
-                residual.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(),          \
-                scale.data_ptr<float>(), epsilon, num_tokens, hidden_size);          \
+#define LAUNCH_FUSED_ADD_RMS_NORM(width, fp8_type)                          \
+  VLLM_DISPATCH_FLOATING_TYPES(                                             \
+      input.scalar_type(), "fused_add_rms_norm_kernel", [&] {               \
+        vllm::fused_add_rms_norm_static_fp8_quant_kernel<scalar_t, width,   \
+                                                         fp8_type>          \
+            <<<grid, block, 0, stream>>>(                                   \
+                out.data_ptr<fp8_type>(), input.data_ptr<scalar_t>(),       \
+                residual.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(), \
+                scale.data_ptr<float>(), epsilon, num_tokens, hidden_size); \
       });
 
 void fused_add_rms_norm_static_fp8_quant(

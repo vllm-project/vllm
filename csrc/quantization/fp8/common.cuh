@@ -16,37 +16,37 @@
 
 static bool is_fp8_ocp() {
 #ifndef USE_ROCM
-    return true;
+  return true;
 #else
-    auto dprops = at::cuda::getCurrentDeviceProperties();
-    std::string device_arch = dprops->gcnArchName;
-    size_t substring = device_arch.find("gfx94");
-    return substring == std::string::npos;
+  auto dprops = at::cuda::getCurrentDeviceProperties();
+  std::string device_arch = dprops->gcnArchName;
+  size_t substring = device_arch.find("gfx94");
+  return substring == std::string::npos;
 #endif
 }
 
 template <typename T>
 class FP8_E4M3_ADJUSTED_MAX {
-  public:
-    static constexpr T val() { return {}; };
+ public:
+  static constexpr T val() { return {}; };
 };
 
 template <>
 class FP8_E4M3_ADJUSTED_MAX<c10::Float8_e4m3fn> {
-  public:
-    static constexpr c10::Float8_e4m3fn val() {
-      return std::numeric_limits<c10::Float8_e4m3fn>::max();
-    }
+ public:
+  static constexpr c10::Float8_e4m3fn val() {
+    return std::numeric_limits<c10::Float8_e4m3fn>::max();
+  }
 };
 
 // Using the default max value from pytorch (240.0 0x7F) will cause accuracy
 // issue when running dynamic quantization. Here use 224.0 0x7E for rocm.
 template <>
 class FP8_E4M3_ADJUSTED_MAX<c10::Float8_e4m3fnuz> {
-  public:
-    static constexpr c10::Float8_e4m3fnuz val() {
-      return c10::Float8_e4m3fnuz(0x7E, c10::Float8_e4m3fnuz::from_bits());
-    }
+ public:
+  static constexpr c10::Float8_e4m3fnuz val() {
+    return c10::Float8_e4m3fnuz(0x7E, c10::Float8_e4m3fnuz::from_bits());
+  }
 };
 
 namespace vllm {
@@ -62,7 +62,7 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
 }
 
 template <bool is_scale_inverted, typename fp8_type>
-__device__ __forceinline__ void scaled_fp8_conversion(fp8_type &ret,
+__device__ __forceinline__ void scaled_fp8_conversion(fp8_type& ret,
                                                       float const val,
                                                       float const scale) {
   float x = 0.0f;
@@ -79,17 +79,15 @@ __device__ __forceinline__ void scaled_fp8_conversion(fp8_type &ret,
 #else
   // Use hardware cvt instruction for fp8 on rocm
   if constexpr (std::is_same_v<fp8_type, c10::Float8_e4m3fn>) {
-    ret = fp8_type(
-        __hip_cvt_float_to_fp8(r,
-          __hip_fp8_e4m3::__default_saturation,
-          __hip_fp8_e4m3::__default_interpret),
-        fp8_type::from_bits());
+    ret =
+        fp8_type(__hip_cvt_float_to_fp8(r, __hip_fp8_e4m3::__default_saturation,
+                                        __hip_fp8_e4m3::__default_interpret),
+                 fp8_type::from_bits());
   }
   if constexpr (std::is_same_v<fp8_type, c10::Float8_e4m3fnuz>) {
     ret = fp8_type(
-        __hip_cvt_float_to_fp8(r,
-          __hip_fp8_e4m3_fnuz::__default_saturation,
-          __hip_fp8_e4m3_fnuz::__default_interpret),
+        __hip_cvt_float_to_fp8(r, __hip_fp8_e4m3_fnuz::__default_saturation,
+                               __hip_fp8_e4m3_fnuz::__default_interpret),
         fp8_type::from_bits());
   }
 #endif
