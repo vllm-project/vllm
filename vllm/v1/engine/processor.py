@@ -92,10 +92,12 @@ class Processor:
             return
         if params.allowed_token_ids is None:
             return
-        if not all(0 <= tid < self.model_config.vocab_size
-                   for tid in params.allowed_token_ids):
+        if not params.allowed_token_ids:
+            raise ValueError("allowed_token_ids is not None and empty!")
+        vocab_size = self.model_config.get_vocab_size()
+        if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
             raise ValueError(
-                "allowed_token_ids contains out-of-vocab token id")
+                "allowed_token_ids contains out-of-vocab token id!")
 
     def process_inputs(
         self,
