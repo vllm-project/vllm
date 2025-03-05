@@ -1,30 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
 from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
 from typing import Optional, Union, cast
 
-import msgspec
-
 from vllm.sampling_params import SamplingParams
 from vllm.v1.struct_output.grammar import (Grammar, StructOutputKey,
                                            StructOutputOptions)
 
 
-class StructOutputRequest(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True,  # type: ignore[call-arg]
-):
+@dataclasses.dataclass
+class StructOutputRequest:
 
     sampling_params: SamplingParams
     _grammar: Optional[Union[Future[Grammar],
-                             Grammar]] = msgspec.field(default=None)
+                             Grammar]] = dataclasses.field(default=None)
 
     def _check_grammar_completion(self) -> bool:
+        # NOTE: We have to lazy import to gate circular imports
         from vllm.v1.request import RequestStatus
 
         if isinstance(self._grammar, Future):

@@ -19,7 +19,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
-from vllm.v1.struct_output.request import StructOutputRequest
 from vllm.v1.struct_output.utils import validate_struct_output_request
 
 
@@ -298,8 +297,7 @@ class Processor:
             eos_token_id=eos_token_id,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            struct_output_request=StructOutputRequest(
-                sampling_params=sampling_params))
+        )
 
     def _validate_model_inputs(self, inputs: ProcessorInputs):
         if is_encoder_decoder_inputs(inputs):

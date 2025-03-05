@@ -603,10 +603,11 @@ class Scheduler:
                     # the outer lists can be of length > 1.
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
 
-            struct_output_req = request.struct_output_request
-            if new_token_ids and struct_output_req is not None:
-                assert struct_output_req.grammar is not None
-                struct_output_req.grammar.accept_tokens(
+            if new_token_ids and request.use_struct_output:
+                # NOTE: struct_output_request
+                # should not be None if use_struct_output, we have
+                # check above, so safe to ignore type warning
+                request.struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     request.request_id,
                     new_token_ids,
                 )

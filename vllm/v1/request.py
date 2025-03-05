@@ -8,6 +8,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
+from vllm.v1.struct_output.request import StructOutputRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -15,7 +16,6 @@ if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.inputs import PlaceholderRange
-    from vllm.v1.struct_output.request import StructOutputRequest
 
 logger = init_logger(__name__)
 
@@ -88,7 +88,8 @@ class Request:
             eos_token_id=request.eos_token_id,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
-            struct_output_request=request.struct_output_request,
+            struct_output_request=StructOutputRequest(
+                sampling_params=request.sampling_params),
         )
 
     def queued(self, timestamp: Optional[float] = None) -> None:

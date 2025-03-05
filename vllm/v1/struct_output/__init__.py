@@ -19,7 +19,6 @@ from vllm.v1.struct_output.grammar import (Grammar, StructOutputKey,
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
-    from vllm.v1.struct_output.request import StructOutputRequest
 
 logger = init_logger(__name__)
 
@@ -66,22 +65,24 @@ class StructOutputManager:
         return None
 
     def populate_cache(self, request: Request) -> None:
-        struct_output_req = request.struct_output_request
-        if struct_output_req is None:
+        if request.struct_output_request is None:
             return
 
         grammar = self.request_key_to_grammar.get(
-            struct_output_req.struct_output_key)
+            request.struct_output_request.struct_output_key)
         if grammar:
-            struct_output_req.grammar = copy.copy(grammar)
+            request.struct_output_request.grammar = copy.copy(grammar)
             return
-        struct_output_req.grammar = self.cache(struct_output_req)
+        request.struct_output_request.grammar = self.cache(request)
 
-    def cache(self, request: StructOutputRequest):
+    def cache(self, request: Request):
         return self.executor.submit(self._executor_loop, request)
 
-    def _executor_loop(self, request: StructOutputRequest) -> Grammar:
-        key = request.struct_output_key
+    def _executor_loop(self, request: Request) -> Grammar:
+        # NOTE: The struct_output_request should never be None in
+        # this case, but mypy can't infer this correctly,
+        # so we need to ignore the error here.
+        key = request.struct_output_request.struct_output_key  # type: ignore[union-attr]
         grammar = self.request_key_to_grammar.get(key)
         if grammar is not None:
             return copy.copy(grammar)
