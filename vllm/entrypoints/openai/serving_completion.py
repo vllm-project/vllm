@@ -23,7 +23,8 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               RequestResponseMetadata,
                                               UsageInfo)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
+                                                    clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -51,11 +52,12 @@ class OpenAIServingCompletion(OpenAIServing):
                          models=models,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
-        diff_sampling_param = self.model_config.get_diff_sampling_param()
-        if diff_sampling_param:
+        self.default_sampling_params = (
+            self.model_config.get_diff_sampling_param())
+        if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
-                diff_sampling_param)
+                self.default_sampling_params)
 
     async def create_completion(
         self,
@@ -119,17 +121,14 @@ class OpenAIServingCompletion(OpenAIServing):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
-                # Build default sampling params
-                default_sampling_params = (
-                    self.model_config.get_diff_sampling_param())
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens, default_sampling_params)
+                        default_max_tokens, self.default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
                         default_max_tokens,
                         self.model_config.logits_processor_pattern,
-                        default_sampling_params)
+                        self.default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
 
@@ -396,13 +395,7 @@ class OpenAIServingCompletion(OpenAIServing):
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
-            prompt_logprobs = final_res.prompt_logprobs
-            if prompt_logprobs:
-                for logprob_dict in prompt_logprobs:
-                    if logprob_dict:
-                        for logprob_values in logprob_dict.values():
-                            if logprob_values.logprob == float('-inf'):
-                                logprob_values.logprob = -9999.0
+            prompt_logprobs = clamp_prompt_logprobs(final_res.prompt_logprobs)
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]
