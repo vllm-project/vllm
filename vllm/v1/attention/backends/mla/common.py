@@ -443,8 +443,6 @@ class MLACommonMetadataBuilder(Generic[M]):
             # If the decode is at the "back" of the batch, i, we can swap it
             # with the prefill closest to the front of the batch
             if decodes[num_decodes - i] >= num_decodes:
-                print("Reordering ", prefills[first_prefill],
-                      decodes[num_decodes - i])
                 input_batch.swap_states(prefills[first_prefill],
                                         decodes[num_decodes - i])
                 first_prefill += 1
