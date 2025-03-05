@@ -1554,6 +1554,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalEncDecInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1567,6 +1568,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             encoder_prompt,
             mm_data,
             hf_processor_mm_kwargs,
+            return_mm_hashes,
         )
 
         tokenizer = self.info.get_tokenizer()
