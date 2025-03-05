@@ -1674,7 +1674,7 @@ def _raise_or_warning(feature_name: str, recommend_to_remove: bool):
 
 def _experimental_warning(feature_name: str):
     logger.warning(
-        "Detected VLLM_USE_V1=1 with %s. Usage should"
+        "Detected VLLM_USE_V1=1 with %s. Usage should "
         "be considered experimental. Please report any "
         "issues on Github.", feature_name)
 
