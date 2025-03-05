@@ -7,7 +7,15 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import (GeluAndMul,
                                                    ReLUSquaredActivation,
                                                    SiluAndMul)
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    dispatch_fused_experts_func, dispatch_topk_func, rocm_aiter_fused_experts,
+    rocm_aiter_topk_softmax, torch_vllm_inplace_fused_experts,
+    torch_vllm_outplace_fused_experts, vllm_topk_softmax)
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    cutlass_scaled_mm, dispatch_blockscale_func,
+    rocm_aiter_gemm_a8w8_blockscale, w8a8_block_fp8_matmul)
+from vllm.platforms import current_platform
 
 
 # Registered subclass for test
@@ -87,3 +95,49 @@ def test_enabled_ops_invalid(env: str):
             custom_ops=env.split(",")))
         with set_current_vllm_config(vllm_config):
             RMSNorm(1024).enabled()
+
+
+@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
+def test_topk_dispatch(use_rocm_aiter: str, monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
+    topk_func = dispatch_topk_func()
+
+    if current_platform.is_rocm() and int(use_rocm_aiter):
+        assert topk_func == rocm_aiter_topk_softmax
+    else:
+        assert topk_func == vllm_topk_softmax
+
+
+@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
+@pytest.mark.parametrize("inplace", [True, False])
+def test_fused_experts_dispatch(use_rocm_aiter: str, inplace: bool,
+                                monkeypatch):
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
+    fused_experts_func = dispatch_fused_experts_func(inplace)
+    if current_platform.is_rocm() and int(use_rocm_aiter):
+        assert fused_experts_func == rocm_aiter_fused_experts
+    elif inplace:
+        assert fused_experts_func == torch_vllm_inplace_fused_experts
+    else:
+        assert fused_experts_func == torch_vllm_outplace_fused_experts
+
+
+@pytest.mark.parametrize("use_cutlass", [True, False])
+@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
+@pytest.mark.parametrize("use_rocm_aiter_block_gemm", ["0", "1"])
+def test_block_gemm_dispatch(use_cutlass: bool, use_rocm_aiter: str,
+                             use_rocm_aiter_block_gemm: str, monkeypatch):
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_BLOCK_GEMM",
+                       use_rocm_aiter_block_gemm)
+    block_scale_func = dispatch_blockscale_func(use_cutlass)
+
+    if use_cutlass:
+        assert block_scale_func == cutlass_scaled_mm
+    elif current_platform.is_rocm() and int(use_rocm_aiter) and int(
+            use_rocm_aiter_block_gemm):
+        assert block_scale_func == rocm_aiter_gemm_a8w8_blockscale
+    else:
+        assert block_scale_func == w8a8_block_fp8_matmul

@@ -4,7 +4,7 @@
 import functools
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import triton
@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED, CUTLASS_FP8_SUPPORTED, apply_fp8_linear)
 from vllm.platforms import current_platform
 from vllm.utils import (direct_register_custom_op,
-                        rocm_aiter_fp8_block_scaled_moe_enabled)
+                        rocm_aiter_w8a8_block_gemm_enabled)
 
 logger = init_logger(__name__)
 
@@ -31,6 +31,54 @@ def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
     if isinstance(x, torch.Tensor):
         x = x.dtype
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
+
+
+def shape_supported_by_cutlass(weight: torch.Tensor, block_size: List[int],
+                               weight_scale: torch.Tensor,
+                               input_2d: torch.Tensor) -> bool:
+    if current_platform.is_rocm():
+        scale_a_shape = ((input_2d.shape[-1] // block_size[1], ) +
+                         input_2d.shape[:-1])[::-1]
+        scale_b_shape = (weight_scale.view(-1, 1)
+                         if weight_scale.dim() <= 1 else weight_scale.T).shape
+        ar, ac = scale_a_shape
+        br, bc = scale_b_shape
+        return ac > 1 or bc > 1 or ar not in (1, input_2d.shape[0]) \
+            or br not in (1, weight.shape[0])
+
+    return weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0
+
+
+def cutlass_scaled_mm(A: torch.Tensor, B: torch.Tensor, As: torch.Tensor,
+                      Bs: torch.Tensor, output_dtype: torch.dtype,
+                      **kwargs) -> torch.Tensor:
+    return ops.cutlass_scaled_mm(A,
+                                 B.T,
+                                 out_dtype=output_dtype,
+                                 scale_a=As,
+                                 scale_b=Bs.T)
+
+
+def rocm_aiter_gemm_a8w8_blockscale(A: torch.Tensor,
+                                    B: torch.Tensor,
+                                    As: torch.Tensor,
+                                    Bs: torch.Tensor,
+                                    output_dtype: torch.dtype = torch.float16,
+                                    **kwargs) -> torch.Tensor:
+    import aiter as rocm_aiter
+
+    output = torch.zeros([A.shape[0], B.shape[0]],
+                         dtype=output_dtype,
+                         device=A.device)
+    return rocm_aiter.gemm_a8w8_blockscale(A, B, As, Bs, output)
+
+
+def dispatch_blockscale_func(use_cutlass: bool) -> Callable[..., torch.Tensor]:
+    if use_cutlass:
+        return cutlass_scaled_mm
+    if rocm_aiter_w8a8_block_gemm_enabled():
+        return rocm_aiter_gemm_a8w8_blockscale
+    return w8a8_block_fp8_matmul
 
 
 def apply_w8a8_block_fp8_linear(
@@ -46,47 +94,17 @@ def apply_w8a8_block_fp8_linear(
     # View input as 2D matrix for fp8 methods
     input_2d = input.view(-1, input.shape[-1])
     output_shape = [*input.shape[:-1], weight.shape[0]]
+    use_cutlass = cutlass_block_fp8_supported and shape_supported_by_cutlass()
 
-    shape_supported_by_cutlass = (weight.shape[0] % 128 == 0
-                                  and weight.shape[1] % 128 == 0)
-    if current_platform.is_rocm():
-        scale_a_shape = ((input_2d.shape[-1] // block_size[1], ) +
-                         input_2d.shape[:-1])[::-1]
-        scale_b_shape = (weight_scale.view(-1, 1)
-                         if weight_scale.dim() <= 1 else weight_scale.T).shape
-        ar, ac = scale_a_shape
-        br, bc = scale_b_shape
-        if (ac > 1 or bc > 1 or ar not in (1, input_2d.shape[0])
-                or br not in (1, weight.shape[0])):
-            shape_supported_by_cutlass = False
-    if cutlass_block_fp8_supported and shape_supported_by_cutlass:
-        q_input, x_scale = per_token_group_quant_fp8(input_2d,
-                                                     block_size[1],
-                                                     column_major_scales=True)
-        output = ops.cutlass_scaled_mm(q_input,
-                                       weight.T,
-                                       out_dtype=input.dtype,
-                                       scale_a=x_scale,
-                                       scale_b=weight_scale.T)
-    else:
-        q_input, x_scale = per_token_group_quant_fp8(input_2d,
-                                                     block_size[1],
-                                                     column_major_scales=False)
-        if rocm_aiter_fp8_block_scaled_moe_enabled():
-            import aiter as rocm_aiter
+    q_input, x_scale = per_token_group_quant_fp8(
+        input_2d, block_size[1], column_major_scales=use_cutlass)
+    output = dispatch_blockscale_func()(A=q_input,
+                                        B=weight,
+                                        As=x_scale,
+                                        Bs=weight_scale,
+                                        block_size=block_size,
+                                        output_dtype=input.dtype)
 
-            output = torch.zeros([q_input.shape[0], weight.shape[0]],
-                                 dtype=input.dtype,
-                                 device=q_input.device)
-            output = rocm_aiter.gemm_a8w8_blockscale(q_input, weight, x_scale,
-                                                     weight_scale, output)
-        else:
-            output = w8a8_block_fp8_matmul(q_input,
-                                           weight,
-                                           x_scale,
-                                           weight_scale,
-                                           block_size,
-                                           output_dtype=input.dtype)
     if bias is not None:
         output = output + bias
     return output.to(dtype=input.dtype).view(*output_shape)
