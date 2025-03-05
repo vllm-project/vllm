@@ -24,6 +24,7 @@ def test_n_gt_1(model):
     outputs = model.generate(PROMPT, params)
     assert len(outputs[0].outputs) == 3
 
+
 def test_penalties(model):
     """Check that we do not get errors if applied."""
 
