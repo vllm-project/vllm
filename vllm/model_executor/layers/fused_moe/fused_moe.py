@@ -24,17 +24,6 @@ from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
 logger = init_logger(__name__)
 
 
-def p(s, t):
-    #print(f"{s}: {t.shape}, {t.dtype}\n{t.flatten()}")
-    #print(f"{s}: {t.shape}, {t.dtype}\n{t}")
-    pass
-
-
-def pp(x):
-    #print(x)
-    pass
-
-
 @triton.jit
 def write_zeros_to_output(c_ptr, stride_cm, stride_cn, pid_n, N, offs_token,
                           token_mask, BLOCK_SIZE_M, BLOCK_SIZE_N,
@@ -649,10 +638,6 @@ def moe_align_block_size(
     num_tokens_post_pad = torch.empty((1),
                                       dtype=torch.int32,
                                       device=topk_ids.device)
-
-
-    #pp(f"topk {topk_ids.shape}, block_size: {block_size}, num_exp: {num_experts}, topk {topk_ids}")
-
     if num_experts >= 224:
         if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON or num_experts != 256:
             moe_align_block_size_triton(
@@ -850,9 +835,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
             **config,
         )
-
-        p("fused_out", C)
-        pp(f"END {'SECOND' if mul_routed_weight else 'FIRST'} FUSED_GEMM")
 
 
 # Adapted from: https://github.com/sgl-project/sglang/pull/2628
@@ -1117,14 +1099,16 @@ def fused_topk(
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
-def grouped_topk(hidden_states: torch.Tensor,
-                 gating_output: torch.Tensor,
-                 topk: int,
-                 renormalize: bool,
-                 num_expert_group: int = 0,
-                 topk_group: int = 0,
-                 scoring_func: str = "softmax",
-                 e_score_correction_bias: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+def grouped_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int = 0,
+    topk_group: int = 0,
+    scoring_func: str = "softmax",
+    e_score_correction_bias: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
 
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
@@ -1173,10 +1157,11 @@ def grouped_topk(hidden_states: torch.Tensor,
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
-def get_config_dtype_str(dtype: torch.dtype,
-                         use_int4_w4a16: Optional[bool] = False,
-                         use_int8_w8a16: Optional[bool] = False,
-                         use_fp8_w8a8: Optional[bool] = False) -> Optional[str]:
+def get_config_dtype_str(
+        dtype: torch.dtype,
+        use_int4_w4a16: Optional[bool] = False,
+        use_int8_w8a16: Optional[bool] = False,
+        use_fp8_w8a8: Optional[bool] = False) -> Optional[str]:
     if use_fp8_w8a8:
         return "fp8_w8a8"
     elif use_int8_w8a16:
@@ -1359,25 +1344,26 @@ def fused_experts(hidden_states: torch.Tensor,
         block_shape=block_shape)
 
 
-def fused_experts_impl(hidden_states: torch.Tensor,
-                       w1: torch.Tensor,
-                       w2: torch.Tensor,
-                       topk_weights: torch.Tensor,
-                       topk_ids: torch.Tensor,
-                       inplace: bool = False,
-                       activation: str = "silu",
-                       use_fp8_w8a8: bool = False,
-                       use_int8_w8a16: bool = False,
-                       use_int4_w4a16: bool = False,
-                       global_num_experts: int = -1,
-                       expert_map: Optional[torch.Tensor] = None,
-                       w1_scale: Optional[torch.Tensor] = None,
-                       w2_scale: Optional[torch.Tensor] = None,
-                       w1_zp: Optional[torch.Tensor] = None,
-                       w2_zp: Optional[torch.Tensor] = None,
-                       a1_scale: Optional[torch.Tensor] = None,
-                       a2_scale: Optional[torch.Tensor] = None,
-                       block_shape: Optional[List[int]] = None) -> torch.Tensor:
+def fused_experts_impl(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        inplace: bool = False,
+        activation: str = "silu",
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        use_int4_w4a16: bool = False,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        w1_zp: Optional[torch.Tensor] = None,
+        w2_zp: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None,
+        block_shape: Optional[List[int]] = None) -> torch.Tensor:
     # Check constraints.
     if use_int4_w4a16:
         assert hidden_states.shape[1] // 2 == w1.shape[
@@ -1447,9 +1433,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    pp(f"NUM CHUNKS = {(num_tokens // CHUNK_SIZE) + 1}")
-    #pp(f"FUSED A {hidden_states.shape}, {hidden_states}")
-
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
@@ -1478,8 +1461,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
-        #pp(f"CUR_TOPK_IDS {curr_topk_ids.shape}")
-
         invoke_fused_moe_kernel(curr_hidden_states,
                                 w1,
                                 intermediate_cache1,
@@ -1499,8 +1480,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
                                 block_shape=block_shape)
-
-        #pp(f"FUSED_MOE {intermediate_cache1.shape} {intermediate_cache1}")
 
         if activation == "silu":
             torch.ops._C.silu_and_mul(intermediate_cache2,
@@ -1609,8 +1588,6 @@ def fused_moe(
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
-
-    #pp(f"FUSED SCORES {hidden_states.shape} {gating_output.shape}")
 
     if use_grouped_topk:
         assert num_expert_group is not None and topk_group is not None
