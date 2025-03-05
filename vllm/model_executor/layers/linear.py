@@ -2,7 +2,7 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Any, Literal, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -14,7 +14,6 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.envs import VLLM_ROCM_USE_AITER_LINEAR
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -28,11 +27,6 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-
-USE_ROCM_AITER_LINEAR = VLLM_ROCM_USE_AITER_LINEAR \
-    and current_platform.is_rocm()
-if USE_ROCM_AITER_LINEAR:
-    from aiter.tuned_gemm import tgemm as aiter_tgemm
 
 logger = init_logger(__name__)
 
@@ -55,6 +49,18 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "QuarkLinearMethod",
     "ModelOptNvFp4LinearMethod",
 ]
+
+
+def rocm_aiter_tgemm_mm(x: torch.Tensor, weight: torch.Tensor,
+                        bias: torch.Tensor) -> torch.Tensor:
+    from aiter.tuned_gemm import tgemm
+    return tgemm.mm(x, weight, bias)
+
+
+def dipsatch_unquantized_linear_func() -> Callable[..., torch.Tensor]:
+    if current_platform.rocm_aiter_linear_enabled():
+        return rocm_aiter_tgemm_mm
+    return F.linear
 
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
@@ -194,10 +200,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if USE_ROCM_AITER_LINEAR:
-            return aiter_tgemm.mm(x, layer.weigt, bias)
-
-        return F.linear(x, layer.weight, bias)
+        return dipsatch_unquantized_linear_func()(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):

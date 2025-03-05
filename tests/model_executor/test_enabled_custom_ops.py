@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+import torch.nn.functional as F
 
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.custom_op import CustomOp
@@ -8,6 +9,9 @@ from vllm.model_executor.layers.activation import (GeluAndMul,
                                                    ReLUSquaredActivation,
                                                    SiluAndMul)
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (
+    dipsatch_unquantized_linear_func, rocm_aiter_tgemm_mm)
+from vllm.platforms import current_platform
 
 
 # Registered subclass for test
@@ -87,3 +91,17 @@ def test_enabled_ops_invalid(env: str):
             custom_ops=env.split(",")))
         with set_current_vllm_config(vllm_config):
             RMSNorm(1024).enabled()
+
+
+@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
+@pytest.mark.parametrize("use_rocm_aiter_linear", ["0", "1"])
+def test_unquantized_linear_dispatch(use_rocm_aiter: str,
+                                     use_rocm_aiter_linear: str, monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR", use_rocm_aiter_linear)
+    linear_func = dipsatch_unquantized_linear_func()
+    if current_platform.is_rocm() and int(use_rocm_aiter) and int(
+            use_rocm_aiter_linear):
+        assert linear_func == rocm_aiter_tgemm_mm
+    else:
+        assert linear_func == F.linear
