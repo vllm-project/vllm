@@ -399,7 +399,7 @@ class MLACommonMetadataBuilder(Generic[M]):
             self.page_size = self.runner.block_size
 
     def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput"):
+                      scheduler_output: "SchedulerOutput") -> bool:
         # We now want to reorder the batch so that the "decode" requests are and
         # the front and the "prefill" requests are at the using the least amount
         # swaps possible. (NOTE for now we loosely use "decode" to mean requests
@@ -437,14 +437,18 @@ class MLACommonMetadataBuilder(Generic[M]):
         num_decodes = len(decodes)
         num_prefills = len(prefills)
         first_prefill = 0
+        modified_batch = False
 
         for i in range(1, min(num_decodes, num_prefills) + 1):
             # If the decode is at the "back" of the batch, i, we can swap it
             # with the prefill closest to the front of the batch
             if decodes[num_decodes - i] >= num_decodes:
+                print("Reordering ", prefills[first_prefill],
+                      decodes[num_decodes - i])
                 input_batch.swap_states(prefills[first_prefill],
                                         decodes[num_decodes - i])
                 first_prefill += 1
+                modified_batch = True
             else:
                 break
 
@@ -455,6 +459,8 @@ class MLACommonMetadataBuilder(Generic[M]):
         self._num_prefills = num_prefills
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
+
+        return modified_batch
 
     def _build_decode(self, input_positions: torch.Tensor,
                       block_table: torch.Tensor, seq_lens: torch.Tensor):
@@ -482,10 +488,11 @@ class MLACommonMetadataBuilder(Generic[M]):
 
         prefill_metadata = None
         if self._num_prefills > 0:
-            start = self._num_decodes  # prefill_start
+            reqs_start = self._num_decodes  # prefill_start
+            tokens_start = self._num_decode_tokens
 
             context_lens_cpu = self.runner.input_batch.\
-                num_computed_tokens_cpu_tensor[start:num_reqs]
+                num_computed_tokens_cpu_tensor[reqs_start:num_reqs]
             context_lens = context_lens_cpu.to(device, non_blocking=True)
 
             chunked_context_metadata = None
@@ -545,11 +552,11 @@ class MLACommonMetadataBuilder(Generic[M]):
                     self.chunked_prefill_workspace_size
 
             prefill_metadata = MLACommonPrefillMetadata(
-                input_positions=input_positions[self._num_decode_tokens:],
-                block_table=block_table[start:, ...],
-                query_start_loc=query_start_loc[start:] -
-                query_start_loc[start],
-                max_query_len=seq_lens[start:].max().item(),
+                input_positions=input_positions[tokens_start:],
+                block_table=block_table[reqs_start:, ...],
+                query_start_loc=query_start_loc[reqs_start:] -
+                query_start_loc[reqs_start],
+                max_query_len=seq_lens[reqs_start:].max().item(),
                 chunked_context=chunked_context_metadata,
             )
 
