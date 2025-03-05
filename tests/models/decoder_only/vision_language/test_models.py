@@ -106,6 +106,7 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.IMAGE,
         prompt_formatter=identity,
         img_idx_to_prompt = lambda idx: "",
+        max_model_len=8192,
         # Paligemma uses its own sample prompts because the default one fails
         single_image_prompts=IMAGE_ASSETS.prompts({
             "stop_sign": "caption es",
