@@ -196,7 +196,7 @@ def main(args):
 
     sampling_params = SamplingParams(temperature=0,
                                      max_tokens=args.output_len,
-                                     detokenize=args.detokenize)
+                                     detokenize=not args.disable_detokenize)
 
     print("Testing filtered requests")
     prompts = repeat_and_sort_requests(filtered_requests,
@@ -246,10 +246,11 @@ if __name__ == "__main__":
         "when dataset-path is not provided.",
     )
     parser.add_argument(
-        '--detokenize',
+        '--disable-detokenize',
         action='store_true',
-        help=('Detokenize the response (detokenization time included in the '
-              'latency measurement)'))
+        help=("Do not detokenize responses (i.e. do not include "
+              "detokenization time in the latency measurement)"),
+    )
 
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
