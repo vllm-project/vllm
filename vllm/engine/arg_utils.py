@@ -1424,7 +1424,6 @@ class EngineArgs:
         #############################################################
         # Important feature flags we plan to support on V1 but not yet.
 
-        # TODO: log a warning if V1 is on for
         if self.guided_decoding_backend != "xgrammar":
             _raise_or_warning(feature_name="--guided-decoding-backend",
                               recommend_to_remove=False)
@@ -1440,13 +1439,13 @@ class EngineArgs:
 
         # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
-            _raise_or_warning(feature_name="--kv_cache_dtype",
+            _raise_or_warning(feature_name="--kv-cache-dtype",
                               recommend_to_remove=False)
             return False
 
         # No Prompt Adapter so far.
         if self.enable_prompt_adapter:
-            _raise_or_warning(feature_name="--enable_prompt_adapter",
+            _raise_or_warning(feature_name="--enable-prompt-adapter",
                               recommend_to_remove=False)
             return False
 
@@ -1475,7 +1474,7 @@ class EngineArgs:
 
         # No OTLP observability so far.
         if (self.otlp_traces_endpoint or self.collect_detailed_traces):
-            _raise_or_warning(feature_name="--otlp_traces_endpoint",
+            _raise_or_warning(feature_name="--otlp-traces-endpoint",
                               recommend_to_remove=False)
             return False
 
