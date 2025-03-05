@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Tuple
-
 import torch
 import torch.utils.benchmark as benchmark
 from benchmark_shapes import WEIGHT_SHAPES_MOE
@@ -29,9 +27,9 @@ def to_fp8(tensor: torch.Tensor):
         min=finfo.min, max=finfo.max)).to(dtype=torch.float8_e4m3fn)
 
 
-def bench_run(results: List[benchmark.Measurement], model: str,
+def bench_run(results: list[benchmark.Measurement], model: str,
               num_experts: int, topk: int, per_act_token: bool,
-              per_out_ch: bool, mkn: Tuple[int, int, int]):
+              per_out_ch: bool, mkn: tuple[int, int, int]):
     label = "Quant Matmul"
 
     sub_label = (
@@ -273,7 +271,7 @@ def main(args):
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")
 
-    results: List[benchmark.Measurement] = []
+    results: list[benchmark.Measurement] = []
 
     for model in args.models:
         for layer in WEIGHT_SHAPES_MOE[model]:
