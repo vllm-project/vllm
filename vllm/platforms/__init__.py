@@ -106,6 +106,9 @@ def rocm_platform_plugin() -> Optional[str]:
             if len(amdsmi.amdsmi_get_processor_handles()) > 0:
                 is_rocm = True
                 logger.debug("Confirmed ROCm platform is available.")
+            else:
+                logger.debug("ROCm platform is not available because"
+                             " no GPU is found.")
         finally:
             amdsmi.amdsmi_shut_down()
     except Exception as e:
