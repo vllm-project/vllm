@@ -254,6 +254,7 @@ class InputPreprocessor:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
         lora_request: Optional[LoRARequest],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """
         Apply the model's multi-modal processor to a multi-modal prompt,
@@ -274,7 +275,8 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs)
+        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
+                                  return_mm_hashes)
 
     async def _process_multimodal_async(
         self,
@@ -282,6 +284,7 @@ class InputPreprocessor:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
         lora_request: Optional[LoRARequest],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """Async version of :meth:`_process_multimodal`."""
         # At the moment on model (PrithviGeoSpatialMAE) requires to be
@@ -299,13 +302,15 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs)
+        return mm_processor.apply(prompt, mm_data, mm_processor_kwargs,
+                                  return_mm_hashes)
 
     def _prompt_to_llm_inputs(
         self,
         prompt: SingletonPrompt,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
+        return_mm_hashes: bool = False,
     ) -> SingletonInputs:
         """
         Extract the singleton inputs from a prompt.
@@ -315,6 +320,7 @@ class InputPreprocessor:
         * request_id
         * prompt: single encoder or decoder input prompt
         * lora_request: this is only valid for decoder prompts
+        * return_mm_hashes: whether to return multimodal hashes
 
         Returns:
 
@@ -349,6 +355,7 @@ class InputPreprocessor:
                     multi_modal_data,
                     mm_processor_kwargs,
                     lora_request=lora_request,
+                    return_mm_hashes=return_mm_hashes,
                 )
 
             return token_inputs(
@@ -695,6 +702,7 @@ class InputPreprocessor:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        return_mm_hashes: bool = False,
     ) -> DecoderOnlyInputs:
         """
         For decoder-only models:
@@ -706,6 +714,7 @@ class InputPreprocessor:
         * request_id
         * lora_request
         * prompt_adapter_request
+        * return_mm_hashes
 
         Returns:
 
@@ -729,6 +738,7 @@ class InputPreprocessor:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        return_mm_hashes: bool = False,
     ) -> DecoderOnlyInputs:
         """Async version of :meth:`_process_decoder_only_prompt`."""
         prompt_comps = await self._prompt_to_llm_inputs_async(
@@ -748,9 +758,13 @@ class InputPreprocessor:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        return_mm_hashes: bool = False,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
+            assert not return_mm_hashes, (
+                "Multimodal hashes for encoder-decoder models should not be ",
+                "returned until they are supported on vLLM V1.")
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
             return self._process_encoder_decoder_prompt(
@@ -768,6 +782,7 @@ class InputPreprocessor:
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            return_mm_hashes=return_mm_hashes,
         )
 
     async def preprocess_async(
@@ -776,9 +791,13 @@ class InputPreprocessor:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        return_mm_hashes: bool = False,
     ) -> ProcessorInputs:
         """Async version of :meth:`preprocess`."""
         if self.model_config.is_encoder_decoder:
+            assert not return_mm_hashes, (
+                "Multimodal hashes for encoder-decoder models should not be ",
+                "returned until they are supported on vLLM V1.")
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
             return await self._process_encoder_decoder_prompt_async(
@@ -796,4 +815,5 @@ class InputPreprocessor:
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            return_mm_hashes=return_mm_hashes,
         )

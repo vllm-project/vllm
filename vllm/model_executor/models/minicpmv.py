@@ -780,6 +780,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: Union[str, List[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         supported_mm_modalities = self.info.get_supported_mm_modalities()
         if isinstance(prompt, list):
@@ -791,7 +792,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 [index for index, m in enumerate(matches) if m == modality])
             for modality in supported_mm_modalities
         }
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
+        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
+                               return_mm_hashes)
         # Exclude <image_id>x</image_id> from placeholders
         if "image" in result["mm_placeholders"] and \
             self.info.get_model_version() == (2, 6):
