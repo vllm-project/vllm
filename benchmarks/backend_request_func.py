@@ -5,7 +5,7 @@ import os
 import sys
 import time
 import traceback
-from dataclasses import dataclass, field, make_dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Union
 
 import aiohttp
@@ -18,25 +18,20 @@ from vllm.model_executor.model_loader.weight_utils import get_lock
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
-REQUEST_FUNC_INPUT_FIELDS = [
-    ("prompt", str),
-    ("api_url", str),
-    ("prompt_len", int),
-    ("output_len", int),
-    ("model", str),
-    ("model_name", Optional[str], field(default=None)),
-    ("logprobs", Optional[int], field(default=None)),
-    ("extra_body", Optional[dict], field(default=None)),
-    ("multi_modal_content", Optional[dict], field(default=None)),
-    ("ignore_eos", bool, field(default=False)),
-]
-if not os.environ.get("VLLM_USE_V1", 0):
-    # From https://github.com/vllm-project/vllm/pull/14159, v1 doesn't yet
-    # support best_of parameter
-    REQUEST_FUNC_INPUT_FIELDS.append(("best_of", int, field(default=1)))
 
-RequestFuncInput = make_dataclass("RequestFuncInput",
-                                  REQUEST_FUNC_INPUT_FIELDS)
+@dataclass
+class RequestFuncInput:
+    prompt: str
+    api_url: str
+    prompt_len: int
+    output_len: int
+    model: str
+    model_name: Optional[str] = None
+    best_of: Optional[int] = None if os.environ.get("VLLM_USE_V1", 0) else 1
+    logprobs: Optional[int] = None
+    extra_body: Optional[dict] = None
+    multi_modal_content: Optional[dict] = None
+    ignore_eos: bool = False
 
 
 @dataclass
