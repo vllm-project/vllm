@@ -14,12 +14,12 @@ def cdiv_fn(x, y):
 
 @triton.jit
 def kernel_paged_attention_2d(
-        output_ptr,  # [num_seqs, num_query_heads, head_size]
-        query_ptr,  # [num_seqs, num_query_heads, head_size]
-        key_cache_ptr,  # [num_blocks, num_kv_heads, head_size, block_size]
-        value_cache_ptr,  # [num_blocks, num_kv_heads, head_size, block_size]
+        output_ptr,  # [num_tokens, num_query_heads, head_size]
+        query_ptr,  # [num_tokens, num_query_heads, head_size]
+        key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
+        value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
         block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
-        context_lens_ptr,  # [num_seqs]
+        seq_lens_ptr,  # [num_seqs]
         alibi_slopes_ptr,  # [num_query_heads]
         scale,  # float32
         k_scale,  # float32
@@ -83,14 +83,14 @@ def kernel_paged_attention_2d(
     L = tl.full([1], 1.0, dtype=tl.float32)
     acc = tl.zeros([HEAD_SIZE_PADDED], dtype=tl.float32)
 
-    # context len for this particular sequence
-    context_len = tl.load(context_lens_ptr + seq_idx)
+    # sequence len for this particular sequence
+    seq_len = tl.load(seq_lens_ptr + seq_idx)
 
     # alibi slope for this head
     if USE_ALIBI_SLOPES:
         alibi_slope = tl.load(alibi_slopes_ptr + query_head_idx)
 
-    num_blocks = cdiv_fn(context_len, BLOCK_SIZE)
+    num_blocks = cdiv_fn(seq_len, BLOCK_SIZE)
 
     # iterate through tiles
     for j in range(0, num_blocks):
@@ -132,17 +132,17 @@ def kernel_paged_attention_2d(
             V = V_load
 
         tmp = j * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-        boundary = tl.full([BLOCK_SIZE], context_len, dtype=tl.int32)
+        boundary = tl.full([BLOCK_SIZE], seq_len, dtype=tl.int32)
         mask_new = tmp < boundary
         # S : (BLOCK_SIZE,)
         S = tl.where(mask_new, 0.0, float("-inf")).to(tl.float32)
         S += scale * tl.sum(K * Q[:, None], axis=0)
 
         if SLIDING_WINDOW > 0:
-            S = tl.where((context_len - 1 - tmp) < SLIDING_WINDOW, S, -10000)
+            S = tl.where((seq_len - 1 - tmp) < SLIDING_WINDOW, S, -10000)
 
         if USE_ALIBI_SLOPES:
-            S += alibi_slope * (tmp - context_len + 1)
+            S += alibi_slope * (tmp - seq_len + 1)
 
         # compute running maximum
         # m_j : (1,)
@@ -205,25 +205,26 @@ def chunked_prefill_paged_decode(
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
 
-    context_attention_fwd(
-        q=query,
-        k=key,
-        v=value,
-        o=output,
-        kv_cache_dtype=kv_cache_dtype,
-        k_cache=key_cache,
-        v_cache=value_cache,
-        b_loc=block_table,
-        b_start_loc=query_start_loc,
-        b_seq_len=seq_lens,
-        max_input_len=max_query_len,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        alibi_slopes=alibi_slopes,
-        sliding_window=sliding_window,
-        sm_scale=sm_scale,
-        skip_decode=True,
-    )
+    if max_query_len > 1:
+        context_attention_fwd(
+            q=query,
+            k=key,
+            v=value,
+            o=output,
+            kv_cache_dtype=kv_cache_dtype,
+            k_cache=key_cache,
+            v_cache=value_cache,
+            b_loc=block_table,
+            b_start_loc=query_start_loc,
+            b_seq_len=seq_lens,
+            max_input_len=max_query_len,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            alibi_slopes=alibi_slopes,
+            sliding_window=sliding_window,
+            sm_scale=sm_scale,
+            skip_decode=True,
+        )
 
     block_size = value_cache.shape[3]
     num_seqs = len(seq_lens)
@@ -256,7 +257,7 @@ def chunked_prefill_paged_decode(
         key_cache_ptr=key_cache,
         value_cache_ptr=value_cache,
         block_tables_ptr=block_table,
-        context_lens_ptr=seq_lens,
+        seq_lens_ptr=seq_lens,
         alibi_slopes_ptr=alibi_slopes,
         scale=sm_scale,
         k_scale=k_scale,
