@@ -275,7 +275,42 @@ class MLACommonBackend(AttentionBackend):
 
 
 @dataclass
-class MLACommonMetadata:
+class MLACommonPrefillMetadata:
+    """ Prefill Specific Metadata """
+
+    @dataclass
+    class ChunkedContextMetadata:
+        # New for MLA (compared to FlashAttention)
+        # For handling chunked prefill
+        cu_seq_lens: torch.Tensor
+        starts: torch.Tensor
+        seq_tot: list[int]
+        max_seq_lens: list[int]
+        workspace: torch.Tensor
+
+    # Input positions for rotrary embeddings since for MLA the rotary
+    # position embeddings are applied inside the attention backend
+    input_positions: torch.Tensor
+    block_table: torch.Tensor
+    query_start_loc: torch.Tensor
+    max_query_len: int
+    chunked_context: Optional[ChunkedContextMetadata] = None
+
+
+@dataclass
+class MLACommonDecodeMetadata:
+    # Input positions for rotrary embeddings since for MLA the rotary
+    # position embeddings are applied inside the attention backend
+    input_positions: torch.Tensor
+    block_table: torch.Tensor
+    seq_lens: torch.Tensor
+
+
+D = TypeVar("D", bound=MLACommonDecodeMetadata)
+
+
+@dataclass
+class MLACommonMetadata(Generic[D]):
     """Metadata for MLACommon.
 
     NOTE: Please read the comment at the top of the file before trying to
@@ -305,38 +340,8 @@ class MLACommonMetadata:
     # The dimension of the attention heads
     head_dim: Optional[int] = None
 
-    @dataclass
-    class PrefillMetadata:
-        """ Prefill Specific Metadata """
-
-        @dataclass
-        class ChunkedContextMetadata:
-            # New for MLA (compared to FlashAttention)
-            # For handling chunked prefill
-            cu_seq_lens: torch.Tensor
-            starts: torch.Tensor
-            seq_tot: list[int]
-            max_seq_lens: list[int]
-            workspace: torch.Tensor
-
-        # Input positions for rotrary embeddings since for MLA the rotary
-        # position embeddings are applied inside the attention backend
-        input_positions: torch.Tensor
-        block_table: torch.Tensor
-        query_start_loc: torch.Tensor
-        max_query_len: int
-        chunked_context: Optional[ChunkedContextMetadata] = None
-
-    @dataclass
-    class DecodeMetadata:
-        # Input positions for rotrary embeddings since for MLA the rotary
-        # position embeddings are applied inside the attention backend
-        input_positions: torch.Tensor
-        block_table: torch.Tensor
-        seq_lens: torch.Tensor
-
-    decode: Optional[DecodeMetadata] = None
-    prefill: Optional[PrefillMetadata] = None
+    decode: Optional[D] = None
+    prefill: Optional[MLACommonPrefillMetadata] = None
 
     def __post_init__(self):
         supported_head_sizes = MLACommonBackend.get_supported_head_sizes()
@@ -347,19 +352,25 @@ class MLACommonMetadata:
                 f"received {self.head_dim}.")
 
 
-T = TypeVar("T", bound=MLACommonMetadata)
+M = TypeVar("M", bound=MLACommonMetadata)
 
 
-class MLACommonMetadataBuilder(Generic[T]):
+class MLACommonMetadataBuilder(Generic[M]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
 
-    def __init__(self,
-                 runner: "GPUModelRunner",
-                 cls: Optional[type[MLACommonMetadata]] = None):
-        self.cls = cls if cls is not None else MLACommonMetadata
+    def __init__(
+        self,
+        runner: "GPUModelRunner",
+        metadata_cls: Optional[type[M]] = None,
+        decode_metadata_cls: Optional[type[D]] = None,
+    ):
+        self.metadata_cls = metadata_cls \
+            if metadata_cls is not None else MLACommonMetadata
+        self.decode_metadata_cls = decode_metadata_cls \
+            if decode_metadata_cls is not None else MLACommonDecodeMetadata
         self.runner = runner
         scheduler_config = runner.scheduler_config
         model_config = runner.model_config
@@ -451,7 +462,7 @@ class MLACommonMetadataBuilder(Generic[T]):
         self._num_prefill_tokens = num_prefill_tokens
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int) -> T:
+              common_prefix_len: int) -> M:
         assert self._num_decodes + self._num_prefills == num_reqs
 
         device = self.runner.device
@@ -517,8 +528,8 @@ class MLACommonMetadataBuilder(Generic[T]):
                                    dtype=torch.int32,
                                    device=device).unsqueeze(-1)
 
-                chunked_context_metadata = self.cls.\
-                    PrefillMetadata.ChunkedContextMetadata( # type: ignore
+                chunked_context_metadata = \
+                    MLACommonPrefillMetadata.ChunkedContextMetadata(
                     cu_seq_lens=torch.cat(
                         [zero, _chunk_cu_seq_lens], dim=1),
                     starts=chunk_starts,
@@ -530,7 +541,7 @@ class MLACommonMetadataBuilder(Generic[T]):
                 assert max(chunked_context_metadata.max_seq_lens) <= \
                     self.chunked_prefill_workspace_size
 
-            prefill_metadata = self.cls.PrefillMetadata(  # type: ignore
+            prefill_metadata = MLACommonPrefillMetadata(
                 input_positions=input_positions[self._num_decode_tokens:],
                 block_table=block_table[start:, ...],
                 query_start_loc=query_start_loc[start:] -
@@ -541,13 +552,13 @@ class MLACommonMetadataBuilder(Generic[T]):
 
         decode_metadata = None
         if self._num_decodes > 0:
-            decode_metadata = self.cls.DecodeMetadata(  # type: ignore
+            decode_metadata = self.decode_metadata_cls(
                 input_positions=input_positions[:self._num_decode_tokens],
                 block_table=block_table[:self._num_decodes, ...],
                 seq_lens=seq_lens[:self._num_decodes],
             )
 
-        return self.cls(
+        return self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
             query_start_loc=query_start_loc,
             slot_mapping=slot_mapping,
@@ -561,7 +572,7 @@ class MLACommonMetadataBuilder(Generic[T]):
         )
 
 
-class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
+class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -968,7 +979,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: T,
+        attn_metadata: M,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -979,7 +990,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         k_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
-        attn_metadata: T,
+        attn_metadata: M,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
