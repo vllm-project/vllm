@@ -651,7 +651,7 @@ def moe_align_block_size(
                                       device=topk_ids.device)
 
 
-    pp(f"topk {topk_ids.shape}, block_size: {block_size}, num_exp: {num_experts}, topk {topk_ids}")
+    #pp(f"topk {topk_ids.shape}, block_size: {block_size}, num_exp: {num_experts}, topk {topk_ids}")
 
     if num_experts >= 224:
         if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON or num_experts != 256:
@@ -1448,7 +1448,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         out_hidden_states = torch.empty_like(hidden_states)
 
     pp(f"NUM CHUNKS = {(num_tokens // CHUNK_SIZE) + 1}")
-    pp(f"FUSED A {hidden_states.shape}, {hidden_states}")
+    #pp(f"FUSED A {hidden_states.shape}, {hidden_states}")
 
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
@@ -1478,7 +1478,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
-        pp(f"CUR_TOPK_IDS {curr_topk_ids.shape}")
+        #pp(f"CUR_TOPK_IDS {curr_topk_ids.shape}")
 
         invoke_fused_moe_kernel(curr_hidden_states,
                                 w1,
@@ -1500,7 +1500,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_int4_w4a16=use_int4_w4a16,
                                 block_shape=block_shape)
 
-        pp(f"FUSED_MOE {intermediate_cache1.shape} {intermediate_cache1}")
+        #pp(f"FUSED_MOE {intermediate_cache1.shape} {intermediate_cache1}")
 
         if activation == "silu":
             torch.ops._C.silu_and_mul(intermediate_cache2,
@@ -1610,7 +1610,7 @@ def fused_moe(
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
 
-    pp(f"FUSED SCORES {hidden_states.shape} {gating_output.shape}")
+    #pp(f"FUSED SCORES {hidden_states.shape} {gating_output.shape}")
 
     if use_grouped_topk:
         assert num_expert_group is not None and topk_group is not None
