@@ -58,9 +58,10 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                           common_prefix_len)
 
         if m.num_decode_tokens is not None and m.num_decode_tokens > 0:
+            assert m.decode is not None
             m.decode_tile_scheduler_metadata, m.decode_num_splits = \
                 get_mla_metadata(
-                m.decode_seq_lens,
+                m.decode.seq_lens,
                 self.num_q_heads,
                 1, # MQA for the decode path
             )
@@ -115,8 +116,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         attn_metadata: FlashMLAMetadata,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
-        assert attn_metadata.decode_block_table is not None
-        assert attn_metadata.decode_seq_lens is not None
+        assert attn_metadata.decode is not None
 
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError("FP8 FlashMLA not yet supported")
@@ -127,8 +127,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         o, _ = flash_mla_with_kvcache(
             q=q,
             k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
-            block_table=attn_metadata.decode_block_table,
-            cache_seqlens=attn_metadata.decode_seq_lens,
+            block_table=attn_metadata.decode.block_table,
+            cache_seqlens=attn_metadata.decode.seq_lens,
             head_dim_v=self.kv_lora_rank,
             tile_scheduler_metadata=attn_metadata.
             decode_tile_scheduler_metadata,
