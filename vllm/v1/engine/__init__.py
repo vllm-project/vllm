@@ -12,6 +12,7 @@ from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.struct_output.request import StructOutputRequest
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -59,6 +60,7 @@ class EngineCoreRequest(
     eos_token_id: Optional[int]
     arrival_time: float
     lora_request: Optional[LoRARequest]
+    struct_output_request: Optional[StructOutputRequest]
 
 
 class EngineCoreEventType(enum.IntEnum):

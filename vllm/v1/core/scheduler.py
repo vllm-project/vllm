@@ -246,11 +246,12 @@ class Scheduler:
                 request = self.waiting[0]
 
                 if request.status == RequestStatus.WAITING_FOR_FSM:
-                    if request.grammar and request.is_grammar_ready:
+                    struct_output_req = request.struct_output_request
+                    if struct_output_req and struct_output_req.grammar:
                         request.status = RequestStatus.WAITING
                     else:
-                        struct_output_req = self.waiting.popleft()
-                        waiting_for_fsm.appendleft(struct_output_req)
+                        waiting_struct_output_req = self.waiting.popleft()
+                        waiting_for_fsm.appendleft(waiting_struct_output_req)
                         continue
 
                 # Check that adding the request still respects the max_loras
@@ -602,10 +603,13 @@ class Scheduler:
                     # the outer lists can be of length > 1.
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
 
-            if new_token_ids and request.use_struct_output:
-                assert request.grammar is not None
-                request.grammar.accept_tokens(request.request_id,
-                                              new_token_ids)
+            struct_output_req = request.struct_output_request
+            if new_token_ids and struct_output_req is not None:
+                assert struct_output_req.grammar is not None
+                struct_output_req.grammar.accept_tokens(
+                    request.request_id,
+                    new_token_ids,
+                )
 
             # Transmit partial if chunked prefill & prompt logprobs is enabled
             if new_token_ids or prompt_logprobs_tensors is not None:

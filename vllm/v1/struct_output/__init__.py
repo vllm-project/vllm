@@ -2,82 +2,26 @@
 from __future__ import annotations
 
 import copy
-import enum
 import multiprocessing
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
-import torch
+import numpy.typing as npt
 import xgrammar as xgr
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.v1.struct_output.grammar import (Grammar, StructOutputKey,
+                                           StructOutputOptions)
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
+    from vllm.v1.struct_output.request import StructOutputRequest
 
 logger = init_logger(__name__)
-
-
-class StructOutputOptions(enum.Enum):
-    JSON = enum.auto()
-    JSON_OBJECT = enum.auto()
-    REGEX = enum.auto()
-    GRAMMAR = enum.auto()
-    CHOICE = enum.auto()
-
-
-StructOutputKey = tuple[StructOutputOptions, str]
-
-
-@dataclass
-class Grammar:
-    # NOTE: This would be a generic-enough class for
-    # supporting different backends, in the future.
-    # For now, just xgrammar.
-    #
-    # TODO: support max_rollback_tokens
-    # https://xgrammar.mlc.ai/docs/api/python/index.html#xgrammar.GrammarMatcher.find_jump_forward_string
-    # for jump-forward decoding
-
-    vocab_size: int
-    matcher: xgr.GrammarMatcher = field(hash=False)
-    ctx: xgr.CompiledGrammar = field(hash=False)
-    num_processed_tokens: int = field(default_factory=lambda: 0,
-                                      repr=False,
-                                      hash=False,
-                                      init=False)
-
-    def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
-        """Accepts a list of tokens and advances the FSM.
-
-        Returns True if the FSM was advanced successfully.
-        Returns False if the FSM failed to advance.
-        """
-        for token in tokens:
-            if not self.matcher.accept_token(token):
-                logger.error(
-                    "Failed to advance FSM for request %s "
-                    "for tokens %s. Please file an issue.", request_id, token)
-                return False
-            self.num_processed_tokens += 1
-        return True
-
-    def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> bool:
-        return self.matcher.fill_next_token_bitmask(bitmask, idx)
-
-    def reset(self):
-        self.num_processed_tokens = 0
-        self.matcher.reset()
-
-    def __copy__(self):
-        return Grammar(matcher=xgr.GrammarMatcher(self.ctx),
-                       vocab_size=self.vocab_size,
-                       ctx=self.ctx)
 
 
 class StructOutputManager:
@@ -122,18 +66,21 @@ class StructOutputManager:
         return None
 
     def populate_cache(self, request: Request) -> None:
-        if not request.use_struct_output:
+        struct_output_req = request.struct_output_request
+        if struct_output_req is None:
             return
-        grammar = self.request_key_to_grammar.get(request.struct_output_key)
-        if grammar:
-            request.grammar = copy.copy(grammar)
-            return
-        request.grammar = self.cache(request)
 
-    def cache(self, request: Request):
+        grammar = self.request_key_to_grammar.get(
+            struct_output_req.struct_output_key)
+        if grammar:
+            struct_output_req.grammar = copy.copy(grammar)
+            return
+        struct_output_req.grammar = self.cache(struct_output_req)
+
+    def cache(self, request: StructOutputRequest):
         return self.executor.submit(self._executor_loop, request)
 
-    def _executor_loop(self, request: Request) -> Grammar:
+    def _executor_loop(self, request: StructOutputRequest) -> Grammar:
         key = request.struct_output_key
         grammar = self.request_key_to_grammar.get(key)
         if grammar is not None:
@@ -171,9 +118,12 @@ class StructOutputManager:
                        vocab_size=self.vocab_size,
                        ctx=ctx)
 
-    def grammar_bitmask(self, requests: dict[str, Request],
-                        struct_output_request_ids: dict[str, int],
-                        batch_len: int) -> Optional[np.ndarray]:
+    def grammar_bitmask(
+        self,
+        requests: dict[str, Request],
+        struct_output_request_ids: dict[str, int],
+        batch_len: int,
+    ) -> Optional[npt.NDArray[np.float32]]:
         # Prepare the structured output bitmask for this batch.
         if not struct_output_request_ids:
             return None
@@ -183,8 +133,8 @@ class StructOutputManager:
         # the batch.
         bitmask_tensor = self._grammar_bitmask
         for req_id, batch_index in struct_output_request_ids.items():
-            request = requests[req_id]
-            assert request.grammar is not None
+            request = requests[req_id].struct_output_request
+            assert request is not None and request.grammar is not None
             if not request.grammar.matcher.is_terminated():
                 request.grammar.fill_bitmask(bitmask_tensor, batch_index)
         if batch_len < self._grammar_bitmask.shape[0]:

@@ -2,16 +2,12 @@
 
 import enum
 import functools
-import json
-from concurrent.futures import Future
-from concurrent.futures._base import TimeoutError
-from typing import TYPE_CHECKING, Optional, Union, cast
+from typing import TYPE_CHECKING, Optional, Union
 
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
-from vllm.v1.struct_output import Grammar, StructOutputKey, StructOutputOptions
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -19,6 +15,7 @@ if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.inputs import PlaceholderRange
+    from vllm.v1.struct_output.request import StructOutputRequest
 
 logger = init_logger(__name__)
 
@@ -37,12 +34,14 @@ class Request:
         eos_token_id: Optional[int],
         arrival_time: float,
         lora_request: Optional["LoRARequest"] = None,
+        struct_output_request: Optional["StructOutputRequest"] = None,
     ) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
+        self.struct_output_request = struct_output_request
 
         self.status = (RequestStatus.WAITING_FOR_FSM
                        if sampling_params.guided_decoding is not None else
@@ -76,9 +75,6 @@ class Request:
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
 
-        # Grammar fields, including the grammar object and the bitmask
-        self._grammar: Optional[Union[Future[Grammar], Grammar]] = None
-
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         return cls(
@@ -92,6 +88,7 @@ class Request:
             eos_token_id=request.eos_token_id,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
+            struct_output_request=request.struct_output_request,
         )
 
     def queued(self, timestamp: Optional[float] = None) -> None:
@@ -151,54 +148,6 @@ class Request:
     @functools.cached_property
     def use_struct_output(self) -> bool:
         return self.sampling_params.guided_decoding is not None
-
-    @functools.cached_property
-    def struct_output_key(self) -> StructOutputKey:
-        params = self.sampling_params.guided_decoding
-        assert params is not None, "params can't be None."
-        if params.json is not None:
-            if not isinstance(params.json, str):
-                json_str = json.dumps(params.json)
-            else:
-                json_str = params.json
-            return (StructOutputOptions.JSON, json_str)
-        elif params.json_object:
-            return (StructOutputOptions.JSON_OBJECT, "")
-        elif params.regex is not None:
-            return (StructOutputOptions.REGEX, params.regex)
-        elif params.choice is not None:
-            if not isinstance(params.choice, str):
-                json_str = json.dumps(params.choice)
-            else:
-                json_str = params.choice
-            return (StructOutputOptions.CHOICE, json_str)
-        elif params.grammar is not None:
-            return (StructOutputOptions.GRAMMAR, params.grammar)
-        else:
-            raise ValueError("No valid structured output parameter found")
-
-    def _check_grammar_completion(self) -> bool:
-        if isinstance(self._grammar, Future):
-            try:
-                # We will check whether the future is ready within 100 us
-                self._grammar = self._grammar.result(timeout=0.0001)
-                self.status = RequestStatus.WAITING
-            except TimeoutError:
-                return False
-        return True
-
-    @property
-    def is_grammar_ready(self) -> bool:
-        return self._check_grammar_completion()
-
-    @property
-    def grammar(self) -> Optional[Grammar]:
-        completed = self._check_grammar_completion()
-        return cast(Optional[Grammar], self._grammar) if completed else None
-
-    @grammar.setter
-    def grammar(self, grammar: Union[Grammar, Future[Grammar]]) -> None:
-        self._grammar = grammar
 
 
 class RequestStatus(enum.IntEnum):
