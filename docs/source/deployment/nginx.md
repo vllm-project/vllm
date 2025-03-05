@@ -95,14 +95,14 @@ Notes:
 
 - If you have your HuggingFace models cached somewhere else, update `hf_cache_dir` below.
 - If you don't have an existing HuggingFace cache you will want to start `vllm0` and wait for the model to complete downloading and the server to be ready. This will ensure that `vllm1` can leverage the model you just downloaded and it won't have to be downloaded again.
-- The below example assumes GPU backend used. If you are using CPU backend, remove `--gpus all`, add `VLLM_CPU_KVCACHE_SPACE` and `VLLM_CPU_OMP_THREADS_BIND` environment variables to the docker run command.
+- The below example assumes GPU backend used. If you are using CPU backend, remove `--gpus device=ID`, add `VLLM_CPU_KVCACHE_SPACE` and `VLLM_CPU_OMP_THREADS_BIND` environment variables to the docker run command.
 - Adjust the model name that you want to use in your vLLM servers if you don't want to use `Llama-2-7b-chat-hf`.
 
 ```console
 mkdir -p ~/.cache/huggingface/hub/
 hf_cache_dir=~/.cache/huggingface/
-docker run -itd --ipc host --privileged --network vllm_nginx --gpus all --shm-size=10.24gb -v $hf_cache_dir:/root/.cache/huggingface/ -p 8081:8000 --name vllm0 vllm --model meta-llama/Llama-2-7b-chat-hf
-docker run -itd --ipc host --privileged --network vllm_nginx --gpus all --shm-size=10.24gb -v $hf_cache_dir:/root/.cache/huggingface/ -p 8082:8000 --name vllm1 vllm --model meta-llama/Llama-2-7b-chat-hf
+docker run -itd --ipc host --network vllm_nginx --gpus device=0 --shm-size=10.24gb -v $hf_cache_dir:/root/.cache/huggingface/ -p 8081:8000 --name vllm0 vllm --model meta-llama/Llama-2-7b-chat-hf
+docker run -itd --ipc host --network vllm_nginx --gpus device=1 --shm-size=10.24gb -v $hf_cache_dir:/root/.cache/huggingface/ -p 8082:8000 --name vllm1 vllm --model meta-llama/Llama-2-7b-chat-hf
 ```
 
 :::{note}
