@@ -1183,7 +1183,7 @@ class EngineArgs:
                     "===================================================\n\n"
                     "Detected EngineConfig is compatible with VLLM V1"
                     "Set VLLM_USE_V1=1 before launch to enable V1.\n\n"
-                    "==================================================")
+                    "===================================================")
 
         if envs.is_set("VLLM_USE_V1"):
             assert use_v1 == envs.VLLM_USE_V1
