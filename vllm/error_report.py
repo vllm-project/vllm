@@ -2,7 +2,7 @@
 
 import enum
 import json
-from typing import Any, Dict, Union
+from typing import Any, Union
 
 import torch
 
@@ -15,15 +15,6 @@ from vllm.version import __version__ as VLLM_VERSION
 from vllm.worker.worker_base import ModelExecutionError
 
 logger = init_logger(__name__)
-
-
-# Hacky way to make sure we can serialize the object in JSON format
-def is_json_serializable(x):
-    try:
-        json.dumps(x)
-        return True
-    except (TypeError, OverflowError):
-        return False
 
 
 def prepare_object_to_dump(obj):
@@ -49,7 +40,7 @@ def prepare_object_to_dump(obj):
         }
 
     elif isinstance(obj, NewRequestData):
-        obj_dict: Dict[str, Any] = {'class': type(obj).__name__}
+        obj_dict: dict[str, Any] = {'class': type(obj).__name__}
         for k, v in obj.__dict__.items():
             if k == 'prompt_token_ids':
                 obj_dict['prompt_token_ids_len'] = len(v)
@@ -60,7 +51,7 @@ def prepare_object_to_dump(obj):
 
         return obj_dict
     elif isinstance(obj, torch.Tensor):
-        # We only print the 'draft'of the tensor to not expose sensitive data
+        # We only print the 'draft' of the tensor to not expose sensitive data
         # and to get some metadata in case of CUDA illegal memory access
         return (f"Tensor(shape={obj.shape}, "
                 f"device={obj.device},"
@@ -70,11 +61,10 @@ def prepare_object_to_dump(obj):
         obj_dict.update(obj.__dict__)
         return prepare_object_to_dump(obj_dict)
     else:
-        # Try to make sure we can serialize the object
-        # to avoid exception
-        if is_json_serializable(obj):
-            return obj
-        else:
+        # Hacky way to make sure we can serialize the object in JSON format
+        try:
+            return json.dumps(obj)
+        except (TypeError, OverflowError):
             return repr(obj)
 
 
@@ -88,7 +78,7 @@ def dump_engine_exception(err: BaseException,
 
     assert engine_version == 0 or engine_version == 1
 
-    logger.error("Engine crashed, dumping input data")
+    logger.error("Dumping input data")
 
     if engine_version == 1:
         logger.error(
@@ -115,8 +105,9 @@ def dump_engine_exception(err: BaseException,
             logger.error("Error preparing object to dump")
             logger.error(repr(exception))
 
-    # In case we do not have a ModelExecutionError we still can
-    # get information from the batch
+    # In case we do not have a ModelExecutionError, which is only present if
+    # the engine raise an error, we still can dump the information from the
+    # batch
     if execute_model_req is not None:
         batch = execute_model_req.seq_group_metadata_list
         requests_count = len(batch)

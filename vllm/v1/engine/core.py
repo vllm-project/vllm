@@ -38,6 +38,17 @@ POLLING_TIMEOUT_S = 2.5
 
 
 class ModelExecutionV1Error(RuntimeError):
+    """Custom RuntimeError with input data for model execution
+    
+    In a nutshell, this object is useful for custom handling of exception for
+    the case the engine raises an error. For instance, it is used to log the
+    input metadata that is useful for debugging on engine crashes.
+    
+    Args:
+        scheduler_output: SchedulerOutput object that contains the input
+            data for model execution
+        
+    """
     scheduler_output: SchedulerOutput
 
     def __init__(self, *args, scheduler_output=None):
@@ -45,7 +56,11 @@ class ModelExecutionV1Error(RuntimeError):
         self.scheduler_output = scheduler_output
 
     def __reduce__(self):
-        # To avoid pickle errors
+        # To avoid pickle errors.
+        # This happens when we exchange this object between processes
+        # since scheduler_output can have objects that only makes sense
+        # to their context/process we remove them from the serialization
+        # and only send the summary of the error as a regular RuntimeError.
         return (self.__class__, (self.args[0], ))
 
 
@@ -60,7 +75,7 @@ class EngineCore:
     ):
         assert vllm_config.model_config.runner_type != "pooling"
 
-        self.config = vllm_config
+        self.vllm_config = vllm_config
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
 
@@ -171,7 +186,7 @@ class EngineCore:
                 f"Model execution failure,"
                 f"reason: {repr(err)}",
                 scheduler_output=scheduler_output)
-            dump_engine_exception(err, self.config, 1)
+            dump_engine_exception(err, self.vllm_config, 1)
             raise err
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore

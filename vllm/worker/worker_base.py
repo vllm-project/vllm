@@ -209,6 +209,17 @@ class LoRANotSupportedWorkerBase(WorkerBase):
 
 
 class ModelExecutionError(RuntimeError):
+    """Custom RuntimeError with input data for model execution
+    
+    In a nutshell, this object is useful for custom handling of exception for
+    the case the engine raises an error. For instance, it is used to log the
+    input metadata that is useful for debugging on engine crashes.
+    
+    Args:
+        model_input: BroadcastableModelInput object that contains the input
+            data for model execution
+        
+    """
     model_input: BroadcastableModelInput
 
     def __init__(self, *args, model_input=None):
@@ -216,7 +227,11 @@ class ModelExecutionError(RuntimeError):
         self.model_input = model_input
 
     def __reduce__(self):
-        # To avoid pickle errors
+        # To avoid pickle errors.
+        # This happens when we exchange this object between processes.
+        # since model_input can have objects that only makes sense
+        # to their context/process we remove them from the serialization
+        # and only send the summary of the error as a regular RuntimeError.
         return (self.__class__, (self.args[0], ))
 
 
