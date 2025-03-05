@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Dict, List, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -18,7 +18,7 @@ try:
 except ImportError:
     is_flashinfer_available = False
 
-is_flashinfer_available = False
+is_flashinfer_available = False  # Turn off FlashInfer
 logger = init_logger(__name__)
 INVALID_TOKEN_ID = -1
 
@@ -58,10 +58,10 @@ class RejectionSampler(nn.Module):
 
     def forward(
         self,
-        draft_token_ids: List[List[int]],
+        draft_token_ids: list[list[int]],
         draft_probs: Optional[
             torch.Tensor],  # [batch_size, max_spec_len, vocab_size]
-        target_token_ids: List[List[int]],
+        target_token_ids: list[list[int]],
         target_probs: torch.
         Tensor,  # [batch_size, max_spec_len + 1, vocab_size]
         sampling_metadata: SamplingMetadata
@@ -279,7 +279,7 @@ def _create_greedy_token_probs(
 
 def _convert_2d_probs(
         probs: torch.Tensor,  # [num_total_tokens, vocab_size]
-        sample_lens: List[int]) -> torch.Tensor:
+        sample_lens: list[int]) -> torch.Tensor:
     """
         Converts a 2D tensor of probabilities to a 3D tensor with padding.
         [num_total_tokens, vocab_size] -> 
@@ -298,7 +298,7 @@ def _convert_2d_probs(
     return padded_probs
 
 
-def _create_uniform_samples(seeded_seqs: Optional[Dict[int, torch.Generator]],
+def _create_uniform_samples(seeded_seqs: Optional[dict[int, torch.Generator]],
                             batch_size: int, k: int,
                             device: torch.device) -> torch.Tensor:
     """

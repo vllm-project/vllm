@@ -3,7 +3,8 @@
 import asyncio
 import base64
 import time
-from typing import AsyncGenerator, Final, List, Literal, Optional, Union, cast
+from collections.abc import AsyncGenerator
+from typing import Final, Literal, Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
@@ -31,7 +32,7 @@ logger = init_logger(__name__)
 def _get_embedding(
     output: EmbeddingOutput,
     encoding_format: Literal["float", "base64"],
-) -> Union[List[float], str]:
+) -> Union[list[float], str]:
     if encoding_format == "float":
         return output.embedding
     elif encoding_format == "base64":
@@ -143,7 +144,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[PoolingRequestOutput, None]] = []
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
             pooling_params = request.to_pooling_params()
 
@@ -178,7 +179,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
-        final_res_batch: List[Optional[PoolingRequestOutput]]
+        final_res_batch: list[Optional[PoolingRequestOutput]]
         final_res_batch = [None] * num_prompts
         try:
             async for i, res in result_generator:
@@ -186,7 +187,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
             assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(List[PoolingRequestOutput],
+            final_res_batch_checked = cast(list[PoolingRequestOutput],
                                            final_res_batch)
 
             response = self.request_output_to_embedding_response(
@@ -206,13 +207,13 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     def request_output_to_embedding_response(
         self,
-        final_res_batch: List[PoolingRequestOutput],
+        final_res_batch: list[PoolingRequestOutput],
         request_id: str,
         created_time: int,
         model_name: str,
         encoding_format: Literal["float", "base64"],
     ) -> EmbeddingResponse:
-        items: List[EmbeddingResponseData] = []
+        items: list[EmbeddingResponseData] = []
         num_prompt_tokens = 0
 
         for idx, final_res in enumerate(final_res_batch):
