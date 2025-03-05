@@ -1034,9 +1034,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def generate_draft_token_ids(
         self,
         sampled_token_ids: list[list[int]],
+        sampling_metadata: Optional[SamplingMetadata] = None,
     ) -> list[list[int]]:
         # TODO(woosuk): Optimize.
         draft_token_ids: list[list[int]] = []
+
         for i, sampled_ids in enumerate(sampled_token_ids):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
@@ -1044,7 +1046,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids.append([])
                 continue
 
-            # TODO: skip requests they require top-p, top-k, etc.
+            # Skip requests that require top-p, top-k, etc.
+            if sampling_metadata and self._disable_spec_decode(
+                    i, sampling_metadata):
+                draft_token_ids.append([])
+                continue
 
             # Add sampled_token_ids to token_ids_cpu.
             start_idx = self.input_batch.num_tokens_no_spec[i]
@@ -1437,3 +1443,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     f"Unknown attention type: {attn_module.attn_type}")
 
         return kv_cache_spec
+
+    def _disable_spec_decode(self, req_idx: int,
+                             sampling_metadata: SamplingMetadata) -> bool:
+        return ((sampling_metadata.top_p
+                 and sampling_metadata.top_p[req_idx] < 1.0)
+                or (sampling_metadata.top_k
+                    and sampling_metadata.top_k[req_idx] > 0)
+                or (sampling_metadata.min_p
+                    and sampling_metadata.min_p[req_idx] > 0.0)
+                or (sampling_metadata.frequency_penalties[req_idx] != 0.0)
+                or (sampling_metadata.presence_penalties[req_idx] != 0.0)
+                or (sampling_metadata.repetition_penalties[req_idx] != 1.0))
