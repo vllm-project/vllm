@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List
-
 import pytest
 import torch
 
@@ -42,8 +40,8 @@ def test_prepare_prompt(batch_size):
         enable_chunked_prefill=False,
     )
 
-    seq_lens: List[int] = []
-    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    seq_lens: list[int] = []
+    seq_group_metadata_list: list[SequenceGroupMetadata] = []
     block_tables = {0: [1]}
     for i in range(batch_size):
         # make sure all tokens fit into one block
@@ -159,8 +157,8 @@ def test_prepare_decode_cuda_graph(batch_size):
         enable_chunked_prefill=False,
     )
 
-    context_lens: List[int] = []
-    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    context_lens: list[int] = []
+    seq_group_metadata_list: list[SequenceGroupMetadata] = []
     # Assume each seq group finishes prefill.
     for i in range(batch_size):
         # make sure all tokens fit into one block
@@ -265,7 +263,7 @@ def test_empty_seq_group():
         dtype="float16",
         enforce_eager=False,
     )
-    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    seq_group_metadata_list: list[SequenceGroupMetadata] = []
     model_input = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list)
     input_tokens, input_positions, attn_metadata = (
@@ -315,10 +313,10 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     )
 
     # Add prefill requests.
-    seq_lens: List[int] = []
-    seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    prefill_metadata_list: List[SequenceGroupMetadata] = []
-    decode_metadata_list: List[SequenceGroupMetadata] = []
+    seq_lens: list[int] = []
+    seq_group_metadata_list: list[SequenceGroupMetadata] = []
+    prefill_metadata_list: list[SequenceGroupMetadata] = []
+    decode_metadata_list: list[SequenceGroupMetadata] = []
     block_tables = {0: [1]}
     prefill_batch_size = batch_size // 2
     decode_batch_size = batch_size - prefill_batch_size

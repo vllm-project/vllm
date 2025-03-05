@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import warnings
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Optional, Union
 
 import torch
 
@@ -9,7 +10,7 @@ from vllm.config import ModelConfig, TaskOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
-TokensText = Tuple[List[int], str]
+TokensText = tuple[list[int], str]
 
 
 def check_outputs_equal(
@@ -46,7 +47,7 @@ def check_outputs_equal(
 # * List of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
+TokensTextLogprobs = tuple[list[int], str, Optional[Union[list[dict[int,
                                                                     float]],
                                                           SampleLogprobs]]]
 
@@ -57,8 +58,8 @@ TokensTextLogprobs = Tuple[List[int], str, Optional[Union[List[Dict[int,
 # * Optional list of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TextTextLogprobs = Tuple[List[str], str, Optional[Union[List[Dict[str, float]],
-                                                        List[Dict[str,
+TextTextLogprobs = tuple[list[str], str, Optional[Union[list[dict[str, float]],
+                                                        list[dict[str,
                                                                   Logprob]]]]]
 
 # Representation of generated sequence as a tuple of
@@ -68,9 +69,9 @@ TextTextLogprobs = Tuple[List[str], str, Optional[Union[List[Dict[str, float]],
 # * Optional list of top prompt logprobs for each prompt token
 #
 # Allows prompt logprobs to be requested.
-TokensTextLogprobsPromptLogprobs = Tuple[
-    List[int], str, Optional[Union[List[Dict[int, float]], SampleLogprobs]],
-    Optional[Union[List[Optional[Dict[int, float]]], PromptLogprobs]]]
+TokensTextLogprobsPromptLogprobs = tuple[
+    list[int], str, Optional[Union[list[dict[int, float]], SampleLogprobs]],
+    Optional[Union[list[Optional[dict[int, float]]], PromptLogprobs]]]
 
 
 def check_logprobs_close(
@@ -254,8 +255,8 @@ def build_model_context(
     tokenizer_name: Optional[str] = None,
     trust_remote_code: bool = False,
     dtype: Optional[Union[str, torch.dtype]] = None,
-    mm_processor_kwargs: Optional[Dict] = None,
-    limit_mm_per_prompt: Optional[Dict] = None,
+    mm_processor_kwargs: Optional[dict] = None,
+    limit_mm_per_prompt: Optional[dict] = None,
     disable_mm_preprocessor_cache: bool = True,
 ):
     """Creates an InputContext for a given model.

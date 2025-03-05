@@ -6,7 +6,6 @@ import json
 import os
 import random
 import time
-from typing import List
 
 import datasets
 import pandas as pd
@@ -39,7 +38,7 @@ class SampleRequest:
     completion: str = None
 
 
-def run_vllm(requests: List[SampleRequest],
+def run_vllm(requests: list[SampleRequest],
              engine_args: EngineArgs,
              n: int,
              guided_decoding_rate: float = 1.0,
@@ -54,8 +53,8 @@ def run_vllm(requests: List[SampleRequest],
             " prompt_len and expected_output_len for all requests.")
 
     # Add the requests to the engine.
-    prompts: List[str] = []
-    sampling_params: List[SamplingParams] = []
+    prompts: list[str] = []
+    sampling_params: list[SamplingParams] = []
     # create a list containing random selected true or false
     guided_decoding_req_idx = random.sample(
         range(len(requests)), int(len(requests) * guided_decoding_rate))
@@ -110,7 +109,7 @@ def run_vllm(requests: List[SampleRequest],
 
 
 async def run_vllm_async(
-        requests: List[SampleRequest],
+        requests: list[SampleRequest],
         engine_args: AsyncEngineArgs,
         n: int,
         guided_decoding_rate: float = 1.0,
@@ -129,8 +128,8 @@ async def run_vllm_async(
                 " prompt_len and expected_output_len for all requests.")
 
         # Add the requests to the engine.
-        prompts: List[str] = []
-        sampling_params: List[SamplingParams] = []
+        prompts: list[str] = []
+        sampling_params: list[SamplingParams] = []
         guided_decoding_req_idx = random.sample(
             range(len(requests)), int(len(requests) * guided_decoding_rate))
 
@@ -203,7 +202,7 @@ async def run_vllm_async(
 
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
-                    args: argparse.Namespace) -> List[SampleRequest]:
+                    args: argparse.Namespace) -> list[SampleRequest]:
     if args.dataset == 'json':
         if args.json_schema_path is None:
             dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -287,7 +286,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
 
     elif args.dataset == "xgrammar_bench":
         args.warmup = False
-        requests: List[SampleRequest] = []
+        requests: list[SampleRequest] = []
         dataset = datasets.load_dataset("NousResearch/json-mode-eval",
                                         split="train")
         print(f"dataset has {len(dataset)} entries")

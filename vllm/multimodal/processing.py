@@ -8,14 +8,12 @@ from collections.abc import (Callable, Generator, ItemsView, Iterable, Mapping,
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import lru_cache
-from itertools import groupby
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
-import vllm.envs as envs
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
@@ -38,6 +36,65 @@ _S = TypeVar("_S", str, list[int])
 
 PromptSeq = Union[str, list[int]]
 """A token sequence (list of token IDs) or text."""
+
+
+@dataclass
+class PromptIndex:
+    """Resolves to an index in the prompt."""
+    get_match_index: Callable[[AnyTokenizer, PromptSeq], Optional[int]]
+
+
+class PromptIndexTargets:
+
+    @staticmethod
+    def start() -> PromptIndex:
+        """
+        Resolves to the start of the prompt (before the first token).
+
+        This results in a match even if the prompt is empty.
+        """
+        return PromptIndex(lambda tok, prompt: 0)
+
+    @staticmethod
+    def prefix(seq: PromptSeq) -> PromptIndex:
+        """
+        Resolves to a location in the prompt after the given prefix.
+        """
+
+        def get_match_index(
+            tokenizer: AnyTokenizer,
+            prompt: PromptSeq,
+        ) -> Optional[int]:
+            prefix = seq
+
+            if isinstance(prompt, str):
+                if not isinstance(prefix, str):
+                    # Make both `str`
+                    prefix = decode_tokens(tokenizer, prefix)
+            else:
+                if isinstance(prefix, str):
+                    # Make both `list[int]`
+                    prefix = encode_tokens(tokenizer, prefix)
+
+            match_idx = len(prefix)
+            return match_idx if prompt[:match_idx] == prefix else None
+
+        return PromptIndex(get_match_index)
+
+    @staticmethod
+    def end() -> PromptIndex:
+        """
+        Resolves to the end of the prompt (after the last token).
+
+        This results in a match even if the prompt is empty.
+        """
+        return PromptIndex(lambda tok, prompt: len(prompt))
+
+
+PromptTarget = Union[PromptSeq, PromptIndex]
+"""
+The token sequence or text to update.
+"""
 
 
 @dataclass
@@ -84,7 +141,7 @@ class UpdateMode(str, Enum):
 
 
 @dataclass
-class PromptUpdate:
+class PromptUpdate(ABC):
     """
     Defines how to update a prompt with placeholder tokens.
     """
@@ -92,7 +149,7 @@ class PromptUpdate:
     modality: str
     """The modality for which the update is made."""
 
-    target: PromptSeq
+    target: PromptTarget
     """The token sequence (or text) to update."""
 
     @property
@@ -122,24 +179,43 @@ class PromptInsertion(PromptUpdate):
     Example:
 
         For each image, insert a number of ``<image>`` feature placeholders
-        equal to the feature size of the vision encoder at the start of the
-        prompt:
-
-        .. code-block:: python
-
-            PromptInsertion(
-                modality="image",
-                target="",
-                insertion="<image>" * image_feature_size,
-            )
-
-        As above, but insert after the ``<s>`` token:
+        equal to the feature size of the vision encoder after the ``<s>`` token:
 
         .. code-block:: python
 
             PromptInsertion(
                 modality="image",
                 target="<s>",
+                insertion="<image>" * image_feature_size,
+            )
+
+        Insert these tokens at the start of the prompt:
+
+        .. code-block:: python
+
+            PromptInsertion(
+                modality="image",
+                target=PromptIndexTargets.start(),
+                insertion="<image>" * image_feature_size,
+            )
+
+        Insert these tokens after a prefix ``Images:``:
+
+        .. code-block:: python
+
+            PromptInsertion(
+                modality="image",
+                target=PromptIndexTargets.prefix("Images:"),
+                insertion="<image>" * image_feature_size,
+            )
+
+        Insert these tokens at the end of the prompt:
+
+        .. code-block:: python
+
+            PromptInsertion(
+                modality="image",
+                target=PromptIndexTargets.end(),
                 insertion="<image>" * image_feature_size,
             )
     """
@@ -345,10 +421,14 @@ class BoundPromptUpdate:
         return self._origin.modality
 
     @property
-    def target(self) -> _BoundPromptSequence:
+    def target(self) -> Union[_BoundPromptSequence, PromptIndex]:
         """The token sequence (or text) to update."""
-        return _BoundPromptSequence.from_seq(self.tokenizer,
-                                             self._origin.target)
+        target = self._origin.target
+
+        if isinstance(target, PromptIndex):
+            return target
+
+        return _BoundPromptSequence.from_seq(self.tokenizer, target)
 
     @property
     def content(self) -> PromptUpdateContent:
@@ -448,6 +528,19 @@ class _PromptTargetMatch(ABC):
 
 
 @dataclass(repr=False)
+class _PromptTargetIndexMatch(_PromptTargetMatch):
+    match_idx: int
+
+    @property
+    def start_idx(self) -> int:
+        return self.match_idx
+
+    @property
+    def end_idx(self) -> int:
+        return self.match_idx
+
+
+@dataclass(repr=False)
 class _PromptTargetTokenMatch(_PromptTargetMatch):
     match: _TokenMatch
 
@@ -496,9 +589,24 @@ def find_token_matches(
     prompt_updates: Sequence[BoundPromptUpdate],
 ) -> Sequence[_PromptTargetMatch]:
     """Return each target of :code:`prompt_updates` found in :code:`prompt`."""
+
+    def get_matches(update: BoundPromptUpdate):
+        target = update.target
+
+        if isinstance(target, PromptIndex):
+            match_idx = target.get_match_index(update.tokenizer, prompt)
+            if match_idx is None:
+                return []
+
+            return [_PromptTargetIndexMatch(update, match_idx)]
+
+        return [
+            _PromptTargetTokenMatch(update, match)
+            for match in iter_token_matches(prompt, target.token_ids)
+        ]
+
     return [
-        _PromptTargetTokenMatch(update, match) for update in prompt_updates
-        for match in iter_token_matches(prompt, update.target.token_ids)
+        match for update in prompt_updates for match in get_matches(update)
     ]
 
 
@@ -507,9 +615,24 @@ def find_text_matches(
     prompt_updates: Sequence[BoundPromptUpdate],
 ) -> Sequence[_PromptTargetMatch]:
     """Return each target of :code:`prompt_updates` found in :code:`prompt`."""
+
+    def get_matches(update: BoundPromptUpdate):
+        target = update.target
+
+        if isinstance(target, PromptIndex):
+            match_idx = target.get_match_index(update.tokenizer, prompt)
+            if match_idx is None:
+                return []
+
+            return [_PromptTargetIndexMatch(update, match_idx)]
+
+        return [
+            _PromptTargetTextMatch(update, match)
+            for match in re.finditer(re.escape(target.text), prompt)
+        ]
+
     return [
-        _PromptTargetTextMatch(update, match) for update in prompt_updates
-        for match in re.finditer(re.escape(update.target.text), prompt)
+        match for update in prompt_updates for match in get_matches(update)
     ]
 
 
@@ -547,45 +670,39 @@ def _apply_matches(
     prev_end_idx = 0
     next_idx_by_modality = defaultdict[str, int](lambda: 0)
 
-    for (start_idx, end_idx), group in groupby(
-            _resolve_matches(prompt, mm_matches),
-            key=lambda x: (x.start_idx, x.end_idx),
-    ):
-        matches = tuple(group)
-        assert len(matches) == 1
+    for match in _resolve_matches(prompt, mm_matches):
+        modality = match.modality
 
-        for match in matches:
-            modality = match.modality
+        item_start_idx = next_idx_by_modality[modality]
+        max_item_count = mm_item_counts.get(modality, 0)
+        if item_start_idx >= max_item_count:
+            continue
 
-            item_idx = next_idx_by_modality[modality]
-            if item_idx >= mm_item_counts.get(modality, 0):
-                continue
+        start_idx = match.start_idx
+        end_idx = match.end_idx
+        origin = match._origin
+        mode = origin.mode
 
-            origin = match._origin
+        if mode == UpdateMode.INSERT:
+            out_seqs.append(prompt[prev_end_idx:end_idx])
+            num_inserts = max_item_count
+        elif mode == UpdateMode.REPLACE:
+            out_seqs.append(prompt[prev_end_idx:start_idx])
+            num_inserts = max_item_count if start_idx == end_idx else 1
+        else:
+            assert_never(mode)
+
+        item_end_idx = min(item_start_idx + num_inserts, max_item_count)
+
+        for item_idx in range(item_start_idx, item_end_idx):
             content = origin.get_content(item_idx)
-            mode = origin.mode
+            insert_seq = (content.full.text if isinstance(prompt, str) else
+                          content.full.token_ids)
 
-            if mode == UpdateMode.INSERT:
-                out_seqs.append(prompt[prev_end_idx:end_idx])
-                num_inserts = mm_item_counts.get(modality, 0)
-            elif mode == UpdateMode.REPLACE:
-                out_seqs.append(prompt[prev_end_idx:start_idx])
-                num_inserts = 1
-            else:
-                assert_never(mode)
+            out_seqs.append(insert_seq)
 
-            for _ in range(num_inserts):
-                if item_idx >= mm_item_counts.get(modality, 0):
-                    continue
-
-                if isinstance(prompt, str):
-                    out_seqs.append(content.full.text)
-                else:
-                    out_seqs.append(content.full.token_ids)
-
-                next_idx_by_modality[modality] += 1
-
-            prev_end_idx = end_idx
+        prev_end_idx = end_idx
+        next_idx_by_modality[modality] += item_end_idx - item_start_idx
 
     out_seqs.append(prompt[prev_end_idx:])
 
@@ -1317,6 +1434,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1333,11 +1451,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         mm_items = self._to_mm_items(mm_data)
 
-        # Create MM hashes (only used in V1)
+        # Create MM hashes to be returned (only used in V1)
         # TODO: Use these hash keys for caching operations in apply_hf_processor
         # instead of rehashing.
 
-        if envs.VLLM_USE_V1:
+        if return_mm_hashes:
             model_id = self.info.model_id
             mm_hashes = {
                 modality: [
@@ -1436,6 +1554,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalEncDecInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1449,6 +1568,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             encoder_prompt,
             mm_data,
             hf_processor_mm_kwargs,
+            return_mm_hashes,
         )
 
         tokenizer = self.info.get_tokenizer()

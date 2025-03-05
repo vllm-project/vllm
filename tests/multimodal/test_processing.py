@@ -14,8 +14,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
-                                        PromptInsertion, PromptReplacement,
-                                        apply_text_matches,
+                                        PromptIndexTargets, PromptInsertion,
+                                        PromptReplacement, apply_text_matches,
                                         apply_token_matches,
                                         find_mm_placeholders,
                                         find_text_matches, find_token_matches,
@@ -98,10 +98,20 @@ def test_iter_token_matches(token_ids, match_ids, expected):
             {
                 "pattern_1": [],
                 "pattern_2": [32000],
+                "pattern_3": PromptIndexTargets.start(),
+                "pattern_4": PromptIndexTargets.prefix([32000]),
+                "pattern_5": PromptIndexTargets.end(),
             },
             {
                 "pattern_1": [],
                 "pattern_2": [],
+                "pattern_3": [
+                    { "start_idx": 0, "end_idx": 0 },
+                ],
+                "pattern_4": [],
+                "pattern_5": [
+                    { "start_idx": 0, "end_idx": 0 },
+                ],
             },
         ),
         (
@@ -110,6 +120,9 @@ def test_iter_token_matches(token_ids, match_ids, expected):
                 "pattern_1": [32000],
                 "pattern_2": [32000, 32000],
                 "pattern_3": [32000, 32000, 32000],
+                "pattern_4": PromptIndexTargets.start(),
+                "pattern_5": PromptIndexTargets.prefix([32000]),
+                "pattern_6": PromptIndexTargets.end(),
             },
             {
                 "pattern_1": [
@@ -125,6 +138,15 @@ def test_iter_token_matches(token_ids, match_ids, expected):
                 "pattern_3": [
                     { "start_idx": 0, "end_idx": 3 },
                 ],
+                "pattern_4": [
+                    { "start_idx": 0, "end_idx": 0 },
+                ],
+                "pattern_5": [
+                    { "start_idx": 1, "end_idx": 1 },
+                ],
+                "pattern_6": [
+                    { "start_idx": 4, "end_idx": 4 },
+                ],
             },
         ),
         (
@@ -133,6 +155,9 @@ def test_iter_token_matches(token_ids, match_ids, expected):
                 "pattern_1": [28747, 32000],
                 "pattern_2": [28747, 32000, 32000, 32000],
                 "pattern_3": [28747, 0, 32000],
+                "pattern_4": PromptIndexTargets.start(),
+                "pattern_5": PromptIndexTargets.prefix([28747, 32000]),
+                "pattern_6": PromptIndexTargets.end(),
             },
             {
                 "pattern_1": [
@@ -143,6 +168,13 @@ def test_iter_token_matches(token_ids, match_ids, expected):
                     { "start_idx": 1, "end_idx": 5 },
                 ],
                 "pattern_3": [],
+                "pattern_4": [
+                    { "start_idx": 0, "end_idx": 0 },
+                ],
+                "pattern_5": [],
+                "pattern_6": [
+                    { "start_idx": 10, "end_idx": 10 },
+                ],
             },
         ),
     ],
@@ -189,10 +221,20 @@ def test_find_token_matches(
             {
                 "pattern_1": "",
                 "pattern_2": "<image>",
+                "pattern_3": PromptIndexTargets.start(),
+                "pattern_4": PromptIndexTargets.prefix("<image>"),
+                "pattern_5": PromptIndexTargets.end(),
             },
             {
                 "pattern_1": [{ "start_idx": 0, "end_idx": 0 }],
                 "pattern_2": [],
+                "pattern_3": [
+                    { "start_idx": 0, "end_idx": 0 },
+                ],
+                "pattern_4": [],
+                "pattern_5": [
+                    { "start_idx": 0, "end_idx": 0 },
+                ],
             }
         ),
         (
@@ -201,6 +243,9 @@ def test_find_token_matches(
                 "pattern_1": "<image>",
                 "pattern_2": "<image><image>",
                 "pattern_3": "<image><image><image>",
+                "pattern_4": PromptIndexTargets.start(),
+                "pattern_5": PromptIndexTargets.prefix("<image>"),
+                "pattern_6": PromptIndexTargets.end(),
             },
             {
                 "pattern_1": [
@@ -216,6 +261,15 @@ def test_find_token_matches(
                 "pattern_3": [
                     { "start_idx": 0, "end_idx": 21 },
                 ],
+                "pattern_4": [
+                    { "start_idx": 0, "end_idx": 0 },
+                ],
+                "pattern_5": [
+                    { "start_idx": 7, "end_idx": 7 },
+                ],
+                "pattern_6": [
+                    { "start_idx": 28, "end_idx": 28 },
+                ],
             },
         ),
         (
@@ -224,6 +278,9 @@ def test_find_token_matches(
                 "pattern_1": "Image:<image>",
                 "pattern_2": "Image:<image><image><image>",
                 "pattern_3": "Image:<unk><image>",
+                "pattern_4": PromptIndexTargets.start(),
+                "pattern_5": PromptIndexTargets.prefix("Image:<image>"),
+                "pattern_6": PromptIndexTargets.end(),
             },
             {
                 "pattern_1": [
@@ -234,6 +291,15 @@ def test_find_token_matches(
                     { "start_idx": 0, "end_idx": 27 },
                 ],
                 "pattern_3": [],
+                "pattern_4": [
+                    { "start_idx": 0, "end_idx": 0 },
+                ],
+                "pattern_5": [
+                    { "start_idx": 13, "end_idx": 13 },
+                ],
+                "pattern_6": [
+                    { "start_idx": 48, "end_idx": 48 },
+                ],
             },
         ),
         # Test regex escape
@@ -325,6 +391,100 @@ def test_find_text_matches(
                 },
             },
         ),
+        # Test index targets
+        (
+            "",
+            {
+                "pattern_1": PromptIndexTargets.start(),
+                "pattern_2": PromptIndexTargets.prefix("<image>"),
+                "pattern_3": PromptIndexTargets.end(),
+            },
+            {
+                "pattern_1": "1",
+                "pattern_2": "2",
+                "pattern_3": "3",
+            },
+            {
+                PromptInsertion: {
+                    0: "",
+                    1: "13",
+                    2: "1133",
+                },
+                PromptReplacement: {
+                    0: "",
+                    1: "13",
+                    2: "1133",
+                },
+            },
+        ),
+        (
+            "<image>",
+            {
+                "pattern_1": PromptIndexTargets.start(),
+                "pattern_2": PromptIndexTargets.prefix("<image>"),
+                "pattern_3": PromptIndexTargets.end(),
+            },
+            {
+                "pattern_1": "1",
+                "pattern_2": "2",
+                "pattern_3": "3",
+            },
+            {
+                PromptInsertion: {
+                    0: "<image>",
+                    1: "1<image>23",
+                    2: "11<image>2233",
+                },
+                PromptReplacement: {
+                    0: "<image>",
+                    1: "1<image>23",
+                    2: "11<image>2233",
+                },
+            },
+        ),
+        # Test different replacement per item
+        (
+            "<image><image><image>",
+            {
+                "pattern_1": "<image>",
+            },
+            {
+                "pattern_1": lambda idx: str(idx + 1),
+            },
+            {
+                PromptInsertion: {
+                    0: "<image><image><image>",
+                    1: "<image>1<image><image>",
+                    2: "<image>12<image><image>",
+                },
+                PromptReplacement: {
+                    0: "<image><image><image>",
+                    1: "1<image><image>",
+                    2: "12<image>",
+                },
+            },
+        ),
+        (
+            "<image><image><image>",
+            {
+                "pattern_1": PromptIndexTargets.prefix("<image>"),
+            },
+            {
+                "pattern_1": lambda idx: str(idx + 1),
+            },
+            {
+                PromptInsertion: {
+                    0: "<image><image><image>",
+                    1: "<image>1<image><image>",
+                    2: "<image>12<image><image>",
+                },
+                PromptReplacement: {
+                    0: "<image><image><image>",
+                    1: "<image>1<image><image>",
+                    2: "<image>12<image><image>",
+                },
+            },
+        ),
     ]
 )
 # yapf: enable
@@ -402,6 +562,100 @@ def test_find_update_text(
                     0: [1, 9833, 28747, 32000, 9833, 28747, 32000, 32000, 918],
                     1: [1, 32000, 32000, 9833, 28747, 32000, 32000, 1550, 918, 1550],  # noqa: E501
                     2: [1, 32000, 32000, 32000, 32000, 32000, 1550, 918, 1550],
+                },
+            },
+        ),
+        # Test index targets
+        (
+            [],
+            {
+                "pattern_1": PromptIndexTargets.start(),
+                "pattern_2": PromptIndexTargets.prefix([32000]),
+                "pattern_3": PromptIndexTargets.end(),
+            },
+            {
+                "pattern_1": [-1],
+                "pattern_2": [-2],
+                "pattern_3": [-3],
+            },
+            {
+                PromptInsertion: {
+                    0: [],
+                    1: [-1, -3],
+                    2: [-1, -1, -3, -3],
+                },
+                PromptReplacement: {
+                    0: [],
+                    1: [-1, -3],
+                    2: [-1, -1, -3, -3],
+                },
+            },
+        ),
+        (
+            [32000],
+            {
+                "pattern_1": PromptIndexTargets.start(),
+                "pattern_2": PromptIndexTargets.prefix([32000]),
+                "pattern_3": PromptIndexTargets.end(),
+            },
+            {
+                "pattern_1": [-1],
+                "pattern_2": [-2],
+                "pattern_3": [-3],
+            },
+            {
+                PromptInsertion: {
+                    0: [32000],
+                    1: [-1, 32000, -2, -3],
+                    2: [-1, -1, 32000, -2, -2, -3, -3],
+                },
+                PromptReplacement: {
+                    0: [32000],
+                    1: [-1, 32000, -2, -3],
+                    2: [-1, -1, 32000, -2, -2, -3, -3],
+                },
+            },
+        ),
+        # Test different replacement per item
+        (
+            [32000, 32000, 32000],
+            {
+                "pattern_1": [32000],
+            },
+            {
+                "pattern_1": lambda idx: [-(idx + 1)],
+            },
+            {
+                PromptInsertion: {
+                    0: [32000, 32000, 32000],
+                    1: [32000, -1, 32000, 32000],
+                    2: [32000, -1, -2, 32000, 32000],
+                },
+                PromptReplacement: {
+                    0: [32000, 32000, 32000],
+                    1: [-1, 32000, 32000],
+                    2: [-1, -2, 32000],
+                },
+            },
+        ),
+        (
+            [32000, 32000, 32000],
+            {
+                "pattern_1": PromptIndexTargets.prefix([32000]),
+            },
+            {
+                "pattern_1": lambda idx: [-(idx + 1)],
+            },
+            {
+                PromptInsertion: {
+                    0: [32000, 32000, 32000],
+                    1: [32000, -1, 32000, 32000],
+                    2: [32000, -1, -2, 32000, 32000],
+                },
+                PromptReplacement: {
+                    0: [32000, 32000, 32000],
+                    1: [32000, -1, 32000, 32000],
+                    2: [32000, -1, -2, 32000, 32000],
                 },
             },
         ),
