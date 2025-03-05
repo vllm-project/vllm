@@ -24,6 +24,23 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
+def _flatten_inputs(inputs):
+    """
+    Helper function for making nested inputs flattens
+    """
+    flatten_inputs = []
+    for input_data in inputs:
+        if input_data is None:
+            continue
+        if isinstance(input_data, (list, tuple)):
+            flatten_inputs.extend(_flatten_inputs(input_data))
+        elif isinstance(input_data, dict):
+            flatten_inputs.extend(_flatten_inputs(list(input_data.values())))
+        else:
+            flatten_inputs.append(input_data)
+    return flatten_inputs
+
+
 def _modify_cache_parameters(model: ov.Model, kv_cache_dtype: ov.Type,
                              is_cpu: bool):
     # Apply hardware dependent modifications to KV tensors
@@ -129,13 +146,10 @@ class OpenVINOCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
     ) -> torch.Tensor:
-        fwd_ctx = get_forward_context()
-        flat_kv_caches = [
-            attn_layer.kv_cache[fwd_ctx.virtual_engine]
-            for attn_layer in fwd_ctx.attn_layers
-        ]
-        attn_metadata = fwd_ctx.attn_metadata
+        flat_kv_caches = _flatten_inputs(kv_caches)
+        attn_metadata = get_forward_context().attn_metadata
 
         inputs = [
             input_ids,
