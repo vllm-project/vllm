@@ -509,6 +509,11 @@ def main(args: argparse.Namespace):
         intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
         block_quant_shape = config.quantization_config['weight_block_size']
+    elif config.architectures[0] == "Qwen2MoeForCausalLM":
+        E = config.num_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.moe_intermediate_size
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
     else:
         # Default: Mixtral.
         E = config.num_local_experts
