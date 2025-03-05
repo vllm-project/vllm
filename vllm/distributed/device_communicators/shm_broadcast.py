@@ -356,8 +356,13 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.debug("No available block found in %s second. ",
-                                     VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        block_status_info = f"The block has been read by {read_count} out of {self.buffer.n_reader} readers."
+                        
+                        logger.debug(
+                            "No available block found in %s second. %s",
+                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                            block_status_info,
+                        )
                         n_warning += 1
 
                     # if we time out, raise an exception
@@ -414,8 +419,26 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.debug("No available block found in %s second. ",
-                                     VLLM_RINGBUFFER_WARNING_INTERVAL)
+                        if not written_flag:
+                            block_status_info = (
+                                "This block has not been written yet."
+                            )
+                        else:
+                            block_status_info = (
+                                "This block has already been read by "
+                                f"reader {self.local_reader_rank}."
+                            )
+                        block_status = (
+                            f"{block_status_info} "
+                            f"written_flag: {written_flag}, "
+                            f"read_flag: {read_flag}."
+                        )
+
+                        logger.debug(
+                            "No available block found in %s second. %s",
+                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                            block_status,
+                        )
                         n_warning += 1
 
                     # if we time out, raise an exception
