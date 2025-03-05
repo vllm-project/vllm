@@ -113,6 +113,10 @@ def test_allowed_token_ids(model):
         PROMPT, SamplingParams(allowed_token_ids=allowed_token_ids))
     assert output[0].outputs[0].token_ids[-1] == TOKEN_ID
 
+    # Reject empty allowed_token_ids.
+    with pytest.raises(ValueError):
+        _ = model.generate(PROMPT, SamplingParams(allowed_token_ids=[]))
+
     # Reject negative token id.
     with pytest.raises(ValueError):
         _ = model.generate(PROMPT, SamplingParams(allowed_token_ids=[-1]))
