@@ -652,6 +652,8 @@ class FalconMamba2ForCausalLM(
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
+                if self.tie_word_embeddings and "lm_head" in name:
+                    continue
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
