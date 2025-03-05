@@ -242,7 +242,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     user: Optional[str] = None
 
     # doc: begin-chat-completion-sampling-params
-    best_of: Optional[int] = None
     use_beam_search: bool = False
     top_k: Optional[int] = None
     min_p: Optional[float] = None
@@ -369,6 +368,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "arguments. For example: {'qualname': "
             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
             "{'param': 'value'}}."))
+    return_tokens_as_token_ids: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If specified with 'logprobs', tokens are represented "
+            " as strings of the form 'token_id:{token_id}' so that tokens "
+            "that are not JSON-encodable can be identified."))
 
     # doc: end-chat-completion-extra-params
 
@@ -473,7 +478,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(
             n=self.n,
-            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
@@ -644,7 +648,6 @@ class CompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/completions/create
     model: Optional[str] = None
     prompt: Union[list[int], list[list[int]], str, list[str]]
-    best_of: Optional[int] = None
     echo: Optional[bool] = False
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[dict[str, float]] = None
@@ -739,6 +742,12 @@ class CompletionRequest(OpenAIBaseModel):
             "arguments. For example: {'qualname': "
             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
             "{'param': 'value'}}."))
+    return_tokens_as_token_ids: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If specified with 'logprobs', tokens are represented "
+            " as strings of the form 'token_id:{token_id}' so that tokens "
+            "that are not JSON-encodable can be identified."))
 
     # doc: end-completion-extra-params
 
@@ -836,7 +845,6 @@ class CompletionRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(
             n=self.n,
-            best_of=self.best_of,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,

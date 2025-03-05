@@ -2196,8 +2196,8 @@ def bind_kv_cache(
     from vllm.model_executor.models.utils import extract_layer_index
     layer_need_kv_cache = [
         layer_name for layer_name in ctx
-        if ctx[layer_name].attn_type in (AttentionType.DECODER,
-                                         AttentionType.ENCODER_DECODER)
+        if (hasattr(ctx[layer_name], 'attn_type') and ctx[layer_name].attn_type
+            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER))
     ]
     layer_index_sorted = sorted(
         set(
