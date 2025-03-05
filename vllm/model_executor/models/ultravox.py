@@ -561,7 +561,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
         return flattened_embeddings
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return None

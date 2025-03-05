@@ -2,7 +2,7 @@
 
 import itertools
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
@@ -151,12 +151,12 @@ class LogprobsProcessor:
 
     @staticmethod
     def _make_logprob_dict(
-        logprobs: List[float],
-        logprob_token_ids: List[int],
-        decoded_tokens: List[str],
+        logprobs: list[float],
+        logprob_token_ids: list[int],
+        decoded_tokens: list[str],
         rank: int,
         num_logprobs: int,
-    ) -> Dict[int, Logprob]:
+    ) -> dict[int, Logprob]:
         """Make a Logprob dictionary for a position.
 
         Args:
@@ -168,7 +168,7 @@ class LogprobsProcessor:
             by the user (in addition to sampled logprob)
 
         Returns:
-          Dict[token id, Logprob]
+          dict[token id, Logprob]
         """
 
         # We do not need a special case for the sampled token

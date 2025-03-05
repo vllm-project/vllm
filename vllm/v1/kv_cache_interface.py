@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List
 
 import torch
 
@@ -74,7 +73,7 @@ class FullAttentionSpec(KVCacheSpecBase):
         return cdiv(num_tokens, self.block_size) * self.page_size_bytes
 
 
-KVCacheSpec = Dict[str, KVCacheSpecBase]
+KVCacheSpec = dict[str, KVCacheSpecBase]
 
 
 @dataclass
@@ -95,7 +94,7 @@ class KVCacheConfig:
     """The number of KV cache blocks"""
     num_blocks: int
     """layer_name -> how to initialize KV cache for that layer"""
-    tensors: Dict[str, KVCacheTensor]
+    tensors: dict[str, KVCacheTensor]
     """
     A list of kv-cache groups. Each group includes a set of layers with
     the same kv-cache spec, and the total page_size of layers inside a group
@@ -108,6 +107,6 @@ class KVCacheConfig:
     3. (not implemented yet) A model with 2 full attention layers and 4 sliding 
     window attention layers: three groups, (full * 2), (sw * 2), (sw * 2).
     """
-    groups: List[List[str]]
+    groups: list[list[str]]
     """the KVCacheSpec of the model"""
     kv_cache_spec: KVCacheSpec

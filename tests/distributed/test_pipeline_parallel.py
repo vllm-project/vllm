@@ -9,7 +9,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import json
 import os
 from dataclasses import dataclass
-from typing import List, Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple, Optional
 
 import pytest
 
@@ -38,14 +38,14 @@ class PPTestOptions(NamedTuple):
 
 @dataclass
 class PPTestSettings:
-    parallel_setups: List[ParallelSetup]
+    parallel_setups: list[ParallelSetup]
     # NOTE: the length of distributed_backends and
     # vllm_major_versions should be the same, and they
     # are first zipped together to iterate over all
     # test settings.
-    distributed_backends: List[str]
+    distributed_backends: list[str]
     # vllm major version: "0" for V0, "1" for V1
-    vllm_major_versions: List[str]
+    vllm_major_versions: list[str]
     task: TaskOption
     test_options: PPTestOptions
 

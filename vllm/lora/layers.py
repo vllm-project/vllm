@@ -395,6 +395,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
+
+        # In transformers backend, x and output have extra batch dimension like
+        # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
+        # therefore we need to flatten the batch dimensions.
+        if x.ndim == 3 and output.ndim == 3:
+            output = output.flatten(0, 1)
+            x = x.flatten(0, 1)
+
         self.punica_wrapper.add_lora_linear(output, x, self.lora_a_stacked,
                                             self.lora_b_stacked,
                                             self.lora_bias_stacked, 1.0,
@@ -413,7 +421,7 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def forward(
         self, input_: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """Forward of ReplicatedLinearWithLoRA
 
         Args:
@@ -431,6 +439,10 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 
         output_bias = (self.base_layer.bias
                        if self.base_layer.skip_bias_add else None)
+
+        if not self.base_layer.return_bias:
+            return output
+
         return output, output_bias
 
     # ReplicatedLinear should always be replaced, regardless of the fully
@@ -506,7 +518,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def forward(
         self, input_: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """Forward of ColumnParallelLinear
 
         Args:
@@ -526,6 +538,10 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             output = tensor_model_parallel_all_gather(output_parallel)
         else:
             output = output_parallel
+
+        if not self.base_layer.return_bias:
+            return output
+
         output_bias = (self.base_layer.bias
                        if self.base_layer.skip_bias_add else None)
         return output, output_bias
@@ -845,7 +861,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def forward(
         self, input_: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """Forward of RowParallelLinear
 
         Args:
@@ -880,6 +896,10 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         else:
             output = output_
             output_bias = self.base_layer.bias
+
+        if not self.base_layer.return_bias:
+            return output
+
         return output, output_bias
 
     @property
