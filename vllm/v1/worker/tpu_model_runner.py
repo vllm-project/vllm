@@ -697,6 +697,9 @@ class TPUModelRunner:
     ) -> ModelRunnerOutput:
         # Update cached state
         self._update_states(scheduler_output)
+        # TODO (NickLucche) something before this point (likely _update_state)
+        # is causing a small recompilation on 2nd runs. Optimize.
+        # xm.mark_step()
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -725,12 +728,16 @@ class TPUModelRunner:
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids
             inputs_embeds = None
-       
+
         sampling_metadata = self.input_batch.sampling_metadata
         num_reqs = self.input_batch.num_reqs
         # Indices at which we sample (positions of last token in the sequence).
-        logits_indices = logits_indices[:num_reqs]
-        padded_do_sample_indices = _pad_indices_do_sample(logits_indices)
+        # logits_indices = logits_indices[:num_reqs]
+        padded_do_sample_indices = _pad_indices_do_sample(
+            logits_indices, num_reqs)
+        # NOTE (NickLucche) here we sync with TPU: if there's any shape
+        # mismatch in pre-processing, it will trigger a small recompilation
+        # of the code thus far. Forward graph remains untouched.
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_sampling_metadata(sampling_metadata, padded_do_sample_indices,
                                     num_reqs, self.device)
@@ -739,7 +746,7 @@ class TPUModelRunner:
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
             selected_token_ids = self.model(
-                token_ids=self.input_ids,
+                token_ids=input_ids,
                 position_ids=self.position_ids,
                 kv_caches=self.kv_caches,
                 inputs_embeds=inputs_embeds,
@@ -836,12 +843,10 @@ class TPUModelRunner:
                                    dynamic=False)
 
     @torch.no_grad()
-    def _dummy_run(
-        self,
-        kv_caches,
-        num_tokens: int,
-        num_tokens_to_sample: Optional[int] = None
-    ) -> None:
+    def _dummy_run(self,
+                   kv_caches,
+                   num_tokens: int,
+                   num_tokens_to_sample: Optional[int] = None) -> None:
         if self.is_multimodal_model:
             input_ids = None
             inputs_embeds = torch.zeros((num_tokens, self.hidden_size),
@@ -908,13 +913,15 @@ class TPUModelRunner:
         num_tokens = 16
         num_reqs_to_sample = MIN_NUM_SEQS
         while True:
+            # Compile for different sampler outputs in
+            # [MIN_NUM_SEQS, pad(max_num_reqs)]
             while True:
                 self._dummy_run(self.kv_caches, num_tokens)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs_to_sample)
                 xm.mark_step()
                 xm.wait_device_ops()
-                if num_reqs_to_sample >= self.scheduler_config.max_num_seqs:
+                if num_reqs_to_sample >= self.max_num_reqs:
                     break
                 num_reqs_to_sample *= 2
             if num_tokens >= self.scheduler_config.max_num_batched_tokens:
@@ -1008,6 +1015,7 @@ class ModelWrapperV1(nn.Module):
         position_ids: torch.Tensor,
         kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
         sampling_metadata: TPUSupportedSamplingMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
            Sampling happens in the same forward call so that we can maintain
@@ -1019,11 +1027,8 @@ class ModelWrapperV1(nn.Module):
                 memory profiling at initialization.
         """
         # NxV, N num padded tokens
-        hidden_states = self.model_forward(
-            token_ids,
-            position_ids,
-            kv_caches,
-        )
+        hidden_states = self.model_forward(token_ids, position_ids, kv_caches,
+                                           inputs_embeds)
 
         # Tensor `sample_hidden_states` is of fixed pre-compiled size.
         sample_hidden_states = \
@@ -1034,11 +1039,8 @@ class ModelWrapperV1(nn.Module):
         sampled_token_ids = sampler_output.sampled_token_ids
         return sampled_token_ids
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata,
-    ) -> Optional[torch.Tensor]:
+    def compute_logits(self,
+                       hidden_states: torch.Tensor) -> Optional[torch.Tensor]:
         # SamplingMetadata here for pruning output in LogitsProcessor, disabled
         logits = self.model.compute_logits(hidden_states, None)
         return logits
@@ -1049,6 +1051,7 @@ class ModelWrapperV1(nn.Module):
     def get_input_embeddings(self, *args, **kwargs):
         return self.model.get_input_embeddings(*args, **kwargs)
 
+
 def _get_padded_number(n: int, multiple: int) -> int:
     return ((n + multiple - 1) // multiple) * multiple
 
@@ -1057,9 +1060,9 @@ def _get_padded_token_len(x: int) -> int:
     if x <= 16:
         return 16
     return 1 << (x - 1).bit_length()
-def _pad_indices_do_sample(indices_do_sample: torch.Tensor) -> torch.Tensor:
+def _pad_indices_do_sample(indices_do_sample: torch.Tensor,
+                           num_do_sample: int) -> torch.Tensor:
     # `num_do_sample` \in [1, max_num_seqs]
-    num_do_sample = len(indices_do_sample)
     # Find closest power of two for padding size.
     if num_do_sample < MIN_NUM_SEQS:
         padded_do_sample = MIN_NUM_SEQS
@@ -1072,7 +1075,7 @@ def _pad_indices_do_sample(indices_do_sample: torch.Tensor) -> torch.Tensor:
         padded_indices = torch.zeros(padded_do_sample,
                                      dtype=indices_do_sample.dtype,
                                      device=indices_do_sample.device)
-        padded_indices[:num_do_sample] = indices_do_sample
+        padded_indices[:num_do_sample] = indices_do_sample[:num_do_sample]
         indices_do_sample = padded_indices
 
     return indices_do_sample
