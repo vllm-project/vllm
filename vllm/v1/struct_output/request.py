@@ -10,9 +10,8 @@ from typing import Optional, Union, cast
 import msgspec
 
 from vllm.sampling_params import SamplingParams
-from vllm.v1.request import RequestStatus
-from vllm.v1.struct_output import Grammar
-from vllm.v1.struct_output.grammar import StructOutputKey, StructOutputOptions
+from vllm.v1.struct_output.grammar import (Grammar, StructOutputKey,
+                                           StructOutputOptions)
 
 
 class StructOutputRequest(
@@ -26,6 +25,8 @@ class StructOutputRequest(
                              Grammar]] = msgspec.field(default=None)
 
     def _check_grammar_completion(self) -> bool:
+        from vllm.v1.request import RequestStatus
+
         if isinstance(self._grammar, Future):
             try:
                 # We will check whether the future is ready within 100 us
