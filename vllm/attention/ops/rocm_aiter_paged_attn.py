@@ -108,6 +108,20 @@ class PagedAttention:
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
     ) -> torch.Tensor:
+        if kv_cache_dtype not in ["int8", "fp8", "fp8_e4m3"]:
+            if num_kv_heads == 1:
+                k_scale, v_scale = (None, None)
+                query = query.contiguous()
+            else:
+                raise NotImplementedError(
+                    f"ROCM AITER paged attention does not \
+                    support num_kv_heads > 1 \
+                    for kv_cache_dtype: {kv_cache_dtype}")
+
+        elif "fp8" in kv_cache_dtype:
+            key_cache = key_cache.view(torch.float8_e4m3fnuz)
+            value_cache = value_cache.view(torch.float8_e4m3fnuz)
+
         if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
             # use blocksparse paged attention
             block_size = value_cache.size(-1)
@@ -119,13 +133,6 @@ class PagedAttention:
         output = torch.empty_like(query)
         block_size = value_cache.shape[3]
         max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
-
-        if kv_cache_dtype not in ["int8", "fp8", "fp8_e4m3"]:
-            k_scale, v_scale = (None, None)
-            query = query.contiguous()
-        elif "fp8" in kv_cache_dtype:
-            key_cache = key_cache.view(torch.float8_e4m3fnuz)
-            value_cache = value_cache.view(torch.float8_e4m3fnuz)
 
         rocm_aiter.pa_fwd_asm(query, key_cache, value_cache, block_tables,
                               seq_lens, max_num_blocks_per_seq, k_scale,

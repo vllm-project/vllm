@@ -559,8 +559,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use aiter paged attention if aiter ops are enabled.
     # this is disabled by default
     "VLLM_ROCM_USE_AITER_PAGED_ATTN":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in
-             ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN",
+                                         "False").lower() in ("true", "1")),
 
     # use aiter w8a8 block gemm kerner if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_BLOCK_GEMM":
