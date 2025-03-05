@@ -1114,6 +1114,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         # Remain consistent with old `flash_attn_varlen_func` where there
         # is only one output tensor if `return_softmax_lse` is False.
         if return_softmax_lse:
+            assert rest is not None
             return attn_out, rest[0]
         return attn_out
 
