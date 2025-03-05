@@ -40,6 +40,9 @@ struct Signal {
 
 struct __align__(16) RankData {
   const void* __restrict__ ptrs[8];
+  RankData()
+      : ptrs{nullptr, nullptr, nullptr, nullptr,
+             nullptr, nullptr, nullptr, nullptr} {}
 };
 
 struct __align__(16) RankSignals {
