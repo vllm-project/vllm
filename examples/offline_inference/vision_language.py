@@ -152,15 +152,13 @@ def run_h2ovl(questions: list[str], modality: str):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
-    prompts = [
-        tokenizer.apply_chat_template([{
-            'role': 'user',
-            'content': f"<image>\n{question}"
-        }],
-                                      tokenize=False,
-                                      add_generation_prompt=True)
-        for question in questions
-    ]
+    messages = [[{
+        'role': 'user',
+        'content': f"<image>\n{question}"
+    }] for question in questions]
+    prompts = tokenizer.apply_chat_template(messages,
+                                            tokenize=False,
+                                            add_generation_prompt=True)
 
     # Stop tokens for H2OVL-Mississippi
     # https://huggingface.co/h2oai/h2ovl-mississippi-800m
@@ -209,15 +207,13 @@ def run_internvl(questions: list[str], modality: str):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
-    prompts = [
-        tokenizer.apply_chat_template([{
-            'role': 'user',
-            'content': f"<image>\n{question}"
-        }],
-                                      tokenize=False,
-                                      add_generation_prompt=True)
-        for question in questions
-    ]
+    messages = [[{
+        'role': 'user',
+        'content': f"<image>\n{question}"
+    }] for question in questions]
+    prompts = tokenizer.apply_chat_template(messages,
+                                            tokenize=False,
+                                            add_generation_prompt=True)
 
     # Stop tokens for InternVL
     # models variants may have different stop tokens
@@ -399,7 +395,7 @@ def run_mllama(questions: list[str], modality: str):
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    messages = [{
+    messages = [[{
         "role":
         "user",
         "content": [{
@@ -408,7 +404,7 @@ def run_mllama(questions: list[str], modality: str):
             "type": "text",
             "text": f"{question}"
         }]
-    } for question in questions]
+    }] for question in questions]
     prompts = tokenizer.apply_chat_template(messages,
                                             add_generation_prompt=True,
                                             tokenize=False)
@@ -454,10 +450,10 @@ def run_nvlm_d(questions: list[str], modality: str):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
-    messages = [{
+    messages = [[{
         'role': 'user',
         'content': f"<image>\n{question}"
-    } for question in questions]
+    }] for question in questions]
     prompts = tokenizer.apply_chat_template(messages,
                                             tokenize=False,
                                             add_generation_prompt=True)
