@@ -190,9 +190,9 @@ class RejectionSampler(nn.Module):
                 dim=-1, index=draft_token_ids_tensor.unsqueeze(-1)).squeeze(-1)
             target_token_probs = target_probs.gather(
                 dim=-1, index=draft_token_ids_tensor.unsqueeze(-1)).squeeze(-1)
-            # Force the probabilities of invalid tokens to 0
+            # Force the probabilities of invalid tokens to inf
             # so that they are not accepted.
-            draft_token_probs[invalid_idx] = 0.0
+            draft_token_probs[invalid_idx] = float('inf')
 
             # 2. Generate uniform samples.
             # [batch_size, max_spec_len + 1]
