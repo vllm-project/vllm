@@ -31,6 +31,7 @@ def main(
     do_profile: bool,
     device: str = "cuda",
     kv_cache_dtype: Optional[str] = None,
+    custom_paged_attn: bool = False,
 ) -> None:
     current_platform.seed_everything(seed)
 
@@ -83,7 +84,7 @@ def main(
     if version == "v2":
         if current_platform.is_rocm():
             global PARTITION_SIZE
-            if not args.custom_paged_attn:
+            if not custom_paged_attn:
                 PARTITION_SIZE = 1024
             else:
                 PARTITION_SIZE = PARTITION_SIZE_ROCM
@@ -130,7 +131,7 @@ def main(
                     v_scale,
                 )
             elif version == "v2":
-                if not args.custom_paged_attn:
+                if not custom_paged_attn:
                     ops.paged_attention_v2(
                         output,
                         exp_sums,
@@ -244,4 +245,5 @@ if __name__ == '__main__':
         seed=args.seed,
         do_profile=args.profile,
         kv_cache_dtype=args.kv_cache_dtype,
+        custom_paged_attn=args.custom_paged_attn,
     )
