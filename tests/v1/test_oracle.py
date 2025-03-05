@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from vllm import LLM
+from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 UNSUPPORTED_MODELS_V1 = [
@@ -133,3 +133,66 @@ def test_v1_ray_llm_by_default(monkeypatch):
         print(model.generate("Hello my name is"))
         assert model.llm_engine.vllm_config.use_v1
         assert hasattr(model.llm_engine, "engine_core")
+
+
+def test_v1_attn_backend(monkeypatch):
+    with monkeypatch.context() as m:
+        if os.getenv("VLLM_USE_V1", None):
+            m.delenv("VLLM_USE_V1")
+        m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
+        m.setenv("VLLM_ATTENTION_BACKEND", "XFORMERS")
+
+        # Fall back to V0.
+        engine_config = AsyncEngineArgs(model=MODEL).create_engine_config()
+        assert not engine_config.use_v1
+
+        # Reject if V1.
+        m.setenv("VLLM_USE_V1", "1")
+        with pytest.raises(NotImplementedError):
+            AsyncEngineArgs(model=MODEL, ).create_engine_config()
+
+        m.setenv("VLLM_ATTENTION_BACKEND", "FLASHMLA")
+        engine_config = AsyncEngineArgs(model=MODEL).create_engine_config()
+        assert engine_config.use_v1
+
+
+def test_v1_multimodal(monkeypatch):
+    with monkeypatch.context() as m:
+        if os.getenv("VLLM_USE_V1", None):
+            m.delenv("VLLM_USE_V1")
+        m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
+
+        model_name = "neuralmagic/pixtral-12b-FP8-dynamic"
+        max_img_per_msg = 5
+        max_tokens_per_img = 4096
+
+        sampling_params = SamplingParams(max_tokens=8192, temperature=0.7)
+        llm = LLM(
+            model=model_name,
+            limit_mm_per_prompt={"image": max_img_per_msg},
+            max_model_len=max_img_per_msg * max_tokens_per_img,
+        )
+
+        prompt = "Describe the following image."
+        url = "https://picsum.photos/seed/picsum/200/300"
+
+        messages = [
+            {
+                "role":
+                "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": url
+                        }
+                    },
+                ],
+            },
+        ]
+        outputs = llm.chat(messages=messages, sampling_params=sampling_params)
+        print(outputs[0].outputs[0].text)

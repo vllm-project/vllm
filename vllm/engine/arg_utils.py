@@ -1546,8 +1546,8 @@ class EngineArgs:
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
-            _raise_or_warning(feature_name="--otlp-traces-endpoint",
-                              recommend_to_remove=False)
+            name = f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}"
+            _raise_or_warning(feature_name=name, recommend_to_remove=True)
             return False
 
         return True

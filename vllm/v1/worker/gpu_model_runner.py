@@ -1230,7 +1230,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 model_config=self.model_config,
                 seq_len=self.max_num_tokens,
                 mm_registry=self.mm_registry,
-                use_v1=True,
             )
             dummy_mm_data = dummy_request_data.multi_modal_data
 
