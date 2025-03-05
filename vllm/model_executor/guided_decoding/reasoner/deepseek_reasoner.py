@@ -31,9 +31,8 @@ class DeepSeekReasoner(Reasoner):
         """
         Extract the content after the end tokens
         """
-        if self.end_token_id not in input_ids:
-            return input_ids
-        elif input_ids.index(self.end_token_id) + 1 == len(input_ids):
+        if self.end_token_id not in input_ids or \
+            input_ids.index(self.end_token_id) + 1 == len(input_ids):
             return []
         else:
             return input_ids[input_ids.index(self.end_token_id) + 1:]
