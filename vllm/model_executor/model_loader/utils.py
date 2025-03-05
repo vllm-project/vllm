@@ -158,7 +158,7 @@ class ParamMapping:
 def configure_quant_config(quant_config: QuantizationConfig,
                            model_class: Type[nn.Module]):
 
-    def configure_packed_modules_mapping():
+    def _configure_packed_modules_mapping():
         """
         Pass packed_modules_mapping by reference to quant_config so that
         quant_config can properly match fused modules
@@ -176,29 +176,38 @@ def configure_quant_config(quant_config: QuantizationConfig,
                 "this may lead to incorrect mapping of quantized or ignored "
                 "modules", model_class.__name__)
 
-    def configure_quant_skip_modules():
+    def _configure_quant_skip_modules():
+        """
+        Configures the quantization skip modules for the model based on the 
+        provided quantization configuration.
+        This function checks if the model class has a `hf_to_vllm_mapper` 
+        attribute. If it does, it uses this mapper to update the list of 
+        modules to be skip  for different quantization. 
+        configurations.
+        - For `BitsAndBytesConfig`, it updates the `llm_int8_skip_modules`.
+        - For `AWQConfig`, it updates the `modules_to_not_convert`.
+        
+        """
 
         if getattr(model_class, "hf_to_vllm_mapper", None) is None:
             return
         hf_to_vllm_mapper: WeightsMapper = model_class.hf_to_vllm_mapper
-        # AWQ
-        if isinstance(quant_config,
-                      AWQConfig) and (modules_to_not_convert :=
-                                      quant_config.modules_to_not_convert):
-            new_modules_lst = []
-            for skip_module in modules_to_not_convert:
-                module_name = hf_to_vllm_mapper._map_name(skip_module)
-                new_modules_lst.append(module_name)
-            quant_config.modules_to_not_convert = new_modules_lst
 
         # BitsAndBytes
-        elif isinstance(quant_config, BitsAndBytesConfig) and (
-                llm_int8_skip_modules := quant_config.llm_int8_skip_modules):
-            new_modules_lst = []
-            for skip_module in llm_int8_skip_modules:
-                module_name = hf_to_vllm_mapper._map_name(skip_module)
-                new_modules_lst.append(module_name)
-            quant_config.llm_int8_skip_modules = new_modules_lst
+        if (isinstance(quant_config, BitsAndBytesConfig)
+                and quant_config.llm_int8_skip_modules):
+            quant_config.llm_int8_skip_modules = [
+                hf_to_vllm_mapper._map_name(module)
+                for module in quant_config.llm_int8_skip_modules
+            ]
+        # AWQ
+        elif (isinstance(quant_config, AWQConfig)
+              and quant_config.modules_to_not_convert):
+            quant_config.modules_to_not_convert = [
+                hf_to_vllm_mapper._map_name(module)
+                for module in quant_config.modules_to_not_convert
+            ]
+        # TODO: Supports more quantization types.
 
-    configure_packed_modules_mapping()
-    configure_quant_skip_modules()
+    _configure_packed_modules_mapping()
+    _configure_quant_skip_modules()
