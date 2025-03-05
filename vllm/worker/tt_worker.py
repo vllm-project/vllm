@@ -237,7 +237,7 @@ class TTWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         appended to.
         """
         # TODO: Add proper implementation which runs profiling on TT devices
-        if ("meta-llama/Meta-Llama-3.1-8B" in self.model_config.model and 
+        if ("Llama-3.1-8B" in self.model_config.model and 
             len(self.device_config.device.get_devices()) == 1):  # Llama8B on N150
             max_tokens_all_users = 65536
         else:
