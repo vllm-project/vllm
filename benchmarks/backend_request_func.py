@@ -39,7 +39,7 @@ class RequestFuncOutput:
     generated_text: str = ""
     success: bool = False
     latency: float = 0.0
-    output_tokens: int = 0
+    output_tokens: int = None 
     ttft: float = 0.0  # Time to first token
     itl: list[float] = field(
         default_factory=list)  # list of inter-token latencies
