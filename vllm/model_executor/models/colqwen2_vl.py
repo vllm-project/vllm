@@ -36,17 +36,20 @@ from .utils import AutoWeightsLoader
 
 
 def round_by_factor(number: float, factor: int) -> int:
-    """Returns the closest integer to 'number' that is divisible by 'factor'."""
+    """Returns the closest integer to 'number' that is 
+    divisible by 'factor'."""
     return round(number / factor) * factor
 
 
 def ceil_by_factor(number: float, factor: int) -> int:
-    """Returns the smallest integer greater than or equal to 'number' that is divisible by 'factor'."""
+  """Returns the smallest integer greater than or equal to 
+  'number' that is divisible by 'factor'."""
     return math.ceil(number / factor) * factor
 
 
 def floor_by_factor(number: float, factor: int) -> int:
-    """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
+    """Returns the largest integer less than or equal to 'number' 
+    that is divisible by 'factor'."""
     return math.floor(number / factor) * factor
 
 
@@ -292,16 +295,23 @@ class ColQwen2VLMultiModalDataParser(Qwen2VLMultiModalDataParser):
     dummy_inputs=ColQwen2VLDummyInputsBuilder)
 class ColQwen2(Qwen2VLForConditionalGeneration):
     """
-    ColQwen2 model implementation from the "ColPali: Efficient Document Retrieval with Vision Language Models" paper.
-    VLLM version compatible with the transformers ColQwen2 class.
+    ColQwen2 model implementation from the "ColPali:
+    Efficient Document Retrieval with Vision Language
+    Models" paper. VLLM version compatible with the 
+    transformers ColQwen2 class.
     """
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        config: ColQwen2VLConfig = vllm_config.model_config.hf_config
+    def __init__(self, *, 
+                 vllm_config: VllmConfig, 
+                 prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, 
+                         prefix=prefix)
+        config: ColQwen2VLConfig = 
+            vllm_config.model_config.hf_config
         self.config = config
         self.dim = 128
-        # Add custom text projection layer to project from model hidden size to embedding dimension
+        # Add custom text projection layer to project from 
+        # model hidden size to embedding dimension
         self.custom_text_proj = ColumnParallelLinear(
             self.config.hidden_size,
             self.dim,
@@ -316,7 +326,8 @@ class ColQwen2(Qwen2VLForConditionalGeneration):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors: 
+            Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> torch.Tensor:
@@ -361,11 +372,12 @@ class ColQwen2(Qwen2VLForConditionalGeneration):
         return None
 
     def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+        torch.Tensor]]) -> Set[str]:
         # First load the standard weights
         loaded = super().load_weights(weights)
 
-        # Custom handling for custom_text_proj weights which might have different naming
+        # Custom handling for custom_text_proj weights which might have
+        # different naming
         loader = AutoWeightsLoader(self)
         # Define a custom mapper for the custom_text_proj weights
         custom_mapper = {
