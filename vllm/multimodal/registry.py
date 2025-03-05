@@ -433,7 +433,6 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         tokenizer: AnyTokenizer,
-        use_v1: bool = False,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
         Create a multi-modal processor for a specific model and tokenizer.
