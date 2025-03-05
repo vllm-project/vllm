@@ -706,7 +706,8 @@ class MQLLMEngineClient(EngineClient):
         """Check whether the engine is sleeping"""
         request = RPCIsSleepingRequest()
 
-        queue: asyncio.Queue[Union[None, BaseException]] = asyncio.Queue()
+        queue: asyncio.Queue[Union[BaseException,
+                                   RPCIsSleepingResponse]] = asyncio.Queue()
         self.output_queues[request.request_id] = queue
 
         request_bytes = pickle.dumps(request)
@@ -717,7 +718,6 @@ class MQLLMEngineClient(EngineClient):
 
         if isinstance(request_output, BaseException):
             raise request_output
-
         return request_output.is_sleeping
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
