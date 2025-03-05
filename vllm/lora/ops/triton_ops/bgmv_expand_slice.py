@@ -15,6 +15,18 @@ from vllm.utils import direct_register_custom_op
 from .utils import get_lora_op_configs
 
 
+def get_autotune_config():
+    return [
+        triton.Config({'BLOCK_N': 32}, num_warps=8),
+        triton.Config({'BLOCK_N': 64}, num_warps=8),
+        triton.Config({'BLOCK_N': 128}, num_warps=8),
+        triton.Config({'BLOCK_N': 256}, num_warps=8),
+    ]
+
+
+@triton.autotune(configs=get_autotune_config(),
+                 key=['N', 'K'],
+                 restore_value=["out_ptr"])
 @triton.jit
 def _bgmv_expand_slice_kernel(
     input_ptr,
@@ -65,8 +77,8 @@ def _bgmv_expand_slice_kernel(
     # sliding  to  next row-block
     b_ptr = (lora_ptr + l0_stride * lora_index +
              pid_sn * split_n_length * lora_k_stride)
-    c_ptr = (out_ptr + cur_batch * cm_stride + pid_sn * split_n_length +
-             slice_offset * cn_stride)
+    c_ptr = (out_ptr + cur_batch * cm_stride +
+             pid_sn * split_n_length * cn_stride + slice_offset * cn_stride)
 
     for n in range(0, split_n_length, BLOCK_N):
         current_n = n + offset_n
@@ -177,7 +189,7 @@ def _bgmv_expand_slice(
         EVEN_K=EVEN_K,
         ADD_INPUTS=ADD_INPUTS,
         CAST_TYPE=CAST_TYPE,
-        **config,
+        SPLIT_N=config["SPLIT_N"],
     )
     return
 
