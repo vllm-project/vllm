@@ -92,6 +92,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
 
+        if not self.vllm_config.use_v1:
+            raise ValueError(
+                "In V1 GPUModelRunner, but got vllm_config.use_v1 = False. "
+                "Raise this issue on GitHub and explicitly set VLLM_USE_V1=1.")
+
         self.attn_backend = get_attn_backend(
             self.head_size,
             self.dtype,
@@ -99,7 +104,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.block_size,
             self.model_config.is_attention_free,
             use_mla=self.model_config.use_mla,
-            use_v1=self.vllm_config.use_v1,
+            use_v1=True,
         )
         if self.attn_backend is None:
             error_msg = (
