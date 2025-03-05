@@ -1282,6 +1282,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         assert prefill_metadata.context_chunk_max_seq_lens is not None
         assert prefill_metadata.context_lens_tensor is not None
 
+        has_context = prefill_metadata.context_lens_tensor.max() > 0
         output = None
         iters = len(prefill_metadata.context_chunk_seq_tot)
 
@@ -1322,7 +1323,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                                                [0, q.shape[-1] - v.shape[-1]],
                                                value=0)
 
-            if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN:
+            if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN and \
+                has_context is False:
                 attn_output, attn_softmax_lse = self.triton_fa_func(
                     q,
                     k,
@@ -1411,7 +1413,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
                                            value=0)
 
-        if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN:
+        if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN and has_context is False:
             output = self.triton_fa_func(
                 q,
                 k,
