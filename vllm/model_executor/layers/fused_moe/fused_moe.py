@@ -28,17 +28,6 @@ from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 logger = init_logger(__name__)
 
 
-def p(s, t):
-    #print(f"{s}: {t.shape}, {t.dtype}\n{t.flatten()}")
-    #print(f"{s}: {t.shape}, {t.dtype}\n{t}")
-    pass
-
-
-def pp(x):
-    #print(x)
-    pass
-
-
 @triton.jit
 def write_zeros_to_output(c_ptr, stride_cm, stride_cn, pid_n, N, offs_token,
                           token_mask, BLOCK_SIZE_M, BLOCK_SIZE_N,
@@ -642,9 +631,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
             **config,
         )
-
-        p("fused_out", C)
-        pp(f"END {'SECOND' if mul_routed_weight else 'FIRST'} FUSED_GEMM")
 
 
 # Adapted from: https://github.com/sgl-project/sglang/pull/2628
@@ -1314,9 +1300,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    pp(f"NUM CHUNKS = {(num_tokens // CHUNK_SIZE) + 1}")
-    #pp(f"FUSED A {hidden_states.shape}, {hidden_states}")
-
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
@@ -1372,8 +1355,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_int4_w4a16=use_int4_w4a16,
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
-
-        #pp(f"FUSED_MOE {intermediate_cache1.shape} {intermediate_cache1}")
 
         if activation == "silu":
             torch.ops._C.silu_and_mul(intermediate_cache2,
@@ -1495,8 +1476,6 @@ def fused_moe(
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
-
-    #pp(f"FUSED SCORES {hidden_states.shape} {gating_output.shape}")
 
     if use_grouped_topk:
         assert num_expert_group is not None and topk_group is not None
