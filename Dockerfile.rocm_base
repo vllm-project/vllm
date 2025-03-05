@@ -12,7 +12,7 @@ ARG PYTORCH_REPO="https://github.com/pytorch/pytorch.git"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
 ARG FA_BRANCH="1a7f4dfa"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="41297e56"
+ARG AITER_BRANCH="c0da3d23"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 FROM ${BASE_IMAGE} AS base
@@ -20,7 +20,7 @@ FROM ${BASE_IMAGE} AS base
 ENV PATH=/opt/rocm/llvm/bin:$PATH
 ENV ROCM_PATH=/opt/rocm
 ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
-ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942
+ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx1100;gfx1101;gfx1200;gfx1201
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 
 ARG PYTHON_VERSION=3.12
@@ -110,7 +110,7 @@ RUN git clone ${FA_REPO}
 RUN cd flash-attention \
     && git checkout ${FA_BRANCH} \
     && git submodule update --init \
-    && GPU_ARCHS=${PYTORCH_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist
+    && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist
 RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
     && cp /app/vision/dist/*.whl /app/install \
     && cp /app/flash-attention/dist/*.whl /app/install
