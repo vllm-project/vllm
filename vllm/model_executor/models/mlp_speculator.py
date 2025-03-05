@@ -140,7 +140,7 @@ class MLPSpeculator(nn.Module):
         self.config = config
         self.logits_processor = LogitsProcessor(config.vocab_size,
                                                 config.vocab_size, 1.0)
-        self.sampler = get_sampler()
+        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
 
     def generate_proposals(
         self,

@@ -403,7 +403,7 @@ class DeepseekForCausalLM(nn.Module, SupportsPP):
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
+        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

@@ -417,7 +417,7 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         else:
             self.lm_head = PPMissingLayer()
 
-        self.sampler = get_sampler()
+        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)

@@ -498,7 +498,8 @@ class OpenVINOWorker(LoRANotSupportedWorkerBase):
                 dummy_data = input_registry \
                     .dummy_data_for_profiling(model_config,
                                               seq_len,
-                                              mm_registry)
+                                              mm_registry,
+                                              use_v1=False)
 
                 block_tables = [[0] * seq_num_blocks] * max_num_seqs
                 seq = SequenceGroupMetadata(

@@ -176,7 +176,7 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA):
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 self.vocab_size, logit_scale)
-        self.sampler = get_sampler()
+        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
 
     def apply_base_model_tp_plan(self, module: nn.Module, prefix: str = ""):
         """

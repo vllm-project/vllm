@@ -314,6 +314,7 @@ class InputRegistry:
         seq_len: int,
         mm_registry: "MultiModalRegistry",
         is_encoder_data: bool = False,
+        use_v1: bool = False,
     ) -> DummyData:
         """
         Create dummy data for profiling the memory usage of a model.

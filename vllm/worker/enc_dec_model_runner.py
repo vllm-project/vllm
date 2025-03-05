@@ -287,12 +287,14 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 .dummy_data_for_profiling(self.model_config,
                                           seq_len,
                                           self.mm_registry,
-                                          is_encoder_data=False)
+                                          is_encoder_data=False,
+                                          use_v1=False)
             encoder_dummy_data = self.input_registry \
                 .dummy_data_for_profiling(self.model_config,
                                           seq_len,
                                           self.mm_registry,
-                                          is_encoder_data=True)
+                                          is_encoder_data=True,
+                                          use_v1=False)
 
             # Having more tokens is over-conservative but otherwise fine
             assert len(

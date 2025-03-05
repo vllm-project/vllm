@@ -114,7 +114,15 @@ def test_v1_llm_by_default(monkeypatch):
         m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
 
         # Should default to V1 for supported config.
-        model = LLM(MODEL, enforce_eager=True, gpu_memory_utilization=0.2)
-        assert model.vllm_config.use_v1
+        model = LLM(MODEL, enforce_eager=True)
+        print(model.generate("Hello my name is"))
 
+        assert model.llm_engine.vllm_config.use_v1
         assert hasattr(model.llm_engine, "engine_core")
+
+
+def test_api_server_llm_by_default(monkeypatch):
+    with monkeypatch.context() as m:
+        if os.getenv("VLLM_USE_V1", None):
+            m.delenv("VLLM_USE_V1")
+        m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")

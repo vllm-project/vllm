@@ -281,7 +281,7 @@ class MPTForCausalLM(nn.Module, SupportsPP):
                                     prefix=maybe_prefix(prefix, "transformer"))
         self.lm_head = self.transformer.wte
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
+        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 

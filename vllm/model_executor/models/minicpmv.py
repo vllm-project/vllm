@@ -813,6 +813,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP,
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
         quant_config = vllm_config.quant_config
@@ -848,7 +849,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP,
         if hasattr(self.llm, "sampler"):
             return self.llm.sampler
 
-        return get_sampler()
+        return get_sampler(use_v1=self.vllm_config.use_v1)
 
     def get_embedding_with_vision(
         self,

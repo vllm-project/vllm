@@ -33,9 +33,8 @@ else:
     flashinfer_top_k_top_p_sampling = None
 
 
-def get_sampler() -> torch.nn.Module:
-    if envs.VLLM_USE_V1:
-        # Lazy import: the v1 package isn't distributed
+def get_sampler(use_v1: bool) -> torch.nn.Module:
+    if use_v1:
         from vllm.v1.sample.sampler import Sampler as V1Sampler
         return V1Sampler()
     return Sampler()

@@ -366,7 +366,7 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                                 scale=config.logit_scale)
         self.model = CohereModel(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "model"))
-        self.sampler = get_sampler()
+        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

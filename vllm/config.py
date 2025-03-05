@@ -711,7 +711,7 @@ class ModelConfig:
                 "when expert parallelism is enabled.")
 
     def verify_async_output_proc(self, parallel_config, speculative_config,
-                                 device_config, use_v1: bool) -> None:
+                                 device_config) -> None:
         if not self.use_async_output_proc:
             # Nothing to check
             return
@@ -3377,8 +3377,7 @@ class VllmConfig:
         if self.model_config is not None:
             self.model_config.verify_async_output_proc(self.parallel_config,
                                                        self.speculative_config,
-                                                       self.device_config,
-                                                       self.use_v1)
+                                                       self.device_config)
             self.model_config.verify_with_parallel_config(self.parallel_config)
 
         if self.cache_config is not None:

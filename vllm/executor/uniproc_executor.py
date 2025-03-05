@@ -93,7 +93,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             ("ExecutorWithExternalLauncher needs deterministic "
             "execution, so it"
             "does not support delay_factor in scheduling")
-        if envs.VLLM_USE_V1:
+        if self.vllm_config.use_v1:
             assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, \
             ("To get deterministic execution in V1, "
             "please set VLLM_ENABLE_V1_MULTIPROCESSING=0")

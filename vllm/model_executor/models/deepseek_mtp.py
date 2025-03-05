@@ -154,7 +154,7 @@ class DeepSeekMTP(nn.Module):
                                                  prefix=maybe_prefix(
                                                      prefix, "model"))
 
-        self.sampler = get_sampler()
+        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
 
     def forward(
         self,

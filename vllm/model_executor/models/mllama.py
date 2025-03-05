@@ -1189,7 +1189,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         )
         self.logits_processor = LogitsProcessor(config.output_hidden_states,
                                                 config.text_config.vocab_size)
-        self.sampler = get_sampler()
+        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
 
     def compute_logits(
         self,

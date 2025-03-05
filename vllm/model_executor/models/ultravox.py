@@ -356,7 +356,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.use_v1 = vllm_config.use_v1
+        self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
@@ -396,7 +396,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return get_sampler()
+        return get_sampler(use_v1=self.vllm_config.use_v1)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
@@ -492,7 +492,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         if multimodal_embeddings is not None:
 
             # TODO(ywang96): remove this block after v0 is deprecated.
-            if not self.use_v1:
+            if not self.vllm_config.use_v1:
                 attn_metadata = get_forward_context().attn_metadata
                 merge_multimodal_embeddings_from_map(
                     inputs_embeds, multimodal_embeddings,

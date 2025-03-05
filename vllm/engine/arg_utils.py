@@ -90,7 +90,6 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
-    enable_v1: bool = False
     model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[str, List[str]]] = None
     tokenizer: Optional[str] = None
@@ -1623,19 +1622,21 @@ class EngineArgs:
                 UsageContext.OPENAI_API_SERVER: 2048,
             }
 
+        use_context_value = usage_context.value if usage_context else None
         if (self.max_num_batched_tokens is None
                 and usage_context in default_max_num_batched_tokens):
             self.max_num_batched_tokens = default_max_num_batched_tokens[
                 usage_context]
             logger.debug(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
-                self.max_num_batched_tokens, usage_context.value or "None")
+                self.max_num_batched_tokens, use_context_value)
 
         default_max_num_seqs = 1024
         if self.max_num_seqs is None:
             self.max_num_seqs = default_max_num_seqs
+
             logger.debug("Setting max_num_seqs to %d for %s usage context.",
-                         self.max_num_seqs, usage_context.value or "None")
+                         self.max_num_seqs, use_context_value)
 
 
 @dataclass

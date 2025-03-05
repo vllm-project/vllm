@@ -260,7 +260,7 @@ class GPTNeoXForCausalLM(nn.Module, SupportsPP):
         if self.config.tie_word_embeddings:
             self.embed_out.weight = self.gpt_neox.embed_in.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
+        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
         self.make_empty_intermediate_tensors = (
             self.gpt_neox.make_empty_intermediate_tensors)
 
