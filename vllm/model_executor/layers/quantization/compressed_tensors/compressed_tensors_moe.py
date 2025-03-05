@@ -257,9 +257,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
 
     def __init__(
-        self,
-        quant_config:
-        "CompressedTensorsConfigGroupedCutlass"  # type: ignore # noqa E501
+            self,
+            quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
         self.quant_config = quant_config
         self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
