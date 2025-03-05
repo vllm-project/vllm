@@ -2,7 +2,7 @@
 
 # ruff: noqa: SIM117
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import openvino as ov
 import torch
@@ -12,7 +12,6 @@ from optimum.intel import OVModelForCausalLM
 from torch import nn
 
 import vllm.envs as envs
-from vllm.attention.backends.openvino import OpenVINOAttentionMetadata
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import (LogitsProcessor,
@@ -22,24 +21,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
-
-
-def _flattenize_inputs(inputs):
-    """
-    Helper function for making nested inputs flattens
-    """
-    flatten_inputs = []
-    for input_data in inputs:
-        if input_data is None:
-            continue
-        if isinstance(input_data, (list, tuple)):
-            flatten_inputs.extend(_flattenize_inputs(input_data))
-        elif isinstance(input_data, dict):
-            flatten_inputs.extend(_flattenize_inputs(list(
-                input_data.values())))
-        else:
-            flatten_inputs.append(input_data)
-    return flatten_inputs
 
 
 def _modify_cache_parameters(model: ov.Model, kv_cache_dtype: ov.Type,
@@ -147,23 +128,8 @@ class OpenVINOCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[Tuple[ov.Tensor, ov.Tensor]],
-        attn_metadata: OpenVINOAttentionMetadata,
     ) -> torch.Tensor:
-        flatten_kv_cache = _flattenize_inputs(kv_caches)
-
-        inputs = [
-            input_ids,
-            positions,
-            *flatten_kv_cache,
-            attn_metadata.past_lens,
-            attn_metadata.subsequence_begins,
-            attn_metadata.block_indices,
-            attn_metadata.block_indices_begins,
-            attn_metadata.max_context_len,
-        ]
-
-        self.ov_request.start_async(inputs, share_inputs=True)
+        self.ov_request.start_async([input_ids, positions], share_inputs=True)
         self.ov_request.wait()
 
         logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
