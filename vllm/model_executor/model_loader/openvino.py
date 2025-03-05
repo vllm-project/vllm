@@ -13,6 +13,7 @@ from torch import nn
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import (LogitsProcessor,
                                                          _prune_hidden_states)
@@ -129,7 +130,22 @@ class OpenVINOCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        self.ov_request.start_async([input_ids, positions], share_inputs=True)
+        fwd_ctx = get_forward_context()
+        flat_kv_caches = [layer.kv_cache for layer in fwd_ctx.attn_layers]
+        attn_metadata = fwd_ctx.attn_metadata
+
+        inputs = [
+            input_ids,
+            positions,
+            *flat_kv_caches,
+            attn_metadata.past_lens,
+            attn_metadata.subsequence_begins,
+            attn_metadata.block_indices,
+            attn_metadata.block_indices_begins,
+            attn_metadata.max_context_len,
+        ]
+
+        self.ov_request.start_async(inputs, share_inputs=True)
         self.ov_request.wait()
 
         logits = torch.from_numpy(self.ov_request.get_tensor("logits").data)
