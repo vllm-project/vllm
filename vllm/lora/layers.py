@@ -396,7 +396,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
-        # remove batching dimension
+        # In transformers backend, x and output have extra batch dimension like
+        # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
+        # therefore we need to flatten the batch dimensions.
         if x.ndim == 3 and output.ndim == 3:
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
