@@ -155,10 +155,8 @@ In this section, we load the BF16 model on DRAM and quantize it to FP8 model usi
 
 ### Prerequisites
 
-- Hardware: 1x8G3 or 1x8G2(WIP), 2T DRAM
+- Hardware: 1x8G3 or 1x8G2
 - Docker: 1.20.0-521
-
-> [!NOTE] The DRAM requirement can be decreased to less than 1T in a few days.
 
 ### Running the Example
 
@@ -179,6 +177,10 @@ cd vllm/scripts
 huggingface-cli download Yi30/inc-tp8-ep8-full-kvcache-from-tp16-ep16 --local-dir nc_workspace_measure_kvache_one_node
 QUANT_CONFIG=inc_quant_with_fp8kv_one_node_config.json python inc_example_one_node.py --fp8_kvcache
 ```
+
+> [!NOTE]
+> If your DRAM is less than 2T, please use `LOW_CPU_MEM=1` to open layer-by-layer conversion.
+
 
 ## Accuracy Evaluation (WIP)
 
