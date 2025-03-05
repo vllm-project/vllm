@@ -157,8 +157,8 @@ if __name__ == "__main__":
     parser.add_argument('--num-documents',
                         type=int,
                         default=8,
-                        help='Range of input lengths for sampling prompts,'
-                        'specified as "min:max" (e.g., "128:256").')
+                        help='Number of unique documents to generate '
+                        'for the benchmark.')
 
     parser.add_argument('--output-len', type=int, default=10)
 
