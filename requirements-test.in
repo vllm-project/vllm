@@ -24,6 +24,7 @@ timm # required for internvl test
 torch==2.5.1
 torchaudio==2.5.1
 transformers_stream_generator # required for qwen-vl test
+mamba_ssm # required for plamo2 test
 matplotlib # required for qwen-vl test
 mistral_common[opencv] >= 1.5.0 # required for pixtral test
 datamodel_code_generator # required for minicpm3 test
