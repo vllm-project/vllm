@@ -100,8 +100,8 @@ class Processor:
             raise ValueError("VLLM V1 does not yet support bad_words.")
         # Logits processors not supported.
         if params.logits_processors:
-            raise ValueError("VLLM V1 does not yet support per request "
-                             "logits processors.")
+            raise ValueError("VLLM V1 does not support per request "
+                             "user provided logits processors.")
         # Allowed token ids is not supported.
         if params.allowed_token_ids:
             raise ValueError("VLLM V1 does not yet support allowed token ids.")
@@ -148,6 +148,8 @@ class Processor:
             raise ValueError("V1 does not support priority yet.")
         if trace_headers is not None:
             raise ValueError("V1 does not support tracing yet.")
+        if prompt_adapter_request is not None:
+            raise ValueError("V1 does not support prompt_adapter_request.")
 
         if arrival_time is None:
             arrival_time = time.time()
