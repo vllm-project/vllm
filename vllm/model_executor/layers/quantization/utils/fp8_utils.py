@@ -98,12 +98,12 @@ def apply_w8a8_block_fp8_linear(
 
     q_input, x_scale = per_token_group_quant_fp8(
         input_2d, block_size[1], column_major_scales=use_cutlass)
-    output = dispatch_blockscale_func()(A=q_input,
-                                        B=weight,
-                                        As=x_scale,
-                                        Bs=weight_scale,
-                                        block_size=block_size,
-                                        output_dtype=input.dtype)
+    output = dispatch_blockscale_func(use_cutlass)(A=q_input,
+                                                   B=weight,
+                                                   As=x_scale,
+                                                   Bs=weight_scale,
+                                                   block_size=block_size,
+                                                   output_dtype=input.dtype)
 
     if bias is not None:
         output = output + bias
