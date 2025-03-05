@@ -227,8 +227,15 @@ class MultiprocExecutor(Executor):
                                    args=(scheduler_output, ),
                                    non_block=self.max_concurrent_batches > 1)
 
-        # Note: only returns ModelRunnerOutput from the driver worker with the
-        # last PP rank
+        # Only returns ModelRunnerOutput from TP rank=0 and PP rank=-1
+        # (the first TP worker of the last PP stage).
+        # Example:
+        # Assuming TP=8, PP=4, then the world_size=32
+        # 0-7, PP rank 0
+        # 8-15, PP rank 1
+        # 16-23, PP rank 2
+        # 24-31, PP rank 3
+        # so world_size - tp_size = 32 - 8 = 24 should be PP rank = -1 (i.e. 3)
         return output[self.world_size -
                       self.parallel_config.tensor_parallel_size]
 
