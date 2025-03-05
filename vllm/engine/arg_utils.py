@@ -1667,7 +1667,7 @@ def _raise_or_warning(feature_name: str, recommend_to_remove: bool):
     msg = f"{feature_name} is not supported by the V1 Engine. "
     msg += "Falling back to V0. "
     if recommend_to_remove:
-        msg += f"We recommend to remove {feature_name} from your config"
+        msg += f"We recommend to remove {feature_name} from your config "
         msg += "in favor of the V1 Engine."
     logger.warning(msg)
 
