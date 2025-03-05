@@ -80,13 +80,14 @@ class Processor:
         self,
         params: SamplingParams,
     ) -> None:
-
-        # Allowed token ids.
-        if (params.allowed_token_ids is not None
-                and not all(0 <= tid < self.model_config.get_vocab_size()
-                            for tid in params.allowed_token_ids)):
+        if params.allowed_token_ids is None:
+            return
+        if not params.allowed_token_ids:
+            raise ValueError("allowed_token_ids is not None and empty!")
+        vocab_size = self.model_config.get_vocab_size()
+        if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
             raise ValueError(
-                "allowed_token_ids contains out-of-vocab token id")
+                "allowed_token_ids contains out-of-vocab token id!")
 
     def _validate_supported_sampling_params(
         self,
@@ -102,9 +103,6 @@ class Processor:
         if params.logits_processors:
             raise ValueError("VLLM V1 does not support per request "
                              "user provided logits processors.")
-        # Allowed token ids is not supported.
-        if params.allowed_token_ids:
-            raise ValueError("VLLM V1 does not yet support allowed token ids.")
 
     def _validate_params(
         self,
@@ -164,6 +162,7 @@ class Processor:
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            return_mm_hashes=self.use_hash,
         )
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
