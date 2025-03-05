@@ -369,12 +369,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 size_k=layer.input_size_per_partition,
                 bias=bias)
 
-        # Note: lazy import to avoid triton import error.
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            apply_w8a8_block_fp8_linear)
         if self.block_quant:
             assert self.quant_config.weight_block_size is not None
-            return apply_w8a8_block_fp8_linear(
+            return torch.ops.vllm.apply_w8a8_block_fp8_linear(
                 input=x,
                 weight=layer.weight,
                 block_size=self.quant_config.weight_block_size,
@@ -675,6 +672,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -698,6 +696,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
+            activation=activation,
             use_fp8_w8a8=True,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
