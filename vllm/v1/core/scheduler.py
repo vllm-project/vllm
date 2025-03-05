@@ -198,6 +198,10 @@ class Scheduler:
             scheduled_running_reqs.append(request)
             self.scheduled_req_ids.add(request.request_id)
             if request.use_struct_output:
+                # PERF: in case of chunked prefill,
+                # request might not include any new tokens.
+                # Therefore, we might introduce some additional
+                # cycle to fill in the bitmask, which could be a big no-op.
                 struct_output_request_ids[request.request_id] = req_index
             req_to_new_block_ids[request.request_id] = [
                 b.block_id for b in new_blocks
