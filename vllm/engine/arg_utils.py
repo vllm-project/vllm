@@ -1570,7 +1570,7 @@ class EngineArgs:
                         "Chunked prefill is enabled by default for models "
                         "with max_model_len > 32K. Chunked prefill might "
                         "not work with some features or models. If you "
-                        "encounter any issues, please disable by launching"
+                        "encounter any issues, please disable by launching "
                         "with --enable-chunked-prefill=False.")
 
             if self.enable_chunked_prefill is None:
