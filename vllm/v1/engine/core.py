@@ -15,8 +15,8 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
-from vllm.error_report import dump_engine_exception
 from vllm.logger import init_logger
+from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
