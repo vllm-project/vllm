@@ -1065,7 +1065,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
         self.model_load_time = time_after_load - time_before_load
-        logger.info("Loading model weights took %.4f GB and %.6f seconds",
+        logger.info("Model loading took %.4f GB and %.6f seconds",
                     self.model_memory_usage / float(2**30),
                     self.model_load_time)
 
