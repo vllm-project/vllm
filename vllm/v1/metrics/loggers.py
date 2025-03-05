@@ -34,6 +34,9 @@ class LoggingStatLogger(StatLoggerBase):
     def __init__(self):
         self._reset(time.monotonic())
         self.last_scheduler_stats = SchedulerStats()
+        # Prefix cache metrics. This cannot be reset.
+        # TODO: Make the interval configurable.
+        self.prefix_caching_metrics = PrefixCachingMetrics()
 
     def _reset(self, now):
         self.last_log_time = now
@@ -41,9 +44,6 @@ class LoggingStatLogger(StatLoggerBase):
         # Tracked stats over current local logging interval.
         self.num_prompt_tokens: list[int] = []
         self.num_generation_tokens: list[int] = []
-
-        # Prefix cache metrics. TODO: Make the interval configurable.
-        self.prefix_caching_metrics = PrefixCachingMetrics()
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
