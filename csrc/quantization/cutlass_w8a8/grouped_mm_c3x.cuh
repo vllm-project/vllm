@@ -2,25 +2,11 @@
 
 #include "cutlass/cutlass.h"
 
-// TODO clean up the includes we no longer need
-
-#include "cute/tensor.hpp"
-#include "cutlass/tensor_ref.h"
-#include "cute/atom/mma_atom.hpp"
-#include "cutlass/numeric_types.h"
-#include "cutlass/platform/platform.h"
-
-#include "cutlass/epilogue/collective/default_epilogue.hpp"
-#include "cutlass/epilogue/thread/linear_combination.h"
-#include "cutlass/gemm/dispatch_policy.hpp"
-#include "cutlass/gemm/group_array_problem_shape.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
-#include "cutlass/gemm/kernel/gemm_universal.hpp"
 
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
-
 #include "cutlass_extensions/common.hpp"
 
 using namespace cute;
@@ -82,18 +68,11 @@ template <typename ElementAB_, typename ElementC_,
           typename EpilogueSchedule>
 struct cutlass_3x_group_gemm {
   using ElementAB = ElementAB_;
-  // TODO check if this works
   using ElementC = void;
   using ElementD = ElementC_;
-  //   using ElementC = ElementC_;
   using ElementAccumulator = float;
 
-  using EpilogueDescriptor =
-      cutlass::epilogue::collective::detail::EpilogueDescriptor<
-          TileShape, cutlass::epilogue::collective::EpilogueTileAuto, ElementC,
-          ElementD, EpilogueSchedule>;
-
-  using Epilogue = Epilogue_<ElementAccumulator, ElementD, EpilogueDescriptor>;
+  using Epilogue = Epilogue_<ElementAccumulator, ElementD, TileShape>;
 
   using StrideC =
       cute::remove_pointer_t<cute::Stride<int64_t, cute::Int<1>, cute::Int<0>>>;

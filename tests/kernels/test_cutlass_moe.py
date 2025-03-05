@@ -99,7 +99,7 @@ def test_cutlass_moe_no_graph(
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
 
-        torch_output = torch_moe(a_d, w1_d, w2_d, score, topk)
+        torch_output = torch_moe(a_d, w1_d, w2_d, score, topk, None)
         cutlass_output = cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale,
                                      w2_scale, topk_weights, topk_ids, m, n, k,
                                      e, ab_strides1, c_strides1, ab_strides2,
@@ -182,7 +182,7 @@ def test_cutlass_moe_cuda_graph(
         score = torch.randn((m, e), device="cuda", dtype=dtype)
         topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
 
-        torch_output = torch_moe(a_d, w1_d, w2_d, score, topk)
+        torch_output = torch_moe(a_d, w1_d, w2_d, score, topk, None)
 
         stream = torch.cuda.Stream()
         graph = torch.cuda.CUDAGraph()

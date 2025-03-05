@@ -73,14 +73,12 @@ struct ScaledEpilogueBase {
   template <typename T>
   using ColOrScalarLoadArray =
       cutlass::epilogue::fusion::Sm90ColOrScalarBroadcastArray<
-          0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
-          Stride<Int<1>, Int<0>, Int<0>>>;
+          0 /*Stages*/, TileShape, T, Stride<Int<1>, Int<0>, Int<0>>>;
 
   template <typename T>
   using RowOrScalarLoadArray =
       cutlass::epilogue::fusion::Sm90RowOrScalarBroadcastArray<
-          0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
-          Stride<Int<0>, Int<1>, Int<0>>>;
+          0 /*Stages*/, TileShape, T, Stride<Int<0>, Int<1>, Int<0>>>;
 
   // This utility function constructs the arguments for the load descriptors
   // from a tensor. It can handle both row and column, as well as row/column or
