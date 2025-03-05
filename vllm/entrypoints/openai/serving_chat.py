@@ -450,6 +450,8 @@ class OpenAIServingChat(OpenAIServing):
                             top_logprobs=output.logprobs,
                             tokenizer=tokenizer,
                             num_output_top_logprobs=request.top_logprobs,
+                            return_as_token_id=request.
+                            return_tokens_as_token_ids,
                         )
                     else:
                         logprobs = None
@@ -705,6 +707,7 @@ class OpenAIServingChat(OpenAIServing):
                     top_logprobs=out_logprobs,
                     num_output_top_logprobs=request.top_logprobs,
                     tokenizer=tokenizer,
+                    return_as_token_id=request.return_tokens_as_token_ids,
                 )
             else:
                 logprobs = None
@@ -852,13 +855,14 @@ class OpenAIServingChat(OpenAIServing):
 
     def _get_top_logprobs(
             self, logprobs: dict[int, Logprob], top_logprobs: Optional[int],
-            tokenizer: AnyTokenizer) -> list[ChatCompletionLogProb]:
+            tokenizer: AnyTokenizer,
+            should_return_as_token_id: bool) -> list[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(token=(token := self._get_decoded_token(
                 p[1],
                 p[0],
                 tokenizer,
-                return_as_token_id=self.return_tokens_as_token_ids)),
+                return_as_token_id=should_return_as_token_id)),
                                   logprob=max(p[1].logprob, -9999.0),
                                   bytes=list(
                                       token.encode("utf-8", errors="replace")))
@@ -872,15 +876,18 @@ class OpenAIServingChat(OpenAIServing):
         top_logprobs: GenericSequence[Optional[dict[int, Logprob]]],
         tokenizer: AnyTokenizer,
         num_output_top_logprobs: Optional[int] = None,
+        return_as_token_id: Optional[bool] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
         logprobs_content: list[ChatCompletionLogProbsContent] = []
 
+        should_return_as_token_id = return_as_token_id if \
+            return_as_token_id is not None else self.return_tokens_as_token_ids
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 token = tokenizer.decode(token_id)
-                if self.return_tokens_as_token_ids:
+                if should_return_as_token_id:
                     token = f"token_id:{token_id}"
 
                 logprobs_content.append(
@@ -898,16 +905,14 @@ class OpenAIServingChat(OpenAIServing):
                             step_token,
                             token_id,
                             tokenizer,
-                            self.return_tokens_as_token_ids,
+                            should_return_as_token_id,
                         ),
                         logprob=max(step_token.logprob, -9999.0),
                         bytes=None if step_decoded is None else list(
                             step_decoded.encode("utf-8", errors="replace")),
                         top_logprobs=self._get_top_logprobs(
-                            step_top_logprobs,
-                            num_output_top_logprobs,
-                            tokenizer,
-                        ),
+                            step_top_logprobs, num_output_top_logprobs,
+                            tokenizer, should_return_as_token_id),
                     ))
 
         return ChatCompletionLogProbs(content=logprobs_content)
