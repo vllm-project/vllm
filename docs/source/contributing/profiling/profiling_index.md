@@ -124,4 +124,3 @@ nsys stats report1.nsys-rep
 GUI example:
 
 <img width="1799" alt="Screenshot 2025-03-05 at 11 48 42 AM" src="https://github.com/user-attachments/assets/c7cff1ae-6d6f-477d-a342-bd13c4fc424c" />
-
