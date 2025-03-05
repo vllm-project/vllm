@@ -25,12 +25,14 @@ def rms_norm(*, x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float,
 def fused_add_rms_norm(*, x: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, variance_epsilon: float):
     from vllm import _custom_ops as ops
-    return ops.fused_add_rms_norm(
+
+    ops.fused_add_rms_norm(
         x,
         residual,
         weight,
         variance_epsilon,
     )
+    return x, residual
 
 
 def rocm_aiter_rmsnorm2d_fwd_with_add(
@@ -134,10 +136,10 @@ class RMSNorm(CustomOp):
 
         add_residual = residual is not None
         return dispatch_rmsnorm_func(add_residual)(
-            x,
-            residual,
-            self.weight.data,
-            self.variance_epsilon,
+            x=x,
+            residual=residual,
+            weight=self.weight.data,
+            variance_epsilon=self.variance_epsilon,
         )
 
     def forward_hpu(

@@ -16,7 +16,7 @@ from vllm.model_executor.layers.layernorm import (
     RMSNorm, dispatch_rmsnorm_func, fused_add_rms_norm, rms_norm,
     rocm_aiter_rmsnorm2d_fwd_with_add)
 from vllm.model_executor.layers.linear import (
-    dipsatch_unquantized_linear_func, rocm_aiter_tgemm_mm)
+    dispatch_unquantized_linear_func, rocm_aiter_tgemm_mm)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     cutlass_scaled_mm, dispatch_blockscale_func,
     rocm_aiter_gemm_a8w8_blockscale, w8a8_block_fp8_matmul)
@@ -172,7 +172,7 @@ def test_unquantized_linear_dispatch(use_rocm_aiter: str,
                                      use_rocm_aiter_linear: str, monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR", use_rocm_aiter_linear)
-    linear_func = dipsatch_unquantized_linear_func()
+    linear_func = dispatch_unquantized_linear_func()
     if current_platform.is_rocm() and int(use_rocm_aiter) and int(
             use_rocm_aiter_linear):
         assert linear_func == rocm_aiter_tgemm_mm
