@@ -377,8 +377,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "'args' and 'kwargs' fields containing positional and keyword "
             "arguments. For example: {'qualname': "
             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
-            "{'param': 'value'}}."),
-    )
+            "{'param': 'value'}}."))
+    return_tokens_as_token_ids: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If specified with 'logprobs', tokens are represented "
+            " as strings of the form 'token_id:{token_id}' so that tokens "
+            "that are not JSON-encodable can be identified."))
 
     # doc: end-chat-completion-extra-params
 
@@ -795,8 +800,7 @@ class CompletionRequest(OpenAIBaseModel):
             "'args' and 'kwargs' fields containing positional and keyword "
             "arguments. For example: {'qualname': "
             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
-            "{'param': 'value'}}."),
-    )
+            "{'param': 'value'}}."))
 
     # doc: end-completion-extra-params
 

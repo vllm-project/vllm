@@ -92,10 +92,12 @@ class Processor:
             return
         if params.allowed_token_ids is None:
             return
-        if not all(0 <= tid < self.model_config.vocab_size
-                   for tid in params.allowed_token_ids):
+        if not params.allowed_token_ids:
+            raise ValueError("allowed_token_ids is not None and empty!")
+        vocab_size = self.model_config.get_vocab_size()
+        if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
             raise ValueError(
-                "allowed_token_ids contains out-of-vocab token id")
+                "allowed_token_ids contains out-of-vocab token id!")
 
     def process_inputs(
         self,
@@ -131,6 +133,7 @@ class Processor:
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            return_mm_hashes=self.use_hash,
         )
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
