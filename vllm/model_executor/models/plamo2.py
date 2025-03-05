@@ -38,6 +38,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
+from vllm.utils import LayerBlockType
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -697,11 +698,18 @@ class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
         assert not vllm_config.cache_config.enable_prefix_caching, \
             "PLaMo2 currently does not support prefix caching"
 
-        super().__init__(vllm_config.model_config.hf_config)
+        super().__init__(config)
         self.config = config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.scheduler_config = scheduler_config
+
+        # TODO(Shinichi): Remove this workaround.
+        self.config.layers_block_type = [
+            "mamba" if is_mamba(self.config, i) else "attention"
+            for i in range(self.config.num_hidden_layers)
+        ]
+
         self.model = Plamo2Model(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "model"))
         self.vocab_size = self.config.vocab_size
@@ -734,10 +742,8 @@ class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
         if self.mamba_cache is None:
-            num_mamba_layers = sum([
-                is_mamba(self.config, i)
-                for i in range(self.config.num_hidden_layers)
-            ])
+            num_mamba_layers = self.model_config.get_num_layers_by_block_type(
+                self.vllm_config.parallel_config, LayerBlockType.mamba)
 
             self.mamba_cache = MambaCacheManager(
                 self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
