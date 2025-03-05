@@ -291,6 +291,23 @@ def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
     return output
 
 
+def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
+                                 dtype: torch.dtype) -> bool:
+    # disable atomicAdd reduce by default,
+    # one can enable it with VLLM_MARLIN_USE_ATOMIC_ADD=1
+    if not envs.VLLM_MARLIN_USE_ATOMIC_ADD or device.dtype != "cuda":
+        return False
+
+    # sm8x doesn't support atomicAdd + bfloat16 natively
+    device_capability = torch.cuda.get_device_capability(device)
+    if device_capability[0] < 9 and dtype == torch.bfloat16:
+        return False
+
+    # the performance of atomicAdd is better than global reduce
+    # only when m*n is small and k is large
+    return max(m, 64) * n < 64 * 2048 and k >= 2048
+
+
 def apply_gptq_marlin_linear(
         input: torch.Tensor,
         weight: torch.Tensor,
@@ -304,16 +321,15 @@ def apply_gptq_marlin_linear(
         input_size_per_partition: int,
         is_k_full: bool,
         bias: Optional[torch.Tensor] = None,
-        use_atomic_add: Optional[bool] = None,
         use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
-    if use_atomic_add is None:
-        use_atomic_add = envs.VLLM_MARLIN_USE_ATOMIC_ADD
-
-    if output_size_per_partition > 2048:
-        use_atomic_add = False
+    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+                                                  n=output_size_per_partition,
+                                                  k=reshaped_x.size(1),
+                                                  device=input.device,
+                                                  dtype=input.dtype)
 
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   weight,
@@ -350,16 +366,15 @@ def apply_awq_marlin_linear(
         output_size_per_partition: int,
         input_size_per_partition: int,
         bias: Optional[torch.Tensor] = None,
-        use_atomic_add: Optional[bool] = None,
         use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
-    if use_atomic_add is None:
-        use_atomic_add = envs.VLLM_MARLIN_USE_ATOMIC_ADD
-
-    if output_size_per_partition > 2048:
-        use_atomic_add = False
+    use_atomic_add = should_use_atomic_add_reduce(m=reshaped_x.size(0),
+                                                  n=output_size_per_partition,
+                                                  k=reshaped_x.size(1),
+                                                  device=input.device,
+                                                  dtype=input.dtype)
 
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   weight,
