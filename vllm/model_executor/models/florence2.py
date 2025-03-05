@@ -25,11 +25,12 @@ from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataDict, MultiModalDataItems
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
-                                        PromptInsertion, PromptUpdate)
+                                        PromptIndexTargets, PromptInsertion,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsV0Only
 from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
 
 
@@ -591,7 +592,6 @@ class Florence2LanguageModel(nn.Module):
 
         self.config = config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.shared = BartScaledWordEmbedding(self.vocab_size, config.d_model)
@@ -651,7 +651,7 @@ class Florence2LanguageModel(nn.Module):
         return decoder_outputs
 
 
-class Florence2LanguageForConditionalGeneration(nn.Module):
+class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -864,7 +864,7 @@ class Florence2MultiModalProcessor(
         return [
             PromptInsertion(
                 modality="image",
-                target="",
+                target=PromptIndexTargets.start(),
                 insertion=image_tokens,
             )
         ]
@@ -1036,7 +1036,9 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         pixel_values = image_input["data"]
         return self._encode_image(pixel_values)
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> torch.Tensor:
+    def get_multimodal_embeddings(
+        self, **kwargs: object
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

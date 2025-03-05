@@ -19,7 +19,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (HasInnerState,
-                                                   IsAttentionFree, SupportsPP)
+                                                   IsAttentionFree, SupportsPP,
+                                                   SupportsV0Only)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -89,7 +90,6 @@ class MambaModel(nn.Module):
         is_lora_enabled = bool(lora_config)
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         lora_vocab = ((lora_config.lora_extra_vocab_size *
                        (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
@@ -155,7 +155,8 @@ class MambaModel(nn.Module):
         return hidden_states
 
 
-class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
+class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP,
+                       SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config

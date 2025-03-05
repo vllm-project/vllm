@@ -19,8 +19,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptInsertion,
-                                        PromptUpdate)
+                                        BaseProcessingInfo, PromptIndexTargets,
+                                        PromptInsertion, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -490,7 +490,7 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
         return [
             PromptInsertion(
                 modality="image",
-                target="",
+                target=PromptIndexTargets.start(),
                 insertion=image_tokens,
             )
         ]
@@ -628,7 +628,9 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         return self.language_projection(query_output)
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

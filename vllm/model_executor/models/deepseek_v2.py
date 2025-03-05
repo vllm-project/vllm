@@ -105,7 +105,6 @@ class DeepseekV2MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
-        self.routed_scaling_factor = config.routed_scaling_factor
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
@@ -146,6 +145,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -570,7 +570,6 @@ class DeepseekV2Model(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank:
