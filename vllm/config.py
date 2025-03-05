@@ -2996,13 +2996,13 @@ class CompilationConfig(BaseModel):
             Each pass defines its own stages (before, after, maybe in-between).
         - dump_graph_dir: directory to dump the graphs. Default is .
         - enable_fusion: whether to enable the custom fusion pass.
-        - enable_noop: whether to enable the custom no-op elimination pass.
-            TODO(luka) better pass enabling system.
+        - enable_reshape: whether to enable the custom reshape elimination pass.
+            TODO better pass enabling system.
         """
         dump_graph_stages: list[str] = Field(default_factory=list)
         dump_graph_dir: Path = Field(default=Path("."))
         enable_fusion: bool = True
-        enable_noop: bool = True
+        enable_reshape: bool = True
 
         def uuid(self):
             """
@@ -3011,12 +3011,13 @@ class CompilationConfig(BaseModel):
             Do not include dump_graph_* in the hash - they don't affect
             compilation.
             """
-            dict_ = self.model_dump(include={"enable_fusion", "enable_noop"})
+            dict_ = self.model_dump(
+                include={"enable_fusion", "enable_reshape"})
             encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
             return hashlib.sha256(encoded).digest()
 
         def model_post_init(self, __context: Any) -> None:
-            if not self.enable_noop and self.enable_fusion:
+            if not self.enable_reshape and self.enable_fusion:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm + quant (fp8) fusion might not work")
@@ -3413,7 +3414,7 @@ class VllmConfig:
             self.compilation_config.use_inductor = True
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.pass_config.enable_fusion = False
-            self.compilation_config.pass_config.enable_noop = False
+            self.compilation_config.pass_config.enable_reshape = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
 
         self._set_cudagraph_sizes()
