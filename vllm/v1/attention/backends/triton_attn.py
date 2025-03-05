@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with PagedAttention and Triton prefix prefill."""
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Optional
 
 import torch
 
@@ -28,7 +28,7 @@ class TritonAttentionBackend(AttentionBackend):
         return "TRITON_ATTN_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type["TritonAttentionImpl"]:
+    def get_impl_cls() -> type["TritonAttentionImpl"]:
         return TritonAttentionImpl
 
     @staticmethod
