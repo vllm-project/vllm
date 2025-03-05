@@ -42,16 +42,26 @@ def _bgmv(
     T, D = inputs.shape
     N, _, L, _ = loras.shape
     
-    # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU register
-    L1 = L
-    if L < 128 or L % 128 != 0:
-        L1 = (L // 128 + 1) * 128
-        loras = jnp.pad(loras, ((0,0), (0,0), (0,L1-L), (0,0)))
-
     # TODO: Tune these
     bT = 8
     bL = 128
     bD = 128
+    
+    # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU register
+    L1 = L
+    if L < bL or L % bL != 0:
+        L1 = (L // bL + 1) * bL
+        
+    D1 = D
+    if D < bD or D % bD != 0:
+        D1 = (D // bD + 1) * bD
+    
+    T1 = T
+    if T < bT or T % bT != 0:
+        T1 = (T // bT + 1) * bT
+    
+    loras = jnp.pad(loras, ((0,0), (0,0), (0,L1-L), (0,D1-D)))
+    inputs = jnp.pad(inputs, ((0,T1-T), (0, D1-D)))
 
     return pl.pallas_call(kernel=functools.partial(_bgmv_kernel, bT, bL),
                           out_shape=jax.ShapeDtypeStruct((T, L1),
@@ -88,14 +98,17 @@ XLA_LIB.define(
 )
 
 @impl(XLA_LIB, "bgmv", "XLA")
-def bgmv_xla(inputs, loras, idxs):
+def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
+    inputs = inputs.to(dtype=loras.dtype)
+    
     jax_import_guard()
     kernel = make_kernel_from_pallas(_bgmv, bgmv_shape_function)
-
+    
     return kernel(idxs, inputs, loras)
 
+
 @impl(XLA_LIB, "bgmv", "CompositeExplicitAutograd")
-def bgmv_non_xla(inputs, loras, idxs):
+def bgmv_non_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
     T, _ = inputs.shape
     _, _, L, _ = loras.shape
     
