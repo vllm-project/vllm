@@ -98,9 +98,6 @@ class Processor:
         # Bad words not yet supported.
         if params.bad_words:
             raise ValueError("VLLM V1 does not yet support bad_words.")
-        # Skip detokenization not yet supported.
-        if not params.detokenize:
-            raise ValueError("VLLM V1 does not yet support detokenize=False.")
         # Logits processors not supported.
         if params.logits_processors:
             raise ValueError("VLLM V1 does not yet support per request "

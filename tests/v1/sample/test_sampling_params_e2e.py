@@ -97,13 +97,6 @@ def test_bad_words(model):
         _ = model.generate(PROMPT, SamplingParams(bad_words=["Hello"]))
 
 
-def test_detokenize(model):
-    """Check that we reject detokenize=False."""
-
-    with pytest.raises(ValueError):
-        _ = model.generate(PROMPT, SamplingParams(detokenize=False))
-
-
 def test_logits_processor(model):
     """Check that we reject logits processor."""
 
