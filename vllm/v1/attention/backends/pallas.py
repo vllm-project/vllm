@@ -132,7 +132,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = ([num_blocks, block_size, num_kv_heads, head_size], 
-                        [num_kv_heads, num_blocks, block_size, num_kv_heads, head_size])
+                        [num_blocks, block_size, num_kv_heads, head_size])
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]

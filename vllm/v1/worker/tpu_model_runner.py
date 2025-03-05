@@ -14,7 +14,7 @@ import torch_xla.runtime as xr
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
