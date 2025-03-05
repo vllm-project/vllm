@@ -21,7 +21,6 @@ from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -128,18 +127,19 @@ class TPUWorker:
             else:
                 raise NotImplementedError
 
-        runner_kv_caches: list[torch.Tensor] = []
-        bind_kv_cache(
-            kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
-            runner_kv_caches)
+        # Associates each attention layer in the `forward_context` with the
+        # initialized KV cache.
+        forward_context = self.vllm_config.compilation_config \
+            .static_forward_context
+        for layer_name, kv_cache in kv_caches.items():
+            # NOTE: Use list because of v0 PP virtual engine.
+            forward_context[layer_name].kv_cache = [kv_cache]
 
-        self.model_runner._dummy_run(
-            runner_kv_caches,
-            num_tokens=self.scheduler_config.max_num_batched_tokens,
-        )
+        self.model_runner.profile_run(
+            num_tokens=self.scheduler_config.max_num_batched_tokens)
 
         # Synchronize before measuring the memory usage.
+        xm.mark_step()
         xm.wait_device_ops()
 
         # Get the maximum amount of memory used by the model weights and

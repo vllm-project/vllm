@@ -12,6 +12,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -33,14 +34,16 @@ class DPMetadata:
 
 @dataclass
 class ForwardContext:
-    # copy from vllm_config.compilation_config.static_forward_context
+    # Copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
-    # TODO: extend to support per-layer dynamic forward context
+    # TODO: Extend to support per-layer dynamic forward context
     attn_metadata: "AttentionMetadata"  # set dynamically for each forward pass
-    # TODO: remove after making all virtual_engines share the same kv cache
+    # TODO: Remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
-    # set dynamically for each forward pass
+    # Set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
+    # Whether this is a profile run (before KV cache init)
+    is_profile_run: bool = False,
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -58,7 +61,8 @@ def get_forward_context() -> ForwardContext:
 def set_forward_context(attn_metadata: Any,
                         vllm_config: VllmConfig,
                         virtual_engine: int = 0,
-                        num_tokens: int = 0):
+                        num_tokens: int = 0,
+                        is_profile_run: bool = False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -93,12 +97,15 @@ def set_forward_context(attn_metadata: Any,
 
     global _forward_context
     prev_context = _forward_context
+
     _forward_context = ForwardContext(
         no_compile_layers=vllm_config.compilation_config.
         static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
-        dp_metadata=dp_metadata)
+        dp_metadata=dp_metadata,
+        is_profile_run=is_profile_run)
+
     try:
         yield
     finally:
@@ -111,10 +118,17 @@ def set_forward_context(attn_metadata: Any,
             else:
                 # for v1 attention backends
                 batchsize = attn_metadata.num_input_tokens
+
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch
-            torch.cuda.synchronize()
+            if current_platform.is_tpu():
+                import torch_xla.core.xla_model as xm
+                xm.mark_step()
+                xm.wait_device_ops()
+            else:
+                torch.cuda.synchronize()
+
             now = time.perf_counter()
             # time measurement is in milliseconds
             batchsize_forward_time[batchsize].append(
