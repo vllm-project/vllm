@@ -1300,7 +1300,7 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
     object: Literal["transcription.chunk"] = "transcription.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
-    choices: List[TranscriptionResponseStreamChoice]
+    choices: list[TranscriptionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
 
 
