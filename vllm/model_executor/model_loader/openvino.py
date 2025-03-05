@@ -125,7 +125,8 @@ class OpenVINOCausalLM(nn.Module):
                 "as-is, all possible options that may affect model conversion "
                 "are ignored.")
 
-        load_in_8bit = envs.VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS
+        load_in_8bit = (envs.VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS
+                        if export else False)
         pt_model = OVModelForCausalLM.from_pretrained(
             model_config.model,
             export=export,

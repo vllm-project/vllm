@@ -12,13 +12,16 @@ from fastapi import FastAPI, Request, Response
 from vllm import envs
 from vllm.engine.async_llm_engine import AsyncEngineDeadError
 from vllm.engine.multiprocessing import MQEngineDeadError
+from vllm.entrypoints.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.utils import find_process_using_port
 
 logger = init_logger(__name__)
 
 
-async def serve_http(app: FastAPI, sock: Optional[socket.socket],
+async def serve_http(app: FastAPI,
+                     sock: Optional[socket.socket],
+                     enable_ssl_refresh: bool = False,
                      **uvicorn_kwargs: Any):
     logger.info("Available routes are:")
     for route in app.routes:
@@ -31,6 +34,7 @@ async def serve_http(app: FastAPI, sock: Optional[socket.socket],
         logger.info("Route: %s, Methods: %s", path, ', '.join(methods))
 
     config = uvicorn.Config(app, **uvicorn_kwargs)
+    config.load()
     server = uvicorn.Server(config)
     _add_shutdown_handlers(app, server)
 
@@ -39,9 +43,17 @@ async def serve_http(app: FastAPI, sock: Optional[socket.socket],
     server_task = loop.create_task(
         server.serve(sockets=[sock] if sock else None))
 
+    ssl_cert_refresher = None if not enable_ssl_refresh else SSLCertRefresher(
+        ssl_context=config.ssl,
+        key_path=config.ssl_keyfile,
+        cert_path=config.ssl_certfile,
+        ca_path=config.ssl_ca_certs)
+
     def signal_handler() -> None:
         # prevents the uvicorn signal handler to exit early
         server_task.cancel()
+        if ssl_cert_refresher:
+            ssl_cert_refresher.stop()
 
     async def dummy_shutdown() -> None:
         pass

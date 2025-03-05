@@ -1,19 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import torch
-import triton
-import triton.language as tl
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import get_flash_attn_version
+from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.worker.gpu_input_batch import InputBatch
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -26,7 +30,7 @@ class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
 
     @staticmethod
@@ -34,12 +38,16 @@ class FlashAttentionBackend(AttentionBackend):
         return "FLASH_ATTN_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type["FlashAttentionImpl"]:
+    def get_impl_cls() -> type["FlashAttentionImpl"]:
         return FlashAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["AttentionMetadata"]:
         return FlashAttentionMetadata
+
+    @staticmethod
+    def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
+        return FlashAttentionMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -47,7 +55,7 @@ class FlashAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
@@ -86,6 +94,62 @@ class FlashAttentionMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
 
 
+class FlashAttentionMetadataBuilder:
+
+    def __init__(self, runner: "GPUModelRunner"):
+        self.runner = runner
+
+    def reorder_batch(self, input_batch: "InputBatch",
+                      scheduler_output: "SchedulerOutput"):
+        pass
+
+    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+              common_prefix_len: int):
+        max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
+        query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
+            self.runner.device, non_blocking=True)
+        seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(self.runner.device,
+                                                          non_blocking=True)
+        block_table = (
+            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
+        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
+            self.runner.device, non_blocking=True).long()
+
+        use_cascade = common_prefix_len > 0
+        if use_cascade:
+            # TODO: Optimize.
+            cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
+                                                dtype=torch.int32,
+                                                device=self.runner.device)
+            prefix_kv_lens = torch.tensor([common_prefix_len],
+                                          dtype=torch.int32,
+                                          device=self.runner.device)
+            suffix_kv_lens = (self.runner.seq_lens_np[:num_reqs] -
+                              common_prefix_len)
+            suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
+                self.runner.device)
+        else:
+            cu_prefix_query_lens = None
+            prefix_kv_lens = None
+            suffix_kv_lens = None
+
+        attn_metadata = FlashAttentionMetadata(
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=max_query_len,
+            query_start_loc=query_start_loc,
+            max_seq_len=max_seq_len,
+            seq_lens=seq_lens,
+            block_table=block_table,
+            slot_mapping=slot_mapping,
+            use_cascade=use_cascade,
+            common_prefix_len=common_prefix_len,
+            cu_prefix_query_lens=cu_prefix_query_lens,
+            prefix_kv_lens=prefix_kv_lens,
+            suffix_kv_lens=suffix_kv_lens,
+        )
+        return attn_metadata
+
+
 class FlashAttentionImpl(AttentionImpl):
 
     def __init__(
@@ -94,10 +158,10 @@ class FlashAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> None:
@@ -317,7 +381,7 @@ def cascade_attention(
     max_kv_len: int,
     softmax_scale: float,
     alibi_slopes: Optional[torch.Tensor],
-    sliding_window: Tuple[int, int],
+    sliding_window: tuple[int, int],
     logits_soft_cap: float,
     block_table: torch.Tensor,
     common_prefix_len: int,
@@ -373,69 +437,3 @@ def cascade_attention(
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
                       suffix_lse)
-
-
-def merge_attn_states(
-    output: torch.Tensor,
-    prefix_output: torch.Tensor,
-    prefix_lse: torch.Tensor,
-    suffix_output: torch.Tensor,
-    suffix_lse: torch.Tensor,
-) -> None:
-    num_tokens = output.shape[0]
-    num_query_heads = output.shape[1]
-    head_size = output.shape[2]
-    padded_head_size = triton.next_power_of_2(head_size)
-
-    # TODO(woosuk): Use CUDA kernel instead of Triton to minimize CPU overhead.
-    merge_attn_states_kernel[(num_tokens, num_query_heads)](
-        output,
-        prefix_output,
-        prefix_lse,
-        suffix_output,
-        suffix_lse,
-        head_size,
-        padded_head_size,
-    )
-
-
-@triton.jit
-def merge_attn_states_kernel(
-    output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    prefix_output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    prefix_lse,  # [NUM_HEADS, NUM_TOKENS]
-    suffix_output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
-    suffix_lse,  # [NUM_HEADS, NUM_TOKENS]
-    HEAD_SIZE: tl.constexpr,
-    PADDED_HEAD_SIZE: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
-    num_tokens = tl.num_programs(0)
-    head_idx = tl.program_id(1)
-    num_heads = tl.num_programs(1)
-
-    p_lse = tl.load(prefix_lse + head_idx * num_tokens + token_idx)
-    s_lse = tl.load(suffix_lse + head_idx * num_tokens + token_idx)
-    max_lse = tl.maximum(p_lse, s_lse)
-    p_lse = p_lse - max_lse
-    s_lse = s_lse - max_lse
-
-    head_arange = tl.arange(0, PADDED_HEAD_SIZE)
-    head_mask = head_arange < HEAD_SIZE
-    p_out = tl.load(prefix_output + token_idx * num_heads * HEAD_SIZE +
-                    head_idx * HEAD_SIZE + head_arange,
-                    mask=head_mask)
-    s_out = tl.load(suffix_output + token_idx * num_heads * HEAD_SIZE +
-                    head_idx * HEAD_SIZE + head_arange,
-                    mask=head_mask)
-
-    # NOTE(woosuk): Be careful with the numerical stability.
-    # We should compute the scale first, and then multiply it with the output.
-    # Do not multiply the output with tl.exp(p_lse) or tl.exp(s_lse) directly.
-    p_scale = tl.exp(p_lse) / (tl.exp(p_lse) + tl.exp(s_lse))
-    s_scale = tl.exp(s_lse) / (tl.exp(p_lse) + tl.exp(s_lse))
-    out = p_out * p_scale + s_out * s_scale
-    tl.store(output + token_idx * num_heads * HEAD_SIZE +
-             head_idx * HEAD_SIZE + head_arange,
-             out,
-             mask=head_mask)

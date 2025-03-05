@@ -15,14 +15,18 @@ ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install minimal dependencies and uv
-RUN apt-get update -y \
-    && apt-get install -y curl ca-certificates software-properties-common git sudo \
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y ccache software-properties-common git curl wget sudo \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Add uv to PATH and install Python
+# Add uv to PATH
 ENV PATH="/root/.local/bin:$PATH"
-RUN uv python install ${PYTHON_VERSION}
-ENV PATH="/root/.local/share/uv/python/install/current/bin:$PATH"
+# Create venv with specified Python and activate by placing at the front of path
+ENV VIRTUAL_ENV="/opt/venv"
+RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
 # as it was causing spam when compiling the CUTLASS kernels
@@ -39,13 +43,6 @@ EOF
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 WORKDIR /workspace
-
-# Create and activate venv
-RUN uv venv --python ${PYTHON_VERSION} --seed /opt/venv
-# Use the virtual environment automatically
-ENV VIRTUAL_ENV=/opt/venv
-# Place entry points in the environment at the front of the path
-ENV PATH="/opt/venv/bin:$PATH"
 
 # arm64 (GH200) build follows the practice of "use existing pytorch" build,
 # we need to install torch and torchvision from the nightly builds first,
@@ -165,28 +162,25 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
 # Install minimal dependencies and uv
-RUN apt-get update -y \
-    && apt-get install -y curl ca-certificates software-properties-common git sudo wget vim \
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y ccache software-properties-common git curl wget sudo vim \
     && apt-get install -y ffmpeg libsm6 libxext6 libgl1 libibverbs-dev \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Add uv to PATH and install Python
+# Add uv to PATH
 ENV PATH="/root/.local/bin:$PATH"
-RUN uv python install ${PYTHON_VERSION}
-ENV PATH="/root/.local/share/uv/python/install/current/bin:$PATH"
+# Create venv with specified Python and activate by placing at the front of path
+ENV VIRTUAL_ENV="/opt/venv"
+RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
 # or future versions of triton.
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
-
-# Create and activate venv
-RUN uv venv --python ${PYTHON_VERSION} --seed /opt/venv
-# Use the virtual environment automatically
-ENV VIRTUAL_ENV=/opt/venv
-# Place entry points in the environment at the front of the path
-ENV PATH="/opt/venv/bin:$PATH"
 
 # arm64 (GH200) build follows the practice of "use existing pytorch" build,
 # we need to install torch and torchvision from the nightly builds first,
