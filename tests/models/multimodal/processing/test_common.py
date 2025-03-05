@@ -239,7 +239,7 @@ def test_processing_correctness_phi3v(
 
 
 def _drop_mm_kwargs_keys(result: dict,
-                         ignore_mm_keys: Optional[list[str]] = None) -> bool:
+                         ignore_mm_keys: Optional[list[str]] = None) -> dict:
     """Drop specified keys from result['mm_kwargs'].
 
     This is mainly to avoid doing exact match of audio_features in ultravox.
