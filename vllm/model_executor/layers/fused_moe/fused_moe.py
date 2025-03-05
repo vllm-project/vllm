@@ -672,6 +672,7 @@ def moe_align_block_size(
 
 
 def p(s, t):
+    #print(f"{s}: {t.shape}, {t.dtype}\n{t.flatten()}")
     print(f"{s}: {t.shape}, {t.dtype}\n{t}")
     #pass
 
