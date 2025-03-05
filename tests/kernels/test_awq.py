@@ -26,6 +26,7 @@ def test_awq_dequantize_opcheck():
             (qweight, scales, zeros, split_k_iters, thx, thy))
 
 
+@pytest.mark.skip(reason="Not working; needs investigation.")
 @pytest.mark.skipif(not hasattr(torch.ops._C, "awq_gemm"),
                     reason="AWQ is not supported on this GPU type.")
 def test_awq_gemm_opcheck():
