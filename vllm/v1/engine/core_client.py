@@ -74,7 +74,7 @@ class EngineCoreClient(ABC):
     def shutdown(self):
         ...
 
-    def get_output(self) -> Optional[EngineCoreOutputs]:
+    def get_output(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
     def add_request(self, request: EngineCoreRequest) -> None:
@@ -160,7 +160,7 @@ class InprocClient(EngineCoreClient):
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
 
-    def get_output(self) -> Optional[EngineCoreOutputs]:
+    def get_output(self) -> EngineCoreOutputs:
         return self.engine_core.step()
 
     def add_request(self, request: EngineCoreRequest) -> None:
@@ -554,7 +554,9 @@ class AsyncMPClient(MPClient):
             await self._start_output_queue_task()
 
     async def call_utility_async(self, method: str, *args) -> Any:
-        return self._call_utility_async(method, *args, engine=self.core_engine)
+        return await self._call_utility_async(method,
+                                              *args,
+                                              engine=self.core_engine)
 
     async def _call_utility_async(
         self,

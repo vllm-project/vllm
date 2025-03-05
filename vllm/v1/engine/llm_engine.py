@@ -187,7 +187,7 @@ class LLMEngine:
 
         # 2) Process EngineCoreOutputs.
         processed_outputs = self.output_processor.process_outputs(
-            outputs.outputs if outputs is not None else [])
+            outputs.outputs)
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
