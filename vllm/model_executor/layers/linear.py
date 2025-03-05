@@ -8,7 +8,6 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
-import vllm.envs as envs
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -26,12 +25,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            RowvLLMParameter)
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
-
-USE_ROCM_AITER_LINEAR = envs.VLLM_ROCM_USE_AITER_LINEAR \
-    and current_platform.is_rocm()
-if USE_ROCM_AITER_LINEAR:
-    from aiter.tuned_gemm import tgemm as rocm_aiter_tgemm
+from vllm.utils import rocm_aiter_linear_enabled
 
 logger = init_logger(__name__)
 
@@ -145,7 +139,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if USE_ROCM_AITER_LINEAR:
+        if rocm_aiter_linear_enabled():
+            from aiter.tuned_gemm import tgemm as rocm_aiter_tgemm
+
             return rocm_aiter_tgemm.mm(x, layer.weight, bias)
 
         return F.linear(x, layer.weight, bias)

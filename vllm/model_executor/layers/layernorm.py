@@ -5,14 +5,8 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm.model_executor.custom_op import CustomOp
-from vllm.platforms import current_platform
-
-USE_ROCM_AITER_NORM = envs.VLLM_ROCM_USE_AITER_NORM \
-    and current_platform.is_rocm()
-if USE_ROCM_AITER_NORM:
-    import aiter as rocm_aiter
+from vllm.utils import rocm_aiter_norm_enabled
 
 
 @CustomOp.register("rms_norm")
@@ -91,7 +85,9 @@ class RMSNorm(CustomOp):
         from vllm import _custom_ops as ops
 
         if residual is not None:
-            if USE_ROCM_AITER_NORM:
+            if rocm_aiter_norm_enabled():
+                import aiter as rocm_aiter
+
                 rocm_aiter.rmsnorm2d_fwd_with_add(
                     x,
                     x,

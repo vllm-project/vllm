@@ -17,7 +17,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED, CUTLASS_FP8_SUPPORTED, apply_fp8_linear)
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import (direct_register_custom_op,
+                        rocm_aiter_fp8_block_scaled_moe_enabled)
 
 logger = init_logger(__name__)
 
@@ -71,12 +72,21 @@ def apply_w8a8_block_fp8_linear(
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],
                                                      column_major_scales=False)
-        output = w8a8_block_fp8_matmul(q_input,
-                                       weight,
-                                       x_scale,
-                                       weight_scale,
-                                       block_size,
-                                       output_dtype=input.dtype)
+        if rocm_aiter_fp8_block_scaled_moe_enabled():
+            import aiter as rocm_aiter
+
+            output = torch.zeros([q_input.shape[0], weight.shape[0]],
+                                 dtype=input.dtype,
+                                 device=q_input.device)
+            output = rocm_aiter.gemm_a8w8_blockscale(q_input, weight, x_scale,
+                                                     weight_scale, output)
+        else:
+            output = w8a8_block_fp8_matmul(q_input,
+                                           weight,
+                                           x_scale,
+                                           weight_scale,
+                                           block_size,
+                                           output_dtype=input.dtype)
     if bias is not None:
         output = output + bias
     return output.to(dtype=input.dtype).view(*output_shape)

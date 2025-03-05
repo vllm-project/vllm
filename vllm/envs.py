@@ -80,6 +80,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = True
     VLLM_ROCM_USE_AITER_NORM: bool = True
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
+    VLLM_ROCM_USE_AITER_BLOCK_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -560,6 +561,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_PAGED_ATTN":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "False").lower() in
              ("true", "1")),
+
+    # use aiter w8a8 block gemm kerner if aiter ops are enabled.
+    "VLLM_ROCM_USE_AITER_BLOCK_GEMM":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_BLOCK_GEMM",
+                                         "True").lower() in ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
