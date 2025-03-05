@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 SAFETENSORS = "safetensors"
 WEIGHT_SCALE_NAME = "weight_scale_inv"
 MODEL_STATE_DICT_MAPPING_FILENAME = "model.safetensors.index.json"
-FULL_RANGE = 240.0  # torch.finfo(torch.float8_e4m3fnuz).max for Gaudi2
+FULL_RANGE = 448.0  # torch.finfo(torch.float8_e4m3fnuz).max for Gaudi2
 # end constants
 
 def get_input_scales(pkl_path):

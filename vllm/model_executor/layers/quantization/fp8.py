@@ -943,8 +943,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             return final_hidden_states
 
-        def do_dynamic_moe_with_static_scaling(x, topk_ids, topk_weights, w13_weight_fp8, w2_weight_fp8, moe_n_slice, n_expert_slice, w13_weight_scale_inv_fp8, w2_weight_scale_inv_fp8, w2_input_scale):
+        def do_dynamic_moe_with_static_scaling(x, topk_ids, topk_weights, w13_weight_fp8, w2_weight_fp8, moe_n_slice, n_expert_slice, w13_weight_scale_inv_fp8, w2_weight_scale_inv_fp8):
             x_scale = layer.w13_input_scale.data
+            w2_input_scale =  layer.w2_input_scale.data
             x_fp8 = torch.ops.hpu.cast_to_fp8_v2(x, 1.0/x_scale, False, False, torch.float8_e4m3fn)[0]
             for i in range(moe_n_slice):
                 min_expert = i * n_expert_slice
@@ -952,9 +953,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
                 w13_list_slice = [w13_weight_fp8[j, ...] for j in range(min_expert, max_expert)]
                 w2_list_slice = [w2_weight_fp8[j, ...] for j in range(min_expert, max_expert)]
-                w13_weight_scale = [w13_weight_scale_inv_fp8[i, ...] for i in range(min_expert, max_expert)]
-                w2_weight_scale = [w2_weight_scale_inv_fp8[i,...] for i in range(min_expert, max_expert)]
-                w2_input_scale = [w2_input_scale.unsqueeze(0).repeat(num_experts)[i] for i in range(num_experts)]
+                w13_weight_scale = [w13_weight_scale_inv_fp8[j, ...] for j in range(min_expert, max_expert)]
+                w2_weight_scale = [w2_weight_scale_inv_fp8[j,...] for j in range(min_expert, max_expert)]
+                w2_input_scale_slice = [w2_input_scale.unsqueeze(0).repeat(n_expert_slice)[j] for j in range(n_expert_slice)]
 
                 current_hidden_states = torch.ops.hpu.mixture_of_experts(
                                             hidden_states=x_fp8,
@@ -963,7 +964,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                             w12=w13_list_slice,
                                             w3=w2_list_slice,
                                             d_scale_hidden_states=x_scale,
-                                            d_scale_intermediate_hidden_states=w2_input_scale,
+                                            d_scale_intermediate_hidden_states=w2_input_scale_slice,
                                             d_scale_w12=w13_weight_scale,
                                             d_scale_w3=w2_weight_scale,
                                             permuted_weights=True,
@@ -985,8 +986,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
                 w13_list_slice = [w13_weight_fp8[j, ...] for j in range(min_expert, max_expert)]
                 w2_list_slice = [w2_weight_fp8[j, ...] for j in range(min_expert, max_expert)]
-                w13_weight_scale = [w13_weight_scale_inv_fp8[i, ...] for i in range(min_expert, max_expert)]
-                w2_weight_scale = [w2_weight_scale_inv_fp8[i,...] for i in range(min_expert, max_expert)]
+                w13_weight_scale = [w13_weight_scale_inv_fp8[j, ...] for j in range(min_expert, max_expert)]
+                w2_weight_scale = [w2_weight_scale_inv_fp8[j,...] for j in range(min_expert, max_expert)]
 
                 current_hidden_states = torch.ops.hpu.mixture_of_experts(
                                             hidden_states=x_fp8,
@@ -1053,13 +1054,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             moe_n_slice = 4 if actual_total_experts >= 64 else 1
             n_expert_slice = actual_total_experts // moe_n_slice
         else:
-            w13_weight_fp8 = layer.w13_weight
-            w13_weight_scale_inv_fp8 = layer.w13_weight_scale_inv
-            w2_weight_fp8 = layer.w2_weight
-            w2_weight_scale_inv_fp8 = layer.w2_weight_scale_inv
+            w13_weight_fp8 = layer.w13_weight.data
+            w13_weight_scale_inv_fp8 = layer.w13_weight_scale_inv.data
+            w2_weight_fp8 = layer.w2_weight.data
+            w2_weight_scale_inv_fp8 = layer.w2_weight_scale_inv.data
             actual_total_experts = total_num_experts
             actual_num_experts = num_experts
             moe_n_slice = self.moe_n_slice
+            n_expert_slice = actual_num_experts // moe_n_slice
 
         if self.quant_config.activation_scheme == "dynamic":
             if self.quant_config.enable_runtime_dequant:
@@ -1069,7 +1071,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             else:
                 final_hidden_states = do_static_moe_with_dynamic_scaling(x, topk_ids, topk_weights, w13_weight_fp8, w2_weight_fp8, actual_total_experts, actual_num_experts, w13_weight_scale_inv_fp8, w2_weight_scale_inv_fp8)
         elif self.quant_config.activation_scheme == "static":
-            final_hidden_states = do_dynamic_moe_with_static_scaling(x, topk_ids, topk_weights, w13_weight_fp8, w2_weight_fp8, moe_n_slice, n_expert_slice, w13_weight_scale_inv_fp8, w2_weight_scale_inv_fp8, layer.w2_input_scale)
+            final_hidden_states = do_dynamic_moe_with_static_scaling(x, topk_ids, topk_weights, w13_weight_fp8, w2_weight_fp8, moe_n_slice, n_expert_slice, w13_weight_scale_inv_fp8, w2_weight_scale_inv_fp8)
         else:
             raise ValueError("Unknown activation scheme")
 

@@ -271,6 +271,15 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
             if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+                if current_platform.is_hpu() and layer.quant_method.quant_config.activation_scheme == "static":
+                    def get_scales(layer: LinearBase) -> torch.Tensor:
+                        if hasattr(layer, "weight_scale_inv"):
+                            return layer.weight_scale_inv
+                        return layer.weight_scale
+                    scales = get_scales(layer)
+                    if len(scales.shape) == 1:
+                        ret = layer.weight.to(act_dtype) * scales.unsqueeze(1)
+                        return ret
                 # NOTE: This should only be used offline, since it's O(N^3)
                 eye = torch.eye(layer.input_size_per_partition,
                                 dtype=act_dtype,

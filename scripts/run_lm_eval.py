@@ -13,7 +13,7 @@ model_path = "/data/models/DeepSeek-R1/"
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", type=str, default=model_path, help="The model path.")
 parser.add_argument("--task", type=str, default="gsm8k", help="The model path.")
-parser.add_argument("--tokenizer", type=str, default=model_path, help="The model path.")
+parser.add_argument("--tokenizer", type=str, default=None, help="The model path.")
 parser.add_argument("--tp_size", type=int, default=8, help="Tensor Parallelism size.")
 parser.add_argument("--ep_size", type=int, default=8, help="Expert Parallelism size.")
 parser.add_argument("-l", "--limit", type=int, default=64, help="test request counts.")
@@ -42,6 +42,8 @@ if __name__ == "__main__":
     from lm_eval import simple_evaluate
 
     model = args.model
+    if args.tokenizer is None:
+        args.tokenizer = model
     if args.tp_size == 1:
         llm = VLLM(
             pretrained=model, 
