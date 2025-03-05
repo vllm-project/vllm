@@ -33,7 +33,7 @@ REQUEST_FUNC_INPUT_FIELDS = [
 if not os.environ.get("VLLM_USE_V1", 0):
     # From https://github.com/vllm-project/vllm/pull/14159, v1 doesn't yet
     # support best_of parameter
-    REQUEST_FUNC_INPUT_FIELDS.extend([("best_of", int, field(default=1))])
+    REQUEST_FUNC_INPUT_FIELDS.append(("best_of", int, field(default=1)))
 
 RequestFuncInput = make_dataclass("RequestFuncInput",
                                   REQUEST_FUNC_INPUT_FIELDS)
