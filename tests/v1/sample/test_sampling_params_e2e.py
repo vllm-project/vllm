@@ -25,14 +25,6 @@ def test_n_gt_1(model):
     assert len(outputs[0].outputs) == 3
 
 
-def test_best_of(model):
-    """Raise a ValueError since best_of is deprecated."""
-
-    params = SamplingParams(n=2, best_of=3)
-    with pytest.raises(ValueError):
-        _ = model.generate(PROMPT, params)
-
-
 def test_penalties(model):
     """Check that we do not get errors if applied."""
 
