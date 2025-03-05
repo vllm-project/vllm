@@ -1084,7 +1084,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--best-of",
         type=int,
-        default=0 if os.environ.get("VLLM_USE_V1", 0) else 1,
+        default=None if os.environ.get("VLLM_USE_V1", 0) else 1,
         help="Generates `best_of` sequences per prompt and "
         "returns the best one.",
     )
