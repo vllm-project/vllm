@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import io
-from collections.abc import AsyncGenerator
 import time
+from collections.abc import AsyncGenerator
 from math import ceil
-from typing import AsyncGenerator, Final, Optional, Tuple, Union, cast
+from typing import Final, Optional, Union, cast
 
 from fastapi import Request
 
@@ -177,7 +177,7 @@ class OpenAIServingTranscription(OpenAIServing):
         self,
         request: TranscriptionRequest,
         audio_data: bytes,
-    ) -> Tuple[PromptType, float]:
+    ) -> tuple[PromptType, float]:
         # Validate request
         # TODO language should be optional and can be guessed.
         # For now we default to en. See
