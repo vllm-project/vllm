@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+import torch.nn.functional as F
 
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.custom_op import CustomOp
@@ -11,7 +12,11 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     dispatch_fused_experts_func, dispatch_topk_func, rocm_aiter_fused_experts,
     rocm_aiter_topk_softmax, torch_vllm_inplace_fused_experts,
     torch_vllm_outplace_fused_experts, vllm_topk_softmax)
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import (
+    RMSNorm, dispatch_rmsnorm_func, fused_add_rms_norm, rms_norm,
+    rocm_aiter_rmsnorm2d_fwd_with_add)
+from vllm.model_executor.layers.linear import (
+    dipsatch_unquantized_linear_func, rocm_aiter_tgemm_mm)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     cutlass_scaled_mm, dispatch_blockscale_func,
     rocm_aiter_gemm_a8w8_blockscale, w8a8_block_fp8_matmul)
@@ -141,3 +146,35 @@ def test_block_gemm_dispatch(use_cutlass: bool, use_rocm_aiter: str,
         assert block_scale_func == rocm_aiter_gemm_a8w8_blockscale
     else:
         assert block_scale_func == w8a8_block_fp8_matmul
+
+
+@pytest.mark.parametrize("add_residual", [True, False])
+@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
+@pytest.mark.parametrize("use_rocm_aiter_norm", ["0", "1"])
+def test_rms_norm_dispatch(add_residual: bool, use_rocm_aiter: str,
+                           use_rocm_aiter_norm: str, monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_NORM", use_rocm_aiter_norm)
+    rms_norm_func = dispatch_rmsnorm_func(add_residual)
+
+    if not add_residual:
+        assert rms_norm_func == rms_norm
+    elif current_platform.is_rocm() and int(use_rocm_aiter) and int(
+            use_rocm_aiter_norm):
+        assert rms_norm_func == rocm_aiter_rmsnorm2d_fwd_with_add
+    else:
+        assert rms_norm_func == fused_add_rms_norm
+
+
+@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
+@pytest.mark.parametrize("use_rocm_aiter_linear", ["0", "1"])
+def test_unquantized_linear_dispatch(use_rocm_aiter: str,
+                                     use_rocm_aiter_linear: str, monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR", use_rocm_aiter_linear)
+    linear_func = dipsatch_unquantized_linear_func()
+    if current_platform.is_rocm() and int(use_rocm_aiter) and int(
+            use_rocm_aiter_linear):
+        assert linear_func == rocm_aiter_tgemm_mm
+    else:
+        assert linear_func == F.linear
