@@ -131,7 +131,10 @@ class OpenVINOCausalLM(nn.Module):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         fwd_ctx = get_forward_context()
-        flat_kv_caches = [layer.kv_cache for layer in fwd_ctx.attn_layers]
+        flat_kv_caches = [
+            attn_layer.kv_cache[fwd_ctx.virtual_engine]
+            for attn_layer in fwd_ctx.attn_layers
+        ]
         attn_metadata = fwd_ctx.attn_metadata
 
         inputs = [
