@@ -314,6 +314,7 @@ class InputRegistry:
         seq_len: int,
         mm_registry: "MultiModalRegistry",
         is_encoder_data: bool = False,
+        use_v1: bool = False,
     ) -> DummyData:
         """
         Create dummy data for profiling the memory usage of a model.
@@ -334,7 +335,7 @@ class InputRegistry:
             processor = mm_registry.create_processor(model_config, tokenizer)
             profiler = MultiModalProfiler(processor)
             dummy_data = profiler.get_dummy_data(
-                seq_len, is_encoder_data=is_encoder_data)
+                seq_len, is_encoder_data=is_encoder_data, use_v1=use_v1)
         else:
             model_cls, _ = get_model_architecture(model_config)
             if is_encoder_data:
