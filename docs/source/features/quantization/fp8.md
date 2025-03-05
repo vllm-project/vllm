@@ -131,38 +131,6 @@ Here's an example of the resulting scores:
 |     |       |strict-match    |     5|exact_match|↑  |0.768|±  |0.0268|
 ```
 
-## Quantization Tools (Hardware Specific)
-
-Different GPU vendors provide specialized quantization tools that can be used to prepare models for optimal performance with vLLM on their hardware.
-
-:::::{tab-set}
-:sync-group: gpu-vendor
-
-::::{tab-item} NVIDIA CUDA
-:sync: cuda
-
-For NVIDIA GPUs, refer to the quantization methods described above using `llmcompressor` or the deprecated AutoFP8 flow.
-
-::::
-
-::::{tab-item} AMD ROCm
-:sync: rocm
-
-For AMD ROCm platforms, vLLM supports the Quark quantization tool which offers FP8 and other quantization formats.
-
-See the dedicated [Quark documentation](quark.md) for details on how to quantize models using AMD's tooling.
-
-::::
-
-::::{tab-item} Intel XPU
-:sync: xpu
-
-Intel does not currently provide a specific quantization tool like Quark for vLLM. Therefore you can use the general quantization methods described above for Intel XPU devices.
-
-::::
-
-:::::
-
 ## Troubleshooting and Support
 
 If you encounter any issues or have feature requests, please open an issue on the `vllm-project/llm-compressor` GitHub repository.
