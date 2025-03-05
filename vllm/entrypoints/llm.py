@@ -96,10 +96,7 @@ class LLM:
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors.
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
-            This can be used for temporarily storing the states of the requests
-            when their `best_of` sampling parameters are larger than 1. If all
-            requests will have `best_of=1`, you can safely set this to 0.
-            Otherwise, too small values may cause out-of-memory (OOM) errors.
+           Too small values may cause out-of-memory (OOM) errors.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
@@ -243,6 +240,7 @@ class LLM:
         self.engine_class = type(self.llm_engine)
 
         self.request_counter = Counter()
+        self.default_sampling_params: Union[dict[str, Any], None] = None
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
@@ -259,10 +257,11 @@ class LLM:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
     def get_default_sampling_params(self) -> SamplingParams:
-        diff_sampling_param = (
-            self.llm_engine.model_config.get_diff_sampling_param())
-        if diff_sampling_param:
-            return SamplingParams.from_optional(**diff_sampling_param)
+        if self.default_sampling_params is None:
+            self.default_sampling_params = (
+                self.llm_engine.model_config.get_diff_sampling_param())
+        if self.default_sampling_params:
+            return SamplingParams.from_optional(**self.default_sampling_params)
         return SamplingParams()
 
     @overload

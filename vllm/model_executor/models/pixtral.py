@@ -221,7 +221,9 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return get_sampler(use_v1=self.vllm_config.use_v1)
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input, image_tokens = self._parse_and_validate_image_input(
             **kwargs)
         if image_input is None:

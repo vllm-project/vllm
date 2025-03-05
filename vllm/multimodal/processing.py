@@ -1436,6 +1436,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1452,11 +1453,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         mm_items = self._to_mm_items(mm_data)
 
-        # Create MM hashes (only used in V1)
+        # Create MM hashes to be returned (only used in V1)
         # TODO: Use these hash keys for caching operations in apply_hf_processor
         # instead of rehashing.
 
-        if self.use_v1:
+        if return_mm_hashes:
             model_id = self.info.model_id
             mm_hashes = {
                 modality: [
@@ -1555,6 +1556,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalEncDecInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1568,6 +1570,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             encoder_prompt,
             mm_data,
             hf_processor_mm_kwargs,
+            return_mm_hashes,
         )
 
         tokenizer = self.info.get_tokenizer()
