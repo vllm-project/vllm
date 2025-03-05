@@ -18,7 +18,6 @@ def create_dummy_prompt(
     prompt_length: int = -1,
     block_size: Optional[int] = None,
     lora_request: Optional[LoRARequest] = None,
-    best_of: int = 1,
     prompt_tokens: Optional[list[int]] = None,
     min_tokens: int = 0,
     max_tokens: int = 16,
@@ -32,17 +31,19 @@ def create_dummy_prompt(
         prompt_tokens = list(range(prompt_length))
 
     prompt_str = " ".join([str(t) for t in prompt_tokens])
-    prompt = Sequence(int(request_id),
-                      inputs=token_inputs(prompt_tokens, prompt=prompt_str),
-                      block_size=block_size)
-    seq_group = SequenceGroup(request_id=request_id,
-                              seqs=[prompt],
-                              arrival_time=time.time(),
-                              sampling_params=SamplingParams(
-                                  best_of=best_of,
-                                  max_tokens=max_tokens,
-                                  min_tokens=min_tokens),
-                              lora_request=lora_request)
+    prompt = Sequence(
+        int(request_id),
+        inputs=token_inputs(prompt_tokens, prompt=prompt_str),
+        block_size=block_size,
+    )
+    seq_group = SequenceGroup(
+        request_id=request_id,
+        seqs=[prompt],
+        arrival_time=time.time(),
+        sampling_params=SamplingParams(max_tokens=max_tokens,
+                                       min_tokens=min_tokens),
+        lora_request=lora_request,
+    )
 
     return prompt, seq_group
 
@@ -72,7 +73,6 @@ def create_dummy_prompt_encoder_decoder(
     encoder_prompt_length: int,
     block_size: Optional[int] = None,
     lora_request: Optional[LoRARequest] = None,
-    best_of: int = 1,
 ) -> tuple[Sequence, Sequence, SequenceGroup]:
     if not block_size:
         block_size = decoder_prompt_length
@@ -102,7 +102,6 @@ def create_dummy_prompt_encoder_decoder(
 
     seq_group = SequenceGroup(request_id=request_id,
                               seqs=[decoder_prompt],
-                              sampling_params=SamplingParams(best_of=best_of),
                               arrival_time=time.time(),
                               lora_request=lora_request,
                               encoder_seq=encoder_prompt)
