@@ -30,7 +30,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader, default_weight_loader, sharded_weight_loader)
-from vllm.model_executor.models.interfaces import HasInnerState, SupportsLoRA
+from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
+                                                   SupportsV0Only)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.models.utils import maybe_prefix
@@ -680,7 +681,8 @@ class Plamo2Model(PlamoPreTrainedModel):
         return hidden_states
 
 
-class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, SupportsLoRA):
+class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
+                        SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
