@@ -31,7 +31,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common git curl sudo vim less \
+    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 \
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
@@ -60,7 +60,8 @@ RUN cd hipBLAS-common \
 RUN git clone https://github.com/ROCm/hipBLASLt
 RUN cd hipBLASLt \
     && git checkout ${HIPBLASLT_BRANCH} \
-    && ./install.sh -d --architecture ${PYTORCH_ROCM_ARCH} ${LEGACY_HIPBLASLT_OPTION} \
+    && apt-get install -y llvm-dev \
+    && ./install.sh -dc --architecture ${PYTORCH_ROCM_ARCH} ${LEGACY_HIPBLASLT_OPTION} \
     && cd build/release \
     && make package
 RUN mkdir -p /app/install && cp /app/hipBLASLt/build/release/*.deb /app/hipBLAS-common/build/*.deb /app/install
