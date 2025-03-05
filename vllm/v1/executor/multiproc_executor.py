@@ -134,7 +134,6 @@ class MultiprocExecutor(Executor):
                              dequeue_timeout: Optional[float] = None):
                 status, result = w.worker_response_mq.dequeue(
                     timeout=dequeue_timeout)
-                # print(w.rank, id(args), w.worker_response_mq.current_idx)
 
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     if isinstance(result, Exception):
