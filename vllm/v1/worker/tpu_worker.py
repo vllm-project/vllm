@@ -134,7 +134,7 @@ class TPUWorker:
             self.vllm_config.compilation_config.static_forward_context,
             runner_kv_caches)
 
-        self.model_runner.dummy_run(
+        self.model_runner._dummy_run(
             runner_kv_caches,
             num_tokens=self.scheduler_config.max_num_batched_tokens,
         )
