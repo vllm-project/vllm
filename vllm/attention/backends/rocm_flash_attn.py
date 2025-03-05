@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 _PARTITION_SIZE_ROCM = 256
 _GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
 _ON_NAVI = "gfx1" in _GPU_ARCH
-_ON_NAVI3 = "gfx11" in _GPU_ARCH
+_ON_NAVI3_NAVI4 = any(arch in _GPU_ARCH for arch in ["gfx11", "gfx12"])
 _ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
 
@@ -912,7 +912,7 @@ def _use_rocm_custom_paged_attention(
         max_seq_len: int,
         kv_cache_dtype: str,
         alibi_slopes: Optional[torch.Tensor] = None) -> bool:
-    if _ON_NAVI3:
+    if _ON_NAVI3_NAVI4:
         return ((qtype == torch.half or qtype == torch.bfloat16)
                 and head_size == 128 and block_size == 16
                 and (gqa_ratio >= 3 and gqa_ratio <= 16)
