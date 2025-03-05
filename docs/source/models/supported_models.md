@@ -410,7 +410,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `Phi3ForCausalLM`
   * Phi-4, Phi-3
-  * `microsoft/Phi-4`, `microsoft/Phi-3-mini-4k-instruct`, `microsoft/Phi-3-mini-128k-instruct`, `microsoft/Phi-3-medium-128k-instruct`, etc.
+  * `microsoft/Phi-4-mini-instruct`, `microsoft/Phi-4`, `microsoft/Phi-3-mini-4k-instruct`, `microsoft/Phi-3-mini-128k-instruct`, `microsoft/Phi-3-medium-128k-instruct`, etc.
   * ✅︎
   * ✅︎
 - * `Phi3SmallForCausalLM`
@@ -856,6 +856,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `Phi4MMForCausalLM`
+  * Phi-4-multimodal
+  * T + I<sup>+</sup> / T + A<sup>+</sup> / I<sup>+</sup> + A<sup>+</sup>
+  * `microsoft/Phi-4-multimodal-instruct`, etc.
+  * ✅︎
+  *
+  *
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
