@@ -859,7 +859,7 @@ prompt_tokens, prompts_length = _tokenize_prompts_with_image_and_batch(
 )
 ```
 
-To accommodate this, instead of a string you can return an instance of `PromptUpdateDetails`
+To accommodate this, instead of a string you can return an instance of {class}`~vllm.multimodal.processing.PromptUpdateDetails`
 with different `full` and `feature` attributes:
 
 ```python
@@ -948,3 +948,35 @@ to register them to the multi-modal registry:
 +                                         dummy_inputs=YourDummyInputsBuilder)
   class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
 ```
+
+## Notes
+
+### Inserting feature tokens without replacement
+
+Some HF processors directly insert feature tokens without replacing anything in the original prompt. In that case, you can use {class}`~vllm.multimodal.processing.PromptInsertion` instead of {class}`~vllm.multimodal.processing.PromptReplacement` inside {meth}`~vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates`.
+
+Examples:
+
+- BLIP-2 (insert at start of prompt): <gh-file:vllm/model_executor/models/blip2.py>
+- Florence2 (insert at start of prompt): <gh-file:vllm/model_executor/models/florence2.py>
+- Molmo (insert after `<|endoftext|>` token): <gh-file:vllm/model_executor/models/molmo.py>
+
+### Handling prompt updates unrelated to multi-modal data
+
+{meth}`~vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates` assumes that each application of prompt update corresponds to one multi-modal item. If the HF processor performs additional processing regardless of how many multi-modal items there are, you should override {meth}`~vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_tokens_only` so that the processed token inputs are consistent with the result of applying the HF processor on text inputs. This is because token inputs bypass the HF processor according to [our design](#mm-processing).
+
+Examples:
+
+- Chameleon (appends `sep_token`): <gh-file:vllm/model_executor/models/chameleon.py>
+- Fuyu (appends `boa_token`): <gh-file:vllm/model_executor/models/fuyu.py>
+- Molmo (applies chat template which is not defined elsewhere): <gh-file:vllm/model_executor/models/molmo.py>
+
+### Custom HF processor
+
+Some models don't define a HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and pass it to {meth}`~vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor`.
+
+Examples:
+
+- DeepSeek-VL2: <gh-file:vllm/model_executor/models/deepseek_vl2.py>
+- InternVL: <gh-file:vllm/model_executor/models/internvl.py>
+- Qwen-VL: <gh-file:vllm/model_executor/models/qwen_vl.py>
