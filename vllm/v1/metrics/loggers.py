@@ -158,7 +158,8 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation="Total number of tokens evicted from KV cache.",
             labelnames=labelnames).labels(*labelvalues)
 
-        self.counter_request_success: Dict[FinishReason,
+
+        self.counter_request_success: dict[FinishReason,
                                            prometheus_client.Counter] = {}
         counter_request_success_base = prometheus_client.Counter(
             name="vllm:request_success_total",
