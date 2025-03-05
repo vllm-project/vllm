@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-r"""Benchmark online serving throughput with guided decoding.
+r"""Benchmark online serving throughput with structured outputs.
 
 On the server side, run one of the following commands:
     (vLLM OpenAI API server)
@@ -9,12 +9,12 @@ On the server side, run one of the following commands:
     ./launch_tgi_server.sh <your_model> <max_batch_total_tokens>
 
 On the client side, run:
-    python benchmarks/benchmark_serving_guided.py \
+    python benchmarks/benchmark_serving_struct_output.py \
         --backend <backend> \
         --model <your_model> \
         --dataset json \
-        --guided-decoding-ratio 1.0 \
-        --guided-decoding-backend xgrammar \
+        --struct-output-ratio 1.0 \
+        --struct-output-backend xgrammar \
         --request-rate 10 \
         --num-prompts 1000
 
@@ -390,8 +390,8 @@ async def benchmark(
     selected_percentiles: list[str],
     ignore_eos: bool,
     max_concurrency: Optional[int],
-    guided_decoding_ratio: float,
-    guided_decoding_backend: str,
+    struct_output_ratio: float,
+    struct_output_backend: str,
     goodput_config_dict: Optional[dict[str, float]] = None,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
@@ -403,18 +403,18 @@ async def benchmark(
         extra_body = {}
         # Add the schema to the extra_body
         extra_body[request.structure_type] = request.schema
-        # Add the specific guided_decoding_backend
-        extra_body["guided_decoding_backend"] = guided_decoding_backend
+        # Add the specific struct_output_backend
+        extra_body["guided_decoding_backend"] = struct_output_backend
         return extra_body
 
     print("Starting initial single prompt test run...")
-    guided_decoding_req_idx = random.sample(
+    struct_output_req_idx = random.sample(
         range(len(input_requests)),
-        int(len(input_requests) * guided_decoding_ratio))
+        int(len(input_requests) * struct_output_ratio))
 
     test_request = input_requests[0]
     test_req_extra_body = (prepare_extra_body(test_request)
-                           if 0 in guided_decoding_req_idx else None)
+                           if 0 in struct_output_req_idx else None)
     test_input = RequestFuncInput(
         model=model_id,
         prompt=test_request.prompt,
@@ -479,7 +479,7 @@ async def benchmark(
     async for i, request in get_request(input_requests, request_rate,
                                         burstiness):
         extra_body = prepare_extra_body(
-            request) if i in guided_decoding_req_idx else None
+            request) if i in struct_output_req_idx else None
         request_func_input = RequestFuncInput(
             model=model_id,
             prompt=request.prompt,
@@ -722,10 +722,10 @@ def main(args: argparse.Namespace):
     else:
         args.structure_type = 'guided_json'
 
-    if args.no_guided_decoding:
-        args.guided_decoding_ratio = 0
+    if args.no_struct_output:
+        args.struct_output_ratio = 0
     if args.save_results:
-        result_file_name = f'{args.guided_decoding_ratio}guided'
+        result_file_name = f'{args.struct_output_ratio}guided'
         result_file_name += f"_{backend}"
         result_file_name += f"_{args.request_rate}qps"
         result_file_name += f"_{args.model.split('/')[-1]}"
@@ -758,8 +758,8 @@ def main(args: argparse.Namespace):
             ],
             ignore_eos=args.ignore_eos,
             max_concurrency=args.max_concurrency,
-            guided_decoding_ratio=args.guided_decoding_ratio,
-            guided_decoding_backend=args.guided_decoding_backend,
+            struct_output_ratio=args.struct_output_ratio,
+            struct_output_backend=args.struct_output_backend,
             goodput_config_dict=goodput_config_dict,
         ))
 
@@ -957,19 +957,19 @@ if __name__ == "__main__":
         "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
         "and the blog: https://hao-ai-lab.github.io/blogs/distserve")
 
-    parser.add_argument("--no-guided-decoding",
+    parser.add_argument("--no-struct-output",
                         action='store_true',
                         default=False,
                         help="Whether to disable JSON decoding or not.")
-    parser.add_argument("--guided-decoding-ratio",
+    parser.add_argument("--struct-output-ratio",
                         type=float,
                         default=1.0,
-                        help="Ratio of Guided Decoding requests")
-    parser.add_argument("--guided-decoding-backend",
+                        help="Ratio of Structured Outputs requests")
+    parser.add_argument("--struct-output-backend",
                         type=str,
                         choices=["outlines", "lm-format-enforcer", "xgrammar"],
                         default="xgrammar",
-                        help="Backend to use for guided decoding")
+                        help="Backend to use for structured outputs")
 
     args = parser.parse_args()
     main(args)
