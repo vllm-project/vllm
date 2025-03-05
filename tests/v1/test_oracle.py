@@ -121,10 +121,15 @@ def test_v1_llm_by_default(monkeypatch):
         assert hasattr(model.llm_engine, "engine_core")
 
 
-def test_v1_multimodal_by_default(monkeypatch):
+def test_v1_ray_llm_by_default(monkeypatch):
     with monkeypatch.context() as m:
         if os.getenv("VLLM_USE_V1", None):
             m.delenv("VLLM_USE_V1")
         m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
 
-        # ADD test here.
+        model = LLM(MODEL,
+                    enforce_eager=True,
+                    distributed_executor_backend="ray")
+        print(model.generate("Hello my name is"))
+        assert model.llm_engine.vllm_config.use_v1
+        assert hasattr(model.llm_engine, "engine_core")
