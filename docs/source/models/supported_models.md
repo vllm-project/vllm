@@ -434,8 +434,8 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
 - * `Qwen2ForCausalLM`
-  * QwQ, Qwen2
-  * `Qwen/QwQ-32B-Preview`, `Qwen/Qwen2-7B-Instruct`, `Qwen/Qwen2-7B`, etc.
+  * Qwen2
+  * `Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc.
   * ✅︎
   * ✅︎
 - * `Qwen2MoeForCausalLM`
@@ -665,6 +665,13 @@ On the other hand, modalities separated by `/` are mutually exclusive.
 
 - e.g.: `T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
 
+### ColQwen2VL
+
+- **Model Name**: ColQwen2VL
+- **Description**: Implements the ColQwen2 model for efficient document retrieval with vision-language capabilities. This model is compatible with the transformers' ColQwen2 class and is designed to handle complex multimodal tasks involving text and image data.
+- **Supported Modalities**: Text + Image
+- **Example Use Cases**: Document Retrieval (Text-to-Image Retrieval) using embedding outputs.
+
 See [this page](#multimodal-inputs) on how to pass multi-modal inputs to the model.
 
 :::{important}
@@ -692,23 +699,8 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt image=4
 vLLM currently only supports adding LoRA to the language backbone of multimodal models.
 :::
 
-### Generative Models
+### Other Models
 
-See [this page](#generative-models) for more information on how to use generative models.
-
-#### Text Generation (`--task generate`)
-
-:::{list-table}
-:widths: 25 25 15 20 5 5 5
-:header-rows: 1
-
-- * Architecture
-  * Models
-  * Inputs
-  * Example HF Models
-  * [LoRA](#lora-adapter)
-  * [PP](#distributed-serving)
-  * [V1](gh-issue:8779)
 - * `AriaForConditionalGeneration`
   * Aria
   * T + I<sup>+</sup>
@@ -1011,7 +1003,7 @@ _________________
 
 ## Model Support Policy
 
-At vLLM, we are committed to facilitating the integration and support of third-party models within our ecosystem. Our approach is designed to balance the need for robustness and the practical limitations of supporting a wide range of models. Here’s how we manage third-party model support:
+At vLLM, we are committed to facilitating the integration and support of third-party models within our ecosystem. Our approach is designed to balance the need for robustness and the practical limitations of supporting a wide range of models. Here's how we manage third-party model support:
 
 1. **Community-Driven Support**: We encourage community contributions for adding new models. When a user requests support for a new model, we welcome pull requests (PRs) from the community. These contributions are evaluated primarily on the sensibility of the output they generate, rather than strict consistency with existing implementations such as those in transformers. **Call for contribution:** PRs coming directly from model vendors are greatly appreciated!
 
