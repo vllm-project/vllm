@@ -361,16 +361,11 @@ class MLACommonMetadataBuilder(Generic[M]):
     understand this class
     """
 
-    def __init__(
-        self,
-        runner: "GPUModelRunner",
-        metadata_cls: Optional[type[M]] = None,
-        decode_metadata_cls: Optional[type[D]] = None,
-    ):
+    def __init__(self,
+                 runner: "GPUModelRunner",
+                 metadata_cls: Optional[type[M]] = None):
         self.metadata_cls = metadata_cls \
             if metadata_cls is not None else MLACommonMetadata
-        self.decode_metadata_cls = decode_metadata_cls \
-            if decode_metadata_cls is not None else MLACommonDecodeMetadata
         self.runner = runner
         scheduler_config = runner.scheduler_config
         model_config = runner.model_config
@@ -460,6 +455,14 @@ class MLACommonMetadataBuilder(Generic[M]):
         self._num_prefills = num_prefills
         self._num_decode_tokens = num_decode_tokens
         self._num_prefill_tokens = num_prefill_tokens
+
+    def _build_decode(self, input_positions: torch.Tensor,
+                      block_table: torch.Tensor, seq_lens: torch.Tensor):
+        return MLACommonDecodeMetadata(
+            input_positions=input_positions,
+            block_table=block_table,
+            seq_lens=seq_lens,
+        )
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int) -> M:
@@ -552,7 +555,7 @@ class MLACommonMetadataBuilder(Generic[M]):
 
         decode_metadata = None
         if self._num_decodes > 0:
-            decode_metadata = self.decode_metadata_cls(
+            decode_metadata = self._build_decode(
                 input_positions=input_positions[:self._num_decode_tokens],
                 block_table=block_table[:self._num_decodes, ...],
                 seq_lens=seq_lens[:self._num_decodes],

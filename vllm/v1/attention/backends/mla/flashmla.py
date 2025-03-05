@@ -52,26 +52,28 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
     def __init__(self, runner):
-        super().__init__(runner, decode_metadata_cls=FlashMLADecodeMetadata)
+        super().__init__(runner)
 
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
-        m = super().build(num_reqs, num_actual_tokens, max_query_len,
-                          common_prefix_len)
+    def _build_decode(self, input_positions: torch.Tensor,
+                      block_table: torch.Tensor,
+                      seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
+        tile_scheduler_metadata, num_splits = \
+            get_mla_metadata(
+            seq_lens,
+            self.num_q_heads,
+            1, # MQA for the decode path
+        )
 
-        if m.num_decode_tokens is not None and m.num_decode_tokens > 0:
-            assert m.decode is not None
-            m.decode.tile_scheduler_metadata, m.decode.num_splits = \
-                get_mla_metadata(
-                m.decode.seq_lens,
-                self.num_q_heads,
-                1, # MQA for the decode path
-            )
-
-        return m
+        return FlashMLADecodeMetadata(
+            input_positions=input_positions,
+            block_table=block_table,
+            seq_lens=seq_lens,
+            tile_scheduler_metadata=tile_scheduler_metadata,
+            num_splits=num_splits,
+        )
 
 
 class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
