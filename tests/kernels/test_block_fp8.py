@@ -609,8 +609,8 @@ def iota(shape: Tuple[int, ...], dim: int = 0, **kwargs) -> torch.Tensor:
 # topk > 1 does not work
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
-    #itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
-    itertools.product(M_moe_small, N_moe_small, K_moe_small, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
+    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
+    #itertools.product(M_moe_small, N_moe_small, K_moe_small, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
     #itertools.product([512], [128], [256], [2], [1], [[128, 128]], DTYPES, SEEDS))
     #itertools.product([128], [128], [256], [2], [2], [[128, 128]], DTYPES, SEEDS))
 @torch.inference_mode()
@@ -618,8 +618,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed):
 
     # only aligned sizes or supported topk
-    if (M % 128 != 0 or N % 128 != 0 or K % 128 != 0 or topk == 1 or topk > E):
-        pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}, {topk}")
+    if (M % 128 != 0 or N % 128 != 0 or K % 128 != 0):
+        pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
 
     pp(f"\nTEST M={M}, N={N}, K={K}, E/num_groups={E}, topk={topk}, block_size={block_size}, dtype={dtype}")
 
