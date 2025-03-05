@@ -952,25 +952,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
-        if not self.use_spec_decode:
-            sampler_output = self.model.sample(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
-            )
-        else:
-            target_probs = self.model.sampler.compute_probs(
-                logits, sampling_metadata)
+
+        if self.use_spec_decode:
             scheduled_request_ids = scheduler_output.num_scheduled_tokens.keys(
             )
             draft_token_ids = [
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
                 for req_id in scheduled_request_ids
             ]
+            sample_lens = [len(tokens) + 1 for tokens in draft_token_ids]
+            recover_logits_idx = np.cumsum(sample_lens) - 1
+            target_probs = self.model.sampler.compute_probs(
+                logits, sampling_metadata, sample_lens)
+            recover_token_ids = self.model.sample(
+                logits=logits[recover_logits_idx, :],
+                sampling_metadata=sampling_metadata,
+            ).sampled_token_ids
             sampler_output = self.rejection_sampler(
                 draft_token_ids,
                 None,  # draft_probs
+                recover_token_ids,
                 target_probs,
                 sampling_metadata)
+        else:
+            sampler_output = self.model.sample(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -1042,6 +1050,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # Skip speculative decoding.
                 draft_token_ids.append([])
                 continue
+
+            # TODO: skip requests they require top-p, top-k, etc.
 
             # Add sampled_token_ids to token_ids_cpu.
             start_idx = self.input_batch.num_tokens_no_spec[i]
