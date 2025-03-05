@@ -228,12 +228,12 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 
 
 def p(s, t):
-    print(f"{s}: {t.shape}, {t.dtype}")
+    print(f"{s}: {t.shape}, {t.dtype}\n{t}")
     pass
 
 
 def pp(x):
-    #print(x)
+    print(x)
     pass
 
 
@@ -436,35 +436,49 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     M, K = a.shape
     N = w2.shape[-1]
     pre_a = a
-    a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K)
+    # to try: turn into 3d view here, do not flatten until after quantization
+    a = a.view(M, -1, K).repeat(1, topk, 1).reshape(-1, K) # orig
+    p("A'", a)
+    print(a)
 
-    inter_out = torch.empty((a.shape[0], w1[0].shape[0]),
+    if False:
+        scpore = torch.softmax(score, dim=-1, dtype=torch.float32)
+        topk_weight, topk_ids = torch.topk(score, topk)
+        topk_ids, w_sort = topk_ids.sort()
+        topk_weight = torch.gather(topk_weight, dim=1, index=w_sort)
+    else:
+        topk_weight, topk_ids = fused_topk(pre_a, score.float(), topk, False)
+        #del pre_a
+
+    # pre_a.shape[0] * topk_ids.shape[1]
+    inter_out = torch.empty((pre_a.shape[0] * topk, w1[0].shape[0]),
                             dtype=torch.bfloat16,
                             device=a.device)
 
-    if True:
-        score = torch.softmax(score, dim=-1, dtype=torch.float32)
-        topk_weight, topk_ids = torch.topk(score, topk)
-    else:
-        topk_weight, topk_ids = fused_topk(pre_a, score.float(), topk, False)
-        del pre_a
-    topk_weight = topk_weight.view(-1)
-    topk_ids = topk_ids.view(-1)
-
     block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
-    pp(f"BLOCK_M {block_m}")
-    p("A", a)
+    pp(f"M {M}, BLOCK_M {block_m}")
+    #p("A", a)
 
     _, block_k = block_shape[0], block_shape[1]
     a_q, a_s = per_token_group_quant_fp8(a, block_m)
+    #a_q, a_s = per_token_cast_to_fp8(a)
+
+    #a_q = a_q.view(a_q.shape[0], -1, a_q.shape[1]).repeat(topk, 1, 1).reshape(-1, a_q.shape[1])
+    #a_s = a_s.view(a_s.shape[0], -1, a_s.shape[1]).repeat(topk, 1, 1).reshape(-1, a_s.shape[1])
 
     #assert w1_s.shape == (num_groups, (2 * N + 127) // 128, (K + 127) // 128)
     #print(f"FIRST GEMM {a_q.shape}")
 
-    if False:
-        m_indices = torch.arange(0, M * topk, dtype=torch.int)
-        #m_indices = m_indices.unsqueeze(-1).expand(M, topk).contiguous().view(-1)
-        m_indices = m_indices.unsqueeze(-1).contiguous().view(-1)
+    if True:
+        m_indices = torch.arange(0, topk, dtype=torch.int)
+        m_indices = m_indices.unsqueeze(-1).expand(topk, M).contiguous().view(-1)
+        #m_indices = m_indices.unsqueeze(-1).contiguous().view(-1)
+    elif True:
+        sorted_token_ids, _, _ = moe_align_block_size(topk_ids, 1, num_groups, None)
+        #assert sorted_token_ids[sorted_token_ids >= topk*M].sum() == 0
+        m_indices = sorted_token_ids
+        p("SORTED", m_indices)
+        print(m_indices)
     else:
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             moe_align_block_size(topk_ids, 1, M, None))
@@ -485,6 +499,9 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
         #pp(f"num_tokens_post_padded = {num_tokens_post_padded}")
         #p("expert ids", expert_ids)
 
+    # must happen after align block size
+    #topk_weight = topk_weight.view(-1)
+
     p("m_indices", m_indices)
     #print(f"m_indices {m_indices.shape} {sorted_token_ids.shape}")
     #pp(m_indices)
@@ -494,6 +511,12 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     #pp(topk_weight)
 
     pp("FIRST GEMM")
+    pp(f"E = {num_groups}")
+    p("A", a_q)
+    p("A_s", a_s)
+    p("B", w1)
+    p("B_s", w1_s)
+    p("m_indices", m_indices)
 
     if True:
         deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
@@ -503,21 +526,27 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
         deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked((a_q, a_s), (w1, w1_s),
                                                         inter_out, topk_ids, M)
 
+    p("out", inter_out)
     pp("FIRST GEMM DONE")
 
-    pp(f"DG {inter_out.shape} {inter_out}")
+    #pp(f"DG {inter_out.shape} {inter_out}")
 
     act_out = SiluAndMul().forward_native(inter_out)
     act_out_q, act_out_s = per_token_group_quant_fp8(act_out, block_k)
-
-    p("act_out", act_out)
-
-    pp("SECOND GEMM")
 
     out = torch.empty(act_out.shape[0],
                       w2.shape[1],
                       dtype=torch.bfloat16,
                       device=a.device)
+
+    pp("SECOND GEMM")
+    pp(f"E = {num_groups}")
+    p("A", act_out)
+    p("A_s", act_out_s)
+    p("B", w2)
+    p("B_s", w2_s)
+    p("topk_weights", topk_weight)
+    p("m_indices", m_indices)
 
     if True:
         deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
@@ -526,6 +555,7 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
         deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(
             (act_out_q, act_out_s), (w2, w2_s), out, topk_ids, M)
 
+    p("out", out)
     pp("SECOND GEMM DONE")
 
     return (out.view(M, -1, w2.shape[1]) *
@@ -550,9 +580,9 @@ def iota(shape: Tuple[int, ...], dim: int = 0, **kwargs) -> torch.Tensor:
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
     #itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
-    itertools.product(M_moe_small, N_moe_small, K_moe_small, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
+    #itertools.product(M_moe_small, N_moe_small, K_moe_small, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
     #itertools.product([512], [128], [256], [2], [1], [[128, 128]], DTYPES, SEEDS))
-    #itertools.product([1], [128], [256], [3], [3], [[128, 128]], DTYPES, SEEDS))
+    itertools.product([128], [128], [256], [2], [2], [[128, 128]], DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed):
