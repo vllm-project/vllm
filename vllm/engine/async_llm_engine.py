@@ -639,7 +639,7 @@ class AsyncLLMEngine(EngineClient):
         disable_log_requests: bool = False,
         disable_log_stats: bool = False,
     ) -> "AsyncLLMEngine":
-        """Create an AsyncLLMEngine from the EngineArs."""
+        """Create an AsyncLLMEngine from the EngineArgs."""
 
         return cls(
             vllm_config=vllm_config,
