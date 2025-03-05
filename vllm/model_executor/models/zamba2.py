@@ -10,17 +10,17 @@ from itertools import cycle
 from typing import Dict, Iterable, Optional, Set, Tuple, Union
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import Zamba2Config
 
 from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (divide, get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_gather)
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -276,22 +276,22 @@ class Zamba2MLP(nn.Module):
         self.num_fwd_mem_blocks = len(layer2block_map)
 
         # Main projection layers with gating
-        self.gate_up_proj = ColumnParallelLinear(
+        self.gate_up_proj = MergedColumnParallelLinear(
             self.hidden_size,
-            2 * self.intermediate_size,  # 2x for gate and input projections
+            2 * [self.intermediate_size],  # 2x for gate and input projections
             bias=self.config.add_bias_linear,
             quant_config=quant_config)
 
-        self.down_proj = ReplicatedLinear(self.intermediate_size,
-                                          self.hidden_size,
-                                          bias=self.config.add_bias_linear,
-                                          quant_config=quant_config)
+        self.down_proj = RowParallelLinear(self.intermediate_size,
+                                           self.hidden_size,
+                                           bias=self.config.add_bias_linear,
+                                           quant_config=quant_config)
 
         # Only allow GELU activations
         if config.hidden_act != "gelu":
-            raise ValueError(f"Only gelu activation is supported "
+            raise ValueError(f"Only GELU activation is supported "
                              f"(got `hidden_act`: {config.hidden_act})")
-        self.act_fn = F.gelu
+        self.act_fn = GeluAndMul()
 
         # Initialize adapter layers if enabled
         self.gate_up_proj_adapter_list = nn.ModuleList([])
@@ -303,10 +303,10 @@ class Zamba2MLP(nn.Module):
                                          bias=False,
                                          quant_config=quant_config,
                                          gather_output=True),
-                    ColumnParallelLinear(config.adapter_rank,
-                                         2 * self.intermediate_size,
-                                         bias=False,
-                                         quant_config=quant_config),
+                    MergedColumnParallelLinear(config.adapter_rank,
+                                               2 * [self.intermediate_size],
+                                               bias=False,
+                                               quant_config=quant_config),
                 ])
             else:
                 gate_up_proj_adapter = nn.Identity()
@@ -335,14 +335,9 @@ class Zamba2MLP(nn.Module):
         lora_output = adapter[0](hidden_states)[0]
         lora_output = adapter[1](lora_output)[0]
         gate_up_states = gate_up_states + lora_output
-        if self.tp_size > 1:
-            gate_up_states = tensor_model_parallel_all_gather(gate_up_states)
-
-        # Split into gate and input projections
-        gate_up_states = torch.chunk(gate_up_states, 2, dim=-1)
 
         # Apply GELU activation with gating
-        hidden_states = self.act_fn(gate_up_states[0]) * gate_up_states[1]
+        hidden_states = self.act_fn(gate_up_states)
 
         # Project back to hidden size
         output, _ = self.down_proj(hidden_states)
