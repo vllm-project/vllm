@@ -370,30 +370,38 @@ class MLACommonMetadata(Generic[D]):
                             FlashInferPrefillMetadata,
                             CudnnPrefillMetadata]] = None
 
-    # New for MLA (compared to FlashAttention)
-    # For handling prefill decode split
-    prefill_query_start_loc: Optional[torch.Tensor] = None
-    prefill_max_query_len: Optional[int] = None
-    prefill_block_table: Optional[torch.Tensor] = None
-    decode_seq_lens: Optional[torch.Tensor] = None
-    decode_block_table: Optional[torch.Tensor] = None
+        @dataclass
+        class ChunkedContextMetadata:
+            # New for MLA (compared to FlashAttention)
+            # For handling chunked prefill
+            cu_seq_lens: torch.Tensor
+            starts: torch.Tensor
+            seq_tot: list[int]
+            max_seq_lens: list[int]
+            workspace: torch.Tensor
+
+        # Input positions for rotrary embeddings since for MLA the rotary
+        # position embeddings are applied inside the attention backend
+        input_positions: torch.Tensor
+        block_table: torch.Tensor
+        query_start_loc: torch.Tensor
+        max_query_len: int
+        chunked_context: Optional[ChunkedContextMetadata] = None
+
+    @dataclass
+    class DecodeMetadata:
+        # Input positions for rotrary embeddings since for MLA the rotary
+        # position embeddings are applied inside the attention backend
+        input_positions: torch.Tensor
+        block_table: torch.Tensor
+        seq_lens: torch.Tensor
+
+    decode: Optional[DecodeMetadata] = None
+    prefill: Optional[PrefillMetadata] = None
 
     def __post_init__(self):
         if self.head_dim is not None:
             MLACommonBackend.validate_head_size(self.head_dim)
-
-        # Pre-compute prefill/decode tensor slices and other stats
-        if self.num_prefills is not None and self.num_prefills > 0:
-            assert self.num_decodes is not None
-            start = self.num_decodes  # prefill_start
-            self.prefill_query_start_loc = \
-                self.query_start_loc[start:] - self.query_start_loc[start]
-            self.prefill_max_query_len = self.seq_lens[start:].max().item()
-            self.prefill_block_table = self.block_table[start:, ...]
-
-        if self.num_decodes is not None and self.num_decodes > 0:
-            self.decode_seq_lens = self.seq_lens[:self.num_decodes]
-            self.decode_block_table = self.block_table[:self.num_decodes, ...]
 
 
 M = TypeVar("M", bound=MLACommonMetadata)
