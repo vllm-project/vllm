@@ -36,7 +36,6 @@ class RequestState:
         prompt_token_ids: list[int],
         logprobs_processor: LogprobsProcessor,
         detokenizer: IncrementalDetokenizer,
-        detokenize: bool,
         max_tokens_param: Optional[int],
         arrival_time: float,
         queue: Optional[asyncio.Queue[RequestOutput]],
@@ -52,7 +51,6 @@ class RequestState:
         self.prompt_len = len(prompt_token_ids)
         self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
-        self.detokenize = detokenize
         self.max_tokens_param = max_tokens_param
         self.is_prefilling = True
         self.queue = queue
@@ -70,6 +68,8 @@ class RequestState:
         queue: Optional[asyncio.Queue[RequestOutput]],
         log_stats: bool,
     ) -> "RequestState":
+        if not request.sampling_params.detokenize:
+            tokenizer = None
         return cls(
             request_id=request.request_id,
             parent_req=parent_req,
@@ -87,7 +87,6 @@ class RequestState:
                 tokenizer=tokenizer,
                 request=request,
             ),
-            detokenize=request.sampling_params.detokenize,
             max_tokens_param=(request.sampling_params.max_tokens if
                               request.sampling_params is not None else None),
             arrival_time=request.arrival_time,
@@ -159,8 +158,7 @@ class RequestState:
         delta = self.output_kind == RequestOutputKind.DELTA
 
         # Prepare text and token_ids, based on delta mode
-        text = self.detokenizer.get_next_output_text(
-            finished, delta) if self.detokenize else ""
+        text = self.detokenizer.get_next_output_text(finished, delta)
         if not delta:
             token_ids = self.detokenizer.output_token_ids
 
@@ -294,11 +292,10 @@ class OutputProcessor:
 
             # 2) Detokenize the token ids into text and check for stop
             #    strings.
-            if req_state.detokenize:
-                stop_string = req_state.detokenizer.update(new_token_ids)
-                if stop_string and finish_reason != FinishReason.STOP:
-                    finish_reason = FinishReason.STOP
-                    stop_reason = stop_string
+            stop_string = req_state.detokenizer.update(new_token_ids)
+            if stop_string and finish_reason != FinishReason.STOP:
+                finish_reason = FinishReason.STOP
+                stop_reason = stop_string
 
             # 3) Compute sample and prompt logprobs for request,
             #    if required.
