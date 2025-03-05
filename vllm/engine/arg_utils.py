@@ -1181,7 +1181,7 @@ class EngineArgs:
             else:
                 logger.info(
                     "===================================================\n\n"
-                    "Detected EngineConfig is compatible with VLLM V1"
+                    "Detected EngineConfig is compatible with VLLM V1. "
                     "Set VLLM_USE_V1=1 before launch to enable V1.\n\n"
                     "===================================================")
 
