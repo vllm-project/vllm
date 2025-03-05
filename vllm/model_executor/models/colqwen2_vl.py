@@ -88,8 +88,10 @@ class ColQwen2VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             PromptReplacement(
                 modality=modality,
                 target=[placeholder[modality]],
-                replacement=partial(get_replacement_colqwen2vl,
-                                    modality=modality),
+                replacement=partial(
+                    get_replacement_colqwen2vl,
+                    modality=modality,
+                ),
             ) for modality in ("image", "video")
         ]
 
