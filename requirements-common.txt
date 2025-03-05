@@ -1,7 +1,6 @@
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
 numpy < 2.0.0
-numba == 0.60.0 # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding.
 requests >= 2.26.0
 tqdm
 blake3
@@ -38,3 +37,4 @@ depyf==0.18.0 # required for profiling and debugging with compilation config
 cloudpickle # allows pickling lambda functions in model_executor/models/registry.py
 watchfiles # required for http server to monitor the updates of TLS files
 python-json-logger # Used by logging as per examples/other/logging_configuration.md
+scipy # Required for phi-4-multimodal-instruct
