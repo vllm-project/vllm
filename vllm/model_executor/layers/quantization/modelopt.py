@@ -360,7 +360,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # contracting dimension is input dimension
         # block_size = 16
         # w_indim  = input_size_per_partition // self.quant_config.group_size
-        scale_n, scale_k = layer.weight_scale.shape
         assert (layer.weight_scale.shape[1] %
                 16 == 0), "Expected weight_scale.dim(1) to be divisible by 16"
 
