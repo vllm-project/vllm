@@ -300,7 +300,7 @@ void get_grouped_mm_data_caller(
   torch::Tensor atomic_buffer = torch::zeros(num_experts, options_int32);
 
   // TODO this is an alternative way to block kernels
-  constexpr bool multi_expert_blocks = false;
+  constexpr bool multi_expert_blocks = true;
   if constexpr (multi_expert_blocks) {
     int num_blocks = (num_experts + 3) / 4;
     int num_threads = THREADS_PER_EXPERT_2 * 4;
