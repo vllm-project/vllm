@@ -1433,7 +1433,7 @@ class EngineArgs:
         from vllm.platforms import current_platform
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability().major < 8):
-            _raise_or_warning(feature_name="Compute Capacity < 8.0",
+            _raise_or_warning(feature_name="Compute Capability < 8.0",
                               recommend_to_remove=False)
             return False
 
