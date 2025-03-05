@@ -49,7 +49,7 @@ class LinearType(str, enum.Enum):
     Fp8Retain = "fp8-retain"
 
 
-# Just for type hinting and PlamoPreTrainedModel.config_class.
+# Only used for type hinting and PlamoPreTrainedModel.config_class.
 class PlamoConfig(PretrainedConfig):  # type: ignore
     model_type: str = "plamo"
 
@@ -798,15 +798,15 @@ class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
 
-            # Alignment team workaround: somehow when tie_word_embeddings=True,
-            # `lm_head.weight` may be in the safetensor, which causing dict key
-            # access error.
+            # Both tie_word_embeddings=True and lm_head.weight in the safetensor
+            # at the same time causes dict key access error.
             if name == "lm_head.weight" and self.config.tie_word_embeddings:
                 assert "lm_head.weight" not in params_dict
                 continue
 
             # Update the weight names to be compatible with the vllm version
-            # of the model. Do not change the order of the replacements.
+            # of the model.
+            # Do not change the order of the replacements.
             replacements = {
                 # Skip PlamoDecoderLayers.
                 ".layers.layers": ".layers",
