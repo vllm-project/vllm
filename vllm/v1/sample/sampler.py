@@ -9,7 +9,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.penalties import (apply_all_penalties,
                                           apply_min_token_penalties)
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
-from vllm.v1.sample.rejection_sampler import RejectionSampler
 
 _SAMPLING_EPS = 1e-5
 
@@ -19,22 +18,12 @@ class Sampler(nn.Module):
     def __init__(self):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
-        self.rejection_sampler = RejectionSampler()
 
     def forward(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        if sampling_metadata.spec_token_ids:
-            if sampling_metadata.max_num_logprobs:
-                raise NotImplementedError(
-                    "Rejection sampling does not support logprobs.")
-            return self.rejection_sampler(
-                logits,
-                sampling_metadata,
-            )
-
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
         # This is different from the V0 sampler, which uses the logits that
@@ -126,6 +115,14 @@ class Sampler(nn.Module):
             out=greedy_sampled,  # Reuse tensor
         )
         return sampled
+
+    def compute_probs(self, logits: torch.Tensor,
+                      sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        if sampling_metadata.all_greedy:
+            return logits
+        # Apply temperature. This is an in-place op changing logits.
+        logits = self.apply_temperature(logits, sampling_metadata.temperature)
+        return logits.softmax(dim=-1, dtype=torch.float32)
 
     def compute_logprobs(self, logits: torch.Tensor) -> torch.Tensor:
         return logits.log_softmax(dim=-1, dtype=torch.float32)

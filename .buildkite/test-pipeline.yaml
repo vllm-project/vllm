@@ -275,7 +275,7 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - tests/lora
-  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_minicpmv_tp.py
+  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_minicpmv_tp.py  --ignore=lora/test_transfomers_model.py
   parallelism: 4
 
 - label: PyTorch Fullgraph Smoke Test # 9min
@@ -589,6 +589,7 @@ steps:
     - pytest -v -s -x lora/test_chatglm3_tp.py
     - pytest -v -s -x lora/test_llama_tp.py
     - pytest -v -s -x lora/test_minicpmv_tp.py
+    - pytest -v -s -x lora/test_transfomers_model.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min

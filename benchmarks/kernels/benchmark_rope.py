@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from itertools import accumulate
-from typing import List, Optional
+from typing import Optional
 
 import nvtx
 import torch
@@ -39,7 +39,7 @@ def benchmark_rope_kernels_multi_lora(
                             })
     # non-batched RoPE takes only one scaling factor, we create multiple
     # instances to simulate the same behavior
-    non_batched_ropes: List[RotaryEmbedding] = []
+    non_batched_ropes: list[RotaryEmbedding] = []
     for scaling_factor in scaling_factors:
         non_batched_ropes.append(
             get_rope(head_size, rotary_dim, max_position, base, is_neox_style,
