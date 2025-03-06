@@ -6,6 +6,7 @@ the correct prompt format on vision language models for text generation.
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
+import os
 import random
 
 from huggingface_hub import snapshot_download
@@ -525,15 +526,13 @@ def run_phi3v(questions: list[str], modality: str):
 def run_phi4mm(questions: list[str], modality: str):
     """
     Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
-    only show how to process image inputs, as the processing logic for audio
-    inputs follows a similar method.
+    show how to process image inputs.
     """
-
     assert modality == "image"
+    model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
     # Since the vision-lora and speech-lora co-exist with the base model,
     # we have to manually specify the path of the lora weights.
-    model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
-    vision_lora_path = model_path + "/vision-lora"
+    vision_lora_path = os.path.join(model_path, "vision-lora")
     prompts = [
         f"<|user|><|image_1|>{question}<|end|><|assistant|>"
         for question in questions
