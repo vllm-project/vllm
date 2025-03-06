@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import concurrent
@@ -24,6 +26,7 @@ import tempfile
 import threading
 import time
 import traceback
+import types
 import uuid
 import warnings
 import weakref
@@ -983,7 +986,7 @@ def current_stream() -> torch.cuda.Stream:
     return _current_stream
 
 
-def enable_trace_function_call_for_thread(vllm_config: "VllmConfig") -> None:
+def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
     """Set up function tracing for the current thread,
     if enabled via the VLLM_TRACE_FUNCTION environment variable
     """
@@ -1978,7 +1981,7 @@ class MemorySnapshot:
         self.non_torch_memory = self.cuda_memory - self.torch_memory
         self.timestamp = time.time()
 
-    def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
+    def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
             cuda_memory=self.cuda_memory - other.cuda_memory,
@@ -2309,22 +2312,52 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
     return cls
 
 
-def lazy_import(module_name: str) -> Any:
+class LazyLoader(types.ModuleType):
     """
-    Lazy import a module.
+    LazyLoader module borrowed from Tensorflow
+    https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
+    with a addition of "module caching".
 
-    Args:
-        module_name: The name of the module to import.
-
-    Returns:
-        A function used to get the lazily imported module
+    Lazily import a module, mainly to avoid pulling in large dependencies.
+    Modules such as `xgrammar` might do additional side effects, so we
+    only want to use this when it is needed, delaying all eager effects
     """
-    module = None
 
-    def _lazy_import():
-        nonlocal module
-        if module is None:
-            module = importlib.import_module(module_name)
+    def __init__(
+        self,
+        local_name: str,
+        parent_module_globals: dict[str, Any],
+        name: str,
+    ):
+        self._local_name = local_name
+        self._parent_module_globals = parent_module_globals
+        self._module: types.ModuleType | None = None
+
+        super().__init__(str(name))
+
+    def _load(self) -> types.ModuleType:
+        # Import the target module and insert it into the parent's namespace
+        try:
+            module = importlib.import_module(self.__name__)
+            self._parent_module_globals[self._local_name] = module
+            # The additional add to sys.modules
+            # ensures library is actually loaded.
+            sys.modules[self._local_name] = module
+        except ModuleNotFoundError as err:
+            raise self._exc(f"{self._exc_msg} (reason: {err})") from None
+
+        # Update this object's dict so that if someone keeps a
+        # reference to the LazyLoader, lookups are efficient
+        # (__getattr__ is only called on lookups that fail).
+        self.__dict__.update(module.__dict__)
         return module
 
-    return _lazy_import
+    def __getattr__(self, item: Any) -> Any:
+        if self._module is None:
+            self._module = self._load()
+        return getattr(self._module, item)
+
+    def __dir__(self) -> list[str]:
+        if self._module is None:
+            self._module = self._load()
+        return dir(self._module)

@@ -25,8 +25,8 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, cdiv, is_pin_memory_available,
-                        lazy_import)
+                        LayerBlockType, LazyLoader, cdiv,
+                        is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
@@ -41,11 +41,13 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 if TYPE_CHECKING:
+    import xgrammar as xgr
+
     from vllm.v1.core.scheduler_output import SchedulerOutput
+else:
+    xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
-
-xgr = lazy_import("xgrammar")
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -904,7 +906,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         grammar_bitmask = torch.from_numpy(grammar_bitmask)
 
         # TODO: compatibility with spec decode
-        xgr().apply_token_bitmask_inplace(
+        xgr.apply_token_bitmask_inplace(
             logits,
             grammar_bitmask.to(self.device, non_blocking=True),
             indices=list(struct_out_req_batch_indices.values()),

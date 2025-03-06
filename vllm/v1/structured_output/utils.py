@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.sampling_params import SamplingParams
-from vllm.utils import lazy_import
+from vllm.utils import LazyLoader
 
-xgr = lazy_import("xgrammar")
+if TYPE_CHECKING:
+    import xgrammar as xgr
+else:
+    xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 
 def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
@@ -253,7 +256,7 @@ def validate_structured_output_request(
     if gd_params.choice:
         choice_grammar = choice_as_grammar(gd_params.choice)
         try:
-            xgr().Grammar.from_ebnf(choice_grammar)
+            xgr.Grammar.from_ebnf(choice_grammar)
         except Exception as err:
             raise ValueError("Failed to transform choices into a grammar: "
                              "{err}") from err
@@ -287,6 +290,6 @@ def validate_structured_output_request(
         # Test parsing EBNF grammar, possibly already converted from Lark
         try:
             # parse the grammar, but we aren't compiling it.
-            xgr().Grammar.from_ebnf(gd_params.grammar)
+            xgr.Grammar.from_ebnf(gd_params.grammar)
         except Exception as e:
             raise ValueError("Invalid grammar specification.") from e

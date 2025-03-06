@@ -8,14 +8,14 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils import lazy_import
+from vllm.utils import LazyLoader
 
 if TYPE_CHECKING:
-    import xgrammar
+    import xgrammar as xgr
+else:
+    xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
-
-xgr = lazy_import("xgrammar")
 
 
 class StructuredOutputOptions(enum.Enum):
@@ -40,8 +40,8 @@ class Grammar:
     # for jump-forward decoding
 
     vocab_size: int
-    matcher: xgrammar.GrammarMatcher = field(hash=False)
-    ctx: xgrammar.CompiledGrammar = field(hash=False)
+    matcher: xgr.GrammarMatcher = field(hash=False)
+    ctx: xgr.CompiledGrammar = field(hash=False)
     num_processed_tokens: int = field(default_factory=lambda: 0,
                                       repr=False,
                                       hash=False,
@@ -70,6 +70,8 @@ class Grammar:
         self.matcher.reset()
 
     def __copy__(self):
-        return Grammar(matcher=xgr().GrammarMatcher(self.ctx),
-                       vocab_size=self.vocab_size,
-                       ctx=self.ctx)
+        return Grammar(
+            matcher=xgr.GrammarMatcher(self.ctx),
+            vocab_size=self.vocab_size,
+            ctx=self.ctx,
+        )
