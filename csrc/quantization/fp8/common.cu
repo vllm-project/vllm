@@ -79,8 +79,8 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
         token_output, token_input, token_scale, hidden_size, tid, blockDim.x);
   } else {
     for (int i = tid; i < hidden_size; i += blockDim.x) {
-      scaled_fp8_conversion<false, fp8_type>(
-          token_output[i], static_cast<float>(token_input[i]), token_scale);
+      token_output[i] = scaled_fp8_conversion<false, fp8_type>(
+          static_cast<float>(token_input[i]), token_scale);
     }
   }
 }

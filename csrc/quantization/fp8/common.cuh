@@ -63,9 +63,8 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
 }
 
 template <bool is_scale_inverted, typename fp8_type>
-__device__ __forceinline__ void scaled_fp8_conversion(fp8_type& ret,
-                                                      float const val,
-                                                      float const scale) {
+__device__ __forceinline__ fp8_type scaled_fp8_conversion(float const val,
+                                                          float const scale) {
   float x = 0.0f;
   if constexpr (is_scale_inverted) {
     x = val * scale;
@@ -76,21 +75,10 @@ __device__ __forceinline__ void scaled_fp8_conversion(fp8_type& ret,
   float r = fmax(-fp8_e4m3_adjusted_max_v<fp8_type>,
                  fmin(x, fp8_e4m3_adjusted_max_v<fp8_type>));
 #ifndef USE_ROCM
-  ret = static_cast<fp8_type>(r);
+  return static_cast<fp8_type>(r);
 #else
   // Use hardware cvt instruction for fp8 on rocm
-  if constexpr (std::is_same_v<fp8_type, c10::Float8_e4m3fn>) {
-    ret =
-        fp8_type(__hip_cvt_float_to_fp8(r, __hip_fp8_e4m3::__default_saturation,
-                                        __hip_fp8_e4m3::__default_interpret),
-                 fp8_type::from_bits());
-  }
-  if constexpr (std::is_same_v<fp8_type, c10::Float8_e4m3fnuz>) {
-    ret = fp8_type(
-        __hip_cvt_float_to_fp8(r, __hip_fp8_e4m3_fnuz::__default_saturation,
-                               __hip_fp8_e4m3_fnuz::__default_interpret),
-        fp8_type::from_bits());
-  }
+  return fp8::cvt_c10<fp8_type>(r);
 #endif
 }
 
@@ -181,21 +169,21 @@ __device__ void scaled_fp8_conversion_vec(fp8_type* __restrict__ out,
     vec4_t<scalar_t> in_vec = vectorized_in[i];
     float8x4_t out_vec;
 
-    scaled_fp8_conversion<is_scale_inverted, fp8_type>(
-        out_vec.x, static_cast<float>(in_vec.x), scale);
-    scaled_fp8_conversion<is_scale_inverted, fp8_type>(
-        out_vec.y, static_cast<float>(in_vec.y), scale);
-    scaled_fp8_conversion<is_scale_inverted, fp8_type>(
-        out_vec.z, static_cast<float>(in_vec.z), scale);
-    scaled_fp8_conversion<is_scale_inverted, fp8_type>(
-        out_vec.w, static_cast<float>(in_vec.w), scale);
+    out_vec.x = scaled_fp8_conversion<is_scale_inverted, fp8_type>(
+        static_cast<float>(in_vec.x), scale);
+    out_vec.y = scaled_fp8_conversion<is_scale_inverted, fp8_type>(
+        static_cast<float>(in_vec.y), scale);
+    out_vec.z = scaled_fp8_conversion<is_scale_inverted, fp8_type>(
+        static_cast<float>(in_vec.z), scale);
+    out_vec.w = scaled_fp8_conversion<is_scale_inverted, fp8_type>(
+        static_cast<float>(in_vec.w), scale);
     vectorized_out[i] = out_vec;
   }
 
   // Handle the remaining elements if num_elems is not divisible by 4
   for (int64_t i = num_vec_elems * 4 + tid; i < num_elems; i += step) {
-    scaled_fp8_conversion<is_scale_inverted, fp8_type>(
-        out[i], static_cast<float>(input[i]), scale);
+    out[i] = scaled_fp8_conversion<is_scale_inverted, fp8_type>(
+        static_cast<float>(input[i]), scale);
   }
 }
 

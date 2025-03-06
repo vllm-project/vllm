@@ -51,8 +51,8 @@ __global__ void rms_norm_static_fp8_quant_kernel(
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)input[blockIdx.x * hidden_size + idx];
     float const out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
-    scaled_fp8_conversion<true, fp8_type>(out[blockIdx.x * hidden_size + idx],
-                                          out_norm, scale_inv);
+    out[blockIdx.x * hidden_size + idx] =
+        scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
   }
 }
 
@@ -113,8 +113,8 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     temp *= weight_v[idx];
 #pragma unroll
     for (int i = 0; i < width; ++i) {
-      scaled_fp8_conversion<true, fp8_type>(out[id * width + i],
-                                            float(temp.data[i]), scale_inv);
+      out[id * width + i] =
+          scaled_fp8_conversion<true, fp8_type>(float(temp.data[i]), scale_inv);
     }
   }
 }
@@ -157,8 +157,8 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)residual[blockIdx.x * hidden_size + idx];
     float const out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
-    scaled_fp8_conversion<true, fp8_type>(out[blockIdx.x * hidden_size + idx],
-                                          out_norm, scale_inv);
+    out[blockIdx.x * hidden_size + idx] =
+        scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
   }
 }
 
