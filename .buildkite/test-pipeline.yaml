@@ -200,7 +200,6 @@ steps:
     - tests/v1
   commands:
     # split the test to avoid interference
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - VLLM_USE_V1=1 pytest -v -s v1/core
     - VLLM_USE_V1=1 pytest -v -s v1/engine
     - VLLM_USE_V1=1 pytest -v -s v1/sample
