@@ -1470,6 +1470,7 @@ class LLMEngine:
                 self.do_tracing(scheduler_outputs)
         else:
             # Multi-step case
+            self.seq_id_to_seq_group.clear()
             return ctx.request_outputs
 
         if not self.has_unfinished_requests():
@@ -1486,6 +1487,7 @@ class LLMEngine:
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
 
+        self.seq_id_to_seq_group.clear()
         return ctx.request_outputs
 
     def _abort_and_cache_schedule(
