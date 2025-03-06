@@ -745,14 +745,18 @@ class TPUModelRunner:
         sampling_metadata = cast(SamplingMetadata, tpu_sampling_metadata)
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
-            selected_token_ids = self.model(
-                token_ids=input_ids,
-                position_ids=self.position_ids,
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=self.position_ids,
                 kv_caches=self.kv_caches,
                 inputs_embeds=inputs_embeds,
-                sampling_metadata=sampling_metadata)
+            )
+        xm.mark_step()  # break model graph
+        selected_token_ids = self.model.sample_from_hidden(
+            hidden_states, sampling_metadata)
 
-        # Then, let's update the cache state.
+        # Update the cache state concurrently. Code above will not block until
+        # we use `selected_token_ids`. Add mark_step if post-processing changes
         request_seq_lens: list[tuple[int, CachedRequestState, int]] = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
@@ -843,10 +847,7 @@ class TPUModelRunner:
                                    dynamic=False)
 
     @torch.no_grad()
-    def _dummy_run(self,
-                   kv_caches,
-                   num_tokens: int,
-                   num_tokens_to_sample: Optional[int] = None) -> None:
+    def _dummy_run(self, kv_caches, num_tokens: int) -> None:
         if self.is_multimodal_model:
             input_ids = None
             inputs_embeds = torch.zeros((num_tokens, self.hidden_size),
@@ -894,39 +895,11 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-        # To allow sampling, trace the forward with all supported sampling args.
-        if num_tokens_to_sample is None:
-            # Assume to sample the maximum amount of tokens (decode-only batch).
-            num_tokens_to_sample = self.max_num_reqs
-        sampling_meta = TPUSupportedSamplingMetadata.\
-            get_default_sampling_params(num_tokens_to_sample, self.device)
         with set_forward_context(attn_metadata, self.vllm_config, 0):
-            assert self.model is not None
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=position_ids,
-                kv_caches=kv_caches,
-                inputs_embeds=inputs_embeds,
-            )
-            num_reqs = _get_padded_num_reqs_with_upper_limit(
-                64, self.max_num_reqs)
-            # NOTE(chengjiyao): In total, the compute_logits function utilizes a
-            # compilation cache size of token_bucket_num multiplied by
-            # req_bucket_num. This is acceptable, given the graph's relatively
-            # small size.
-            while True:
-                logits_indices = torch.zeros(
-                    num_reqs,
-                    dtype=torch.int32,
-                    device=self.device,
-                )
-                torch._dynamo.mark_dynamic(hidden_states, 0)
-                torch._dynamo.mark_dynamic(logits_indices, 0)
-                self.model.compute_logits(hidden_states, logits_indices, None)
-                if num_reqs >= self.max_num_reqs:
-                    break
-                num_reqs = _get_padded_num_reqs_with_upper_limit(
-                    num_reqs + 1, self.max_num_reqs)
+            self.model(input_ids=input_ids,
+                       positions=position_ids,
+                       kv_caches=kv_caches,
+                       inputs_embeds=inputs_embeds)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -935,22 +908,42 @@ class TPUModelRunner:
 
         start = time.perf_counter()
         num_tokens = 16
-        num_reqs_to_sample = MIN_NUM_SEQS
         while True:
-            # Compile for different sampler outputs in
-            # [MIN_NUM_SEQS, pad(max_num_reqs)]
+            logger.info("  -- num_tokens: %d", num_tokens)
+            self._dummy_run(self.kv_caches, num_tokens)
+            xm.mark_step()
+            if num_tokens >= self.scheduler_config.max_num_batched_tokens:
+                break
+            num_tokens *= 2
+        xm.wait_device_ops()
+        end = time.perf_counter()
+        logger.info("Compilation finished in in %.2f [secs].", end - start)
+
+        logger.info("Compiling sampling with different input shapes.")
+        start = time.perf_counter()
+        num_tokens = 16
+        num_reqs_to_sample = MIN_NUM_SEQS
+        hsize = self.model_config.get_hidden_size()
+        device = self.device
+        # Compile sampling step for different model+sampler outputs in
+        # [MIN_NUM_SEQS, pad(max_num_reqs)]
+        while True:
+            dummy_hidden = torch.randn((num_tokens, hsize), device=device)
             while True:
-                self._dummy_run(self.kv_caches, num_tokens)
+                # To allow sampling, trace with all supported sampling args.
+                sampling_meta = TPUSupportedSamplingMetadata.\
+                    get_default_sampling_params(num_reqs_to_sample, device)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs_to_sample)
+                self.model.sample_from_hidden(dummy_hidden, sampling_meta)
                 xm.mark_step()
-                xm.wait_device_ops()
                 if num_reqs_to_sample >= self.max_num_reqs:
                     break
                 num_reqs_to_sample *= 2
             if num_tokens >= self.scheduler_config.max_num_batched_tokens:
                 break
             num_tokens *= 2
+        xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
 
@@ -1006,7 +999,7 @@ class ModelWrapperV1(nn.Module):
         sampler_out = self.sampler(logits, sampling_metadata)
         return sampler_out
 
-    def model_forward(
+    def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
@@ -1024,7 +1017,6 @@ class ModelWrapperV1(nn.Module):
                 hidden_size]. It is used for multimodal models.
         """
 
-        assert self.model is not None
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -1033,27 +1025,11 @@ class ModelWrapperV1(nn.Module):
 
         return hidden_states
 
-    def forward(
+    def sample_from_hidden(
         self,
-        token_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
+        hidden_states: torch.Tensor,
         sampling_metadata: TPUSupportedSamplingMetadata,
-        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Executes the forward pass of the model and samples the next token.
-           Sampling happens in the same forward call so that we can maintain
-           and optimize a single XLA graph. 
-        Args:
-            token_ids: The input token IDs of shape [num_tokens].
-            position_ids: The input position IDs of shape [num_tokens].
-            kv_caches: The key and value caches. They can be None during the
-                memory profiling at initialization.
-        """
-        # NxV, N num padded tokens
-        hidden_states = self.model_forward(token_ids, position_ids, kv_caches,
-                                           inputs_embeds)
-
         # Tensor `sample_hidden_states` is of fixed pre-compiled size.
         sample_hidden_states = \
             hidden_states[sampling_metadata.indices_do_sample]
