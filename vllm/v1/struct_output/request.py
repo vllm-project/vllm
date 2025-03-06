@@ -17,8 +17,7 @@ from vllm.v1.struct_output.grammar import (Grammar, StructuredOutputKey,
 class StructuredOutputRequest:
 
     sampling_params: SamplingParams
-    _grammar: Optional[Union[Future[Grammar],
-                             Grammar]] = dataclasses.field(default=None)
+    _grammar: Optional[Union[Future[Grammar], Grammar]] = None
 
     def _check_grammar_completion(self) -> bool:
         # NOTE: We have to lazy import to gate circular imports

@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import enum
-import functools
 from typing import TYPE_CHECKING, Optional, Union
 
-from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
@@ -16,8 +14,6 @@ if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.inputs import PlaceholderRange
-
-logger = init_logger(__name__)
 
 
 class Request:
@@ -146,7 +142,7 @@ class Request:
         num_tokens = self.mm_positions[input_id]["length"]
         return num_tokens
 
-    @functools.cached_property
+    @property
     def use_structured_output(self) -> bool:
         return self.sampling_params.guided_decoding is not None
 
