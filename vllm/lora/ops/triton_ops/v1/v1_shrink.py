@@ -14,7 +14,6 @@ import triton.language as tl
 
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr
-from vllm.lora.ops.triton_ops.v1.utils import get_v1_op_configs
 from vllm.utils import direct_register_custom_op
 
 
@@ -151,16 +150,15 @@ def _v1_shrink(
     NUM_SLICES = len(lora_a_weights)
     MAX_LORAS = lora_ids.size(0)
 
-    kernel_config = get_v1_op_configs("shrink",
-                                      max_loras=MAX_LORAS,
-                                      batch=M,
-                                      hidden_size=K,
-                                      rank=N,
-                                      num_slices=NUM_SLICES)
-    BLOCK_M = kernel_config['block_m']
-    BLOCK_N = kernel_config['block_n']
-    BLOCK_K = kernel_config['block_k']
-    SPLIT_K = kernel_config['split_k']
+    # Triton kernel configs
+    BLOCK_M = 32
+    BLOCK_N = 16
+    BLOCK_K = 256 if M < 128 else 32,
+    SPLIT_K = 64 if M < 128 else 8,
+    NUM_WARPS = 4
+    NUM_CTAS = 1
+    NUM_STAGES = 2,
+    MAX_NREG = None
 
     EVEN_K = K % (BLOCK_K * SPLIT_K) == 0  # type: ignore
 
@@ -202,10 +200,10 @@ def _v1_shrink(
         EVEN_K,
         SPLIT_K,
         NUM_SLICES,
-        num_warps=kernel_config['num_warps'],
-        num_ctas=kernel_config['num_ctas'],
-        num_stages=kernel_config['num_stages'],
-        maxnreg=kernel_config['max_nreg'],
+        num_warps=NUM_WARPS,
+        num_ctas=NUM_CTAS,
+        num_stages=NUM_STAGES,
+        maxnreg=MAX_NREG,
     )
 
     return
