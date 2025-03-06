@@ -173,7 +173,8 @@ class TPUSupportedSamplingMetadata:
             # the control flow must be constant.
             sampling_metadata.all_greedy = False
             # TODO this is checked somewhere else already isn't it?
-            assert torch.count_nonzero(sampling_metadata.temperature) == 0
+            temp = sampling_metadata.temperature
+            assert temp is None or torch.count_nonzero(temp) == 0
         return sampling_metadata
 
     @staticmethod
