@@ -866,7 +866,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
-  * `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b` (see note), etc.
+  * `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b`, etc.
   *
   * ✅︎
   * ✅︎
@@ -928,10 +928,6 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 
 :::{note}
 Currently the PaliGemma model series is implemented without PrefixLM attention mask. This model series may be deprecated in a future release.
-:::
-
-:::{note}
-`mistral-community/pixtral-12b` does not support V1 yet.
 :::
 
 :::{note}
