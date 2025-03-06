@@ -149,7 +149,7 @@ def test_v1_attn_backend(monkeypatch):
         # Reject if V1.
         m.setenv("VLLM_USE_V1", "1")
         with pytest.raises(NotImplementedError):
-            AsyncEngineArgs(model=MODEL, ).create_engine_config()
+            AsyncEngineArgs(model=MODEL).create_engine_config()
 
         m.setenv("VLLM_ATTENTION_BACKEND", "FLASHMLA")
         engine_config = AsyncEngineArgs(model=MODEL).create_engine_config()
