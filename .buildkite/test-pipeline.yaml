@@ -78,6 +78,7 @@ steps:
   - tests/basic_correctness/test_preemption
   - tests/basic_correctness/test_cumem.py
   commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/test_cumem.py
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
@@ -112,6 +113,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   - tests/entrypoints/offline_mode
   commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
@@ -196,6 +198,7 @@ steps:
     - tests/v1
   commands:
     # split the test to avoid interference
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - VLLM_USE_V1=1 pytest -v -s v1/core
     - VLLM_USE_V1=1 pytest -v -s v1/engine
     - VLLM_USE_V1=1 pytest -v -s v1/sample
