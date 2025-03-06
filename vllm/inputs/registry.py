@@ -331,7 +331,9 @@ class InputRegistry:
 
         if mm_registry.has_processor(model_config):
             tokenizer = cached_tokenizer_from_config(model_config)
-            processor = mm_registry.create_processor(model_config, tokenizer)
+            processor = mm_registry.create_processor(model_config,
+                                                     tokenizer,
+                                                     disable_cache=True)
             profiler = MultiModalProfiler(processor)
             dummy_data = profiler.get_dummy_data(
                 seq_len, is_encoder_data=is_encoder_data)
@@ -348,18 +350,6 @@ class InputRegistry:
             dummy_data = dummy_factory(InputContext(model_config), seq_len,
                                        _MultiModalCounts(mm_counts),
                                        **mm_processor_kwargs)
-
-        # Having more tokens is over-conservative but otherwise fine
-        num_tokens = dummy_data.seq_data.prompt_token_ids
-        if len(num_tokens) < seq_len:
-            if is_encoder_data:
-                logger.warning_once(
-                    f"Expected at least {seq_len} dummy encoder tokens for "
-                    f"profiling, but found {len(num_tokens)} tokens instead.")
-            else:
-                raise AssertionError(
-                    f"Expected at least {seq_len} dummy tokens for profiling, "
-                    f"but found {len(num_tokens)} tokens instead.")
 
         if (dummy_data.multi_modal_data is not None and
                 not isinstance(dummy_data.multi_modal_data, MultiModalKwargs)):
