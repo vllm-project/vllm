@@ -18,7 +18,7 @@ try:
 except ImportError:
     is_flashinfer_available = False
 
-is_flashinfer_available = False  # Turn off FlashInfer
+is_flashinfer_available = False  # Turn off FlashInfer by default for now.
 logger = init_logger(__name__)
 INVALID_TOKEN_ID = -1
 
@@ -29,7 +29,7 @@ class RejectionSampler(nn.Module):
         https://arxiv.org/abs/2211.17192.
     However, we want to clarify the terminology used in the implementation:
     accepted tokens: tokens that are accepted based on the relationship 
-            between the "raw" draft probabilities and the target probabilities.
+            between the "raw" draft and target probabilities.
     recovered tokens: tokens that are sampled based on the adjusted probability
         distribution, which is derived from both the draft and target 
         probabilities.
@@ -82,12 +82,46 @@ class RejectionSampler(nn.Module):
     def forward(
         self,
         draft_token_ids: list[list[int]],
-        draft_probs: Optional[
-            torch.Tensor],  # [batch_size, max_spec_len, vocab_size]
+        draft_probs: Optional[torch.Tensor],
         bonus_token_ids_tensor: torch.Tensor,  # [batch_size, 1]
         target_probs: torch.Tensor,  # [num_total_tokens, vocab_size]
         sampling_metadata: SamplingMetadata
     ) -> SamplerOutput:
+        '''
+        Args:
+            draft_token_ids (List[List[int]]):
+                A 2D list of token IDs for each request in the batch. 
+                Each request might have different number of draft tokens. 
+                It may also contain empty lists for requests that have 
+                no draft tokens.
+            draft_probs (Optional[torch.Tensor]):
+                Probability distribution for the draft tokens. Shape is
+                [batch_size, max_spec_len, vocab_size]. Can be None if 
+                probabilities are not provided, which is the case for
+                ngram spec decode.
+            bonus_token_ids_tensor (torch.Tensor):
+                A tensor containing bonus tokens. Shape is [batch_size, 1]. 
+                Bonus tokens are added to the end of the sequence if all 
+                proposed tokens are accepted. We generate the bonus tokens 
+                outside of the rejection sampler with the default sampling 
+                strategy. It allows for more flexibility in the sampling 
+                process such as top_p, top_k sampling.
+            target_probs (torch.Tensor):
+                Target model probability distribution.
+                Shape is [num_total_tokens, vocab_size]. num_total_tokens 
+                is the total number of tokens from all requests. Here, 
+                probabilities from different requests are flattened into
+                a single tensor because this is the shape of the output 
+                logits.
+            sampling_metadata (SamplingMetadata):
+                Additional metadata needed for sampling, such as temperature,
+                top-k/top-p parameters, or other relevant information.
+        Returns:
+            SamplerOutput:
+                An object containing the results of the sampling process 
+                (output_token_ids).
+        '''
+
         # NOTE: The following input preparationg can be moved
         # to the model runner with a persistent manner for better
         # performance.
