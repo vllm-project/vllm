@@ -7,9 +7,6 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
 
-import numpy as np
-import numpy.typing as npt
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
@@ -18,6 +15,8 @@ from vllm.v1.structured_output.grammar import (Grammar, StructuredOutputKey,
                                                StructuredOutputOptions)
 
 if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
     import xgrammar as xgr
 
     from vllm.v1.request import Request
