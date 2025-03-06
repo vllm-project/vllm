@@ -31,9 +31,10 @@ def generate_test_data(T, D, L, N, seed, dtype=torch.float32):
         
         ref_output: torch.Tensor - shape (T, L) - inputs @ loras[idxs].T
     """
+    torch.manual_seed(seed)
 
-    inputs = torch.randn((T, D), device="xla")
-    loras = torch.randn((N, 1, L, D), device="xla")
+    inputs = torch.randn((T, D), device="xla", dtype=dtype)
+    loras = torch.randn((N, 1, L, D), device="xla", dtype=dtype)
     idxs = torch.randint(0, N, (T, ), dtype=torch.int32, device="xla")
 
     ref_output = ref_bgmv(inputs, loras, idxs)

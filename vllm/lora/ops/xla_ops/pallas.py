@@ -49,7 +49,7 @@ def _bgmv(
     bL = 128
     bD = 128
 
-    # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU 
+    # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU
     # register
     L1 = L
     if bL > L or L % bL != 0:
@@ -121,8 +121,8 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
     _, L, D = loras.shape
 
     # FIXME: Routing the output from 1 Pallas kernel directly to another results
-    # in NaN outputs so here we fallback on a reference implementation until the 
-    # bug is fixed. The kernel can be used for either shrink or expand, but not 
+    # in NaN outputs so here we fallback on a reference implementation until the
+    # bug is fixed. The kernel can be used for either shrink or expand, but not
     # both at the same time.
     use_reference = True
     if use_reference and L < D or not use_reference and D < L:
