@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class StructOutputOptions(enum.Enum):
+class StructuredOutputOptions(enum.Enum):
     JSON = enum.auto()
     JSON_OBJECT = enum.auto()
     REGEX = enum.auto()
@@ -20,7 +20,7 @@ class StructOutputOptions(enum.Enum):
     CHOICE = enum.auto()
 
 
-StructOutputKey = tuple[StructOutputOptions, str]
+StructuredOutputKey = tuple[StructuredOutputOptions, str]
 
 
 @dataclass

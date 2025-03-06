@@ -117,6 +117,6 @@ class SchedulerOutput:
 
     # Dict of request ids to their index within the batch
     # for filling the next token bitmask
-    struct_output_request_ids: dict[str, int]
+    structured_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
     grammar_bitmask: Optional["npt.NDArray[np.int32]"]

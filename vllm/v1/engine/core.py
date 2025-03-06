@@ -29,7 +29,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-from vllm.v1.struct_output import StructOutputManager
+from vllm.v1.struct_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -62,7 +62,7 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        self.struct_output_manager = StructOutputManager(vllm_config)
+        self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
         self.scheduler = Scheduler(
@@ -72,7 +72,7 @@ class EngineCore:
             lora_config=vllm_config.lora_config,
             speculative_config=vllm_config.speculative_config,
             log_stats=self.log_stats,
-            struct_output_manager=self.struct_output_manager,
+            structured_output_manager=self.structured_output_manager,
         )
 
         # Setup MM Input Mapper.
@@ -135,9 +135,9 @@ class EngineCore:
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
-        if req.use_struct_output:
+        if req.use_structured_output:
             # Start grammar compilation asynchronously
-            self.struct_output_manager.populate_cache(req)
+            self.structured_output_manager.populate_cache(req)
 
         self.scheduler.add_request(req)
 

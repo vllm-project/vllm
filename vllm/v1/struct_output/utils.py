@@ -25,10 +25,9 @@ def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
 
         # Check for numeric ranges
         if obj.get("type") in ("integer", "number") and any(
-                key in obj for key in (
-                    "minimum", "maximum", "exclusiveMinimum",
-                    "exclusiveMaximum", "multipleOf"
-                )):
+                key in obj
+                for key in ("minimum", "maximum", "exclusiveMinimum",
+                            "exclusiveMaximum", "multipleOf")):
             return True
 
         # Check for array unsupported keywords
@@ -234,7 +233,8 @@ def choice_as_grammar(choice: list[str]) -> str:
     return grammar
 
 
-def validate_struct_output_request(sampling_params: SamplingParams) -> None:
+def validate_structured_output_request(
+        sampling_params: SamplingParams) -> None:
     """Validate that the request is supported by structured output.
 
     Raises ValueError if the request is not supported.

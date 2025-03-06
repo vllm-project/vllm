@@ -14,8 +14,8 @@ import xgrammar as xgr
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.v1.struct_output.grammar import (Grammar, StructOutputKey,
-                                           StructOutputOptions)
+from vllm.v1.struct_output.grammar import (Grammar, StructuredOutputKey,
+                                           StructuredOutputOptions)
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class StructOutputManager:
+class StructuredOutputManager:
 
     def __init__(self, vllm_config: VllmConfig, max_cache_size: int = 500):
         tokenizer_group = init_tokenizer_from_configs(
@@ -41,7 +41,7 @@ class StructOutputManager:
         self.compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
 
         self.max_cache_size = max_cache_size
-        self.request_key_to_grammar: OrderedDict[StructOutputKey,
+        self.request_key_to_grammar: OrderedDict[StructuredOutputKey,
                                                  Grammar] = OrderedDict()
 
         # The default max_workers if not specified is the number of CPUs * 5,
@@ -53,7 +53,7 @@ class StructOutputManager:
         self._grammar_bitmask = xgr.allocate_token_bitmask(
             self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
 
-    def __getitem__(self, key: StructOutputKey) -> Optional[Grammar]:
+    def __getitem__(self, key: StructuredOutputKey) -> Optional[Grammar]:
         # We need to pop and re-insert the grammar here for LRU cache
         # of request_key_to_grammar
         if key in self.request_key_to_grammar:
@@ -65,24 +65,24 @@ class StructOutputManager:
         return None
 
     def populate_cache(self, request: Request) -> None:
-        if request.struct_output_request is None:
+        if request.structured_output_request is None:
             return
 
         grammar = self.request_key_to_grammar.get(
-            request.struct_output_request.struct_output_key)
+            request.structured_output_request.structured_output_key)
         if grammar:
-            request.struct_output_request.grammar = copy.copy(grammar)
+            request.structured_output_request.grammar = copy.copy(grammar)
             return
-        request.struct_output_request.grammar = self.cache(request)
+        request.structured_output_request.grammar = self.cache(request)
 
     def cache(self, request: Request):
         return self.executor.submit(self._executor_loop, request)
 
     def _executor_loop(self, request: Request) -> Grammar:
-        # NOTE: The struct_output_request should never be None in
-        # this case, but mypy can't infer this correctly,
-        # so we need to ignore the error here.
-        key = request.struct_output_request.struct_output_key  # type: ignore[union-attr]
+        # NOTE: The structured_output_request should never be
+        # None in this case, but mypy can't infer this
+        # correctly, so we need to ignore the error here.
+        key = request.structured_output_request.structured_output_key  # type: ignore[union-attr]
         grammar = self.request_key_to_grammar.get(key)
         if grammar is not None:
             return copy.copy(grammar)
@@ -93,21 +93,21 @@ class StructOutputManager:
         self.request_key_to_grammar[key] = grammar
         return copy.copy(grammar)
 
-    def initialize_grammar(self, key: StructOutputKey) -> Grammar:
+    def initialize_grammar(self, key: StructuredOutputKey) -> Grammar:
         # Note that the request was validated in the engine core client,
         # so at this point we know it is a supported type of request.
         #
         # TODO: we still need to handle xgrammar compilation failures
         request_type, grammar_spec = key
 
-        if request_type == StructOutputOptions.JSON:
+        if request_type == StructuredOutputOptions.JSON:
             # TODO -- allow any_whitespace to be configurable
             # pending merge of https://github.com/vllm-project/vllm/pull/12744
             ctx = self.compiler.compile_json_schema(grammar_spec,
                                                     any_whitespace=False)
-        elif request_type == StructOutputOptions.JSON_OBJECT:
+        elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_builtin_json_grammar()
-        elif request_type == StructOutputOptions.GRAMMAR:
+        elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
         else:
             logger.error("Validation should have already occurred. "
@@ -115,26 +115,28 @@ class StructOutputManager:
             raise ValueError(
                 f"grammar is not of valid supported types. ({request_type!s})")
 
-        return Grammar(matcher=xgr.GrammarMatcher(ctx),
-                       vocab_size=self.vocab_size,
-                       ctx=ctx)
+        return Grammar(
+            matcher=xgr.GrammarMatcher(ctx),
+            vocab_size=self.vocab_size,
+            ctx=ctx,
+        )
 
     def grammar_bitmask(
         self,
         requests: dict[str, Request],
-        struct_output_request_ids: dict[str, int],
+        structured_output_request_ids: dict[str, int],
         batch_len: int,
     ) -> Optional[npt.NDArray[np.int32]]:
         # Prepare the structured output bitmask for this batch.
-        if not struct_output_request_ids:
+        if not structured_output_request_ids:
             return None
 
         # Fill the bitmask using the index of each request equal to its
         # position in the batch. Resize the bitmask down to the size of
         # the batch.
         bitmask_tensor = self._grammar_bitmask
-        for req_id, batch_index in struct_output_request_ids.items():
-            request = requests[req_id].struct_output_request
+        for req_id, batch_index in structured_output_request_ids.items():
+            request = requests[req_id].structured_output_request
             assert request is not None and request.grammar is not None
             if not request.grammar.matcher.is_terminated():
                 request.grammar.fill_bitmask(bitmask_tensor, batch_index)

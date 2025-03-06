@@ -875,7 +875,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         struct_out_req_batch_indices: dict[str, int] = {}
         indices_match = True
         for req_id in self.input_batch.req_ids:
-            mask_index = scheduler_output.struct_output_request_ids.get(req_id)
+            mask_index = scheduler_output.structured_output_request_ids.get(
+                req_id)
             if mask_index is None:
                 # not a structured output request
                 continue
@@ -888,7 +889,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Sort the bitmask to match the order of the requests
             sorted_bitmask = np.zeros_like(grammar_bitmask)
             for req_id, batch_index in struct_out_req_batch_indices.items():
-                orig_index = scheduler_output.struct_output_request_ids[req_id]
+                orig_index = scheduler_output.structured_output_request_ids[
+                    req_id]
                 sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
             grammar_bitmask = sorted_bitmask
 

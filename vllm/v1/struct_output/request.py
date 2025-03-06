@@ -9,12 +9,12 @@ from concurrent.futures._base import TimeoutError
 from typing import Optional, Union, cast
 
 from vllm.sampling_params import SamplingParams
-from vllm.v1.struct_output.grammar import (Grammar, StructOutputKey,
-                                           StructOutputOptions)
+from vllm.v1.struct_output.grammar import (Grammar, StructuredOutputKey,
+                                           StructuredOutputOptions)
 
 
 @dataclasses.dataclass
-class StructOutputRequest:
+class StructuredOutputRequest:
 
     sampling_params: SamplingParams
     _grammar: Optional[Union[Future[Grammar],
@@ -47,7 +47,7 @@ class StructOutputRequest:
         self._grammar = grammar
 
     @functools.cached_property
-    def struct_output_key(self) -> StructOutputKey:
+    def structured_output_key(self) -> StructuredOutputKey:
         params = self.sampling_params.guided_decoding
         assert params is not None, "params can't be None."
         if params.json is not None:
@@ -55,18 +55,18 @@ class StructOutputRequest:
                 json_str = json.dumps(params.json)
             else:
                 json_str = params.json
-            return (StructOutputOptions.JSON, json_str)
+            return (StructuredOutputOptions.JSON, json_str)
         elif params.json_object:
-            return (StructOutputOptions.JSON_OBJECT, "")
+            return (StructuredOutputOptions.JSON_OBJECT, "")
         elif params.regex is not None:
-            return (StructOutputOptions.REGEX, params.regex)
+            return (StructuredOutputOptions.REGEX, params.regex)
         elif params.choice is not None:
             if not isinstance(params.choice, str):
                 json_str = json.dumps(params.choice)
             else:
                 json_str = params.choice
-            return (StructOutputOptions.CHOICE, json_str)
+            return (StructuredOutputOptions.CHOICE, json_str)
         elif params.grammar is not None:
-            return (StructOutputOptions.GRAMMAR, params.grammar)
+            return (StructuredOutputOptions.GRAMMAR, params.grammar)
         else:
             raise ValueError("No valid structured output parameter found")

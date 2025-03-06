@@ -20,7 +20,7 @@ from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.struct_output import StructOutputManager
+from vllm.v1.struct_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
@@ -35,14 +35,14 @@ class Scheduler:
         lora_config: Optional[LoRAConfig],
         speculative_config: Optional[SpeculativeConfig],
         log_stats: bool,
-        struct_output_manager: StructOutputManager,
+        structured_output_manager: StructuredOutputManager,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
         self.speculative_config = speculative_config
         self.log_stats = log_stats
-        self.struct_output_manager = struct_output_manager
+        self.structured_output_manager = structured_output_manager
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -119,13 +119,13 @@ class Scheduler:
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
-        # NOTE: struct_output_request_ids maps
+        # NOTE: structured_output_request_ids maps
         # a request's (request that uses structured output)
         # request_id to the running request index.
         # This will helps us determine to slice the grammar bitmask
         # and only applies valid mask for requests that
         # uses structured decoding.
-        struct_output_request_ids: dict[str, int] = {}
+        structured_output_request_ids: dict[str, int] = {}
 
         req_to_new_block_ids: dict[str, list[int]] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -197,12 +197,12 @@ class Scheduler:
             # Schedule the request.
             scheduled_running_reqs.append(request)
             self.scheduled_req_ids.add(request.request_id)
-            if request.use_struct_output:
+            if request.use_structured_output:
                 # PERF: in case of chunked prefill,
                 # request might not include any new tokens.
                 # Therefore, we might introduce some additional
                 # cycle to fill in the bitmask, which could be a big no-op.
-                struct_output_request_ids[request.request_id] = req_index
+                structured_output_request_ids[request.request_id] = req_index
             req_to_new_block_ids[request.request_id] = [
                 b.block_id for b in new_blocks
             ]
@@ -250,8 +250,8 @@ class Scheduler:
                 request = self.waiting[0]
 
                 if request.status == RequestStatus.WAITING_FOR_FSM:
-                    struct_output_req = request.struct_output_request
-                    if struct_output_req and struct_output_req.grammar:
+                    structured_output_req = request.structured_output_request
+                    if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
                     else:
                         waiting_struct_output_req = self.waiting.popleft()
@@ -312,8 +312,9 @@ class Scheduler:
                     break
 
                 self.waiting.popleft()
-                if request.use_struct_output:
-                    struct_output_request_ids[request.request_id] = req_index
+                if request.use_structured_output:
+                    structured_output_request_ids[
+                        request.request_id] = req_index
                 req_index += 1
                 self.running.append(request)
                 self.scheduled_req_ids.add(request.request_id)
@@ -369,8 +370,11 @@ class Scheduler:
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
-        grammar_bitmask = self.struct_output_manager.grammar_bitmask(
-            self.requests, struct_output_request_ids, len(self.running))
+        grammar_bitmask = self.structured_output_manager.grammar_bitmask(
+            self.requests,
+            structured_output_request_ids,
+            len(self.running),
+        )
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
@@ -409,7 +413,7 @@ class Scheduler:
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-            struct_output_request_ids=struct_output_request_ids,
+            structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
 
@@ -607,11 +611,11 @@ class Scheduler:
                     # the outer lists can be of length > 1.
                     new_logprobs = logprobs.slice(req_index, req_index + 1)
 
-            if new_token_ids and request.use_struct_output:
-                # NOTE: struct_output_request
-                # should not be None if use_struct_output, we have
+            if new_token_ids and request.use_structured_output:
+                # NOTE: structured_output_request
+                # should not be None if use_structured_output, we have
                 # check above, so safe to ignore type warning
-                request.struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     request.request_id,
                     new_token_ids,
                 )

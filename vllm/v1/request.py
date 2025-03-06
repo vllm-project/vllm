@@ -8,7 +8,7 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
-from vllm.v1.struct_output.request import StructOutputRequest
+from vllm.v1.struct_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -34,14 +34,14 @@ class Request:
         eos_token_id: Optional[int],
         arrival_time: float,
         lora_request: Optional["LoRARequest"] = None,
-        struct_output_request: Optional["StructOutputRequest"] = None,
+        structured_output_request: Optional["StructuredOutputRequest"] = None,
     ) -> None:
         self.request_id = request_id
         self.sampling_params = sampling_params
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
-        self.struct_output_request = struct_output_request
+        self.structured_output_request = structured_output_request
 
         self.status = (RequestStatus.WAITING_FOR_FSM
                        if sampling_params.guided_decoding is not None else
@@ -88,7 +88,7 @@ class Request:
             eos_token_id=request.eos_token_id,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
-            struct_output_request=StructOutputRequest(
+            structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params),
         )
 
@@ -147,7 +147,7 @@ class Request:
         return num_tokens
 
     @functools.cached_property
-    def use_struct_output(self) -> bool:
+    def use_structured_output(self) -> bool:
         return self.sampling_params.guided_decoding is not None
 
 
