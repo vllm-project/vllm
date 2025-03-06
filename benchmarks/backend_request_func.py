@@ -252,8 +252,6 @@ async def async_request_openai_completions(
                 "include_usage": True,
             },
         }
-        if request_func_input.best_of > 1:
-            payload["best_of"] = request_func_input.best_of
         if request_func_input.ignore_eos:
             payload["ignore_eos"] = request_func_input.ignore_eos
         if request_func_input.extra_body:
