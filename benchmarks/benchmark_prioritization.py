@@ -23,7 +23,7 @@ def sample_requests(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int],
-) -> list[tuple[str, int, int]]:
+) -> list[tuple[str, int, int, int]]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
 

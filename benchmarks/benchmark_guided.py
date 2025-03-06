@@ -73,7 +73,8 @@ def run_vllm(requests: list[SampleRequest],
                     top_p=1.0,
                     ignore_eos=True,
                     max_tokens=request.expected_output_len,
-                    guided_decoding=GuidedDecodingParams(json=request.schema)
+                    guided_decoding=GuidedDecodingParams(
+                        **{request.structure_type: request.schema})
                     if guided_decoding_rate > 0 else None,
                 ))
         llm.generate(prompts, sampling_params, use_tqdm=False)
