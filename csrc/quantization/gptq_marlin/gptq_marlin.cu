@@ -1543,7 +1543,7 @@ __global__ void Marlin(
          i < div_ceil(16 * thread_m_blocks, threads / (2 * thread_n_blocks));
          i++) {
       if (c_gl_wr < c_gl_wr_end) {
-        if (use_atomic_add) {
+        if (use_atomic_add && slice_count > 1) {
           scalar_t2* C_half2 = reinterpret_cast<scalar_t2*>(&C[c_gl_wr]);
           scalar_t2* sh_red_half2 =
               reinterpret_cast<scalar_t2*>(&sh_red[c_sh_rd]);
