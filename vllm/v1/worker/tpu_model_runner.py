@@ -64,9 +64,11 @@ class TPUSupportedSamplingMetadata:
     top_k: torch.Tensor = None
     top_p: torch.Tensor = None
 
-    # XLA-unfriendly control flow
+    # XLA-unfriendly control flow in Sampler
     all_greedy: bool = False
     all_random: bool = False
+    # Greedy sampling flag for compiling single xla graph.
+    do_argmax: torch.Tensor = None
 
     # speculation not supported
     spec_token_ids = None
@@ -96,11 +98,15 @@ class TPUSupportedSamplingMetadata:
     indices_do_sample: torch.Tensor = None
 
     def __post_init__(self):
+        temp = self.temperature
         if self.indices_do_sample is None:
-            temp = self.temperature
             self.indices_do_sample = torch.zeros(temp.shape[0],
                                                  device=temp.device,
                                                  dtype=torch.long)
+        if self.do_argmax is None:
+            self.do_argmax = torch.tensor(0,
+                                          dtype=torch.bool,
+                                          device=temp.device)
 
     @classmethod
     def from_sampling_metadata(
@@ -125,10 +131,14 @@ class TPUSupportedSamplingMetadata:
         # NOTE we have to initialize default tensor-based params first and
         # skip None values altogether to produce the same xla graph.
         num_samples = len(padded_do_sample_indices)
+        do_argmax = torch.tensor(metadata.all_greedy,
+                                 dtype=torch.bool,
+                                 device=device)
         new_metadata = cls.get_default_sampling_params(num_samples, device,
                                                     indices_do_sample=\
-                                                    padded_do_sample_indices)
-
+                                                    padded_do_sample_indices,
+                                                    do_argmax=do_argmax
+                                                    )
         supported_params = \
             TPUSupportedSamplingMetadata._get_default_params_values()
         # Copy input non-None values into `new_metadata` fixed-sized tensors.
@@ -148,7 +158,8 @@ class TPUSupportedSamplingMetadata:
             cls,
             num_samples: int,
             device: torch.device,
-            indices_do_sample=None) -> "TPUSupportedSamplingMetadata":
+            indices_do_sample=None,
+            do_argmax=None) -> "TPUSupportedSamplingMetadata":
         # As sampling happens on a single traced function, options
         # are "disabled" by having them evaluate to an Identity op.
         # Note that initialization is dependent on num_samples.
@@ -163,24 +174,24 @@ class TPUSupportedSamplingMetadata:
                                         device=device)
             init_kwargs[p_name] = default_tensor
 
-        return cls(**init_kwargs, indices_do_sample=indices_do_sample)
+        return cls(**init_kwargs,
+                   indices_do_sample=indices_do_sample,
+                   do_argmax=do_argmax)
 
     @staticmethod
     def _validate_sampling_metadata(
             sampling_metadata: SamplingMetadata) -> SamplingMetadata:
         if sampling_metadata.all_greedy:
-            # Greedy sampling is always performed as long as temp is 0, but
-            # the control flow must be constant.
-            sampling_metadata.all_greedy = False
-            # TODO this is checked somewhere else already isn't it?
-            temp = sampling_metadata.temperature
-            assert temp is None or torch.count_nonzero(temp) == 0
+            # Set to None since #13587. Make sure default isn't overruled.
+            assert sampling_metadata.temperature is None
         return sampling_metadata
 
     @staticmethod
     def _get_default_params_values():
         return dict(
-            temperature=(0.0, torch.float32),
+            # Since #13587 greedy sampling requires branching off which leads
+            # to separate graphs. We set temp to noop and handle argmax here.
+            temperature=(1.0, torch.float32),
             min_p=(0.0, torch.float32),
             # strictly disabled for now
             # top_k=(-1, torch.int32),
@@ -1031,14 +1042,20 @@ class ModelWrapperV1(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: TPUSupportedSamplingMetadata,
     ) -> torch.Tensor:
+        """
+        Sample with *traced* xla-friendly function.
+        """
         # Tensor `sample_hidden_states` is of fixed pre-compiled size.
         sample_hidden_states = \
             hidden_states[sampling_metadata.indices_do_sample]
         logits = self.compute_logits(sample_hidden_states)
-        # Sample with *traced* function to be compiled only once.
-        sampler_output = self.sample(logits, sampling_metadata)
-        sampled_token_ids = sampler_output.sampled_token_ids
-        return sampled_token_ids
+        # Greedy sampling can't be run without branching the graph on Sampler.
+        # Therefore do_argmax/all_greedy is checked here in a xla-friendly way.
+        out_tokens = torch.where(sampling_metadata.do_argmax,
+                        torch.argmax(logits, dim=-1, keepdim=True),
+                        self.sample(logits, sampling_metadata)\
+                                            .sampled_token_ids)
+        return out_tokens
 
     def compute_logits(self,
                        hidden_states: torch.Tensor) -> Optional[torch.Tensor]:

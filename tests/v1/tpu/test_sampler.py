@@ -31,7 +31,7 @@ def test_sampler_compilation(model_name: str, monkeypatch):
                   max_num_seqs=16,
                   max_model_len=1024,
                   gpu_memory_utilization=0.5)
-        prompts = [  # NOTE working with one just fine
+        prompts = [
             "A robot may not injure a human being",
             "It is only with the heart that one can see rightly;",
         ]
@@ -59,7 +59,7 @@ def test_sampler_compilation(model_name: str, monkeypatch):
 
         # Third request with min_p set to "None". It will not trigger
         # recompilation as a default 0 value will be used.
-        sampling_params = SamplingParams(max_tokens=24, temperature=1.0)
+        sampling_params = SamplingParams(max_tokens=24, temperature=0.0)
         s = time()
         _ = llm.generate(prompts, sampling_params)
         run3 = time() - s
@@ -70,7 +70,7 @@ def test_sampler_compilation(model_name: str, monkeypatch):
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen2.5-1.5B-Instruct"])
 @pytest.mark.skipif(not current_platform.is_tpu(),
                     reason="This test needs a TPU")
-def test_sampler_correctness(model_name: str, monkeypatch):
+def test_sampler_correctness(model_name: str):
     """
     Test significantly different sampling params to assert the model produces 
     different results.
