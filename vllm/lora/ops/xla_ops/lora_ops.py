@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-import vllm.lora.ops.xla_ops.pallas # Required to register the custom ops
+
+# Required to register the custom ops
+import vllm.lora.ops.xla_ops.pallas  # noqa # pylint: disable=unused-import
+
 
 def bgmv_expand(inputs: torch.Tensor,
                 lora_b_weights: torch.Tensor,
@@ -26,13 +29,16 @@ def bgmv_expand(inputs: torch.Tensor,
     else:
         return outputs[:limit, :]
 
+
 def bgmv_shrink(inputs: torch.Tensor,
                 lora_b_weights: torch.Tensor,
                 output_tensor: torch.Tensor,
                 lora_indices_tensor: torch.Tensor,
                 scaling: float = 1.0):
 
-    return scaling * torch.ops.xla.bgmv(inputs, lora_b_weights, lora_indices_tensor)
+    return scaling * torch.ops.xla.bgmv(inputs, lora_b_weights,
+                                        lora_indices_tensor)
+
 
 def bgmv_expand_slice(inputs: torch.Tensor,
                       lora_b_weights: torch.Tensor,

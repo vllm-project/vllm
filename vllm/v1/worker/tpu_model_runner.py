@@ -436,9 +436,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
             self.device)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
-        
+
         if self.lora_config is not None:
-            self.set_active_loras(self.input_batch, np.array(padded_total_num_scheduled_tokens))
+            self.set_active_loras(self.input_batch,
+                                  np.array(padded_total_num_scheduled_tokens))
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
@@ -673,11 +674,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
         if self.lora_config:
-            model = self.load_lora_model(model,
-                                         self.model_config,
+            model = self.load_lora_model(model, self.model_config,
                                          self.scheduler_config,
-                                         self.lora_config,
-                                         self.device)
+                                         self.lora_config, self.device)
         model = model.eval()
         xm.mark_step()
         xm.wait_device_ops()
@@ -756,7 +755,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         start = time.perf_counter()
         num_tokens = 16
         while True:
-            with self.maybe_profile_with_lora(self.lora_config, np.array([num_tokens], dtype=np.int32)):
+            with self.maybe_profile_with_lora(
+                    self.lora_config, np.array([num_tokens], dtype=np.int32)):
                 self._dummy_run(self.kv_caches, num_tokens)
             logger.info("  -- num_tokens: %d", num_tokens)
             xm.mark_step()

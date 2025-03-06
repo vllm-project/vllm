@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import pytest
-
 import torch
-import vllm.lora.ops.xla_ops.pallas # Required to register the custom ops
+
+# Required to register the custom ops
+import vllm.lora.ops.xla_ops.pallas  # noqa # pylint: disable=unused-import
 
 N_TOKENS = [
     8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
@@ -10,12 +11,12 @@ N_TOKENS = [
 ]
 HIDDEN_SIZES = [128, 256, 512, 896, 1024, 2048, 4096, 8192, 8320]
 
-DTYPES = [jnp.float16, jnp.bfloat16]
+DTYPES = [torch.float16, torch.bfloat16]
 NUM_LORA = [1, 2, 4, 8, 16, 32]
 RANKS = [8, 16, 32, 64, 128]
 
 
-def generate_test_data(T, D, L, N, seed, dtype=jnp.float32):
+def generate_test_data(T, D, L, N, seed, dtype=torch.float32):
     """
     Inputs: (All integers)
         T: Total number of tokens
@@ -30,23 +31,24 @@ def generate_test_data(T, D, L, N, seed, dtype=jnp.float32):
         
         ref_output: torch.Tensor - shape (T, L) - inputs @ loras[idxs].T
     """
-    
+
     inputs = torch.randn((T, D), device="xla")
     loras = torch.randn((N, 1, L, D), device="xla")
-    idxs = torch.randint(0, N, (T,), dtype=torch.int32, device="xla")
+    idxs = torch.randint(0, N, (T, ), dtype=torch.int32, device="xla")
 
     ref_output = ref_bgmv(inputs, loras, idxs)
     return inputs, loras, idxs, ref_output
+
 
 def ref_bgmv(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.Tensor):
     selected_loras = loras[idxs]
     if len(selected_loras.shape) == 4:
         selected_loras = selected_loras.squeeze(axis=1)
-        
+
     batch_size, output_size, input_size = selected_loras.shape
-    outputs = (
-        selected_loras @ inputs.reshape((batch_size, input_size, 1))
-    ).reshape((batch_size, output_size))
+    outputs = (selected_loras @ inputs.reshape(
+        (batch_size, input_size, 1))).reshape((batch_size, output_size))
+
 
 # Parameterize tests with various shapes and dtypes
 @pytest.mark.parametrize("T", N_TOKENS)
@@ -63,7 +65,8 @@ def test_bgmv(T, D, L, N, dtype, op_type, seed):
     # Run bgmv
     match op_type:
         case "expand":
-            output = torch.ops.xla.bgmv(inputs, loras, idxs)  # TODO: Specialise
+            output = torch.ops.xla.bgmv(inputs, loras,
+                                        idxs)  # TODO: Specialise
         case "shrink":
             output = torch.ops.xla.bgmv(inputs, loras, idxs)
 
