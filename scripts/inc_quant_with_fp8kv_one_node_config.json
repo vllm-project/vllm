@@ -8,7 +8,7 @@
     },
     "blocklist": {
         "types": [],
-        "names": ["lm_head"]
+        "names": ["lm_head", "mlp\\.gate\\b"]
     },
     "dump_stats_path": "./nc_workspace_measure_kvache_one_node/inc_measure_output"
 }
