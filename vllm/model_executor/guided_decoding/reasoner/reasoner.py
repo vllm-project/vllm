@@ -17,3 +17,7 @@ class Reasoner(ABC):
     @abstractmethod
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         pass
+
+    @abstractmethod
+    def extract_content(self, input_ids: list[int]) -> list[int]:
+        pass
