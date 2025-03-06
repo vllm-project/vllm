@@ -4,7 +4,8 @@ from vllm.lora.request import LoRARequest
 
 
 def test_lora_hotswapping():
-    lora_name_template = "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
+    lora_name_template = \
+        "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
     lora_requests = [
         LoRARequest(f"lora_adapter_{i}", i, lora_name_template.format(i))
         for i in range(1, 5)

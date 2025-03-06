@@ -46,7 +46,7 @@ def ref_bgmv(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.Tensor):
         selected_loras = selected_loras.squeeze(axis=1)
 
     batch_size, output_size, input_size = selected_loras.shape
-    outputs = (selected_loras @ inputs.reshape(
+    return (selected_loras @ inputs.reshape(
         (batch_size, input_size, 1))).reshape((batch_size, output_size))
 
 
