@@ -259,40 +259,44 @@ class AsyncLLM(EngineClient):
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
 
-                # Split outputs into chunks of at most
-                # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
-                # event loop for too long.
                 num_outputs = len(outputs.outputs)
-                if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
-                    slices = (outputs.outputs, )
-                else:
-                    slices = np.array_split(
-                        outputs.outputs,
-                        cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
+                if num_outputs:
+                    # Split outputs into chunks of at most
+                    # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
+                    # event loop for too long.
+                    if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
+                        slices = (outputs.outputs, )
+                    else:
+                        slices = np.array_split(
+                            outputs.outputs,
+                            cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
 
-                for i, outputs_slice in enumerate(slices):
-                    # 2) Process EngineCoreOutputs.
-                    processed_outputs = self.output_processor.process_outputs(
-                        outputs_slice, outputs.timestamp, iteration_stats)
-                    # NOTE: RequestOutputs are pushed to their queues.
-                    assert not processed_outputs.request_outputs
+                    for i, outputs_slice in enumerate(slices):
+                        # 2) Process EngineCoreOutputs.
+                        processed_outputs = (
+                            self.output_processor.process_outputs(
+                                outputs_slice, outputs.timestamp,
+                                iteration_stats))
+                        # NOTE: RequestOutputs are pushed to their queues.
+                        assert not processed_outputs.request_outputs
 
-                    # Allow other asyncio tasks to run between chunks
-                    if i + 1 < len(slices):
-                        await asyncio.sleep(0)
+                        # Allow other asyncio tasks to run between chunks
+                        if i + 1 < len(slices):
+                            await asyncio.sleep(0)
 
-                    # 3) Abort any reqs that finished due to stop strings.
-                    await self.engine_core.abort_requests_async(
-                        processed_outputs.reqs_to_abort)
+                        # 3) Abort any reqs that finished due to stop strings.
+                        await self.engine_core.abort_requests_async(
+                            processed_outputs.reqs_to_abort)
 
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once Prometheus overhead is non-trivial.
-                self._record_stats(
-                    scheduler_stats=outputs.scheduler_stats,
-                    iteration_stats=iteration_stats,
-                    more_to_come=outputs.accumulate_stats,
-                )
+                if self.log_stats:
+                    self._add_stats(outputs.scheduler_stats)
+                    if outputs.final_outputs_for_step:
+                        assert iteration_stats is not None
+                        self._record_stats(iteration_stats)
+                        iteration_stats = IterationStats()
 
         except Exception as e:
             logger.exception("EngineCore output handler hit an error: %s", e)
@@ -308,31 +312,22 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Aborted request %s.", request_id)
 
-    def _record_stats(
-        self,
-        scheduler_stats: Optional[SchedulerStats],
-        iteration_stats: Optional[IterationStats],
-        more_to_come: bool,
-    ):
-        if not self.log_stats:
-            return
+    def _add_stats(self, scheduler_stats: Optional[SchedulerStats]):
+        if scheduler_stats:
+            if self.scheduler_stats is None:
+                self.scheduler_stats = scheduler_stats
+            else:
+                self.scheduler_stats.add(scheduler_stats)
 
-        assert scheduler_stats is not None
-        assert iteration_stats is not None
-        if self.scheduler_stats is None:
-            self.scheduler_stats = scheduler_stats
-        else:
-            self.scheduler_stats.add(scheduler_stats)
+    def _record_stats(self, iteration_stats: IterationStats):
+        self.output_processor.lora_states.update_iteration_stats(
+            iteration_stats)
 
-        if not more_to_come:
-            self.output_processor.lora_states.update_iteration_stats(
-                iteration_stats)
-
-            for stat_logger in self.stat_loggers:
-                stat_logger.record(scheduler_stats=self.scheduler_stats,
-                                   iteration_stats=iteration_stats)
-            self.scheduler_stats = None
-            iteration_stats.clear()
+        scheduler_stats = self.scheduler_stats or SchedulerStats()
+        for stat_logger in self.stat_loggers:
+            stat_logger.record(scheduler_stats=scheduler_stats,
+                               iteration_stats=iteration_stats)
+        self.scheduler_stats = None
 
     def encode(
         self,

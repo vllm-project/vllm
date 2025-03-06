@@ -31,12 +31,14 @@ class Scheduler:
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
         speculative_config: Optional[SpeculativeConfig],
-        log_stats: bool,
+        include_finished_set: bool = False,
+        log_stats: bool = False,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
         self.speculative_config = speculative_config
+        self.include_finished_set = include_finished_set
         self.log_stats = log_stats
 
         # Scheduling constraints.
@@ -485,7 +487,6 @@ class Scheduler:
 
         new_running: list[Request] = []
         outputs: list[EngineCoreOutput] = []
-        finished_requests: list[str] = []
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -569,29 +570,29 @@ class Scheduler:
             # Transmit partial if chunked prefill & prompt logprobs is enabled
             if new_token_ids or prompt_logprobs_tensors is not None:
                 # Add EngineCoreOutput for this Request.
-                finish_reason = request.get_finished_reason()
                 outputs.append(
                     EngineCoreOutput(
                         request_id=req_id,
                         new_token_ids=new_token_ids,
-                        finish_reason=finish_reason,
+                        finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
                         events=request.take_events()))
-                if finish_reason:
-                    finished_requests.append(req_id)
 
             self.scheduled_req_ids.remove(request.request_id)
             if not stopped:
                 new_running.append(request)
 
         self.running = new_running
-        return EngineCoreOutputs(
+        engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
-            finished_requests=finished_requests,
             scheduler_stats=self.make_stats(),
         )
+        if self.include_finished_set:
+            engine_core_outputs.finished_requests = (
+                scheduler_output.finished_req_ids)
+        return engine_core_outputs
 
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len

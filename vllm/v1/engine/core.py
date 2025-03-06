@@ -30,6 +30,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.stats.common import SchedulerStats
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -69,6 +70,8 @@ class EngineCore:
             cache_config=vllm_config.cache_config,
             lora_config=vllm_config.lora_config,
             speculative_config=vllm_config.speculative_config,
+            include_finished_set=vllm_config.parallel_config.data_parallel_size
+            > 1,
             log_stats=self.log_stats,
         )
 
@@ -349,7 +352,7 @@ class EngineCoreProc(EngineCore):
         # Step the engine core.
         outputs = self.step_fn()
         # Put EngineCoreOutputs into the output queue.
-        if outputs:
+        if outputs is not None:
             self.output_queue.put_nowait(outputs)
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
@@ -424,7 +427,11 @@ class EngineCoreProc(EngineCore):
             while True:
                 outputs = self.output_queue.get()
                 encoder.encode_into(outputs, buffer)
-                socket.send_multipart((buffer, ), copy=False)
+                socket.send(buffer, copy=False)
+
+
+ENGINE_PAUSED_OUTPUTS = EngineCoreOutputs(engine_paused=True)
+EMPTY_STATS_OUTPUTS = EngineCoreOutputs(scheduler_stats=SchedulerStats())
 
 
 class DPEngineCoreProc(EngineCoreProc):
@@ -488,14 +495,18 @@ class DPEngineCoreProc(EngineCoreProc):
                 # dummy forward pass.
                 self.execute_dummy_batch()
 
+                #TODO we currently need to send empty stats here since the
+                # client won't know how many to aggregate each step otherwise.
+                if self.log_stats:
+                    self.output_queue.put_nowait(EMPTY_STATS_OUTPUTS)
+
             # 3) All-reduce operation to determine global unfinished reqs.
             self.global_unfinished_reqs = self._has_global_unfinished_reqs(
                 local_unfinished_reqs)
 
             if not self.global_unfinished_reqs:
                 # Notify client that we are pausing the loop.
-                self.output_queue.put_nowait(
-                    EngineCoreOutputs(engine_paused=True))
+                self.output_queue.put_nowait(ENGINE_PAUSED_OUTPUTS)
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
 

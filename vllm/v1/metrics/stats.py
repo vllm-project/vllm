@@ -105,18 +105,6 @@ class IterationStats:
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
 
-    def clear(self):
-        self.num_generation_tokens = 0
-        self.num_prompt_tokens = 0
-        self.num_preempted_reqs = 0
-        self.finished_requests.clear()
-        self.max_num_generation_tokens_iter.clear()
-        self.n_params_iter.clear()
-        self.time_to_first_tokens_iter.clear()
-        self.time_per_output_tokens_iter.clear()
-        self.waiting_lora_adapters.clear()
-        self.running_lora_adapters.clear()
-
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
         return self.iteration_timestamp - start

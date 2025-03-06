@@ -7,7 +7,7 @@ import signal
 import uuid
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from threading import Thread
@@ -237,6 +237,9 @@ class CoreEngine:
                 # Ensure socket is closed if process fails to start.
                 self.close()
 
+    def send_multipart(self, msg_parts: Sequence):
+        return self.input_socket.send_multipart(msg_parts, copy=False)
+
     def close(self):
         if proc_handle := getattr(self, "proc_handle", None):
             proc_handle.shutdown()
@@ -378,8 +381,6 @@ class SyncMPClient(MPClient):
 
         self.outputs_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
 
-        self.input_socket = self.core_engine.input_socket
-
         # Ensure that the outputs socket processing thread does not have
         # a ref to the client which prevents gc.
         ctx = self.ctx
@@ -407,7 +408,7 @@ class SyncMPClient(MPClient):
                         # shutdown signal, exit thread.
                         break
 
-                    (frame, ) = out_socket.recv_multipart(copy=False)
+                    frame = out_socket.recv(copy=False)
                     outputs = decoder.decode(frame.buffer)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
@@ -428,12 +429,10 @@ class SyncMPClient(MPClient):
     def get_output(self) -> EngineCoreOutputs:
         return self.outputs_queue.get()
 
-    def _send_input(self, request_type: EngineCoreRequestType,
-                    request: Any) -> None:
-
+    def _send_input(self, request_type: EngineCoreRequestType, request: Any):
         # (RequestType, SerializedRequest)
         msg = (request_type.value, self.encoder.encode(request))
-        self.input_socket.send_multipart(msg, copy=False)
+        self.core_engine.send_multipart(msg)
 
     def call_utility(self, method: str, *args) -> Any:
         call_id = uuid.uuid1().int >> 64
@@ -542,13 +541,10 @@ class AsyncMPClient(MPClient):
             assert self.outputs_queue is not None
         return await self.outputs_queue.get()
 
-    async def _send_input(self,
-                          request_type: EngineCoreRequestType,
-                          request: Any,
-                          core_engine: Optional[CoreEngine] = None) -> None:
-        msg = (request_type.value, self.encoder.encode(request))
-        engine = self.core_engine if core_engine is None else core_engine
-        await engine.input_socket.send_multipart(msg, copy=False)
+    async def _send_input(self, request_type: EngineCoreRequestType,
+                          request: Any) -> None:
+        await self.core_engine.send_multipart(
+            (request_type.value, self.encoder.encode(request)))
 
         if self.outputs_queue is None:
             await self._start_output_queue_task()
@@ -567,8 +563,8 @@ class AsyncMPClient(MPClient):
         call_id = uuid.uuid1().int >> 64
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
-        await self._send_input(EngineCoreRequestType.UTILITY,
-                               (call_id, method, args), engine)
+        await engine.send_multipart(
+            (EngineCoreRequestType.UTILITY.value, (call_id, method, args)))
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
@@ -664,15 +660,15 @@ class DPAsyncMPClient(AsyncMPClient):
         self.reqs_in_flight[request.request_id] = chosen_engine
         chosen_engine.num_reqs_in_flight += 1
         if self.num_engines_running >= len(self.core_engines):
-            await chosen_engine.input_socket.send_multipart(msg, copy=False)
+            await chosen_engine.send_multipart(msg)
         else:
             # Send request to chosen engine and dp start loop
             # control message to all other engines.
             self.num_engines_running += len(self.core_engines)
             await asyncio.gather(*[
-                engine.input_socket.send_multipart(
-                    msg if engine is chosen_engine else self.start_dp_msg,
-                    copy=False) for engine in self.core_engines
+                engine.send_multipart(msg if engine is
+                                      chosen_engine else self.start_dp_msg)
+                for engine in self.core_engines
             ])
 
     def get_core_engine_for_request(self) -> CoreEngine:
@@ -682,7 +678,7 @@ class DPAsyncMPClient(AsyncMPClient):
     async def process_engine_outputs(self: "DPAsyncMPClient",
                                      outputs: EngineCoreOutputs):
         if self.reqs_in_flight:
-            for req_id in outputs.finished_requests:
+            for req_id in outputs.finished_requests or ():
                 if engine := self.reqs_in_flight.pop(req_id, None):
                     engine.num_reqs_in_flight -= 1
 
@@ -695,8 +691,7 @@ class DPAsyncMPClient(AsyncMPClient):
                 # sure to start the other engines:
                 self.num_engines_running = len(self.core_engines)
                 coros = [
-                    engine.input_socket.send_multipart(self.start_dp_msg,
-                                                       copy=False)
+                    engine.send_multipart(self.start_dp_msg)
                     for engine in self.core_engines
                     if not engine.num_reqs_in_flight
                 ]
@@ -704,13 +699,13 @@ class DPAsyncMPClient(AsyncMPClient):
                     await asyncio.gather(*coros)
 
         if outputs.scheduler_stats:
-            # Set the accumulate flag if we haven't yet received outputs
+            # Unset the final flag if we haven't yet received outputs
             # from all engines for this step.
             self.outputs_counter += 1
             if self.outputs_counter == len(self.core_engines):
                 self.outputs_counter = 0
             else:
-                outputs.accumulate_stats = True
+                outputs.final_outputs_for_step = False
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if not request_ids:
@@ -731,5 +726,5 @@ class DPAsyncMPClient(AsyncMPClient):
 
     async def _abort_requests(self, request_ids: list[str],
                               engine: CoreEngine) -> None:
-        await self._send_input(EngineCoreRequestType.ABORT, request_ids,
-                               engine)
+        await engine.send_multipart((EngineCoreRequestType.ABORT.value,
+                                     self.encoder.encode(request_ids)))
