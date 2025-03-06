@@ -439,14 +439,16 @@ def test_contexted_kv_attention_alibi(
         # heads.
         #
         # see also: vllm/model_executor/layers/attention.py
-        query = query.view(query.shape[0], num_kv_heads, num_queries_per_kv,
-                           query.shape[-1])
         key = key[:, :, None, :].expand(key.shape[0], num_kv_heads,
                                         num_queries_per_kv, key.shape[-1])
         value = value[:, :,
                       None, :].expand(value.shape[0], num_kv_heads,
                                       num_queries_per_kv, value.shape[-1])
-
+        # [seq, num_kv_heads, num_queries_per_kv, dk]=>
+        # [seq, num_kv_heads*num_queries_per_kv, dk] to comply with rest of the
+        # codebase. We save some time reshaping alibi matrix at runtime.
+        key = key.reshape(key.shape[0], -1, key.shape[-1])
+        value = value.reshape(value.shape[0], -1, value.shape[-1])
     query = query.unsqueeze(0)
     key = key.unsqueeze(0)
     value = value.unsqueeze(0)
