@@ -42,7 +42,7 @@ def test_models(
     if 'Bamba' in model:
         example_prompts.pop(3)
     if 'plamo' in model:
-        model_kwargs = None
+        model_kwargs = {}
 
     with hf_runner(model, dtype=dtype, model_kwargs=model_kwargs) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
@@ -149,7 +149,7 @@ def test_mamba_prefill_chunking(hf_runner, vllm_runner, example_prompts,
         # don't use them
     }
     if 'plamo' in model:
-        model_kwargs = None
+        model_kwargs = {}
 
     with hf_runner(model, dtype=dtype, model_kwargs=model_kwargs) as hf_model:
         non_chunked = hf_model.generate_greedy(example_prompts, max_tokens)
