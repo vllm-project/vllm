@@ -571,9 +571,7 @@ class WorkerWrapperBase:
         if self.vllm_config.parallel_config.worker_mixin_cls:
             worker_mixin_cls = resolve_obj_by_qualname(
                 self.vllm_config.parallel_config.worker_mixin_cls)
-            logger.info(
-                "Injecting %s into %s for extended collective_rpc call",
-                worker_mixin_cls, worker_class)
+            extended_calls = []
             if worker_mixin_cls not in worker_class.__bases__:
                 # check any conflicts between worker and worker_mixin_cls
                 for attr in dir(worker_mixin_cls):
@@ -583,9 +581,13 @@ class WorkerWrapperBase:
                         f"Worker class {worker_class} already has an attribute"
                         f" {attr}, which conflicts with the worker"
                         f" mixin class {worker_mixin_cls}.")
+                    extended_calls.append(attr)
                 # dynamically inherit the worker mixin class
                 worker_class.__bases__ = worker_class.__bases__ + (
                     worker_mixin_cls, )
+                logger.info(
+                    "Injected %s into %s for extended collective_rpc calls %s",
+                    worker_mixin_cls, worker_class, extended_calls)
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
