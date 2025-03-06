@@ -25,14 +25,6 @@ def test_n_gt_1(model):
     assert len(outputs[0].outputs) == 3
 
 
-def test_best_of(model):
-    """Raise a ValueError since best_of is deprecated."""
-
-    params = SamplingParams(n=2, best_of=3)
-    with pytest.raises(ValueError):
-        _ = model.generate(PROMPT, params)
-
-
 def test_penalties(model):
     """Check that we do not get errors if applied."""
 
@@ -120,6 +112,10 @@ def test_allowed_token_ids(model):
     output = model.generate(
         PROMPT, SamplingParams(allowed_token_ids=allowed_token_ids))
     assert output[0].outputs[0].token_ids[-1] == TOKEN_ID
+
+    # Reject empty allowed_token_ids.
+    with pytest.raises(ValueError):
+        _ = model.generate(PROMPT, SamplingParams(allowed_token_ids=[]))
 
     # Reject negative token id.
     with pytest.raises(ValueError):
