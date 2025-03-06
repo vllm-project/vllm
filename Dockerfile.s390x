@@ -14,9 +14,9 @@ ENV LANG=C.UTF-8 \
 
 # Install development utilities
 RUN microdnf install -y \
-    which procps findutils tar vim git gcc g++ make patch make zlib-devel \
+    which procps findutils tar vim git gcc g++ make patch zlib-devel \
     libjpeg-turbo-devel libtiff-devel libpng-devel libwebp-devel freetype-devel harfbuzz-devel \
-    openssl-devel openblas openblas-devel wget autoconf automake libtool cmake && \
+    openssl-devel openblas openblas-devel autoconf automake libtool cmake && \
     microdnf clean all
 
 # Python Installation
@@ -34,8 +34,7 @@ FROM python-install AS pyarrow
 
 # Build Apache Arrow
 WORKDIR /tmp
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/apache/arrow.git && \
     cd arrow/cpp && \
     mkdir release && cd release && \
@@ -59,7 +58,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     cd ../../python && \
     export PYARROW_PARALLEL=4 && \
     export ARROW_BUILD_TYPE=release && \
-    python -m pip install -r requirements-build.txt && \
+    uv pip install -r requirements-build.txt && \
     python setup.py build_ext --build-type=$ARROW_BUILD_TYPE --bundle-arrow-cpp bdist_wheel
 
 FROM python-install AS numa-build
@@ -87,15 +86,14 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
 
 FROM python-install AS torch-vision
 # Install torchvision
-ARG TORCH_VERSION=2.6.0.dev20250104+cpu
+ARG TORCH_VERSION=2.7.0.dev20250304
 ARG TORCH_VISION_VERSION=v0.20.1
 WORKDIR /tmp
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/pytorch/vision.git && \
     cd vision && \
     git checkout $TORCH_VISION_VERSION && \
-    pip install -v torch==${TORCH_VERSION} --extra-index-url https://download.pytorch.org/whl/nightly/cpu && \
+    uv pip install -v torch==${TORCH_VERSION} --extra-index-url https://download.pytorch.org/whl/nightly/cpu && \
     python setup.py bdist_wheel
 
 # Final build stage
@@ -117,8 +115,7 @@ RUN --mount=type=bind,from=numa-build,src=/tmp/numactl-2.0.16,target=/numactl \
     make -C /numactl install
 
 # Install dependencies, including PyTorch and Apache Arrow
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=rust,source=/root/.cargo,target=/root/.cargo,rw \
     --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
     --mount=type=bind,from=pyarrow,source=/tmp/arrow/python/dist,target=/tmp/arrow-wheels \
@@ -135,8 +132,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         -r requirements-cpu.txt 
 
 # Build and install vllm
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
     uv pip install "$(echo dist/*.whl)[tensorizer]"
 
@@ -144,7 +140,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN umask 002 && \
     useradd --uid 2000 --gid 0 vllm && \
     mkdir -p /home/vllm && \
-    chmod g+rwx /home/vllm /usr/src /workspace
+    chmod g+rwx /home/vllm
 
 COPY LICENSE /licenses/vllm.md
 COPY examples/*.jinja /app/data/template/
@@ -153,4 +149,4 @@ USER 2000
 WORKDIR /home/vllm
 
 # Set the default entrypoint
-ENTRYPOINT ["/opt/vllm/bin/python", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]
