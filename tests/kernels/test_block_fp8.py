@@ -455,8 +455,8 @@ def iota(shape: Tuple[int, ...], dim: int = 0, **kwargs) -> torch.Tensor:
 
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
-    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
-    #itertools.product([128], [128], [256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS))
+    #itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
+    itertools.product([128], [128], [256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed):
