@@ -345,6 +345,13 @@ class Platform:
         return False
 
     @classmethod
+    def fp8_dtype(cls) -> torch.dtype:
+        """
+        Returns the preferred F8 type on the current platform.
+        """
+        return torch.float8_e4m3fn
+
+    @classmethod
     def use_all_gather(cls) -> bool:
         """
         Whether to use allgather in LogitsProcessor to gather the logits.

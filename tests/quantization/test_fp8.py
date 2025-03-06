@@ -113,10 +113,7 @@ def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
             elif current_platform.is_rocm():
                 if current_platform.supports_fp8() and not force_marlin:
                     # For GPUs with hardware support, we keep weights in fp8
-                    if current_platform.is_fp8_fnuz():
-                        assert fc1.weight.dtype == torch.float8_e4m3fnuz
-                    else:
-                        assert fc1.weight.dtype == torch.float8_e4m3fn
+                    assert fc1.weight.dtype == current_platform.fp8_dtype()
                 else:  # unsupported ROCm platform
                     pytest.skip(
                         "Skip `test_load_fp16_model`. "

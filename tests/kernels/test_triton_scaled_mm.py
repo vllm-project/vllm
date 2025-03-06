@@ -32,11 +32,8 @@ def scaled_mm_torch(a: torch.Tensor,
 
 def get_8bit_types():
     types = [torch.int8]
-    if current_platform.supports_fp8:
-        if current_platform.is_fp8_fnuz():
-            types.append(torch.float8_e4m3fnuz)
-        else:
-            types.append(torch.float8_e4m3fn)
+    if current_platform.supports_fp8():
+        types.append(current_platform.fp8_dtype())
     return types
 
 
