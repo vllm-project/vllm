@@ -496,7 +496,7 @@ class AsyncMPClient(MPClient):
         self.outputs_queue: Optional[asyncio.Queue[EngineCoreOutputs]] = None
         self.queue_task: Optional[asyncio.Task] = None
 
-        self.output_processor: Optional[Callable[
+        self.output_handler: Optional[Callable[
             [AsyncMPClient, EngineCoreOutputs], Awaitable[None]]] = None
 
     async def _start_output_queue_task(self):
@@ -506,8 +506,8 @@ class AsyncMPClient(MPClient):
         decoder = self.decoder
         utility_results = self.utility_results
         outputs_queue = self.outputs_queue
-        output_processor = self.output_processor
-        _self_ref = weakref.ref(self) if output_processor else None
+        output_handler = self.output_handler
+        _self_ref = weakref.ref(self) if output_handler else None
         output_path = self.output_path
         output_socket = make_zmq_socket(self.ctx, output_path,
                                         zmq.constants.PULL)
@@ -522,12 +522,13 @@ class AsyncMPClient(MPClient):
                                             utility_results)
                     continue
 
-                if output_processor is not None:
+                if output_handler is not None:
                     assert _self_ref is not None
                     _self = _self_ref()
                     if not _self:
+                        # Client has been garbage collected, abort.
                         return
-                    await output_processor(_self, outputs)
+                    await output_handler(_self, outputs)
 
                 if outputs.outputs or outputs.scheduler_stats:
                     outputs_queue.put_nowait(outputs)
@@ -564,7 +565,7 @@ class AsyncMPClient(MPClient):
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
         message = (EngineCoreRequestType.UTILITY.value,
-               self.encoder.encode((call_id, method, args)))
+                   self.encoder.encode((call_id, method, args)))
         await engine.send_multipart(message)
         return await future
 
@@ -623,7 +624,7 @@ class DPAsyncMPClient(AsyncMPClient):
         self.num_engines_running = 0
         self.reqs_in_flight: dict[str, CoreEngine] = {}
 
-        self.output_processor = DPAsyncMPClient.process_engine_outputs  # type: ignore[assignment]
+        self.outputs_handler = DPAsyncMPClient.process_engine_outputs  # type: ignore[assignment]
         self.outputs_counter = 0
 
     def _init_core_engines(
