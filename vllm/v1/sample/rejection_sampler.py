@@ -24,6 +24,29 @@ INVALID_TOKEN_ID = -1
 
 
 class RejectionSampler(nn.Module):
+    """
+    The implementation strictly follows the algorithm described in 
+        https://arxiv.org/abs/2211.17192.
+    However, we want to clarify the terminology used in the implementation:
+    accepted tokens: tokens that are accepted based on the relationship 
+            between the "raw" draft probabilities and the target probabilities.
+    recovered tokens: tokens that are sampled based on the adjusted probability
+        distribution, which is derived from both the draft and target 
+        probabilities.
+    bonus tokens:
+        If all proposed tokens are accepted, the bonus token is added to the
+        end of the sequence. The bonus token is only sampled from the target
+        probabilities. We pass in the bonus tokens instead of sampling them
+        in the rejection sampler to allow for more flexibility in the
+        sampling process. For example, we can use top_p, top_k sampling for
+        bonus tokens, while spec decode does not support these sampling
+        strategies.
+    output tokens: 
+        Tokens are finally generated with the rejection sampler. 
+        output tokens = accepted tokens +
+                        recovered tokens +
+                        bonus tokens
+    """
 
     def __init__(self):
         super().__init__()
@@ -61,7 +84,7 @@ class RejectionSampler(nn.Module):
         draft_token_ids: list[list[int]],
         draft_probs: Optional[
             torch.Tensor],  # [batch_size, max_spec_len, vocab_size]
-        target_token_ids: list[list[int]],
+        bonus_token_ids_tensor: torch.Tensor,  # [batch_size, 1]
         target_probs: torch.
         Tensor,  # [batch_size, max_spec_len + 1, vocab_size]
         sampling_metadata: SamplingMetadata
@@ -77,17 +100,8 @@ class RejectionSampler(nn.Module):
                                               batch_first=True,
                                               padding_value=INVALID_TOKEN_ID)
 
-        target_token_ids = [
-            torch.tensor(x, dtype=int, device='cpu') for x in target_token_ids
-        ]
-        target_token_ids_tensor = pad_sequence(target_token_ids,
-                                               batch_first=True,
-                                               padding_value=INVALID_TOKEN_ID)
-
         # NOTE: CPU <-> GPU synchronization happens here.
         draft_token_ids_tensor = draft_token_ids_tensor.to(target_probs.device)
-        target_token_ids_tensor = target_token_ids_tensor.to(
-            target_probs.device)
 
         if self.forward_method == self.flashinfer_sample:
             # Create one-hot tensor for draft token ids.
@@ -97,12 +111,12 @@ class RejectionSampler(nn.Module):
                 draft_probs = _create_greedy_token_probs(
                     draft_token_ids_tensor, vocab_size, target_probs.device)
             if sampling_metadata.all_greedy:
+                target_token_ids_tensor = target_probs.argmax(dim=-1)
                 target_probs = _create_greedy_token_probs(
                     target_token_ids_tensor, vocab_size, target_probs.device)
             else:
-                sample_lens = [len(x) for x in target_token_ids]
+                sample_lens = [len(x) + 1 for x in draft_token_ids]
                 target_probs = _convert_2d_probs(target_probs, sample_lens)
-                print("target_probs", target_probs.size())
 
         if (self.forward_method == self.forward_native
                 and not sampling_metadata.all_greedy):
@@ -112,18 +126,18 @@ class RejectionSampler(nn.Module):
                 vocab_size = target_probs.size(-1)
                 draft_probs = _create_greedy_token_probs(
                     draft_token_ids_tensor, vocab_size, target_probs.device)
-            sample_lens = [len(x) for x in target_token_ids]
+            sample_lens = [len(x) + 1 for x in draft_token_ids]
             target_probs = _convert_2d_probs(target_probs, sample_lens)
 
         return self.forward_method(draft_token_ids_tensor, draft_probs,
-                                   target_token_ids_tensor, target_probs,
+                                   bonus_token_ids_tensor, target_probs,
                                    sampling_metadata)
 
     def flashinfer_sample(
         self,
         draft_token_ids_tensor: torch.Tensor,
         draft_probs: Optional[torch.Tensor],
-        target_token_ids_tensor: torch.Tensor,
+        bonus_token_ids_tensor: torch.Tensor,
         target_probs: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
@@ -148,7 +162,7 @@ class RejectionSampler(nn.Module):
         draft_token_ids_tensor: torch.Tensor,
         draft_probs: Optional[
             torch.Tensor],  # [batch_size, max_spec_len, vocab_size]
-        target_token_ids_tensor: torch.Tensor,
+        bonus_token_ids_tensor: torch.Tensor,
         target_probs: torch.
         Tensor,  # [batch_size, max_spec_len + 1, vocab_size]
         sampling_metadata: SamplingMetadata,
@@ -157,6 +171,7 @@ class RejectionSampler(nn.Module):
         if sampling_metadata.all_greedy:
             # Produce a mask that remains 1 (True) until the first
             # mismatch (cumprod turns 0 after a mismatch).
+            target_token_ids_tensor = target_probs.argmax(dim=-1)
             accept_mask = (target_token_ids_tensor[:, :-1] ==
                            draft_token_ids_tensor).cumprod(dim=1)
 
@@ -224,11 +239,8 @@ class RejectionSampler(nn.Module):
             # output_token_ids = accepted_token_ids +
             #                    recovered_token_ids +
             #                    bonus_token_id
-            recovered_bonus_token_ids = torch.cat([
-                recovered_token_ids, target_token_ids_tensor[:,
-                                                             -1].unsqueeze(-1)
-            ],
-                                                  dim=1)
+            recovered_bonus_token_ids = torch.cat(
+                [recovered_token_ids, bonus_token_ids_tensor], dim=1)
             # Generate mask with bonus tokens.
             generate_mask = torch.cat([
                 accept_mask,

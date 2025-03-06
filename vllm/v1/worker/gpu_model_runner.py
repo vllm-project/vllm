@@ -957,14 +957,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             recover_logits_idx = np.cumsum(sample_lens) - 1
             target_probs = self.model.sampler.compute_probs(
                 logits, sampling_metadata, sample_lens)
-            recover_token_ids = self.model.sample(
+            bonus_token_ids = self.model.sample(
                 logits=logits[recover_logits_idx, :],
                 sampling_metadata=sampling_metadata,
             ).sampled_token_ids
             sampler_output = self.rejection_sampler(
                 draft_token_ids,
                 None,  # draft_probs
-                recover_token_ids,
+                bonus_token_ids,
                 target_probs,
                 sampling_metadata)
         else:
