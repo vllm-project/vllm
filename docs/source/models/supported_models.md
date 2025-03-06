@@ -842,13 +842,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
-- * `PaliGemmaForConditionalGeneration`\*
-  * PaliGemma, PaliGemma 2
+- * `PaliGemmaForConditionalGeneration`
+  * PaliGemma (see note), PaliGemma 2 (see note)
   * T + I<sup>E</sup>
   * `google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, `google/paligemma2-3b-ft-docci-448`, etc.
   *
   * ✅︎
-  *
+  * ✅︎
 - * `Phi3VForCausalLM`
   * Phi-3-Vision, Phi-3.5-Vision
   * T + I<sup>E+</sup>
