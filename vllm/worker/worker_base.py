@@ -568,24 +568,24 @@ class WorkerWrapperBase:
                               bytes)
             worker_class = cloudpickle.loads(
                 self.vllm_config.parallel_config.worker_cls)
-        if self.vllm_config.parallel_config.worker_adapter_cls:
-            worker_adapter_class = resolve_obj_by_qualname(
-                self.vllm_config.parallel_config.worker_adapter_cls)
+        if self.vllm_config.parallel_config.worker_mixin_cls:
+            worker_mixin_cls = resolve_obj_by_qualname(
+                self.vllm_config.parallel_config.worker_mixin_cls)
             logger.info(
                 "Injecting %s into %s for extended collective_rpc call",
-                worker_adapter_class, worker_class)
-            if worker_adapter_class not in worker_class.__bases__:
+                worker_mixin_cls, worker_class)
+            if worker_mixin_cls not in worker_class.__bases__:
                 # check any conflicts between worker and worker_adapter
-                for attr in dir(worker_adapter_class):
+                for attr in dir(worker_mixin_cls):
                     if attr.startswith("__"):
                         continue
                     assert not hasattr(worker_class, attr), (
                         f"Worker class {worker_class} already has an attribute"
                         f" {attr}, which conflicts with the worker"
-                        f" adapter class {worker_adapter_class}.")
+                        f" mixin class {worker_mixin_cls}.")
                 # dynamically inherit the worker adapter class
                 worker_class.__bases__ = worker_class.__bases__ + (
-                    worker_adapter_class, )
+                    worker_mixin_cls, )
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)

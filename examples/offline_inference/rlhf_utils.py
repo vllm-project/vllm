@@ -28,7 +28,7 @@ class WorkerAdapter:
     the underlying worker class. This way, the code can be compatible
     with both vLLM V0 and V1.
     NOTE: we define this class in a separate module, and the main module
-    should pass the full qualified name as `worker_adapter_cls` argument.
+    should pass the full qualified name as `worker_mixin_cls` argument.
     """
 
     def init_weight_update_group(self, master_address, master_port,
@@ -71,7 +71,7 @@ class ColocateWorkerAdapter:
     the underlying worker class. This way, the code can be compatible
     with both vLLM V0 and V1.
     NOTE: we define this class in a separate module, and the main module
-    should pass the full qualified name as `worker_adapter_cls` argument.
+    should pass the full qualified name as `worker_mixin_cls` argument.
     """
 
     def report_device_id(self) -> str:

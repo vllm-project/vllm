@@ -116,7 +116,7 @@ for (i, bundle_indices) in enumerate([[0, 1], [2, 3]]):
     )(MyLLM).remote(
         model="facebook/opt-125m",
         enforce_eager=True,
-        worker_adapter_cls="rlhf_utils.ColocateWorkerAdapter",
+        worker_mixin_cls="rlhf_utils.ColocateWorkerAdapter",
         tensor_parallel_size=2,
         distributed_executor_backend="ray",
         gpu_memory_utilization=0.4,
