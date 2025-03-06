@@ -1366,7 +1366,7 @@ class ParallelConfig:
     # will be determined based on the platform.
     worker_cls: str = "auto"
     sd_worker_cls: str = "auto"
-    worker_mixin_cls: str = ""
+    worker_extension_cls: str = ""
 
     # world_size is TPxPP, it affects the number of workers we create.
     world_size: int = field(init=False)
@@ -1524,9 +1524,8 @@ class ParallelConfig:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
-        assert isinstance(
-            self.worker_mixin_cls,
-            str), ("worker_mixin_cls must be a string (qualified class name).")
+        assert isinstance(self.worker_extension_cls, str), (
+            "worker_extension_cls must be a string (qualified class name).")
 
 
 @dataclass

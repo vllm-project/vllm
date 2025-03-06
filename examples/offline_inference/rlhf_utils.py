@@ -21,14 +21,14 @@ def stateless_init_process_group(master_address, master_port, rank, world_size,
     return pynccl
 
 
-class WorkerMixin:
+class WorkerExtension:
     """
     The class for vLLM's worker to inherit from.
-    By defining a mixin class, the code can work no matter what is
+    By defining an extension class, the code can work no matter what is
     the underlying worker class. This way, the code can be compatible
     with both vLLM V0 and V1.
     NOTE: we define this class in a separate module, and the main module
-    should pass the full qualified name as `worker_mixin_cls` argument.
+    should pass the full qualified name as `worker_extension_cls` argument.
     """
 
     def init_weight_update_group(self, master_address, master_port,
@@ -64,14 +64,14 @@ class WorkerMixin:
         return weights_updated
 
 
-class ColocateWorkerMixin:
+class ColocateWorkerExtension:
     """
     The class for vLLM's worker to inherit from, in the colocate setting.
-    By defining a mixin class, the code can work no matter what is
+    By defining an extension class, the code can work no matter what is
     the underlying worker class. This way, the code can be compatible
     with both vLLM V0 and V1.
     NOTE: we define this class in a separate module, and the main module
-    should pass the full qualified name as `worker_mixin_cls` argument.
+    should pass the full qualified name as `worker_extension_cls` argument.
     """
 
     def report_device_id(self) -> str:
