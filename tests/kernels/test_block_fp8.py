@@ -33,6 +33,7 @@ K = [256, 4096, 5120, 3884, 13824, 16384]
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
 M_moe = [1, 2, 7, 83, 128, 512, 2048]
+M_moe_dg = [128, 512, 2048]
 N_moe = [128, 256, 4608]  # [128, 4608, 13824]
 K_moe = [256, 512, 7168]  # [256, 7168, 13824]
 BLOCK_SIZE = [[128, 128]]
@@ -369,7 +370,7 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
     sorted_token_ids, m_indices, num_pad = moe_align_block_size(
         topk_ids, 1, num_groups, None)  # topk?
-    #assert sorted_token_ids[sorted_token_ids >= topk*M].sum() == 0
+    assert sorted_token_ids[sorted_token_ids >= topk*M].sum() == 0
 
     pp(f"num_pad = {num_pad}")
     p("orig sorted", sorted_token_ids)
@@ -455,8 +456,8 @@ def iota(shape: Tuple[int, ...], dim: int = 0, **kwargs) -> torch.Tensor:
 
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
-    #itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
-    itertools.product([128], [128], [256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS))
+    itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
+    #itertools.product([128], [128], [256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed):
