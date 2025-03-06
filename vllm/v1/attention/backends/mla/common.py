@@ -631,7 +631,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         if current_platform.is_cuda():
             # Hack for V1 for now to avoid torch library overhead (since we are
             # already inside an attention custom op), pull out the forward
-            # method from the rotary embedding and all it directly
+            # method from the rotary embedding and all it directly (and avoid c
+            # alling forward_native)
+            # TODO(lucas): we should probably find a cleaner way to do this
             self.rotary_emb = rotary_emb.forward_cuda
 
         self.q_proj = q_proj
