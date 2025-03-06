@@ -69,6 +69,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         attn_metadata: MLACommonMetadata,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
+        assert attn_metadata.decode is not None
+
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError("FP8 Triton MLA not yet supported")
 
@@ -104,7 +106,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         # Run MQA
         decode_attention_fwd(q, kv_c_and_k_pe_cache, kv_c_cache, o,
-                             attn_metadata.block_table, attn_metadata.seq_lens,
-                             attn_logits, num_kv_splits, self.scale, PAGE_SIZE)
+                             attn_metadata.decode.block_table,
+                             attn_metadata.decode.seq_lens, attn_logits,
+                             num_kv_splits, self.scale, PAGE_SIZE)
 
         return self._v_up_proj_and_o_proj(o)
