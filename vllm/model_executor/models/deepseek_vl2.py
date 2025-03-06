@@ -606,7 +606,9 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self._pixel_values_to_embedding(
             pixel_values=pixel_values, images_spatial_crop=images_spatial_crop)
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> torch.Tensor:
+    def get_multimodal_embeddings(
+        self, **kwargs: object
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

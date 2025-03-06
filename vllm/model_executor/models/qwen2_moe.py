@@ -100,6 +100,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -115,7 +116,8 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                                 intermediate_size=config.moe_intermediate_size,
                                 reduce_results=False,
                                 renormalize=config.norm_topk_prob,
-                                quant_config=quant_config)
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.experts")
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.num_experts,
@@ -277,7 +279,8 @@ class Qwen2MoeDecoderLayer(nn.Module):
                 config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):
             self.mlp = Qwen2MoeSparseMoeBlock(config=config,
-                                              quant_config=quant_config)
+                                              quant_config=quant_config,
+                                              prefix=f"{prefix}.mlp")
         else:
             self.mlp = Qwen2MoeMLP(
                 hidden_size=config.hidden_size,
@@ -325,7 +328,6 @@ class Qwen2MoeModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
