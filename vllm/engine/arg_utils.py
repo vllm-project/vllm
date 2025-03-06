@@ -202,6 +202,7 @@ class EngineArgs:
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = "auto"
+    worker_extension_cls: str = ""
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
@@ -1016,6 +1017,13 @@ class EngineArgs:
             default="auto",
             help='The worker class to use for distributed execution.')
         parser.add_argument(
+            '--worker-extension-cls',
+            type=str,
+            default="",
+            help='The worker extension class on top of the worker cls, '
+            'it is useful if you just want to add new functions to the worker '
+            'class without changing the existing functions.')
+        parser.add_argument(
             "--generation-config",
             type=nullable_str,
             default=None,
@@ -1209,6 +1217,7 @@ class EngineArgs:
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
+            worker_extension_cls=self.worker_extension_cls,
         )
 
         max_model_len = model_config.max_model_len
