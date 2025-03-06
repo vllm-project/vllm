@@ -106,7 +106,6 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.IMAGE,
         prompt_formatter=identity,
         img_idx_to_prompt = lambda idx: "",
-        max_model_len=8192,
         # Paligemma uses its own sample prompts because the default one fails
         single_image_prompts=IMAGE_ASSETS.prompts({
             "stop_sign": "caption es",
@@ -117,9 +116,8 @@ VLM_TEST_SETTINGS = {
             "pixel_values"
         ),
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
-        dtype=("half" if current_platform.is_cpu() or current_platform.is_rocm()
-               else ("half", "float")),
-        marks=[pytest.mark.skip],
+        dtype="bfloat16",
+        marks=[pytest.mark.skip(reason="vLLM does not support PrefixLM attention mask")],  # noqa: E501
     ),
     # TODO(ywang96): Move Qwen2-VL out of core models in favor of Qwen2.5-VL
     # once we upgraded to transformers>=4.49.0.
