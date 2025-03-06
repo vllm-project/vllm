@@ -31,6 +31,10 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 RUN --mount=type=cache,target=/root/.cache/uv \
     python3 -m pip install uv
 
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
+
 # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
 # as it was causing spam when compiling the CUTLASS kernels
 RUN apt-get install -y gcc-10 g++-10
@@ -80,6 +84,10 @@ ARG TARGETPLATFORM
 
 # install build dependencies
 COPY requirements-build.txt requirements-build.txt
+
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements-build.txt
@@ -143,6 +151,10 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
 #################### DEV IMAGE ####################
 FROM base as dev
 
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
+
 COPY requirements-lint.txt requirements-lint.txt
 COPY requirements-test.txt requirements-test.txt
 COPY requirements-dev.txt requirements-dev.txt
@@ -180,6 +192,10 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 # Install uv for faster pip installs
 RUN --mount=type=cache,target=/root/.cache/uv \
     python3 -m pip install uv
+
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -237,6 +253,10 @@ FROM vllm-base AS test
 
 ADD . /vllm-workspace/
 
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
+
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements-dev.txt
@@ -264,6 +284,10 @@ RUN mv vllm test_docs/
 #################### OPENAI API SERVER ####################
 # base openai image with additional requirements, for any subsequent openai-style images
 FROM vllm-base AS vllm-openai-base
+
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/uv \
