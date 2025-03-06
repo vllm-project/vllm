@@ -22,8 +22,9 @@ def rms_norm(*, x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float,
     return out
 
 
-def fused_add_rms_norm(*, x: torch.Tensor, residual: torch.Tensor,
-                       weight: torch.Tensor, variance_epsilon: float):
+def fused_add_rms_norm(
+        *, x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
 
     ops.fused_add_rms_norm(
@@ -51,9 +52,9 @@ def rocm_aiter_rmsnorm2d_fwd_with_add(
     return x, residual
 
 
-def dispatch_rmsnorm_func(
-        add_residual: bool
-) -> Callable[..., Tuple[torch.Tensor, torch.Tensor]]:
+def dispatch_cuda_rmsnorm_func(
+    add_residual: bool
+) -> Callable[..., Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]:
     if not add_residual:
         return rms_norm
     if rocm_aiter_norm_enabled():
@@ -135,7 +136,7 @@ class RMSNorm(CustomOp):
             return self.forward_native(x, residual)
 
         add_residual = residual is not None
-        return dispatch_rmsnorm_func(add_residual)(
+        return dispatch_cuda_rmsnorm_func(add_residual)(
             x=x,
             residual=residual,
             weight=self.weight.data,

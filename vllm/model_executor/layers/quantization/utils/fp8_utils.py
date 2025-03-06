@@ -73,7 +73,8 @@ def rocm_aiter_gemm_a8w8_blockscale(A: torch.Tensor,
     return rocm_aiter.gemm_a8w8_blockscale(A, B, As, Bs, output)
 
 
-def dispatch_blockscale_func(use_cutlass: bool) -> Callable[..., torch.Tensor]:
+def dispatch_w8a8_blockscale_func(
+        use_cutlass: bool) -> Callable[..., torch.Tensor]:
     if use_cutlass:
         return cutlass_scaled_mm
     if rocm_aiter_w8a8_block_gemm_enabled():
@@ -94,16 +95,18 @@ def apply_w8a8_block_fp8_linear(
     # View input as 2D matrix for fp8 methods
     input_2d = input.view(-1, input.shape[-1])
     output_shape = [*input.shape[:-1], weight.shape[0]]
-    use_cutlass = cutlass_block_fp8_supported and shape_supported_by_cutlass()
+    use_cutlass = cutlass_block_fp8_supported and shape_supported_by_cutlass(
+        weight, block_size, weight_scale, input_2d)
 
     q_input, x_scale = per_token_group_quant_fp8(
         input_2d, block_size[1], column_major_scales=use_cutlass)
-    output = dispatch_blockscale_func(use_cutlass)(A=q_input,
-                                                   B=weight,
-                                                   As=x_scale,
-                                                   Bs=weight_scale,
-                                                   block_size=block_size,
-                                                   output_dtype=input.dtype)
+    output = dispatch_w8a8_blockscale_func(use_cutlass)(
+        A=q_input,
+        B=weight,
+        As=x_scale,
+        Bs=weight_scale,
+        block_size=block_size,
+        output_dtype=input.dtype)
 
     if bias is not None:
         output = output + bias

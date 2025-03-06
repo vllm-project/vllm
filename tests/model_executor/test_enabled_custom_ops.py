@@ -13,12 +13,12 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     rocm_aiter_topk_softmax, torch_vllm_inplace_fused_experts,
     torch_vllm_outplace_fused_experts, vllm_topk_softmax)
 from vllm.model_executor.layers.layernorm import (
-    RMSNorm, dispatch_rmsnorm_func, fused_add_rms_norm, rms_norm,
+    RMSNorm, dispatch_cuda_rmsnorm_func, fused_add_rms_norm, rms_norm,
     rocm_aiter_rmsnorm2d_fwd_with_add)
 from vllm.model_executor.layers.linear import (
     dispatch_unquantized_linear_func, rocm_aiter_tgemm_mm)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    cutlass_scaled_mm, dispatch_blockscale_func,
+    cutlass_scaled_mm, dispatch_w8a8_blockscale_func,
     rocm_aiter_gemm_a8w8_blockscale, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
 
@@ -137,7 +137,7 @@ def test_block_gemm_dispatch(use_cutlass: bool, use_rocm_aiter: str,
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_BLOCK_GEMM",
                        use_rocm_aiter_block_gemm)
-    block_scale_func = dispatch_blockscale_func(use_cutlass)
+    block_scale_func = dispatch_w8a8_blockscale_func(use_cutlass)
 
     if use_cutlass:
         assert block_scale_func == cutlass_scaled_mm
@@ -155,7 +155,7 @@ def test_rms_norm_dispatch(add_residual: bool, use_rocm_aiter: str,
                            use_rocm_aiter_norm: str, monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_NORM", use_rocm_aiter_norm)
-    rms_norm_func = dispatch_rmsnorm_func(add_residual)
+    rms_norm_func = dispatch_cuda_rmsnorm_func(add_residual)
 
     if not add_residual:
         assert rms_norm_func == rms_norm
