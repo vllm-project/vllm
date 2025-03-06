@@ -100,6 +100,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         super().process_weights_after_loading(layer)
 
         if rocm_aiter_moe_enabled():
+            # reshaping weights is required for aiter moe kernel.
             from aiter.ops.shuffle import (shuffle_weight as
                                            rocm_aiter_shuffle_weight)
 

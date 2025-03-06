@@ -560,6 +560,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
             if rocm_aiter_fp8_block_scaled_moe_enabled():
+                # reshaping weights is required for aiter moe kernel.
                 from aiter.ops.shuffle import (shuffle_weight as
                                                rocm_aiter_shuffle_weight)
 
@@ -600,6 +601,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                  requires_grad=False)
 
             if rocm_aiter_moe_enabled():
+                # reshaping weights is required for aiter moe kernel.
                 from aiter.ops.shuffle import (shuffle_weight as
                                                rocm_aiter_shuffle_weight)
 
@@ -687,6 +689,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     start += shard_size
 
             if rocm_aiter_moe_enabled():
+                # reshaping weights is required for aiter moe kernel.
                 from aiter.ops.shuffle import (shuffle_weight as
                                                rocm_aiter_shuffle_weight)
 
