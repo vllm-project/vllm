@@ -23,6 +23,23 @@ from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
 
 logger = init_logger(__name__)
 
+use_deep_gemm = False
+if True or envs.VLLM_USE_DEEP_GEMM:
+    try:
+        import deep_gemm as dg
+        use_deep_gemm = True
+    except ImportError:
+        logger.warning("Failed to import DeepGemm kernels.")
+
+
+def p(s, t):
+    #print(f"{s}: {t.shape}\n{t}")
+    pass
+
+def pp(x):
+    #print(x)
+    pass
+
 
 @triton.jit
 def write_zeros_to_output(c_ptr, stride_cm, stride_cn, pid_n, N, offs_token,
@@ -667,6 +684,32 @@ def moe_align_block_size(
     return sorted_ids, expert_ids, num_tokens_post_pad
 
 
+def valid_deep_gemm(hidden_states: torch.Tensor,
+                    w1: torch.Tensor,
+                    w2: torch.Tensor,
+                    config: Dict[str, Any],
+                    use_fp8_w8a8: bool) -> bool:
+    if not use_deep_gemm or not use_fp8_w8a8:
+        return False
+
+    block_m = config["BLOCK_SIZE_M"]
+    block_n = config["BLOCK_SIZE_N"]
+    block_k = config["BLOCK_SIZE_K"]
+
+    if block_m % 128 != 0 or block_n % 128 != 0 or block_k % 128 != 0:
+        return False
+
+    M, K = hidden_states.shape
+    N = w2.shape[-1]
+    if M % 128 != 0 or N % 128 != 0 or K % 128 != 0:
+        return False
+
+    if not hidden_states.is_contiguous() or not w1.is_contiguous() or not w2.is_contiguous():
+        return False
+
+    return True
+
+
 def invoke_fused_moe_kernel(A: torch.Tensor,
                             B: torch.Tensor,
                             C: torch.Tensor,
@@ -685,22 +728,37 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                             use_fp8_w8a8: bool,
                             use_int8_w8a16: bool,
                             use_int4_w4a16: bool,
+                            use_dg: bool = False,
                             block_shape: Optional[List[int]] = None) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
-    if use_fp8_w8a8:
+    inv_perm = None
+
+    if use_fp8_w8a8 or use_dg:
         assert B_scale is not None
         if block_shape is None:
             A, A_scale = ops.scaled_fp8_quant(A, A_scale)
         else:
             assert len(block_shape) == 2
+            print(f"BLOCK {block_shape} {mul_routed_weight} {A.shape} {B.dtype}")
             block_n, block_k = block_shape[0], block_shape[1]
             A, A_scale = per_token_group_quant_fp8(A, block_k)
             assert triton.cdiv(A.shape[-1], block_k) == A_scale.shape[-1]
             assert triton.cdiv(B.shape[-2], block_n) == B_scale.shape[
                 -2], f"{B.shape[-2]}/{block_n}, {B_scale.shape[-2]}"
             assert triton.cdiv(B.shape[-1], block_k) == B_scale.shape[-1]
+
+        if use_dg:
+            inv_perm = torch.argsort(sorted_token_ids)
+            # if not mul_routed_weight?
+            X = A.shape
+            A_scale = dg.get_col_major_tma_aligned_tensor(A_scale)
+            A = A.view(dtype=torch.uint8)[sorted_token_ids, ...].view(dtype=A.dtype)
+            A_scale = A_scale[sorted_token_ids]
+            assert X == A.shape
+            assert A_scale.shape[-1] == A.shape[-1] // 128
+
     elif use_int8_w8a16 or use_int4_w4a16:
         assert B_scale is not None
         assert block_shape is None or block_shape[0] == 0
@@ -716,6 +774,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         # and we can skip some invalid blocks.
         EM = min(sorted_token_ids.shape[0],
                  A.shape[0] * top_k * config['BLOCK_SIZE_M'])
+
     grid = lambda META: (triton.cdiv(EM, META['BLOCK_SIZE_M']) * triton.cdiv(
         B.shape[1], META['BLOCK_SIZE_N']), )
 
@@ -967,7 +1026,7 @@ def get_default_config(
         # Block-wise quant: BLOCK_SIZE_N must be divisible by block_shape[0]
         # BLOCK_SIZE_K must be divisible by block_shape[1]
         config = {
-            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_M": 64 if not use_deep_gemm else dg.get_m_alignment_for_contiguous_layout(),
             "BLOCK_SIZE_N": block_shape[0],
             "BLOCK_SIZE_K": block_shape[1],
             "GROUP_SIZE_M": 32,
@@ -990,10 +1049,11 @@ def get_default_config(
         else:
             config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1}
     else:
+        dg_config = use_deep_gemm and dtype == "fp8_w8a8"
         config = {
-            "BLOCK_SIZE_M": 64,
-            "BLOCK_SIZE_N": 64,
-            "BLOCK_SIZE_K": 32,
+            "BLOCK_SIZE_M": 64 if not dg_config else dg.get_m_alignment_for_contiguous_layout(),
+            "BLOCK_SIZE_N": 64 if not dg_config else 128,
+            "BLOCK_SIZE_K": 32 if not dg_config else 128,
             "GROUP_SIZE_M": 8,
         }
         # A heuristic: fused marlin works faster with this config for small M
@@ -1433,7 +1493,20 @@ def fused_experts_impl(
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    for chunk in range((num_tokens // CHUNK_SIZE) + 1):
+    use_dg = False and valid_deep_gemm(hidden_states, w1, w2, config, use_fp8_w8a8)
+
+    if use_dg:
+        print("USE_DG!!!!!!!!!!!!!")
+        num_chunks = 1
+        assert w1_scale is not None
+        assert w2_scale is not None
+        # TODO: do this offline
+        w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
+        w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
+    else:
+        num_chunks = (num_tokens // CHUNK_SIZE) + 1
+
+    for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
                                               num_tokens))
@@ -1458,8 +1531,14 @@ def fused_experts_impl(
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
+            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'] if not use_dg else 1,
                                  global_num_experts, expert_map))
+
+        # TODO: fix, this won't work chunked
+        if use_dg:
+            print(f"SOR {sorted_token_ids}")
+            expert_ids = torch.arange(0, top_k_num, dtype=torch.int)
+            expert_ids = expert_ids.unsqueeze(-1).expand(top_k_num, tokens_in_chunk).contiguous().view(-1)
 
         invoke_fused_moe_kernel(curr_hidden_states,
                                 w1,
@@ -1479,6 +1558,7 @@ def fused_experts_impl(
                                 use_fp8_w8a8=use_fp8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
+                                use_dg=use_dg,
                                 block_shape=block_shape)
 
         if activation == "silu":
@@ -1508,10 +1588,18 @@ def fused_experts_impl(
                                 use_fp8_w8a8=use_fp8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
+                                use_dg=use_dg,
                                 block_shape=block_shape)
+
+        p("fused topk", topk_ids)
+        p("fused sorted", sorted_token_ids)
+        p("fused topk_weight", topk_weights)
 
         ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
                     out_hidden_states[begin_chunk_idx:end_chunk_idx])
+
+        p("fused out", out_hidden_states)
+
     return out_hidden_states
 
 
