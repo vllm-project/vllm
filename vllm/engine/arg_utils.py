@@ -137,6 +137,7 @@ class EngineArgs:
     hf_overrides: Optional[HfOverrides] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
+
     enforce_eager: Optional[bool] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
