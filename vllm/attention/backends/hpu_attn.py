@@ -219,30 +219,16 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             and attn_metadata.block_list is None:
             key = key.unflatten(0, (block_indices.size(0), -1))
             value = value.unflatten(0, (block_indices.size(0), -1))
-        num_blocks = kv_cache[0].shape[0]
-        block_size = kv_cache[0].shape[1]
 
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache = HPUPagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
-            # Reshape the input keys and values and store them in the cache.
-            # If kv_cache is not provided, the new key and value tensors are
-            # not cached. This happens during the initial memory profiling run.
-            padded_key = key
-            padded_value = value
-            # NOTE(kzawora): Prefix prefill currently cannot properly handle sequence padding, so this is a workaround 
-            #if attn_metadata.is_prompt and attn_metadata.block_list is not None:
-            #    padded_key = torch.zeros((block_indices.size(0), block_size, self.num_kv_heads, self.head_size), device=key.device, dtype=key.dtype)
-            #    padded_key.view(-1, self.num_kv_heads, self.head_size)[:key.shape[0]] = key.view(-1, self.num_kv_heads, self.head_size)
-            #    padded_value = torch.zeros((block_indices.size(0), block_size, self.num_kv_heads, self.head_size), device=value.device, dtype=value.dtype)
-            #    padded_value.view(-1, self.num_kv_heads, self.head_size)[:value.shape[0]] = value.view(-1, self.num_kv_heads, self.head_size)
-
-            key_cache = self.k_cache(padded_key, key_cache, block_indices,
+            key_cache = self.k_cache(key, key_cache, block_indices,
                                      block_offsets)
-            value_cache = self.v_cache(padded_value, value_cache, block_indices,
+            value_cache = self.v_cache(value, value_cache, block_indices,
                                        block_offsets)
-                
+
         if attn_metadata.is_prompt:
             # Prompt run.
             query_shape = (batch_size, seq_len, self.num_heads, self.head_size)

@@ -51,9 +51,11 @@ logger = init_logger(__name__)
 
 _TYPE_CACHE = {}
 
+
 class CacheAccessValidator:
+
     def __init__(self, num_blocks, block_size, pad_block_id):
-        self.num_blocks = num_blocks 
+        self.num_blocks = num_blocks
         self.block_size = block_size
         self.pad_block_id = pad_block_id
         self.producers = [None] * (num_blocks * block_size)
@@ -64,13 +66,14 @@ class CacheAccessValidator:
         # write to kv cache from slot mapping, no reads
         for i in range(len(request_ids)):
             self.write_slots(slot_mapping[i], request_ids[i])
-        
+
     def validate_prefix_prefill(self, slot_mapping, block_list, request_ids):
         for i in range(len(request_ids)):
             self.write_slots(slot_mapping[i], request_ids[i])
             self.read_blocks(block_list[i], request_ids[i])
-        
-    def validate_decode(self, slot_mapping, block_list, block_usage, request_ids):
+
+    def validate_decode(self, slot_mapping, block_list, block_usage,
+                        request_ids):
         for i in range(len(request_ids)):
             self.write_slots(slot_mapping[i], request_ids[i])
             self.read_blocks(block_list[i], request_ids[i], block_usage[i])
@@ -81,37 +84,30 @@ class CacheAccessValidator:
         assert start < end
         return start, end
 
-    #def write_blocks(self, block_ids, producer):
-    #    for block_id in block_ids:
-    #        self.write_block(block_id, producer)
-    
-    #def write_block(self, block_id, producer):
-    #    if block_id == self.pad_block_id:
-    #        return
-    #    start, end = self._get_block_range(block_id)
-    #    try:
-    #        assert all([i is None for i in self.producers[start:end]]), f"Producer {producer} attempted to overwrite block {block_id} taken by {self.producers[start]}"
-    #        assert all([i == producer or i is None for i in self.consumers[start:end]]), f"Producer {producer} attempted to overwrite block {block_id} consumed by {self.consumers[start]}"        
-    #    except AssertionError:
-    #        import pdb; pdb.set_trace()
-    #    self.producers[start:end] = producer
-
     def write_slots(self, slot_ids, producer):
         for slot_id in slot_ids:
-            self.write_slot(slot_id, producer) 
+            self.write_slot(slot_id, producer)
 
     def write_slot(self, slot_id, producer):
         if slot_id // self.block_size == self.pad_block_id:
             return
         try:
             # TODO(kzawora): remove or self.producers[slot_id] == producer
-            assert self.producers[slot_id] is None or self.producers[slot_id] == producer, f"Producer {producer} attempted to overwrite slot {slot_id} taken by {self.producers[slot_id]}"
-            assert self.consumers[slot_id] == producer or self.consumers[slot_id] is None, f"Producer {producer} attempted to overwrite slot {slot_id} consumed by {self.consumers[slot_id]}"        
+            assert self.producers[slot_id] is None or self.producers[
+                slot_id] == producer, (
+                    f"Producer {producer} attempted to overwrite slot {slot_id}"
+                    f" taken by {self.producers[slot_id]}")
+            assert self.consumers[slot_id] == producer or self.consumers[
+                slot_id] is None, (
+                    f"Producer {producer} attempted to overwrite slot {slot_id}"
+                    f" consumed by {self.consumers[slot_id]}")
         except AssertionError:
-            import pdb; pdb.set_trace()
+            import pdb
+            pdb.set_trace()
         if self.producers[slot_id] == producer:
-            print(f"Producer {producer} is overwriting its own context at {slot_id}!")
-        
+            print(
+                f"Producer {producer} is overwriting own context at {slot_id}")
+
         if producer not in self.req_metadata:
             self.req_metadata[producer] = {}
             self.req_metadata[producer]["producing"] = [slot_id]
@@ -119,37 +115,43 @@ class CacheAccessValidator:
         else:
             self.req_metadata[producer]["producing"].append(slot_id)
         self.producers[slot_id] = producer
- 
-    
+
     def read_blocks(self, block_ids, consumer, block_usage=None):
         for i, block_id in enumerate(block_ids):
-            self.read_block(block_id, consumer, None if block_usage is None else block_usage[i])
-    
+            self.read_block(block_id, consumer,
+                            None if block_usage is None else block_usage[i])
+
     def read_block(self, block_id, consumer, block_usage=None):
         if block_id == self.pad_block_id:
             return
         start, end = self._get_block_range(block_id, block_usage)
         try:
-#            assert all([i is None for i in self.producers[start:end]]), f"Consumer {consumer} attempted to consume block {block_id} produced by no one"
-            assert all([i == consumer and i is not None for i in self.producers[start:end]]), f"Consumer {consumer} attempted to consume block {block_id} produced by {self.producers[start]}"        
+            assert all([
+                i == consumer and i is not None
+                for i in self.producers[start:end]
+            ]), (f"Consumer {consumer} attempted to consume block {block_id} "
+                 f"produced by {self.producers[start]}")
         except AssertionError:
-            import pdb; pdb.set_trace()
+            import pdb
+            pdb.set_trace()
         if consumer not in self.req_metadata:
-            assert False, "what? we can't become consumer without being producer first!"
+            raise AssertionError(
+                "this should never happen! we can't become consumer without "
+                "being producer first")
         else:
             for i in range(start, end):
                 self.req_metadata[consumer]["consuming"].append(i)
                 self.consumers[i] = consumer
-                
-    
+
     def evict_request(self, req_id):
-        logger.info(f'scrubbing request {req_id}, scrub-a-dub-dub...')
+        logger.info('scrubbing request %s, scrub-a-dub-dub...', req_id)
         del self.req_metadata[req_id]
         for i in range(len(self.producers)):
             if self.producers[i] == req_id:
                 self.producers[i] = None
             if self.consumers[i] == req_id:
                 self.consumers[i] = None
+
 
 class PhaseType(Enum):
     PREFILL = 'prefill'
@@ -199,7 +201,7 @@ class DecodeInputData:
     num_decodes: int
     token_ids: Optional[torch.Tensor] = None
     position_ids: Optional[torch.Tensor] = None
-    attn_metadata: HPUAttentionMetadataV1 = None
+    attn_metadata: Optional[HPUAttentionMetadataV1] = None
     logits_indices: Optional[torch.Tensor] = None
 
 
@@ -544,7 +546,8 @@ class HpuModelAdapter:
                 a 'prepare_cos_sin' method.")
 
     def forward(self, *args, **kwargs):
-        # TODO(kzawora): something goes VERY WRONG when operating on kwargs['attn_metadata'].slot_mapping, compared to untrimmed metadata
+        # TODO(kzawora): something goes VERY WRONG when operating on
+        # kwargs['attn_metadata'].slot_mapping, compared to untrimmed metadata
         kwargs = kwargs.copy()
         #        selected_token_indices = kwargs.pop('selected_token_indices')
         if 'warmup_mode' in kwargs:
@@ -719,6 +722,7 @@ class HPUModelRunner:
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
         )
+        self.mem_margin = None
 
         self.use_hpu_graph = not self.model_config.enforce_eager
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
@@ -742,7 +746,7 @@ class HPUModelRunner:
         self.padding_aware_scheduling = True  # TODO(kzawora): add knob for that
         self.padding_ratio_threshold = 0.9  # TODO(kzawora): add knob for that
         os.environ[
-            'VLLM_CONTIGUOUS_PA'] = 'false'  # NOTE(kzawora): this is a workaround
+            'VLLM_CONTIGUOUS_PA'] = 'false'  # NOTE(kzawora): this is a workaround # noqa
         self.use_contiguous_pa = os.environ.get('VLLM_CONTIGUOUS_PA',
                                                 'true').lower() == 'true'
         self.seen_configs: set = set()
@@ -767,9 +771,9 @@ class HPUModelRunner:
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config).tokenizer
-        self.validate_accesses = False
-        self.cache_access_validator = None
-                
+        self.validate_accesses = True
+        self.cache_access_validator: Optional[CacheAccessValidator] = None
+
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
         Generates the KVCacheSpec by parsing the kv cache format from each 
@@ -904,7 +908,8 @@ class HPUModelRunner:
                 req_data.new_block_ids)
             self.input_batch.block_table.append_row(req_index, start_index,
                                                     req_data.new_block_ids)
-            #if self.input_batch.num_computed_tokens_cpu[req_index] < self.input_batch.num_prompt_tokens[req_index]:
+            #if self.input_batch.num_computed_tokens_cpu[req_index] < \
+            # self.input_batch.num_prompt_tokens[req_index]:
             #    import pdb; pdb.set_trace()
             #    assert len(self.requests[req_id].output_token_ids) == 0
 
@@ -993,12 +998,13 @@ class HPUModelRunner:
             req_id_output_token_ids = {
                 req_id: req_id_output_token_ids[req_id] \
                     for req_id in request_ids}
-        req_id_output_token_ids = list(req_id_output_token_ids.items())
+        req_id_output_token_ids_lst = list(req_id_output_token_ids.items())
         if pad_to is not None:
-            while len(req_id_output_token_ids) < pad_to:
-                req_id_output_token_ids.append(req_id_output_token_ids[0])
+            while len(req_id_output_token_ids_lst) < pad_to:
+                req_id_output_token_ids_lst.append(
+                    req_id_output_token_ids_lst[0])
         sampling_metadata = self.input_batch.make_selective_sampling_metadata(
-            req_id_output_token_ids, skip_copy=not batch_changed)
+            req_id_output_token_ids_lst, skip_copy=not batch_changed)
         return sampling_metadata
 
     def get_habana_paged_attn_buffers(self,
@@ -1020,6 +1026,7 @@ class HPUModelRunner:
         assert len(block_list) == len(block_usage)
 
         padding_fn = None
+        block_bucket_size: int
         if self.use_contiguous_pa:
             block_bucket_size = max(max(block_list) + 1, len(block_list))
             if bucketing:
@@ -1033,7 +1040,6 @@ class HPUModelRunner:
             padding_fn = lambda tensor, pad_value: gather_list(
                 tensor, indices, pad_value)
         else:
-            block_bucket_size: int
             if bucketing:
                 block_bucket_size = \
                     self.bucketing_ctx.get_padded_decode_num_blocks(
@@ -1073,7 +1079,8 @@ class HPUModelRunner:
         assert padded_prompt_len <= self.max_model_len
         return padded_batch_size, padded_prompt_len
 
-    def _prefill_find_batch_size(self, num_scheduled_tokens, batch_idx, num_reqs, fake_prefix_prefill, bucketing):
+    def _prefill_find_batch_size(self, num_scheduled_tokens, batch_idx,
+                                 num_reqs, fake_prefix_prefill, bucketing):
         num_prefills: int
         padded_batch_size: int
         padded_prompt_len: int
@@ -1085,7 +1092,7 @@ class HPUModelRunner:
                 continue
             num_prefills = possible_batch_size
             batch_req_ids = self.input_batch.req_ids[batch_idx:batch_idx +
-                                                        num_prefills]
+                                                     num_prefills]
             batch_context_lens = self.input_batch.num_computed_tokens_cpu[
                 batch_idx:batch_idx + num_prefills]
             batch_num_prompt_tokens = self.input_batch.num_prompt_tokens[
@@ -1094,13 +1101,12 @@ class HPUModelRunner:
                 batch_idx:batch_idx + num_prefills]
 
             prompt_lens = num_scheduled_tokens[batch_idx:batch_idx +
-                                                num_prefills]
+                                               num_prefills]
 
             if fake_prefix_prefill:
                 for i in range(num_prefills):
-                    if batch_context_lens[
-                            i] > 0 and batch_num_scheduled_tokens[
-                                i] != batch_num_prompt_tokens[i]:
+                    if batch_context_lens[i] > 0 and batch_num_scheduled_tokens[
+                            i] != batch_num_prompt_tokens[i]:
                         prompt_lens[i] = batch_num_prompt_tokens[i]
 
             max_prompt_len = max(prompt_lens)
@@ -1122,7 +1128,7 @@ class HPUModelRunner:
             if not self.padding_aware_scheduling or can_schedule:
                 break
         return batch_req_ids, padded_batch_size, padded_prompt_len
-            
+
     def _prepare_prefill_inputs(self,
                                 total_num_prefills,
                                 num_decodes,
@@ -1139,7 +1145,6 @@ class HPUModelRunner:
         prefill_logits_indices = []
         block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
         fake_prefix_prefill = False
-        enable_prefix_caching = self.cache_config.enable_prefix_caching
 
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
@@ -1153,15 +1158,16 @@ class HPUModelRunner:
             # Find the largest batch size in range [1, max_prefill_batch_size]
             # that can fit within specified token budget
 
-            batch_req_ids, padded_batch_size, padded_prompt_len = self._prefill_find_batch_size(num_scheduled_tokens, batch_idx, num_reqs, fake_prefix_prefill, bucketing)
+            batch_req_ids, padded_batch_size, padded_prompt_len = (
+                self._prefill_find_batch_size(num_scheduled_tokens, batch_idx,
+                                              num_reqs, fake_prefix_prefill,
+                                              bucketing))
             num_prefills = len(batch_req_ids)
             context_lens = self.input_batch.num_computed_tokens_cpu[
                 batch_idx:batch_idx + num_prefills]
-            batch_num_prompt_tokens = self.input_batch.num_prompt_tokens[
-                batch_idx:batch_idx + num_prefills]
             batch_num_scheduled_tokens = num_scheduled_tokens[
                 batch_idx:batch_idx + num_prefills]
-            
+
             use_prefix_prefill = any(context_lens) and not fake_prefix_prefill
             # TODO(kzawora): this is an ugly hack for prefix caching, remove
             # padded_batch_size = num_prefills
@@ -1186,16 +1192,16 @@ class HPUModelRunner:
             # Look up the block_idx in the block table (logical<>physical map)
             # to compute this.
             slot_mapping = torch.ones((padded_batch_size, padded_prompt_len),
-                                       dtype=torch.int32,
-                                       device='cpu') * self._PAD_SLOT_ID
+                                      dtype=torch.int32,
+                                      device='cpu') * self._PAD_SLOT_ID
             dummy_slots = itertools.cycle(
                 range(self._PAD_SLOT_ID, self._PAD_SLOT_ID + self.block_size))
-            slot_mapping.apply_(lambda _: next(dummy_slots))
+            slot_mapping.apply_(lambda _, ds=dummy_slots: next(ds))
             # NOTE(kzawora): this has no right to work on prefix prefills
-            iterable = zip(
-                batch_num_scheduled_tokens, [0] *
-                len(batch_num_scheduled_tokens)) if not use_prefix_prefill else zip(
-                    batch_num_scheduled_tokens, context_lens)
+            iterable = zip(batch_num_scheduled_tokens, [0] *
+                           len(batch_num_scheduled_tokens)
+                           ) if not use_prefix_prefill else zip(
+                               batch_num_scheduled_tokens, context_lens)
             for i, (prompt_scheduled_tokens,
                     prompt_start_idx) in enumerate(iterable):
                 # Prepare and sanitize token ids (cpu)
@@ -1226,16 +1232,12 @@ class HPUModelRunner:
                 block_offsets = flat_prefill_positions % self.block_size
                 slot_mapping[
                     i, :
-                    prompt_scheduled_tokens] = block_numbers * self.block_size + \
-                        block_offsets
+                    prompt_scheduled_tokens] = block_numbers * self.block_size \
+                        + block_offsets
                 #slot_mapping[i, prompt_len:] = _PAD_SLOT_ID # no need to
                 # sanitize - buffer is pre-filled with _PAD_SLOT_IDs
             slot_mapping = slot_mapping.long()
-            #block_size = self.block_size
-            #indices = torch.div(slot_mapping.flatten(), block_size, rounding_mode="floor")
-            #if not torch.equal(indices.unflatten(0, (-1, block_size)), indices.unflatten(0, (-1, block_size))[:, 0].unsqueeze(1).expand(-1, block_size)):
-            #    import pdb; pdb.set_trace()
-            #import pdb; pdb.set_trace()
+
             logits_indices = torch.zeros(padded_batch_size,
                                          dtype=torch.int32,
                                          device='cpu')
@@ -1258,8 +1260,8 @@ class HPUModelRunner:
             seq_lens_tensor = torch.zeros((padded_batch_size),
                                           dtype=torch.int32,
                                           device='cpu')
-            seq_lens_tensor[:num_prefills] = torch.tensor(batch_num_scheduled_tokens,
-                                                          device='cpu')
+            seq_lens_tensor[:num_prefills] = torch.tensor(
+                batch_num_scheduled_tokens, device='cpu')
             token_ids_device = _async_h2d_tensor_copy(token_ids, self.device)
             positions_device = _async_h2d_tensor_copy(positions, self.device)
             seq_lens_tensor_device = _async_h2d_tensor_copy(
@@ -1299,9 +1301,15 @@ class HPUModelRunner:
                 context_lens_tensor_device = _async_h2d_tensor_copy(
                     context_lens_tensor, self.device)
                 #import pdb; pdb.set_trace()
-                block_indices = torch.div(slot_mapping, self.block_size, rounding_mode="floor")
-                intersection = list(set(block_indices.flatten().tolist()) & set(prefix_block_tables.flatten().tolist()))
-                assert len(intersection) == 0, "slot_mapping and prefix_block_tables intersect"
+                block_indices = torch.div(slot_mapping,
+                                          self.block_size,
+                                          rounding_mode="floor")
+                intersection = list(
+                    set(block_indices.flatten().tolist())
+                    & set(prefix_block_tables.flatten().tolist()))
+                assert len(
+                    intersection
+                ) == 0, "slot_mapping and prefix_block_tables intersect"
                 attn_metadata = \
                     HPUAttentionMetadataV1.make_cached_prefill_metadata(
                     seq_lens_tensor=seq_lens_tensor_device,
@@ -1310,8 +1318,11 @@ class HPUModelRunner:
                     num_prefill_tokens=sum(batch_num_scheduled_tokens),
                     slot_mapping=slot_mapping_device,
                     block_list=block_list_device)
-                if self.validate_accesses:
-                    self.cache_access_validator.validate_prefix_prefill(slot_mapping.tolist(), prefix_block_tables.tolist(), batch_req_ids)
+                if self.validate_accesses and \
+                    self.cache_access_validator is not None:
+                    self.cache_access_validator.validate_prefix_prefill(
+                        slot_mapping.tolist(), prefix_block_tables.tolist(),
+                        batch_req_ids)
             else:
                 attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
                     seq_lens_tensor=seq_lens_tensor_device,
@@ -1319,8 +1330,10 @@ class HPUModelRunner:
                     num_prefill_tokens=sum(batch_num_scheduled_tokens),
                     slot_mapping=slot_mapping_device,
                 )
-                if self.validate_accesses:
-                    self.cache_access_validator.validate_prefill(slot_mapping.tolist(), batch_req_ids)
+                if (self.validate_accesses
+                        and self.cache_access_validator is not None):
+                    self.cache_access_validator.validate_prefill(
+                        slot_mapping.tolist(), batch_req_ids)
             # ATTN_METADATA.
             prefill_attn_metadata.append(attn_metadata)
             batch_idx += num_prefills
@@ -1330,7 +1343,6 @@ class HPUModelRunner:
                                 position_ids=prefill_position_ids,
                                 attn_metadata=prefill_attn_metadata,
                                 logits_indices=prefill_logits_indices)
-
 
     def _prepare_decode_inputs(self,
                                num_decodes,
@@ -1396,7 +1408,7 @@ class HPUModelRunner:
         slot_mapping = slot_mapping[:padded_batch_size]
         dummy_slots = itertools.cycle(
             range(self._PAD_SLOT_ID, self._PAD_SLOT_ID + self.block_size))
-        slot_mapping[num_decodes:].apply_(lambda _: next(dummy_slots))
+        slot_mapping[num_decodes:].apply_(lambda _, ds=dummy_slots: next(ds))
         # BLOCK_TABLE [batch, max_num_blocks_per_req]
         context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
         num_blocks = np.ceil(context_lens / self.block_size).astype(
@@ -1439,16 +1451,19 @@ class HPUModelRunner:
         num_decode_tokens_device = _async_h2d_tensor_copy(
             num_decode_tokens, self.device)
         slot_mapping_device = _async_h2d_tensor_copy(slot_mapping, self.device)
-        if self.validate_accesses:
+        if self.validate_accesses and self.cache_access_validator is not None:
             last_block_usage = [
                 slot[0] % self.block_size + 1 for slot in slot_mapping
             ]
-            block_groups = [[i] * len(bt) for i, bt in enumerate(block_tables_list)]
-            block_usage = [[self.block_size] * (len(bt) - 1) + [lbu]
-                        for bt, lbu in zip(block_tables_list, last_block_usage)
-                        if bt]
+            block_groups = [[i] * len(bt)
+                            for i, bt in enumerate(block_tables_list)]
+            block_usage = [
+                [self.block_size] * (len(bt) - 1) + [lbu]
+                for bt, lbu in zip(block_tables_list, last_block_usage) if bt
+            ]
             req_ids = self.input_batch.req_ids[:num_decodes]
-            self.cache_access_validator.validate_decode(slot_mapping.tolist(), block_tables_list, block_usage,req_ids)
+            self.cache_access_validator.validate_decode(
+                slot_mapping.tolist(), block_tables_list, block_usage, req_ids)
         return DecodeInputData(
             num_decodes=num_decodes,
             token_ids=token_ids_device,
@@ -1480,6 +1495,7 @@ class HPUModelRunner:
         num_scheduled_tokens = []
         num_prompt_tokens = []
         for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            assert req_id is not None
             seq_num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             seq_num_prompt_tokens = self.input_batch.num_prompt_tokens[idx]
@@ -1690,6 +1706,7 @@ class HPUModelRunner:
         ######################### DECODES #########################
         # Decodes run as one single batch with [padded_decode_bs, 1]
         if num_decodes > 0:
+            assert decode_data is not None
             htorch.core.mark_step()
             logits_device = self._execute_model_generic(
                 decode_data.token_ids, decode_data.position_ids,
@@ -1753,11 +1770,11 @@ class HPUModelRunner:
         for req_id in all_req_ids:
             prompt_logprobs_dict[req_id] = None
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
-        if self.validate_accesses:
+        if self.validate_accesses and self.cache_access_validator is not None:
             for i in range(num_reqs):
                 if sampled_token_ids_list[i] == self._tokenizer.eos_token_id:
                     self.cache_access_validator.evict_request(all_req_ids[i])
-    
+
         model_runner_output = ModelRunnerOutput(
             req_ids=all_req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1780,14 +1797,8 @@ class HPUModelRunner:
                 seq_len = (req_state.num_computed_tokens +
                            scheduler_output.num_scheduled_tokens[req_id])
                 req_state = self.requests[req_id]
-                prompt = self._tokenizer.decode(req_state.prompt_token_ids)
+                #prompt = self._tokenizer.decode(req_state.prompt_token_ids)
                 generated = self._tokenizer.decode(req_state.output_token_ids)
-
-                phase = 'prefill' if req_idx >= num_decodes \
-                    else 'decode'
-                #                logger.info(
-                #                    f'[ENGINE_ITER {self._ENGINE_ITER}] REQ:{req_id} IDX:{req_idx} {phase} generated token: {self._tokenizer.decode(sampled_token_ids_cpu[req_idx])!r}, all generated so far: {generated!r}'  # noqa
-                #                )
                 if 'The final answer is' not in generated:
                     logger.info(
                         f'[ENGINE_ITER {self._ENGINE_ITER}] REQ:{req_id} IDX:{req_idx} finished: {generated!r}'  # noqa
@@ -2034,8 +2045,8 @@ class HPUModelRunner:
             graphs = graph == 't'
             if graphs:
                 self.graphed_buckets.add((int(bs), int(seq_len), is_prompt))
-            self.warmup_scenario(int(bs), int(seq_len), is_prompt, kv_caches,
-                                 True)
+            #self.warmup_scenario(int(bs), int(seq_len), is_prompt, kv_caches,
+            #                     True)
             raise AssertionError("Finished profiling")
         if self.skip_warmup:
             logger.info("Skipping warmup...")
@@ -2045,7 +2056,8 @@ class HPUModelRunner:
         self.bucketing_ctx.generate_prompt_buckets()
         self.bucketing_ctx.generate_decode_buckets(max_blocks)
 
-        if not htorch.utils.internal.is_lazy() and not self.enforce_eager:
+        if not htorch.utils.internal.is_lazy(
+        ) and not self.model_config.enforce_eager:
             cache_size_limit = len(self.bucketing_ctx.prompt_buckets) + len(
                 self.bucketing_ctx.decode_buckets) + 1
             torch._dynamo.config.cache_size_limit = max(
@@ -2254,6 +2266,7 @@ class HPUModelRunner:
         self._PAD_BLOCK_ID = num_blocks
         self._PAD_SLOT_ID = num_blocks * self.block_size
         if self.validate_accesses:
-            self.cache_access_validator = CacheAccessValidator(num_blocks, self.block_size, self._PAD_BLOCK_ID)
+            self.cache_access_validator = CacheAccessValidator(
+                num_blocks, self.block_size, self._PAD_BLOCK_ID)
 
         htorch.hpu.synchronize()

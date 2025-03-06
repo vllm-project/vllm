@@ -3,7 +3,7 @@
 import gc
 import os
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
 import torch.distributed
@@ -104,7 +104,7 @@ class HPUWorker:
         self.model_runner.load_model()
 
     @torch.inference_mode()
-    def determine_available_memory(self) -> Tuple[int, int]:
+    def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
 
@@ -176,9 +176,9 @@ class HPUWorker:
             f"(gpu_memory_utilization={self.cache_config.gpu_memory_utilization}),"
             f" {format_bytes(graph_headroom_bytes)} reserved for HPUGraphs "
             f"(VLLM_GRAPH_RESERVED_MEM={graph_reserved_mem}), "
-            f"{format_bytes(dummy_block_headroom)} reserved for KV cache dummy block "
-            f"{format_bytes(cache_size_bytes-dummy_block_headroom)} reserved for usable KV cache"
-        )
+            f"{format_bytes(dummy_block_headroom)} reserved for KV cache dummy "
+            f"block {format_bytes(cache_size_bytes-dummy_block_headroom)} "
+            "reserved for usable KV cache")
 
         logger.info(msg)
         gc.collect()
@@ -191,10 +191,11 @@ class HPUWorker:
         with HabanaMemoryProfiler() as m:
             self.model_runner.initialize_kv_cache(kv_cache_config)
             torch.hpu.synchronize()
-        msg = (
-            f"Usable num_blocks: {kv_cache_config.num_blocks}, "
-            f"actual allocated num_blocks: {self.model_runner.kv_caches[0][0].shape[0]} (_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, _PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})"
-        )
+        msg = (f"Usable num_blocks: {kv_cache_config.num_blocks}, "
+               f"actual allocated num_blocks: "
+               f"{self.model_runner.kv_caches[0][0].shape[0]} "
+               f"(_PAD_BLOCK_ID={self.model_runner._PAD_BLOCK_ID}, "
+               f"_PAD_SLOT_ID={self.model_runner._PAD_SLOT_ID})")
         logger.info(msg)
         msg = ("Initializing cache engine "
                f"took {m.get_summary_string()}")
@@ -217,7 +218,6 @@ class HPUWorker:
         output = self.model_runner.execute_model(scheduler_output)
         # TODO(woosuk): Send the output to the engine process.
         return output if self.rank == 0 else None
-        return output
 
 
 def init_worker_distributed_environment(

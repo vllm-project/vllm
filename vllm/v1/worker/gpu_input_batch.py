@@ -425,17 +425,20 @@ class InputBatch:
 
     def make_selective_sampling_metadata(
         self,
-        req_id_output_token_ids: Tuple[str, List[int]],
+        req_id_output_token_ids: List[Tuple[str, List[int]]],
         skip_copy: bool = False,
     ) -> SamplingMetadata:
-        req_indices = [self.req_id_to_index[req_id[0]] for req_id in req_id_output_token_ids]
+        req_indices: List[int] = [
+            self.req_id_to_index[req_id]
+            for req_id, _ in req_id_output_token_ids
+        ]
         if not skip_copy:
             self.temperature[req_indices].copy_(
                 self.temperature_cpu_tensor[req_indices], non_blocking=True)
-            self.top_p[req_indices].copy_(
-                self.top_p_cpu_tensor[req_indices], non_blocking=True)
-            self.top_k[req_indices].copy_(
-                self.top_k_cpu_tensor[req_indices], non_blocking=True)
+            self.top_p[req_indices].copy_(self.top_p_cpu_tensor[req_indices],
+                                          non_blocking=True)
+            self.top_k[req_indices].copy_(self.top_k_cpu_tensor[req_indices],
+                                          non_blocking=True)
             if not self.no_penalties:
                 # Since syncing these tensors is expensive only copy them
                 # if necessary i.e. if there are requests which require
@@ -483,7 +486,9 @@ class InputBatch:
             repetition_penalties=self.repetition_penalties[req_indices],
             output_token_ids=output_token_ids,
             min_tokens=[self.min_tokens[req_idx] for req_idx in req_indices],
-            stop_token_ids=[self.stop_token_ids[req_idx] for req_idx in req_indices],
+            stop_token_ids=[
+                self.stop_token_ids[req_idx] for req_idx in req_indices
+            ],
             no_penalties=self.no_penalties,
         )
 
