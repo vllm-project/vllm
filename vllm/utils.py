@@ -8,6 +8,7 @@ import datetime
 import enum
 import gc
 import getpass
+import importlib
 import importlib.metadata
 import importlib.util
 import inspect
@@ -2306,3 +2307,24 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
 
     type.__setattr__(cls, '__init__', wrapped_init)
     return cls
+
+
+def lazy_import(module_name: str) -> Any:
+    """
+    Lazy import a module.
+
+    Args:
+        module_name: The name of the module to import.
+
+    Returns:
+        A function used to get the lazily imported module
+    """
+    module = None
+
+    def _lazy_import():
+        nonlocal module
+        if module is None:
+            module = importlib.import_module(module_name)
+        return module
+
+    return _lazy_import

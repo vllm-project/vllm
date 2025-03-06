@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import numpy.typing as npt
-import xgrammar as xgr
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.utils import lazy_import
 from vllm.v1.structured_output.grammar import (Grammar, StructuredOutputKey,
                                                StructuredOutputOptions)
 
@@ -22,12 +22,12 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+xgr = lazy_import("xgrammar")
+
 
 class StructuredOutputManager:
 
     def __init__(self, vllm_config: VllmConfig, max_cache_size: int = 500):
-        import torch
-        logger.warning("CUDA initialized: %s", torch.cuda.is_initialized())
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
@@ -38,9 +38,9 @@ class StructuredOutputManager:
         self.vllm_config = vllm_config
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
-        tokenizer_info = xgr.TokenizerInfo.from_huggingface(
+        tokenizer_info = xgr().TokenizerInfo.from_huggingface(
             tokenizer, vocab_size=self.vocab_size)
-        self.compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
+        self.compiler = xgr().GrammarCompiler(tokenizer_info, max_threads=8)
 
         self.max_cache_size = max_cache_size
         self.request_key_to_grammar: OrderedDict[StructuredOutputKey,
@@ -52,9 +52,8 @@ class StructuredOutputManager:
         # compilation, so we set it to half the number of CPUs.
         max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self._grammar_bitmask = xgr.allocate_token_bitmask(
+        self._grammar_bitmask = xgr().allocate_token_bitmask(
             self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
-        logger.warning("CUDA initialized: %s", torch.cuda.is_initialized())
 
     def __getitem__(self, key: StructuredOutputKey) -> Optional[Grammar]:
         # We need to pop and re-insert the grammar here for LRU cache
@@ -119,7 +118,7 @@ class StructuredOutputManager:
                 f"grammar is not of valid supported types. ({request_type!s})")
 
         return Grammar(
-            matcher=xgr.GrammarMatcher(ctx),
+            matcher=xgr().GrammarMatcher(ctx),
             vocab_size=self.vocab_size,
             ctx=ctx,
         )
