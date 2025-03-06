@@ -192,7 +192,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                     ).squeeze(0)+lora_bias_stacked[i]
 
         Args:
-            y (torch.Tensor): Output tensor. Will be changed in-place.
+            y (torch.Tensor): Output tensor. Will not be changed in-place.
             x (torch.Tensor): Input tensor (T, E)
             lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weight.
             lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight.
@@ -237,7 +237,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                         buffer: Optional[torch.Tensor] = None,
                         **kwargs) -> torch.Tensor:
         """
-        Applies lora  specifically for LogitsProcessorWithLoRA.
+        Applies lora specifically for LogitsProcessorWithLoRA.
 
         Semantics:
             buffer = (x @ lora_a_stacked) * scale

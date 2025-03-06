@@ -10,6 +10,11 @@ from torch.library import impl
 from torch_xla.experimental.custom_kernel import (XLA_LIB, jax_import_guard,
                                                   make_kernel_from_pallas)
 
+# TODO: Tune these
+TOKENS_BLOCK = 16
+LORA_RANK_BLOCK = 128
+DIM_BLOCK_SIZE = 128
+
 
 def _bgmv_kernel(bT: int, bL: int, idx_ref, inp_ref, lora_ref, out_ref,
                  acc_ref, mask_ref):
@@ -37,59 +42,35 @@ def _bgmv_kernel(bT: int, bL: int, idx_ref, inp_ref, lora_ref, out_ref,
 
 @jax.jit
 def _bgmv(
-    idxs: jax.Array,  # (T, )        int32
-    inputs: jax.Array,  # (T, D)       model dtype
-    loras: jax.Array  # (N, 1, L, D) model dtype
-) -> jax.Array:  # (T, L)       model dtype
+    idxs: jax.Array,  # (T, ) int32
+    inputs: jax.Array,  # (T, D) model dtype
+    loras: jax.Array  # (N, L, D) model dtype
+) -> jax.Array:  # (T, L) model dtype
     T, D = inputs.shape
     N, L, _ = loras.shape
 
-    # TODO: Tune these
-    bT = 8
-    bL = 128
-    bD = 128
-
-    # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU
-    # register
-    L1 = L
-    if bL > L or L % bL != 0:
-        L1 = (L // bL + 1) * bL
-
-    D1 = D
-    if bD > D or D % bD != 0:
-        D1 = (D // bD + 1) * bD
-
-    T1 = T
-    if bT > T or T % bT != 0:
-        T1 = (T // bT + 1) * bT
-
-    loras = jnp.pad(loras, ((0, 0), (0, L1 - L), (0, D1 - D)))
-    inputs = jnp.pad(inputs, ((0, T1 - T), (0, D1 - D)))
-
-    return pl.pallas_call(kernel=functools.partial(_bgmv_kernel, bT, bL),
-                          out_shape=jax.ShapeDtypeStruct((T1, L1),
-                                                         dtype=inputs.dtype),
-                          grid_spec=pltpu.PrefetchScalarGridSpec(
-                              num_scalar_prefetch=1,
-                              grid=(T1 // bT, L1 // bL, D1 // bD),
-                              in_specs=[
-                                  pl.BlockSpec((bT, bD),
-                                               lambda i, j, k, block_idx:
-                                               (i, k)),
-                                  pl.BlockSpec((N, bL, bD),
-                                               lambda i, j, k, block_idx:
-                                               (0, j, k)),
-                              ],
-                              out_specs=pl.BlockSpec(
-                                  (bT, bL), lambda i, j, k, block_idx: (i, j)),
-                              scratch_shapes=[
-                                  pltpu.VMEM((bT, bL), jnp.float32),
-                                  pltpu.VMEM((bT, bL), jnp.float32)
-                              ]),
-                          compiler_params=pltpu.TPUCompilerParams(
-                              dimension_semantics=("parallel", "parallel",
-                                                   "arbitrary")),
-                          name="bgmv")(idxs, inputs, loras)[:T, :L]
+    return pl.pallas_call(
+        kernel=functools.partial(_bgmv_kernel, TOKENS_BLOCK, LORA_RANK_BLOCK),
+        out_shape=jax.ShapeDtypeStruct((T, L), dtype=inputs.dtype),
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=1,
+            grid=(T // TOKENS_BLOCK, L // LORA_RANK_BLOCK,
+                  D // DIM_BLOCK_SIZE),
+            in_specs=[
+                pl.BlockSpec((TOKENS_BLOCK, DIM_BLOCK_SIZE),
+                             lambda i, j, k, block_idx: (i, k)),
+                pl.BlockSpec((N, LORA_RANK_BLOCK, DIM_BLOCK_SIZE),
+                             lambda i, j, k, block_idx: (0, j, k)),
+            ],
+            out_specs=pl.BlockSpec((TOKENS_BLOCK, LORA_RANK_BLOCK),
+                                   lambda i, j, k, block_idx: (i, j)),
+            scratch_shapes=[
+                pltpu.VMEM((TOKENS_BLOCK, LORA_RANK_BLOCK), jnp.float32),
+                pltpu.VMEM((TOKENS_BLOCK, LORA_RANK_BLOCK), jnp.float32)
+            ]),
+        compiler_params=pltpu.TPUCompilerParams(
+            dimension_semantics=("parallel", "parallel", "arbitrary")),
+        name="bgmv")(idxs, inputs, loras)
 
 
 def bgmv_shape_function(idxs, inputs, loras):
@@ -102,15 +83,6 @@ def bgmv_shape_function(idxs, inputs, loras):
 XLA_LIB.define("bgmv(Tensor inputs, Tensor loras, Tensor idxs) -> Tensor", )
 
 
-def ref_bgmv(inputs: jax.Array, loras: jax.Array, idxs: jax.Array):
-    selected_loras = loras[idxs]
-    n_tokens, output_size, input_size = selected_loras.shape
-    outputs = (selected_loras @ inputs.reshape(
-        (n_tokens, input_size, 1))).reshape((n_tokens, output_size))
-
-    return outputs
-
-
 @impl(XLA_LIB, "bgmv", "XLA")
 def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
     inputs = inputs.to(dtype=loras.dtype)
@@ -118,20 +90,30 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
     if len(loras.shape) == 4:
         loras = loras.squeeze(axis=1)
 
-    _, L, D = loras.shape
-
-    # FIXME: Routing the output from 1 Pallas kernel directly to another results
-    # in NaN outputs so here we fallback on a reference implementation until the
-    # bug is fixed. The kernel can be used for either shrink or expand, but not
-    # both at the same time.
-    use_reference = True
-    if use_reference and L < D or not use_reference and D < L:
-        return ref_bgmv(inputs, loras, idxs)
-
     jax_import_guard()
     kernel = make_kernel_from_pallas(_bgmv, bgmv_shape_function)
 
-    return kernel(idxs, inputs, loras)
+    T, _ = inputs.shape
+    _, L, D = loras.shape
+
+    # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU
+    # register. This has to happen in pytorch, doing it in Jax will lead to NaNs
+    L1 = L
+    if LORA_RANK_BLOCK > L or L % LORA_RANK_BLOCK != 0:
+        L1 = (L // LORA_RANK_BLOCK + 1) * LORA_RANK_BLOCK
+
+    D1 = D
+    if DIM_BLOCK_SIZE > D or D % DIM_BLOCK_SIZE != 0:
+        D1 = (D // DIM_BLOCK_SIZE + 1) * DIM_BLOCK_SIZE
+
+    T1 = T
+    if TOKENS_BLOCK > T or T % TOKENS_BLOCK != 0:
+        T1 = (T // TOKENS_BLOCK + 1) * TOKENS_BLOCK
+
+    loras = torch.nn.functional.pad(loras, (0, D1 - D, 0, L1 - L, 0, 0))
+    inputs = torch.nn.functional.pad(inputs, (0, D1 - D, 0, T1 - T))
+
+    return kernel(idxs, inputs, loras)[:T, :L]
 
 
 @impl(XLA_LIB, "bgmv", "CompositeExplicitAutograd")
