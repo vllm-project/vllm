@@ -74,7 +74,7 @@ class Attention(nn.Module):
             calculate_kv_scales = False
             if not envs.is_set("VLLM_USE_V1"):
                 raise NotImplementedError(
-                    "VLLM_USE_V1 is not set and your model does"
+                    "VLLM_USE_V1 is not set and your model does "
                     "not pass a CacheConfig to the Attention layer. "
                     "As a result, we cannot detect whether to use V0 "
                     "or V1 attention. Please set VLLM_USE_V1=0 or "
