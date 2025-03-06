@@ -37,11 +37,11 @@ if True or envs.VLLM_USE_DEEP_GEMM:
 
 
 def p(s, t):
-    #print(f"{s}: {t.shape}\n{t}")
+    print(f"{s}: {t.shape}\n{t}")
     pass
 
 def pp(x):
-    #print(x)
+    print(x)
     pass
 
 
@@ -527,7 +527,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         # and we can skip some invalid blocks.
         EM = min(sorted_token_ids.shape[0],
                  A.shape[0] * top_k * config['BLOCK_SIZE_M'])
-
     grid = lambda META: (triton.cdiv(EM, META['BLOCK_SIZE_M']) * triton.cdiv(
         B.shape[1], META['BLOCK_SIZE_N']), )
 
@@ -1319,7 +1318,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    use_dg = False and valid_deep_gemm(hidden_states, w1, w2, config, use_fp8_w8a8)
+    use_dg = valid_deep_gemm(hidden_states, w1, w2, config, use_fp8_w8a8)
 
     if use_dg:
         print("USE_DG!!!!!!!!!!!!!")
