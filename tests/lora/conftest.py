@@ -37,16 +37,20 @@ class ContextInfo(TypedDict):
     context_length: str
 
 
-LONG_LORA_INFOS: List[ContextIDInfo] = [{
-    "lora_id": 1,
-    "context_length": "16k",
-}, {
-    "lora_id": 2,
-    "context_length": "16k",
-}, {
-    "lora_id": 3,
-    "context_length": "32k",
-}]
+LONG_LORA_INFOS: List[ContextIDInfo] = [
+    {
+        "lora_id": 1,
+        "context_length": "16k",
+    },
+    {
+        "lora_id": 2,
+        "context_length": "16k",
+    },
+    {
+        "lora_id": 3,
+        "context_length": "32k",
+    },
+]
 
 
 @pytest.fixture()
@@ -74,11 +78,13 @@ def dist_init():
     if current_platform.is_cpu():
         backend = "gloo"
 
-    init_distributed_environment(world_size=1,
-                                 rank=0,
-                                 distributed_init_method=f"file://{temp_file}",
-                                 local_rank=0,
-                                 backend=backend)
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        distributed_init_method=f"file://{temp_file}",
+        local_rank=0,
+        backend=backend,
+    )
     initialize_model_parallel(1, 1)
     yield
     cleanup_dist_env_and_memory(shutdown_ray=True)
@@ -123,7 +129,7 @@ def dummy_model() -> nn.Module:
             # Special handling for lm_head & sampler
             ("lm_head", ParallelLMHead(512, 10)),
             ("logits_processor", LogitsProcessor(512)),
-            ("sampler", Sampler())
+            ("sampler", Sampler()),
         ]))
     model.config = MagicMock()
     model.embedding_modules = {"lm_head": "lm_head"}
@@ -150,7 +156,7 @@ def dummy_model_gate_up() -> nn.Module:
             # Special handling for lm_head & sampler
             ("lm_head", ParallelLMHead(512, 10)),
             ("logits_processor", LogitsProcessor(512)),
-            ("sampler", Sampler())
+            ("sampler", Sampler()),
         ]))
     model.config = MagicMock()
     model.packed_modules_mapping = {
@@ -271,6 +277,12 @@ def long_context_lora_files_16k_1():
 
 
 @pytest.fixture(scope="session")
+def dora_files():
+    return snapshot_download(
+        repo_id="makcedward/Llama-3.2-1B-Instruct-DoRA-Adapter")
+
+
+@pytest.fixture(scope="session")
 def long_context_lora_files_16k_2():
     return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_2")
 
@@ -281,9 +293,11 @@ def long_context_lora_files_32k():
 
 
 @pytest.fixture(scope="session")
-def long_context_infos(long_context_lora_files_16k_1,
-                       long_context_lora_files_16k_2,
-                       long_context_lora_files_32k):
+def long_context_infos(
+    long_context_lora_files_16k_1,
+    long_context_lora_files_16k_2,
+    long_context_lora_files_32k,
+):
     cleanup_dist_env_and_memory(shutdown_ray=True)
     infos: Dict[int, ContextInfo] = {}
     for lora_checkpoint_info in LONG_LORA_INFOS:
@@ -336,8 +350,8 @@ def run_with_both_engines_lora(request, monkeypatch):
     if use_v1:
         if skip_v1:
             pytest.skip("Skipping test on vllm V1")
-        monkeypatch.setenv('VLLM_USE_V1', '1')
+        monkeypatch.setenv("VLLM_USE_V1", "1")
     else:
-        monkeypatch.setenv('VLLM_USE_V1', '0')
+        monkeypatch.setenv("VLLM_USE_V1", "0")
 
     yield

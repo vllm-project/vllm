@@ -124,9 +124,32 @@ class LoRAModel(AdapterModel):
         """Create a LoRAModel from a dictionary of tensors."""
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: Dict[str, LoRALayerWeights] = {}
+        magnitude_vectors = {}
+
+        # First check if this is a DoRA adapter with use_dora=True
+        dora_enabled = peft_helper.use_dora
+        if dora_enabled:
+            # Identify if there are any magnitude vectors in the tensors
+            magnitude_names = [
+                name for name in tensors
+                if name.endswith('lora_magnitude_vector')
+            ]
+            if not magnitude_names:
+                # If use_dora=True but no magnitude vectors, raise an error
+                raise RuntimeError(
+                    "DoRA adapter with use_dora=True in config, but magnitude parameters are missing "
+                    "in adapter weights. Please check that the adapter file is not corrupted."
+                )
+
+        # Process all tensors
         for tensor_name, tensor in tensors.items():
-            module_name, is_lora_a, is_bias = parse_fine_tuned_lora_name(
+            module_name, is_lora_a, is_bias, is_magnitude = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper)
+
+            # Store magnitude vectors for later processing
+            if is_magnitude:
+                magnitude_vectors[module_name] = tensor
+                continue
             if module_name not in loras:
                 lora_embeddings_tensor = None
                 if embeddings:
@@ -172,6 +195,32 @@ class LoRAModel(AdapterModel):
                 if pin_memory:
                     loras[module_name].lora_b = loras[
                         module_name].lora_b.pin_memory()
+
+        # Process magnitude vectors for DoRA if they exist
+        if magnitude_vectors:
+            for module_name, magnitude_tensor in magnitude_vectors.items():
+                if module_name in loras:
+                    # Set magnitude parameter for this module
+                    mag_tensor = magnitude_tensor.to(device=device,
+                                                     dtype=dtype)
+                    if pin_memory:
+                        mag_tensor = mag_tensor.pin_memory()
+                    loras[module_name].magnitude_param = mag_tensor
+                else:
+                    logger.warning(
+                        f"Found magnitude vector for {module_name} but no corresponding LoRA weights"
+                    )
+
+        # If DoRA is enabled, verify all modules have magnitude vectors
+        if dora_enabled:
+            missing_magnitude = [
+                name for name in loras if name not in magnitude_vectors
+            ]
+            if missing_magnitude:
+                raise RuntimeError(
+                    f"DoRA adapter is missing magnitude vectors for modules: {missing_magnitude[:5]}... "
+                    f"(total {len(missing_magnitude)} modules). Please check adapter file consistency."
+                )
 
         for lora in loras.values():
             lora.optimize()
@@ -233,7 +282,7 @@ class LoRAModel(AdapterModel):
             with safetensors.safe_open(lora_tensor_path,
                                        framework="pt") as f:  # type: ignore
                 for lora_module in f.keys():  # noqa
-                    module_name, _, _ = parse_fine_tuned_lora_name(
+                    module_name, _, _, _ = parse_fine_tuned_lora_name(
                         lora_module, weights_mapper)
                     part_name = module_name.split(".")[-1]
                     if part_name not in expected_lora_modules:

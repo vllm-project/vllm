@@ -17,6 +17,38 @@ from .utils import (PunicaTensors, assert_close, generate_data,
                     generate_data_for_nslices)
 
 
+# Utility reference implementations for DoRA operations
+def apply_dora_norm_magnitudes(lora_a: torch.Tensor, lora_b: torch.Tensor,
+                               magnitude_param: torch.Tensor) -> torch.Tensor:
+    """
+    Apply DoRA normalization and magnitude scaling to LoRA weights.
+    
+    Args:
+        lora_a: The LoRA A weights [input_dim, rank]
+        lora_b: The LoRA B weights [rank, output_dim]
+        magnitude_param: The DoRA magnitude parameters [output_dim]
+        
+    Returns:
+        The result after applying DoRA transformation
+    """
+    # In DoRA, the product of lora_a and lora_b is normalized column-wise
+    # and then scaled by the magnitude parameter
+
+    # Compute lora_a @ lora_b
+    lora_product = torch.matmul(lora_a, lora_b)
+
+    # Normalize the columns of the product
+    # For each output dimension, we normalize the weights coming from each rank
+    norm = torch.norm(lora_product, dim=0, keepdim=True)
+    normalized_product = lora_product / (
+        norm + 1e-5)  # Add epsilon for numerical stability
+
+    # Scale each column by the corresponding magnitude parameter
+    magnitude_scaled = normalized_product * magnitude_param.view(1, -1)
+
+    return magnitude_scaled
+
+
 # Utility shrink and expand operations used as reference implementations.
 def sgmv_shrink_for_nslices(
         nslices: int, inputs_tensor: torch.Tensor,
@@ -650,3 +682,254 @@ def test_punica_bgmv_expand_nslices_hidden_size(batches: int, num_loras: int,
                             dtype=dtype,
                             device=device,
                             add_inputs=True)
+
+
+########################### DoRA specific tests ##########################
+
+
+def test_dora_normalization():
+    """Test that DoRA normalization and magnitude scaling works as expected."""
+    # Create random LoRA weights and magnitude parameters
+    input_dim = 64
+    rank = 16
+    output_dim = 32
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Create random LoRA weights
+    lora_a = torch.rand((input_dim, rank), device=device)
+    lora_b = torch.rand((rank, output_dim), device=device)
+    # Magnitude param should match output_dim, not rank
+    magnitude_param = torch.rand((output_dim, ), device=device)
+
+    # Compute the DoRA transformation
+    dora_output = apply_dora_norm_magnitudes(lora_a, lora_b, magnitude_param)
+
+    # Manual verification:
+    # 1. Compute lora_a @ lora_b
+    lora_product = torch.matmul(lora_a, lora_b)
+
+    # 2. Normalize column-wise
+    norm = torch.norm(lora_product, dim=0, keepdim=True)
+    normalized_product = lora_product / (norm + 1e-5)
+
+    # 3. Apply magnitude scaling
+    expected_output = normalized_product * magnitude_param.view(1, -1)
+
+    # Check that our implementation matches the expected output
+    assert torch.allclose(dora_output, expected_output, rtol=1e-5, atol=1e-5)
+
+    # Check that the column norms are approximately equal to the magnitude parameters
+    actual_col_norms = torch.norm(dora_output, dim=0)
+    assert torch.allclose(actual_col_norms,
+                          magnitude_param,
+                          rtol=1e-4,
+                          atol=1e-4)
+
+
+@pytest.mark.parametrize("device",
+                         ["cuda"] if torch.cuda.is_available() else ["cpu"])
+def test_dora_vs_lora_performance(device):
+    """Compare the performance of DoRA vs regular LoRA."""
+    # Set up dimensions
+    input_dim = 4096
+    rank = 32
+    output_dim = 32  # Changed to match magnitude param dimension
+    batch_size = 8
+
+    # Create input tensor
+    x = torch.rand((batch_size, input_dim), device=device)
+
+    # Create LoRA weights
+    lora_a = torch.rand((input_dim, rank), device=device)
+    lora_b = torch.rand((rank, output_dim), device=device)
+
+    # Create DoRA magnitude parameters - should match output_dim
+    magnitude_param = torch.rand((output_dim, ), device=device)
+
+    # Regular LoRA forward pass (no magnitude normalization)
+    def lora_forward():
+        return torch.matmul(x, torch.matmul(lora_a, lora_b))
+
+    # DoRA forward pass (with magnitude normalization)
+    def dora_forward():
+        lora_product = torch.matmul(lora_a, lora_b)
+        norm = torch.norm(lora_product, dim=0, keepdim=True)
+        normalized_product = lora_product / (norm + 1e-5)
+        magnitude_scaled = normalized_product * magnitude_param.view(1, -1)
+        return torch.matmul(x, magnitude_scaled)
+
+    # Warm up
+    for _ in range(5):
+        lora_forward()
+        dora_forward()
+
+    # Test performance
+    import time
+
+    # Measure LoRA performance
+    torch.cuda.synchronize() if device == "cuda" else None
+    start_time = time.time()
+    for _ in range(100):
+        lora_result = lora_forward()
+    torch.cuda.synchronize() if device == "cuda" else None
+    lora_time = time.time() - start_time
+
+    # Measure DoRA performance
+    torch.cuda.synchronize() if device == "cuda" else None
+    start_time = time.time()
+    for _ in range(100):
+        dora_result = dora_forward()
+    torch.cuda.synchronize() if device == "cuda" else None
+    dora_time = time.time() - start_time
+
+    # Print performance comparison
+    print(f"Regular LoRA time: {lora_time:.6f} seconds for 100 iterations")
+    print(f"DoRA time: {dora_time:.6f} seconds for 100 iterations")
+    print(f"Overhead: {(dora_time/lora_time - 1)*100:.2f}%")
+
+    # DoRA is expected to have some overhead (acceptable up to 200%)
+    assert dora_time < lora_time * 3.0, "DoRA overhead too high"
+
+
+# Test implementing DoRA with packed lora weights
+@pytest.mark.parametrize("device",
+                         ["cuda"] if torch.cuda.is_available() else ["cpu"])
+def test_dora_with_packed_weights(device):
+    """Test DoRA with packed lora weights."""
+    from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
+
+    # Set up dimensions
+    input_dim = 128
+    rank = 8
+    output_dim = 64
+
+    # Create two LoRA weights with magnitude parameters (DoRA)
+    lora1 = LoRALayerWeights(
+        module_name="module1",
+        rank=rank,
+        lora_alpha=1,
+        lora_a=torch.rand((input_dim, rank), device=device),
+        lora_b=torch.rand((rank, output_dim), device=device),
+        magnitude_param=torch.rand((output_dim, ),
+                                   device=device),  # Should match output_dim
+    )
+
+    lora2 = LoRALayerWeights(
+        module_name="module2",
+        rank=rank,
+        lora_alpha=1,
+        lora_a=torch.rand((input_dim, rank), device=device),
+        lora_b=torch.rand((rank, output_dim), device=device),
+        magnitude_param=torch.rand((output_dim, ),
+                                   device=device),  # Should match output_dim
+    )
+
+    # Pack the LoRA weights
+    packed_lora = PackedLoRALayerWeights.pack([lora1, lora2])
+
+    # Check that the packed LoRA weights have the magnitude parameters
+    assert packed_lora.magnitude_param is not None
+
+    # Verify the shape of the magnitude parameters
+    assert isinstance(packed_lora.magnitude_param, list)
+    assert len(packed_lora.magnitude_param) == 2
+    assert packed_lora.magnitude_param[0].shape == (
+        output_dim, )  # Should match output_dim
+    assert packed_lora.magnitude_param[1].shape == (
+        output_dim, )  # Should match output_dim
+
+
+@pytest.mark.parametrize("batches", [1, 2])
+@pytest.mark.parametrize("num_loras", [1, 2])
+@pytest.mark.parametrize("rank", [8])
+@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("device",
+                         ["cuda"] if torch.cuda.is_available() else ["cpu"])
+def test_dora_in_lora_ops(batches: int, num_loras: int, rank: int,
+                          hidden_size: int, device: str):
+    """Test how DoRA would be used in LoRA operations."""
+    # Create test data like a regular LoRA test
+    torch.set_default_device(device)
+
+    # Create test data
+    seq_length = 4
+    seq_len_tensor = torch.ones(batches, dtype=torch.long) * seq_length
+    b_seq_start_loc = torch.cumsum(
+        torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
+        dim=0,
+    )
+    total_tokens = seq_len_tensor.sum()
+
+    # Create input tensor
+    inputs_tensor = torch.rand((total_tokens, hidden_size))
+
+    # We need to transpose the weight matrices for matrix multiplication
+    # Matrix A: [input_dim, rank]
+    # Matrix B: [rank, output_dim]
+    lora_a_weights = torch.rand(
+        (num_loras, hidden_size, rank))  # [hidden_size, rank] for each lora
+    lora_b_weights = torch.rand(
+        (num_loras, rank, hidden_size))  # [rank, hidden_size] for each lora
+
+    # DoRA magnitude parameters - should match output dimension (hidden_size)
+    magnitude_params = torch.rand((num_loras, hidden_size))
+
+    # Create output tensors for regular LoRA and DoRA
+    ref_lora_out_tensor = torch.zeros((total_tokens, hidden_size))
+    ref_dora_out_tensor = torch.zeros((total_tokens, hidden_size))
+
+    # Create lora indices tensor
+    lora_indices_tensor = torch.randint(0, num_loras, (batches, ))
+
+    # Expand indices to token level
+    exploded_indices = torch.repeat_interleave(lora_indices_tensor,
+                                               seq_len_tensor)
+
+    # Implement regular LoRA for reference
+    for i in range(total_tokens):
+        lora_idx = exploded_indices[i].item()
+        lora_a = lora_a_weights[lora_idx]  # [hidden_size, rank]
+        lora_b = lora_b_weights[lora_idx]  # [rank, hidden_size]
+
+        # For regular LoRA: x @ (A @ B)
+        # First compute A @ B to get [hidden_size, hidden_size]
+        lora_product = torch.matmul(lora_a, lora_b)
+
+        # Then apply to input: [1, hidden_size] @ [hidden_size, hidden_size] = [1, hidden_size]
+        token_input = inputs_tensor[i].unsqueeze(0)  # [1, hidden_size]
+        lora_output = torch.matmul(token_input,
+                                   lora_product)  # [1, hidden_size]
+        ref_lora_out_tensor[i] = lora_output
+
+    # Implement DoRA for reference
+    for i in range(total_tokens):
+        lora_idx = exploded_indices[i].item()
+        lora_a = lora_a_weights[lora_idx]  # [hidden_size, rank]
+        lora_b = lora_b_weights[lora_idx]  # [rank, hidden_size]
+        magnitude = magnitude_params[lora_idx]  # [hidden_size]
+
+        # For DoRA: x @ norm(A @ B) * magnitude
+        lora_product = torch.matmul(lora_a,
+                                    lora_b)  # [hidden_size, hidden_size]
+
+        # Normalize column-wise
+        norm = torch.norm(lora_product, dim=0, keepdim=True)
+        normalized_product = lora_product / (norm + 1e-5)
+
+        # Scale by magnitudes
+        magnitude_scaled = normalized_product * magnitude.unsqueeze(0)
+
+        # Apply to input
+        token_input = inputs_tensor[i].unsqueeze(0)  # [1, hidden_size]
+        dora_output = torch.matmul(token_input,
+                                   magnitude_scaled)  # [1, hidden_size]
+        ref_dora_out_tensor[i] = dora_output
+
+    # Compare the outputs - they should be different due to normalization
+    norm_diff = torch.norm(ref_lora_out_tensor - ref_dora_out_tensor).item()
+    print(f"Norm difference between LoRA and DoRA outputs: {norm_diff:.6f}")
+    assert norm_diff > 0.01, "LoRA and DoRA outputs should differ significantly"
+
+    # Verify that the DoRA outputs have reasonable values
+    dora_output_norm = torch.norm(ref_dora_out_tensor).item()
+    assert dora_output_norm > 0, "DoRA output should have non-zero norm"

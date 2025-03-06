@@ -27,7 +27,16 @@ class DummyLoRAManager:
         weight: torch.Tensor,
         rank: int = 8,
         generate_embeddings_tensor: int = 0,
+        use_dora: bool = False,
     ):
+        # For DoRA, create a random magnitude vector for each output dimension
+        magnitude_param = None
+        if use_dora:
+            magnitude_param = torch.rand(
+                [weight.shape[0]],  # Match output dimension
+                dtype=weight.dtype,
+                device=self._device)
+
         lora = LoRALayerWeights(
             module_name,
             rank=rank,
@@ -38,6 +47,7 @@ class DummyLoRAManager:
             lora_b=torch.rand([rank, weight.shape[0]],
                               dtype=weight.dtype,
                               device=self._device),
+            magnitude_param=magnitude_param,
         )
         if generate_embeddings_tensor:
             lora.embeddings_tensor = torch.rand(
@@ -58,7 +68,13 @@ class DummyLoRAManager:
         rank=8,
         noop=False,
         embeddings_tensor=None,
+        use_dora=False,
     ):
+        # For DoRA, create a random magnitude vector for each output dimension
+        magnitude_param = None
+        if use_dora:
+            magnitude_param = torch.rand([output_dim], device="cuda")
+
         lora = LoRALayerWeights(
             module_name,
             rank=rank,
@@ -66,6 +82,7 @@ class DummyLoRAManager:
             lora_a=torch.rand([input_dim, rank], device="cuda"),
             lora_b=torch.rand([rank, output_dim], device="cuda"),
             embeddings_tensor=embeddings_tensor,
+            magnitude_param=magnitude_param,
         )
         self.set_module_lora(module_name, lora)
         return lora

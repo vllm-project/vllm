@@ -42,11 +42,29 @@ class PEFTHelper:
 
     def _validate_features(self) -> List[str]:
         """
-        Check if there are any unsupported Lora features.
+        Check if there are any unsupported Lora features and validate DoRA configuration.
         """
         error_msg = []
         if self.modules_to_save:
             error_msg.append("vLLM only supports modules_to_save being None.")
+
+        # Validate DoRA configuration
+        if self.use_dora:
+            if self.r <= 0:
+                error_msg.append(
+                    f"Invalid LoRA rank {self.r} for DoRA model, must be positive."
+                )
+            if self.lora_alpha <= 0:
+                error_msg.append(
+                    f"Invalid lora_alpha {self.lora_alpha} for DoRA model, must be positive."
+                )
+
+        # Validate RSLoRA and DoRA combinatorial usage
+        if self.use_rslora and self.use_dora:
+            logger.warning(
+                "Both RSLoRA and DoRA are enabled simultaneously. This might lead to unexpected behavior."
+            )
+
         return error_msg
 
     def __post_init__(self):

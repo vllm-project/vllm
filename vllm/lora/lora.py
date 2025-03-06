@@ -112,7 +112,7 @@ class LoRALayerWeights:
         else:
             bias = None
         if dora_enabled:
-            magnitude_param = torch.zeros([rank],
+            magnitude_param = torch.zeros([output_dim],
                                           dtype=dtype,
                                           device=device,
                                           pin_memory=pin_memory)
