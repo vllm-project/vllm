@@ -383,8 +383,6 @@ class InputBatch:
             self.req_id_to_index[old_id_i2], self.req_id_to_index[old_id_i1]
         self.num_tokens[i1], self.num_tokens[i2] =\
             self.num_tokens[i2], self.num_tokens[i1]
-        self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
-            self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
         self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] =\
             self.num_tokens_no_spec[i2], self.num_tokens_no_spec[i1]
         self.num_prompt_tokens[i1], self.num_prompt_tokens[i2] =\
@@ -406,24 +404,47 @@ class InputBatch:
         self.min_p_cpu[i1], self.min_p_cpu[i2] =\
             self.min_p_cpu[i2], self.min_p_cpu[i1]
 
+        # NOTE: the following is unsafe
+        # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
+        #     self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
+        # instead, we need to temporiarily copy the data for one of the indices
+        # TODO(lucas): optimize this by only copying valid indices
+        tmp = self.token_ids_cpu[i1, ...].copy()
+        self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
+        self.token_ids_cpu[i2, ...] = tmp
+
         g1 = self.generators.get(i1)
         g2 = self.generators.get(i2)
         if g1 is not None:
             self.generators[i2] = g1
+        else:
+            self.generators.pop(i2, None)
         if g2 is not None:
             self.generators[i1] = g2
+        else:
+            self.generators.pop(i1, None)
 
         t1 = self.min_tokens.get(i1)
         t2 = self.min_tokens.get(i2)
         if t1 is not None:
             self.min_tokens[i2] = t1
+        else:
+            self.min_tokens.pop(i2, None)
         if t2 is not None:
             self.min_tokens[i1] = t2
+        else:
+            self.min_tokens.pop(i1, None)
 
         self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
             self.request_lora_mapping[i2], self.request_lora_mapping[i1]
         self.logit_bias[i1], self.logit_bias[i2] =\
             self.logit_bias[i2], self.logit_bias[i1]
+
+        if self.allowed_token_ids_mask_cpu_tensor is not None:
+            self.allowed_token_ids_mask_cpu_tensor[i1], \
+                self.allowed_token_ids_mask_cpu_tensor[i2] =\
+                self.allowed_token_ids_mask_cpu_tensor[i2], \
+                    self.allowed_token_ids_mask_cpu_tensor[i1]
         self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: list[int]) -> None:
