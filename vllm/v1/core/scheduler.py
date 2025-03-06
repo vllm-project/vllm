@@ -238,11 +238,12 @@ class Scheduler:
                 if req.lora_request and req.lora_request.lora_int_id > 0)
             assert len(requested_loras) <= self.lora_config.max_loras
 
+        # Use a temporary deque to collect requests that need to be skipped
+        # and put back at the head of the waiting queue later
+        waiting_for_fsm: deque[Request] = deque()
+
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
-            # Use a temporary deque to collect requests that need to be skipped
-            # and put back at the head of the waiting queue later
-            waiting_for_fsm: deque[Request] = deque()
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
