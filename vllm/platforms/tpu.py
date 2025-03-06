@@ -58,11 +58,6 @@ class TpuPlatform(Platform):
         return not envs.VLLM_USE_V1
 
     @classmethod
-    def is_pin_memory_available(cls):
-        logger.warning("Pin memory is not supported on TPU.")
-        return False
-
-    @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_tpu.PunicaWrapperTPU"
 
