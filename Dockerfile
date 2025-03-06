@@ -18,7 +18,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl wget sudo \
+    && apt-get install -y ccache git curl wget sudo \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Add uv to PATH
@@ -165,7 +165,7 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl wget sudo vim \
+    && apt-get install -y ccache git curl wget sudo vim \
     && apt-get install -y ffmpeg libsm6 libxext6 libgl1 libibverbs-dev \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
@@ -240,7 +240,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -e tests/vllm_test_utils
 
 # enable fast downloads from hf (for testing)
-RUN --mount=type=cache,target=/roo/assets/**/*.py" t/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install hf_transfer
 ENV HF_HUB_ENABLE_HF_TRANSFER 1
 
