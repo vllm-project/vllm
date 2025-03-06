@@ -21,8 +21,7 @@ _LOCAL_LOGGING_INTERVAL_SEC = 5.0
 class StatLoggerBase(ABC):
 
     @abstractmethod
-    def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: IterationStats):
+    def record(self, iteration_stats: IterationStats):
         ...
 
     def log(self):  # noqa
@@ -55,11 +54,12 @@ class LoggingStatLogger(StatLoggerBase):
         # Compute summary metrics for tracked stats
         return float(np.sum(tracked_stats) / (now - self.last_log_time))
 
-    def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: IterationStats):
+    def record(self, iteration_stats: IterationStats):
         """Log Stats to standard output."""
 
         self._track_iteration_stats(iteration_stats)
+
+        scheduler_stats = iteration_stats.scheduler_stats or SchedulerStats()
 
         self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
@@ -318,9 +318,9 @@ class PrometheusStatLogger(StatLoggerBase):
             labelnames=metrics_info.keys()).labels(**metrics_info)
         info_gauge.set(1)
 
-    def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: IterationStats):
+    def record(self, iteration_stats: IterationStats):
         """Log to prometheus."""
+        scheduler_stats = iteration_stats.scheduler_stats or SchedulerStats()
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
 

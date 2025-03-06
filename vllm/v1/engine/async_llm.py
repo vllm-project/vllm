@@ -31,7 +31,7 @@ from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
                                      StatLoggerBase)
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
 
@@ -93,8 +93,6 @@ class AsyncLLM(EngineClient):
         )
 
         self.output_handler: Optional[asyncio.Task] = None
-
-        self.scheduler_stats: Optional[SchedulerStats] = None
 
     @classmethod
     def from_engine_args(
@@ -291,10 +289,11 @@ class AsyncLLM(EngineClient):
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once Prometheus overhead is non-trivial.
-                if self.log_stats:
-                    self._add_stats(outputs.scheduler_stats)
+                if iteration_stats is not None:
+                    if outputs.scheduler_stats is not None:
+                        iteration_stats.update_from_scheduler_stats(
+                            outputs.scheduler_stats)
                     if outputs.final_outputs_for_step:
-                        assert iteration_stats is not None
                         self._record_stats(iteration_stats)
                         iteration_stats = IterationStats()
 
@@ -312,22 +311,12 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Aborted request %s.", request_id)
 
-    def _add_stats(self, scheduler_stats: Optional[SchedulerStats]):
-        if scheduler_stats:
-            if self.scheduler_stats is None:
-                self.scheduler_stats = scheduler_stats
-            else:
-                self.scheduler_stats.add(scheduler_stats)
-
     def _record_stats(self, iteration_stats: IterationStats):
         self.output_processor.lora_states.update_iteration_stats(
             iteration_stats)
 
-        scheduler_stats = self.scheduler_stats or SchedulerStats()
         for stat_logger in self.stat_loggers:
-            stat_logger.record(scheduler_stats=scheduler_stats,
-                               iteration_stats=iteration_stats)
-        self.scheduler_stats = None
+            stat_logger.record(iteration_stats=iteration_stats)
 
     def encode(
         self,

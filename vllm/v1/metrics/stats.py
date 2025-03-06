@@ -105,6 +105,8 @@ class IterationStats:
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
 
+        self.scheduler_stats: Optional[SchedulerStats] = None
+
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
         return self.iteration_timestamp - start
@@ -199,6 +201,13 @@ class IterationStats:
                                  inference_time=inference_time,
                                  decode_time=decode_time)
         self.finished_requests.append(finished_req)
+
+    def update_from_scheduler_stats(self,
+                                    schedulder_stats: SchedulerStats) -> None:
+        if self.scheduler_stats is None:
+            self.scheduler_stats = schedulder_stats
+        else:
+            self.scheduler_stats.add(schedulder_stats)
 
 
 class LoRARequestStates:
