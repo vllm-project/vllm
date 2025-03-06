@@ -3,7 +3,6 @@
 import asyncio
 import os
 import queue
-import signal
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -260,7 +259,7 @@ class MPClient(EngineCoreClient):
                          "down. See stack trace above for root cause issue.")
             kill_process_tree(os.getpid())
 
-        signal.signal(signal.SIGUSR1, sigusr1_handler)
+        # signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         # Serialization setup.
         self.encoder = MsgpackEncoder()
