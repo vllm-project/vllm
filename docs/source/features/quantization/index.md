@@ -17,4 +17,5 @@ int4
 int8
 fp8
 quantized_kvcache
+torchao
 :::
