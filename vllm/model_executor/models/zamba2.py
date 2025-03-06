@@ -7,7 +7,7 @@ architectures in a hybrid model optimized for efficient sequence modeling. The
 model alternates between state space model layers and attention-based layers.
 """
 from itertools import cycle
-from typing import Dict, Iterable, Optional, Set, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -42,6 +42,54 @@ from .interfaces import HasInnerState, IsHybrid
 from .utils import maybe_prefix
 
 
+class Zamba2LoRA(nn.Module):
+    """LoRA layer for the Zamba2 model.
+    
+    Implements a LoRA layer that is used in shared attention and gated MLP
+    blocks.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        rank: int,
+        output_dim: Union[int, List[int]],
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        """Initialize the attention layer.
+        
+        Args:
+            input_dim: input dimension
+            rank: LoRA rank
+            output_dim: output dimension
+            quant_config: Configuration for model quantization
+        """
+        super().__init__()
+
+        self.A = ColumnParallelLinear(input_dim,
+                                      rank,
+                                      bias=False,
+                                      quant_config=quant_config,
+                                      gather_output=True)
+
+        if isinstance(output_dim, list):
+            B_class = MergedColumnParallelLinear
+        else:
+            B_class = ColumnParallelLinear
+        self.B = B_class(rank,
+                         output_dim,
+                         bias=False,
+                         quant_config=quant_config)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+    ):
+        lora_output, _ = self.A(hidden_states)
+        lora_output, _ = self.B(lora_output)
+        return lora_output
+
+
 class Zamba2Attention(nn.Module):
     """Multi-head attention mechanism for the Zamba2 model.
     
@@ -54,7 +102,7 @@ class Zamba2Attention(nn.Module):
         self,
         config: Zamba2Config,
         bare_block_idx: int,
-        layer2block_map: Dict[int, int],
+        num_hybrid_layers: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -64,7 +112,7 @@ class Zamba2Attention(nn.Module):
         Args:
             config: The Zamba2 model configuration
             bare_block_idx: Index of the bare attention block
-            layer2block_map: Mapping from layer indices to block indices 
+            num_hybrid_layers: Total number of hybrid layers
             cache_config: Configuration for key-value caching
             quant_config: Configuration for model quantization
             prefix: Optional prefix for parameter names
@@ -72,8 +120,7 @@ class Zamba2Attention(nn.Module):
         super().__init__()
         tp_size = get_tensor_model_parallel_world_size()
         self.config = config
-        self.layer2block_map = layer2block_map
-        self.num_fwd_mem_blocks = len(layer2block_map)
+        self.num_hybrid_layers = num_hybrid_layers
         self.rope_theta = config.rope_theta
 
         self.attention_hidden_size = config.attention_hidden_size
@@ -111,9 +158,9 @@ class Zamba2Attention(nn.Module):
 
         # Initialize attention blocks with proper indexing
         self.dpa_list = nn.ModuleList([])
-        j = bare_block_idx * (self.num_fwd_mem_blocks + config.num_mem_blocks -
+        j = bare_block_idx * (self.num_hybrid_layers + config.num_mem_blocks -
                               1) // config.num_mem_blocks
-        for block_idx in range(self.num_fwd_mem_blocks):
+        for block_idx in range(self.num_hybrid_layers):
             if block_idx % config.num_mem_blocks == bare_block_idx:
                 dpa = Attention(
                     self.num_attention_heads,
@@ -133,41 +180,26 @@ class Zamba2Attention(nn.Module):
             self.linear_k_adapter_list = nn.ModuleList([])
             self.linear_v_adapter_list = nn.ModuleList([])
 
-            for block_idx in range(self.num_fwd_mem_blocks):
+            for block_idx in range(self.num_hybrid_layers):
                 if block_idx % config.num_mem_blocks == bare_block_idx:
-                    linear_q_adapter = nn.ModuleList([
-                        ColumnParallelLinear(self.attention_hidden_size,
-                                             config.adapter_rank,
-                                             bias=False,
-                                             quant_config=quant_config,
-                                             gather_output=True),
-                        ColumnParallelLinear(config.adapter_rank,
-                                             self.attention_hidden_size,
-                                             bias=False,
-                                             quant_config=quant_config),
-                    ])
-                    linear_k_adapter = nn.ModuleList([
-                        ColumnParallelLinear(self.attention_hidden_size,
-                                             config.adapter_rank,
-                                             bias=False,
-                                             quant_config=quant_config,
-                                             gather_output=True),
-                        ColumnParallelLinear(config.adapter_rank,
-                                             self.attention_hidden_size,
-                                             bias=False,
-                                             quant_config=quant_config),
-                    ])
-                    linear_v_adapter = nn.ModuleList([
-                        ColumnParallelLinear(self.attention_hidden_size,
-                                             config.adapter_rank,
-                                             bias=False,
-                                             quant_config=quant_config,
-                                             gather_output=True),
-                        ColumnParallelLinear(config.adapter_rank,
-                                             self.attention_hidden_size,
-                                             bias=False,
-                                             quant_config=quant_config),
-                    ])
+                    linear_q_adapter = Zamba2LoRA(
+                        self.attention_hidden_size,
+                        config.adapter_rank,
+                        self.attention_hidden_size,
+                        quant_config=quant_config,
+                    )
+                    linear_k_adapter = Zamba2LoRA(
+                        self.attention_hidden_size,
+                        config.adapter_rank,
+                        self.attention_hidden_size,
+                        quant_config=quant_config,
+                    )
+                    linear_v_adapter = Zamba2LoRA(
+                        self.attention_hidden_size,
+                        config.adapter_rank,
+                        self.attention_hidden_size,
+                        quant_config=quant_config,
+                    )
                 else:
                     linear_q_adapter = nn.Identity()
                     linear_k_adapter = nn.Identity()
@@ -190,7 +222,7 @@ class Zamba2Attention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        layer_idx: int,
+        block_idx: int,
         position_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass through the attention layer.
@@ -198,7 +230,7 @@ class Zamba2Attention(nn.Module):
         Args:
             hidden_states: Input tensor [batch_size, seq_len, hidden_size]
             position_ids: Position IDs for positional embeddings
-            layer_idx: Current layer index
+            block_idx: Current shared transformer block index
             
         Returns:
             Output tensor [batch_size, seq_len, hidden_size]
@@ -207,31 +239,21 @@ class Zamba2Attention(nn.Module):
         query_states, key_states, value_states = qkv.split([self.qkv_size] * 3,
                                                            dim=-1)
 
-        block_idx = self.layer2block_map[layer_idx]
         if self.config.use_shared_attention_adapter:
             # Apply adapter transformations to Q, K, V if enabled
-            assert not isinstance(self.linear_q_adapter_list[block_idx],
-                                  nn.Identity)
-            q_lora_output = self.linear_q_adapter_list[block_idx][0](
-                hidden_states)[0]
-            q_lora_output = self.linear_q_adapter_list[block_idx][1](
-                q_lora_output)[0]
+            q_adapter = self.linear_q_adapter_list[block_idx]
+            assert not isinstance(q_adapter, nn.Identity)
+            q_lora_output = q_adapter(hidden_states)
             query_states = query_states + q_lora_output
 
-            assert not isinstance(self.linear_k_adapter_list[block_idx],
-                                  nn.Identity)
-            k_lora_output = self.linear_k_adapter_list[block_idx][0](
-                hidden_states)[0]
-            k_lora_output = self.linear_k_adapter_list[block_idx][1](
-                k_lora_output)[0]
+            k_adapter = self.linear_k_adapter_list[block_idx]
+            assert not isinstance(k_adapter, nn.Identity)
+            k_lora_output = k_adapter(hidden_states)
             key_states = key_states + k_lora_output
 
-            assert not isinstance(self.linear_v_adapter_list[block_idx],
-                                  nn.Identity)
-            v_lora_output = self.linear_v_adapter_list[block_idx][0](
-                hidden_states)[0]
-            v_lora_output = self.linear_v_adapter_list[block_idx][1](
-                v_lora_output)[0]
+            v_adapter = self.linear_v_adapter_list[block_idx]
+            assert not isinstance(v_adapter, nn.Identity)
+            v_lora_output = v_adapter(hidden_states)
             value_states = value_states + v_lora_output
 
         if self.config.use_mem_rope:
@@ -256,7 +278,7 @@ class Zamba2MLP(nn.Module):
         self,
         config: Zamba2Config,
         bare_block_idx: int,
-        layer2block_map: Dict[int, int],
+        num_hybrid_layers: Dict[int, int],
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         """Initialize the MLP layer.
@@ -264,16 +286,15 @@ class Zamba2MLP(nn.Module):
         Args:
             config: The Zamba2 model configuration
             bare_block_idx: Index of the bare block in the model
-            layer2block_map: Mapping from layer indices to block indices
+            num_hybrid_layers: Total number of hybrid layers
             quant_config: Configuration for model quantization
         """
         super().__init__()
         self.config = config
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.layer2block_map = layer2block_map
+        self.num_hybrid_layers = num_hybrid_layers
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.num_fwd_mem_blocks = len(layer2block_map)
 
         # Main projection layers with gating
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -293,32 +314,27 @@ class Zamba2MLP(nn.Module):
                              f"(got `hidden_act`: {config.hidden_act})")
         self.act_fn = GeluAndMul()
 
-        # Initialize adapter layers if enabled
+        # Initialize adapter layers
         self.gate_up_proj_adapter_list = nn.ModuleList([])
-        for block_idx in range(self.num_fwd_mem_blocks):
+        for block_idx in range(self.num_hybrid_layers):
             if block_idx % config.num_mem_blocks == bare_block_idx:
-                gate_up_proj_adapter = nn.ModuleList([
-                    ColumnParallelLinear(config.hidden_size,
-                                         config.adapter_rank,
-                                         bias=False,
-                                         quant_config=quant_config,
-                                         gather_output=True),
-                    MergedColumnParallelLinear(config.adapter_rank,
-                                               2 * [self.intermediate_size],
-                                               bias=False,
-                                               quant_config=quant_config),
-                ])
+                gate_up_proj_adapter = Zamba2LoRA(
+                    config.hidden_size,
+                    config.adapter_rank,
+                    2 * [self.intermediate_size],
+                    quant_config,
+                )
             else:
                 gate_up_proj_adapter = nn.Identity()
             self.gate_up_proj_adapter_list.append(gate_up_proj_adapter)
 
     def forward(self, hidden_states: torch.Tensor,
-                layer_idx: int) -> torch.Tensor:
+                block_idx: int) -> torch.Tensor:
         """Forward pass through the MLP layer.
         
         Args:
             hidden_states: Input tensor [batch_size, seq_len, hidden_size]
-            layer_idx: Current layer index
+            block_idx: Current shared transformer block index
             
         Returns:
             Output tensor [batch_size, seq_len, hidden_size] after applying
@@ -328,12 +344,9 @@ class Zamba2MLP(nn.Module):
         gate_up_states, _ = self.gate_up_proj(hidden_states)
 
         # Apply adapter transformation if present
-        block_idx = self.layer2block_map[layer_idx]
-        assert not isinstance(self.gate_up_proj_adapter_list[block_idx],
-                              nn.Identity)
         adapter = self.gate_up_proj_adapter_list[block_idx]
-        lora_output = adapter[0](hidden_states)[0]
-        lora_output = adapter[1](lora_output)[0]
+        assert not isinstance(adapter, nn.Identity)
+        lora_output = adapter(hidden_states)
         gate_up_states = gate_up_states + lora_output
 
         # Apply GELU activation with gating
@@ -358,7 +371,7 @@ class Zamba2AttentionDecoderLayer(nn.Module):
         self,
         config: Zamba2Config,
         bare_block_idx: int,
-        layer2block_map: Dict[int, int],
+        num_hybrid_layers: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -368,7 +381,7 @@ class Zamba2AttentionDecoderLayer(nn.Module):
         Args:
             config: The Zamba2 model configuration
             bare_block_idx: Index of the bare block
-            layer2block_map: Mapping from layer indices to block indices
+            num_hybrid_layers: Total number of hybrid layers
             cache_config: Configuration for key-value caching
             quant_config: Configuration for model quantization
             prefix: Optional prefix for parameter names
@@ -379,7 +392,7 @@ class Zamba2AttentionDecoderLayer(nn.Module):
         self.self_attn = Zamba2Attention(
             config,
             bare_block_idx=bare_block_idx,
-            layer2block_map=layer2block_map,
+            num_hybrid_layers=num_hybrid_layers,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=prefix,
@@ -389,7 +402,7 @@ class Zamba2AttentionDecoderLayer(nn.Module):
         self.feed_forward = Zamba2MLP(
             config,
             bare_block_idx=bare_block_idx,
-            layer2block_map=layer2block_map,
+            num_hybrid_layers=num_hybrid_layers,
             quant_config=quant_config,
         )
 
@@ -405,7 +418,7 @@ class Zamba2AttentionDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         original_hidden_states: torch.Tensor,
-        layer_idx: int,
+        block_idx: int,
         positions: torch.Tensor,
     ) -> torch.Tensor:
         """Forward pass through the decoder layer.
@@ -414,7 +427,7 @@ class Zamba2AttentionDecoderLayer(nn.Module):
             hidden_states: Input tensor from previous layer
             original_hidden_states: Original input tensor for residual 
                 connection
-            layer_idx: Current layer index
+            block_idx: Current shared transformer block index
             positions: IDs for positional embeddings
             
         Returns:
@@ -435,14 +448,14 @@ class Zamba2AttentionDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             hidden_states,
             position_ids=positions,
-            layer_idx=layer_idx,
+            block_idx=block_idx,
         )
 
         # Layer norm before feed-forward
         hidden_states = self.pre_ff_layernorm(hidden_states)
 
         # Feed-forward network
-        hidden_states = self.feed_forward(hidden_states, layer_idx=layer_idx)
+        hidden_states = self.feed_forward(hidden_states, block_idx=block_idx)
 
         return hidden_states
 
@@ -498,7 +511,6 @@ class Zamba2MambaDecoderLayer(nn.Module):
         transformer_hidden_states: Optional[torch.Tensor] = None,
         positions: Optional[torch.Tensor] = None,
         original_hidden_states: Optional[torch.Tensor] = None,
-        layer_idx: Optional[int] = None,
     ) -> torch.Tensor:
         """Forward pass through the Mamba decoder layer.
         
@@ -512,7 +524,6 @@ class Zamba2MambaDecoderLayer(nn.Module):
                 Added to input if provided (used in hybrid architecture)
             positions: Optional position IDs (unused in Mamba)
             original_hidden_states: Optional original inputs (unused in Mamba)
-            layer_idx: Optional layer index (unused in Mamba)
             
         Returns:
             Transformed hidden states with residual connection applied
@@ -558,6 +569,7 @@ class Zamba2HybridLayer(nn.Module):
         self,
         shared_transformer: Zamba2AttentionDecoderLayer,
         config: Zamba2Config,
+        block_idx: int,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         """Initialize the hybrid layer.
@@ -568,6 +580,7 @@ class Zamba2HybridLayer(nn.Module):
             mamba: Mamba decoder layer for state space pathway
         """
         super().__init__()
+        self.block_idx = block_idx
         self.shared_transformer = shared_transformer
         self.linear = ReplicatedLinear(config.hidden_size,
                                        config.hidden_size,
@@ -580,7 +593,6 @@ class Zamba2HybridLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         original_hidden_states: torch.Tensor,
-        layer_idx: int,
         positions: torch.Tensor,
         mamba_cache_params: Optional[MambaCacheParams] = None,
         sequence_idx: Optional[torch.Tensor] = None,
@@ -597,7 +609,6 @@ class Zamba2HybridLayer(nn.Module):
             hidden_states: Input tensor [batch_size, seq_len, hidden_size]
             original_hidden_states: Original input for transformer residual 
                 connection
-            layer_idx: Current layer index for block mapping
             positions: Position IDs for positional embeddings
             mamba_cache_params: Parameters for Mamba's state caches 
                 (one for conv, one for ssm)
@@ -611,7 +622,7 @@ class Zamba2HybridLayer(nn.Module):
         transformer_hidden_states = self.shared_transformer(
             hidden_states,
             original_hidden_states=original_hidden_states,
-            layer_idx=layer_idx,
+            block_idx=self.block_idx,
             positions=positions,
         )
 
@@ -676,7 +687,7 @@ class Zamba2Model(nn.Module):
         blocks = cycle([
             Zamba2AttentionDecoderLayer(config,
                                         bare_block_idx=idx,
-                                        layer2block_map=layer2block_map,
+                                        num_hybrid_layers=len(layer2block_map),
                                         cache_config=cache_config,
                                         quant_config=quant_config,
                                         prefix=f"{prefix}")
@@ -685,10 +696,12 @@ class Zamba2Model(nn.Module):
 
         # Initialize layers according to block type configuration
         layers = []
-        for layer_type in config.layers_block_type:
+        for layer_idx, layer_type in enumerate(config.layers_block_type):
             if layer_type == "hybrid":
                 block = next(blocks)
-                layers.append(Zamba2HybridLayer(block, config, quant_config))
+                block_idx = layer2block_map[layer_idx]
+                layers.append(
+                    Zamba2HybridLayer(block, config, block_idx, quant_config))
             else:
                 layers.append(
                     Zamba2MambaDecoderLayer(config, quant_config=quant_config))
@@ -755,7 +768,6 @@ class Zamba2Model(nn.Module):
             layer_outputs = layer(
                 hidden_states,
                 original_hidden_states=original_hidden_states,
-                layer_idx=layer_idx,
                 positions=positions,
                 mamba_cache_params=mamba_cache_params.at_layer_idx(layer_idx),
                 sequence_idx=seq_idx,
@@ -991,6 +1003,9 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         for key, loaded_weight in weights:
             if "A_log" in key:
                 key = key.replace("A_log", "A")
+            elif "adapter_list" in key:
+                key = key.replace("0.weight", "A.weight")
+                key = key.replace("1.weight", "B.weight")
             weights_dict[key] = loaded_weight
 
         params_dict = dict(self.named_parameters())
