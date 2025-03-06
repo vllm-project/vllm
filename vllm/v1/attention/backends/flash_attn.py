@@ -100,8 +100,8 @@ class FlashAttentionMetadataBuilder:
         self.runner = runner
 
     def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput"):
-        pass
+                      scheduler_output: "SchedulerOutput") -> bool:
+        return False
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int):

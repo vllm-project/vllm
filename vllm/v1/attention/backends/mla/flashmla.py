@@ -11,6 +11,7 @@ from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          is_flashmla_supported)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
+                                                   MLACommonDecodeMetadata,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
@@ -38,34 +39,41 @@ class FlashMLABackend(MLACommonBackend):
 
 
 @dataclass
-class FlashMLAMetadata(MLACommonMetadata):
-    decode_tile_scheduler_metadata: Optional[tuple[torch.Tensor,
-                                                   torch.Tensor]] = None
-    decode_num_splits: Optional[torch.Tensor] = None
+class FlashMLADecodeMetadata(MLACommonDecodeMetadata):
+    tile_scheduler_metadata: tuple[torch.Tensor, torch.Tensor]
+    num_splits: torch.Tensor
+
+
+@dataclass
+class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
+    pass
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 
     def __init__(self, runner):
-        super().__init__(runner, cls=FlashMLAMetadata)
+        super().__init__(runner)
 
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
-        m = super().build(num_reqs, num_actual_tokens, max_query_len,
-                          common_prefix_len)
+    def _build_decode(self, input_positions: torch.Tensor,
+                      block_table: torch.Tensor,
+                      seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
+        tile_scheduler_metadata, num_splits = \
+            get_mla_metadata(
+            seq_lens,
+            self.num_q_heads,
+            1, # MQA for the decode path
+        )
 
-        if m.num_decode_tokens is not None and m.num_decode_tokens > 0:
-            m.decode_tile_scheduler_metadata, m.decode_num_splits = \
-                get_mla_metadata(
-                m.seq_lens[:m.num_decode_tokens],
-                self.num_q_heads,
-                1, # MQA for the decode path
-            )
-
-        return m
+        return FlashMLADecodeMetadata(
+            input_positions=input_positions,
+            block_table=block_table,
+            seq_lens=seq_lens,
+            tile_scheduler_metadata=tile_scheduler_metadata,
+            num_splits=num_splits,
+        )
 
 
 class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
@@ -115,6 +123,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         attn_metadata: FlashMLAMetadata,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
+        assert attn_metadata.decode is not None
+
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError("FP8 FlashMLA not yet supported")
 
@@ -124,14 +134,12 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         o, _ = flash_mla_with_kvcache(
             q=q,
             k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
-            block_table=attn_metadata.block_table[:attn_metadata.num_decodes,
-                                                  ...],
-            cache_seqlens=attn_metadata.seq_lens[:attn_metadata.
-                                                 num_decode_tokens],
+            block_table=attn_metadata.decode.block_table,
+            cache_seqlens=attn_metadata.decode.seq_lens,
             head_dim_v=self.kv_lora_rank,
-            tile_scheduler_metadata=attn_metadata.
-            decode_tile_scheduler_metadata,
-            num_splits=attn_metadata.decode_num_splits,
+            tile_scheduler_metadata=attn_metadata.decode.
+            tile_scheduler_metadata,
+            num_splits=attn_metadata.decode.num_splits,
             softmax_scale=self.scale,
             causal=True,
         )
