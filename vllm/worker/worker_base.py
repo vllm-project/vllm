@@ -575,7 +575,7 @@ class WorkerWrapperBase:
                 "Injecting %s into %s for extended collective_rpc call",
                 worker_mixin_cls, worker_class)
             if worker_mixin_cls not in worker_class.__bases__:
-                # check any conflicts between worker and worker_adapter
+                # check any conflicts between worker and worker_mixin_cls
                 for attr in dir(worker_mixin_cls):
                     if attr.startswith("__"):
                         continue
@@ -583,7 +583,7 @@ class WorkerWrapperBase:
                         f"Worker class {worker_class} already has an attribute"
                         f" {attr}, which conflicts with the worker"
                         f" mixin class {worker_mixin_cls}.")
-                # dynamically inherit the worker adapter class
+                # dynamically inherit the worker mixin class
                 worker_class.__bases__ = worker_class.__bases__ + (
                     worker_mixin_cls, )
         with set_current_vllm_config(self.vllm_config):
