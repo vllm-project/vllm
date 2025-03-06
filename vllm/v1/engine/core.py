@@ -155,7 +155,9 @@ class EngineCore:
 
         if not self.scheduler.has_unfinished_requests():
             return EngineCoreOutputs(
-                outputs=[], scheduler_stats=self.scheduler.make_stats())
+                outputs=[],
+                scheduler_stats=self.scheduler.make_stats(),
+            )
         scheduler_output = self.scheduler.schedule()
 
         # This case may occur when the only unfinished requests are
@@ -163,7 +165,9 @@ class EngineCore:
         # compiling yet, so there's nothing to run.
         if scheduler_output.total_num_scheduled_tokens == 0:
             return EngineCoreOutputs(
-                outputs=[], scheduler_stats=self.scheduler.make_stats())
+                outputs=[],
+                scheduler_stats=self.scheduler.make_stats(),
+            )
 
         output = self.model_executor.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
