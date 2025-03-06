@@ -28,8 +28,10 @@ from starlette.datastructures import State
 from starlette.routing import Mount
 from typing_extensions import assert_never
 
+
+
 import vllm.envs as envs
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, ObservabilityConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
@@ -96,6 +98,23 @@ logger = init_logger('vllm.entrypoints.openai.api_server')
 
 _running_tasks: set[asyncio.Task] = set()
 
+def setup_otel(app: FastAPI, observability_config: ObservabilityConfig):
+    print("setting up otel")
+    from opentelemetry import trace
+    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+
+    trace.set_tracer_provider(TracerProvider(resource=Resource.create()))
+
+    otlp_exporter = OTLPSpanExporter(endpoint=observability_config.otlp_traces_endpoint)
+    trace.get_tracer_provider().add_span_processor(
+        BatchSpanProcessor(otlp_exporter)
+    )
+
+    FastAPIInstrumentor().instrument_app(app)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -719,7 +738,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         return Response(status_code=200, content=response)
 
 
-def build_app(args: Namespace) -> FastAPI:
+def build_app(args: Namespace, observability_config: ObservabilityConfig) -> FastAPI:
     if args.disable_fastapi_docs:
         app = FastAPI(openapi_url=None,
                       docs_url=None,
@@ -729,6 +748,9 @@ def build_app(args: Namespace) -> FastAPI:
         app = FastAPI(lifespan=lifespan)
     app.include_router(router)
     app.root_path = args.root_path
+
+    if observability_config.otlp_traces_endpoint is not None:
+        setup_otel(app, observability_config)
 
     mount_metrics(app)
 
@@ -945,7 +967,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     signal.signal(signal.SIGTERM, signal_handler)
 
     async with build_async_engine_client(args) as engine_client:
-        app = build_app(args)
+        observability_config = await engine_client.get_observability_config()
+        app = build_app(args, observability_config)
 
         model_config = await engine_client.get_model_config()
         await init_app_state(engine_client, model_config, app.state, args)

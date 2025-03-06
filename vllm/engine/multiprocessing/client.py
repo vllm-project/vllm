@@ -16,7 +16,7 @@ from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm import PoolingParams
-from vllm.config import DecodingConfig, ModelConfig, VllmConfig
+from vllm.config import DecodingConfig, ModelConfig, VllmConfig, ObservabilityConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
@@ -93,6 +93,7 @@ class MQLLMEngineClient(EngineClient):
 
         # Get the configs.
         self.model_config = engine_config.model_config
+        self.observability_config = engine_config.observability_config
         self.decoding_config = engine_config.decoding_config
 
         # Create the tokenizer group.
@@ -378,6 +379,9 @@ class MQLLMEngineClient(EngineClient):
 
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
+
+    async def get_observability_config(self) -> ObservabilityConfig:
+        return self.observability_config
 
     async def is_tracing_enabled(self) -> bool:
         return self.tracing_flag
