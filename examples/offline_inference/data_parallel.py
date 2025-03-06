@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # usage:
-# VLLM_TEST_ENABLE_EP=1 VLLM_USE_V1=1 \
-#   python examples/offline_inference/data_parallel.py
+# VLLM_USE_V1=1 python examples/offline_inference/data_parallel.py
 # we need to have a launcher to create multiple data parallel
 # ranks. And each rank will create a vLLM instance to process its own prompts.
 import os
@@ -55,7 +54,8 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
     # Create an LLM.
     llm = LLM(model="ibm-research/PowerMoE-3b",
               tensor_parallel_size=GPUs_per_dp_rank,
-              enforce_eager=True)
+              enforce_eager=True,
+              enable_expert_parallel=True)
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
     for output in outputs:
