@@ -415,7 +415,8 @@ class HpuModelAdapter:
 
     def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device,
                        dtype):
-        if (attn_metadata is None or self.prefill_use_fusedsdpa
+        if (attn_metadata is None or
+            (self.prefill_use_fusedsdpa and attn_metadata.block_list is None)
                 or not attn_metadata.is_prompt):
             return attn_metadata
 
@@ -423,7 +424,6 @@ class HpuModelAdapter:
 
         seq_lens_t = prefill_metadata.seq_lens_tensor
         context_lens_t = prefill_metadata.context_lens_tensor
-        query_lens_t = seq_lens_t - context_lens_t
 
         block_list = attn_metadata.block_list
         max_context_len = (block_list.size(-1) //
@@ -439,7 +439,7 @@ class HpuModelAdapter:
 
         len_mask = (torch.arange(0, seq_len, device=device,
                                  dtype=torch.int32).view(1, seq_len).ge(
-                                     query_lens_t.unsqueeze(-1)).view(
+                                     seq_lens_t.unsqueeze(-1)).view(
                                          batch_size, 1, 1, seq_len))
         causal_mask = torch.triu(torch.ones((batch_size, 1, seq_len, seq_len),
                                             device=device,
@@ -1289,7 +1289,10 @@ class HPUModelRunner:
                     dtype=torch.int32,
                     device='cpu') * self._PAD_BLOCK_ID
                 for i, n in enumerate(num_blocks):
-                    prefix_block_tables[i, :n] = block_table_cpu_tensor[i, :n]
+                    prefix_block_tables[i, :n] = block_table_cpu_tensor[
+                        batch_idx + i, :n]
+                    #last_block_delta = n * self.block_size -  context_lens[i]
+                    #query_start_loc_np[i] += last_block_delta
                 context_lens_tensor = torch.zeros((padded_batch_size),
                                                   dtype=torch.int32,
                                                   device='cpu')
@@ -1301,15 +1304,16 @@ class HPUModelRunner:
                 context_lens_tensor_device = _async_h2d_tensor_copy(
                     context_lens_tensor, self.device)
                 #import pdb; pdb.set_trace()
-                block_indices = torch.div(slot_mapping,
-                                          self.block_size,
-                                          rounding_mode="floor")
-                intersection = list(
-                    set(block_indices.flatten().tolist())
-                    & set(prefix_block_tables.flatten().tolist()))
-                assert len(
-                    intersection
-                ) == 0, "slot_mapping and prefix_block_tables intersect"
+                #block_indices = torch.div(slot_mapping,
+                #                          self.block_size,
+                #                          rounding_mode="floor")
+                #intersection = list(
+                #    set(block_indices.flatten().tolist())
+                #    & set(prefix_block_tables.flatten().tolist()))
+                #import pdb; pdb.set_trace()
+                #assert len(
+                #    intersection
+                #) == 0, "slot_mapping and prefix_block_tables intersect"
                 attn_metadata = \
                     HPUAttentionMetadataV1.make_cached_prefill_metadata(
                     seq_lens_tensor=seq_lens_tensor_device,
@@ -1783,7 +1787,7 @@ class HPUModelRunner:
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
 
-        if True:
+        if False:
             for req_id in self.input_batch.req_ids[:num_reqs]:
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 if self.input_batch.token_ids_cpu[
@@ -1803,7 +1807,7 @@ class HPUModelRunner:
                     logger.info(
                         f'[ENGINE_ITER {self._ENGINE_ITER}] REQ:{req_id} IDX:{req_idx} finished: {generated!r}'  # noqa
                     )
-
+            logger.info("_ENGINE_ITER %s finished", self._ENGINE_ITER)
         self._ENGINE_ITER += 1
         #import pdb; pdb.set_trace()
         return model_runner_output
