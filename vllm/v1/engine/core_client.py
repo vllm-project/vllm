@@ -563,8 +563,9 @@ class AsyncMPClient(MPClient):
         call_id = uuid.uuid1().int >> 64
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
-        await engine.send_multipart(
-            (EngineCoreRequestType.UTILITY.value, (call_id, method, args)))
+        message = (EngineCoreRequestType.UTILITY.value,
+               self.encoder.encode((call_id, method, args)))
+        await engine.send_multipart(message)
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
