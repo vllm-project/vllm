@@ -199,6 +199,8 @@ class InputBatch:
         self.logit_bias: list[Optional[dict[int,
                                             float]]] = [None] * max_num_reqs
         self.has_allowed_token_ids: set[str] = set()
+        # NOTE(lufang): In the mask tensor, if the corresponding token allowed,
+        # the value is False. Since we use masked_fill_ to set -inf.
         self.allowed_token_ids_mask: Optional[torch.Tensor] = None
         self.allowed_token_ids_mask_cpu_tensor: Optional[torch.Tensor] = None
 
@@ -262,9 +264,12 @@ class InputBatch:
         self.top_p_cpu[req_index] = sampling_params.top_p
         if sampling_params.top_p < 1:
             self.top_p_reqs.add(req_id)
-        self.top_k_cpu[req_index] = sampling_params.top_k
-        if sampling_params.top_k > 0:
+        top_k = sampling_params.top_k
+        if 0 < top_k < self.vocab_size:
             self.top_k_reqs.add(req_id)
+        else:
+            top_k = self.vocab_size
+        self.top_k_cpu[req_index] = top_k
         self.min_p_cpu[req_index] = sampling_params.min_p
         self.frequency_penalties_cpu[
             req_index] = sampling_params.frequency_penalty
@@ -300,6 +305,7 @@ class InputBatch:
             self.has_allowed_token_ids.add(req_id)
             if self.allowed_token_ids_mask_cpu_tensor is None:
                 # Lazy allocation for this tensor, which can be large.
+                # False means we don't fill with -inf.
                 self.allowed_token_ids_mask = torch.zeros(self.max_num_reqs,
                                                           self.vocab_size,
                                                           dtype=torch.bool,
@@ -309,8 +315,10 @@ class InputBatch:
                     self.vocab_size,
                     dtype=torch.bool,
                     device="cpu")
+            self.allowed_token_ids_mask_cpu_tensor[req_index] = True
+            # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index][
-                sampling_params.allowed_token_ids] = True
+                sampling_params.allowed_token_ids] = False
 
         # Add request lora ID
         if request.lora_request:
@@ -359,6 +367,7 @@ class InputBatch:
         self.logit_bias[req_index] = None
         self.has_allowed_token_ids.discard(req_id)
         if self.allowed_token_ids_mask_cpu_tensor is not None:
+            # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         return req_index
 
