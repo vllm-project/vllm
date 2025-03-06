@@ -20,7 +20,6 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          TokenizerPoolConfig, VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
@@ -239,6 +238,20 @@ class EngineArgs:
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
+
+        # Check Quantization, load all methods after plugins are loaded
+        from vllm.model_executor.layers.quantization import (
+            QUANTIZATION_METHODS)
+
+        available_quantization = [*QUANTIZATION_METHODS, None]
+        if self.quantization not in available_quantization:
+            raise ValueError(
+                f"Invalid quantization method: {self.quantization}. "
+                f"Valid options are: {available_quantization}")
+        if self.speculative_model_quantization not in available_quantization:
+            raise ValueError(f"Invalid quantization method: "
+                             f"{self.speculative_model_quantization}. "
+                             f"Valid options are: {available_quantization}")
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -577,7 +590,6 @@ class EngineArgs:
         parser.add_argument('--quantization',
                             '-q',
                             type=nullable_str,
-                            choices=[*QUANTIZATION_METHODS, None],
                             default=EngineArgs.quantization,
                             help='Method used to quantize the weights. If '
                             'None, we first check the `quantization_config` '
@@ -776,7 +788,6 @@ class EngineArgs:
         parser.add_argument(
             '--speculative-model-quantization',
             type=nullable_str,
-            choices=[*QUANTIZATION_METHODS, None],
             default=EngineArgs.speculative_model_quantization,
             help='Method used to quantize the weights of speculative model. '
             'If None, we first check the `quantization_config` '
