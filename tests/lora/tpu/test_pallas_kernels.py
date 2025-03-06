@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-import jax
-import jax.numpy as jnp
-import numpy as np
 import pytest
 
-from bgmv import bgmv
+import torch
+import vllm.lora.ops.xla_ops.pallas # Required to register the custom ops
 
 N_TOKENS = [
     8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
@@ -19,18 +17,36 @@ RANKS = [8, 16, 32, 64, 128]
 
 def generate_test_data(T, D, L, N, seed, dtype=jnp.float32):
     """
-    Generates debug tensors for testing.
+    Inputs: (All integers)
+        T: Total number of tokens
+        D: Input dim
+        L: LoRA Dim
+        N: N LoRAs
+    
+    Outputs:
+        inputs:     torch.Tensor - shape (T, D)
+        loras:      torch.Tensor - shape (N, 1, L, D)
+        idxs:       torch.Tensor - shape (T, ) - all values must be in [0, N)
+        
+        ref_output: torch.Tensor - shape (T, L) - inputs @ loras[idxs].T
     """
-    inputs = jax.random.normal(jax.random.PRNGKey(seed), (T, D))
-    loras = jax.random.normal(jax.random.PRNGKey(seed), (N, 1, L, D))
-    idxs = jax.random.randint(jax.random.PRNGKey(seed),
-                              shape=(T, ),
-                              minval=0,
-                              maxval=N)
+    
+    inputs = torch.randn((T, D), device="xla")
+    loras = torch.randn((N, 1, L, D), device="xla")
+    idxs = torch.randint(0, N, (T,), dtype=torch.int32, device="xla")
 
-    ref_output = jnp.einsum("td,t_ld->tl", inputs, loras[idxs])
+    ref_output = ref_bgmv(inputs, loras, idxs)
     return inputs, loras, idxs, ref_output
 
+def ref_bgmv(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.Tensor):
+    selected_loras = loras[idxs]
+    if len(selected_loras.shape) == 4:
+        selected_loras = selected_loras.squeeze(axis=1)
+        
+    batch_size, output_size, input_size = selected_loras.shape
+    outputs = (
+        selected_loras @ inputs.reshape((batch_size, input_size, 1))
+    ).reshape((batch_size, output_size))
 
 # Parameterize tests with various shapes and dtypes
 @pytest.mark.parametrize("T", N_TOKENS)
@@ -47,12 +63,12 @@ def test_bgmv(T, D, L, N, dtype, op_type, seed):
     # Run bgmv
     match op_type:
         case "expand":
-            output = bgmv(inputs, loras, idxs)  # TODO: Specialise
+            output = torch.ops.xla.bgmv(inputs, loras, idxs)  # TODO: Specialise
         case "shrink":
-            output = bgmv(inputs, loras, idxs)
+            output = torch.ops.xla.bgmv(inputs, loras, idxs)
 
     # Make sure we have no NaNs
-    assert jnp.isnan(output).sum() == 0
+    assert not torch.any(torch.isnan(output))
 
     # Compare with reference output
-    np.testing.assert_allclose(output, ref_output, rtol=1e-3, atol=1e-3)
+    assert torch.allclose(output, ref_output, rtol=1e-3, atol=1e-3)
