@@ -14,7 +14,6 @@ import triton.language as tl
 
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr
-from vllm.lora.ops.triton_ops.v1.utils import get_v1_op_configs
 from vllm.utils import direct_register_custom_op
 
 
@@ -188,16 +187,15 @@ def _v1_expand(
     CAST_TYPE = False
     NUM_SLICES = len(lora_b_weights)
 
-    kernel_config = get_v1_op_configs(op_type="expand",
-                                      max_loras=MAX_LORAS,
-                                      batch=M,
-                                      hidden_size=MAX_N,
-                                      rank=K,
-                                      num_slices=NUM_SLICES,
-                                      add_inputs=add_inputs)
-    BLOCK_M = kernel_config['block_m']
-    BLOCK_N = kernel_config['block_n']
-    BLOCK_K = kernel_config['block_k']
+    # Triton kernel configs.
+    BLOCK_M = 64,
+    BLOCK_N = 128,
+    BLOCK_K = 16,
+    NUM_WARPS = 4,
+    NUM_CTAS = 1,
+    NUM_STAGES = 2
+    MAX_NREG = None
+
     EVEN_K = K % BLOCK_K == 0  # type: ignore
 
     if inputs.dtype == torch.float32 and lora_b_weights[0].dtype in [
@@ -247,11 +245,12 @@ def _v1_expand(
         CAST_TYPE,
         NUM_SLICES,
         same_stride,
-        num_warps=kernel_config['num_warps'],
-        num_ctas=kernel_config['num_ctas'],
-        num_stages=kernel_config['num_stages'],
-        maxnreg=kernel_config['max_nreg'],
+        num_warps=NUM_WARPS,
+        num_ctas=NUM_CTAS,
+        num_stages=NUM_STAGES,
+        maxnreg=MAX_NREG,
     )
+
     return
 
 
