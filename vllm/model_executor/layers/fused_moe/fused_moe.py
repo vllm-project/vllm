@@ -1029,13 +1029,14 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                           w2_zp: Optional[torch.Tensor] = None,
                           a1_scale: Optional[torch.Tensor] = None,
                           a2_scale: Optional[torch.Tensor] = None,
-                          block_shape: Optional[list[int]] = None) -> None:
+                          block_shape: Optional[List[int]] = None,
+                          allow_deep_gemm: bool = False) -> None:
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
                        activation, apply_router_weight_on_input, use_fp8_w8a8,
                        use_int8_w8a8, use_int8_w8a16, use_int4_w4a16,
                        per_channel_quant, global_num_experts, expert_map,
                        w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
-                       block_shape)
+                       block_shape, allow_deep_gemm)
 
 
 def inplace_fused_experts_fake(
@@ -1059,7 +1060,8 @@ def inplace_fused_experts_fake(
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[list[int]] = None) -> None:
+        block_shape: Optional[List[int]] = None,
+        allow_deep_gemm: bool = False) -> None:
     pass
 
 
@@ -1093,7 +1095,8 @@ def outplace_fused_experts(
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[list[int]] = None) -> torch.Tensor:
+        block_shape: Optional[List[int]] = None,
+        allow_deep_gemm: bool = False) -> torch.Tensor:
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
                               False, activation, apply_router_weight_on_input,
                               use_fp8_w8a8, use_int8_w8a8, use_int8_w8a16,
@@ -1123,7 +1126,8 @@ def outplace_fused_experts_fake(
         w2_zp: Optional[torch.Tensor] = None,
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[list[int]] = None) -> torch.Tensor:
+        block_shape: Optional[List[int]] = None,
+        allow_deep_gemm: bool = False) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
 
@@ -1318,12 +1322,14 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    use_dg = valid_deep_gemm(hidden_states, w1, w2, config, use_fp8_w8a8)
+    use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2, config, use_fp8_w8a8)
 
     if use_dg:
         #print("USE_DG!!!!!!!!!!!!!")
-        num_chunks = 1
-        CHUNK_SIZE = num_tokens
+        # TODO: how to test chunks?
+        #num_chunks = 1
+        #CHUNK_SIZE = num_tokens
+        num_chunks = (num_tokens // CHUNK_SIZE) + 1
         assert w1_scale is not None
         assert w2_scale is not None
         # TODO: do this offline
@@ -1333,6 +1339,9 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         #print("GOT HERE B")
     else:
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
+
+    if num_chunks > 1:
+        print("CHUNKS!!!!!!!!!!!!!!!!!!")
 
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
@@ -1463,7 +1472,8 @@ def fused_moe(
     w2_zp: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[list[int]] = None,
+    block_shape: Optional[List[int]] = None,
+    allow_deep_gemm: bool = False,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
