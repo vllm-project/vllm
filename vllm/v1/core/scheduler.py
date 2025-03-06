@@ -16,7 +16,7 @@ from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreOutput, EngineCoreOutputs)
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
@@ -96,6 +96,9 @@ class Scheduler:
         # for these models.
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
+
+        # Cache prefill chunk prompt logprobs
+        self._cached_prompt_logprobs: dict[str, LogprobsTensors] = {}
 
     def schedule(self) -> "SchedulerOutput":
         # NOTE(woosuk) on the scheduling algorithm:
@@ -607,9 +610,18 @@ class Scheduler:
             return True
         return False
 
+    def _add_prompt_logprob_cache(self, request: Request) -> None:
+        if request.sampling_params.prompt_logprobs is None:
+            # No prompt logprobs, no cache
+            return
+        self._cached_prompt_logprobs[request.request_id] = LogprobsTensors(
+            logprob_token_ids=None, logprobs=None, selected_token_ranks=None)
+
     def add_request(self, request: Request) -> None:
+        req_id = request.request_id
         self.waiting.append(request)
-        self.requests[request.request_id] = request
+        self.requests[req_id] = request
+        self._add_prompt_logprob_cache(request)
         self.request_queued(request)
 
     def finish_requests(
@@ -642,14 +654,20 @@ class Scheduler:
             request.status = finished_status
             self._free_request(request)
 
+    def _free_prompt_logprobs_cache(self, request_id: str) -> None:
+        if request_id in self._cached_prompt_logprobs:
+            del self._cached_prompt_logprobs[request_id]
+
     def _free_request(self, request: Request) -> None:
         assert request.is_finished()
+        request_id = request.request_id
         self.kv_cache_manager.free(request)
         self.kv_cache_manager.free_block_hashes(request)
         self.encoder_cache_manager.free(request)
-        self._cached_reqs_data.pop(request.request_id, None)
-        del self.requests[request.request_id]
-        self.finished_req_ids.add(request.request_id)
+        self._cached_reqs_data.pop(request_id, None)
+        del self.requests[request_id]
+        self.finished_req_ids.add(request_id)
+        self._free_prompt_logprobs_cache(request_id)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
