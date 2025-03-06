@@ -191,7 +191,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
         Args:
             y (torch.Tensor): Output tensor. Will be changed in-place.
-            x (torch.Tensor): Input tensor (B, S, E)
+            x (torch.Tensor): Input tensor (T, E)
             lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weight.
             lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight.
             lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): lora's bias.
@@ -210,9 +210,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             r = lora_b_stacked[0].size(-1)
             # We set the buffer to be float32 by default, consistent with the
             # triton op
-            batch_size, seq_len, _ = x.shape
+            T = x.size(0)
             buffer = torch.zeros(
-                (len(output_slices), batch_size * seq_len, r),
+                (len(output_slices), T, r),
                 dtype=torch.float32,
                 device=x.device,
             )
