@@ -188,11 +188,11 @@ def _v1_expand(
     NUM_SLICES = len(lora_b_weights)
 
     # Triton kernel configs.
-    BLOCK_M = 64,
-    BLOCK_N = 128,
-    BLOCK_K = 16,
-    NUM_WARPS = 4,
-    NUM_CTAS = 1,
+    BLOCK_M = 64
+    BLOCK_N = 128
+    BLOCK_K = 16
+    NUM_WARPS = 4
+    NUM_CTAS = 1
     NUM_STAGES = 2
     MAX_NREG = None
 

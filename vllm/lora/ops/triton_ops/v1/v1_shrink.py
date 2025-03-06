@@ -153,11 +153,11 @@ def _v1_shrink(
     # Triton kernel configs
     BLOCK_M = 32
     BLOCK_N = 16
-    BLOCK_K = 256 if M < 128 else 32,
-    SPLIT_K = 64 if M < 128 else 8,
+    BLOCK_K = 256 if M < 128 else 32
+    SPLIT_K = 64 if M < 128 else 8
     NUM_WARPS = 4
     NUM_CTAS = 1
-    NUM_STAGES = 2,
+    NUM_STAGES = 2
     MAX_NREG = None
 
     EVEN_K = K % (BLOCK_K * SPLIT_K) == 0  # type: ignore
