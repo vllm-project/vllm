@@ -115,6 +115,7 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     data_parallel_size: int = 1
+    enable_expert_parallel: bool = False
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
@@ -203,6 +204,7 @@ class EngineArgs:
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = "auto"
+    worker_extension_cls: str = ""
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
@@ -445,6 +447,11 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.data_parallel_size,
                             help='Number of data parallel replicas.')
+        parser.add_argument(
+            '--enable-expert-parallel',
+            action='store_true',
+            help='Use expert parallelism instead of tensor parallelism '
+            'for MoE layers.')
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,
@@ -1022,6 +1029,13 @@ class EngineArgs:
             default="auto",
             help='The worker class to use for distributed execution.')
         parser.add_argument(
+            '--worker-extension-cls',
+            type=str,
+            default="",
+            help='The worker extension class on top of the worker cls, '
+            'it is useful if you just want to add new functions to the worker '
+            'class without changing the existing functions.')
+        parser.add_argument(
             "--generation-config",
             type=nullable_str,
             default=None,
@@ -1206,6 +1220,7 @@ class EngineArgs:
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             data_parallel_size=self.data_parallel_size,
+            enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             tokenizer_pool_config=TokenizerPoolConfig.create_config(
@@ -1216,6 +1231,7 @@ class EngineArgs:
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
+            worker_extension_cls=self.worker_extension_cls,
         )
 
         max_model_len = model_config.max_model_len
