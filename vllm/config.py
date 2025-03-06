@@ -754,7 +754,7 @@ class ModelConfig:
                 " must be divisible by tensor parallel size "
                 f"({tensor_parallel_size}).")
 
-        if envs.VLLM_TEST_ENABLE_EP:
+        if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
@@ -1334,6 +1334,7 @@ class ParallelConfig:
     # IP of the data parallel master.
     data_parallel_master_ip: str = "127.0.0.1"
     data_parallel_master_port: int = 29500  # Port of the data parallel master.
+    enable_expert_parallel: bool = False  # Use EP instead of TP for MoE layers.
 
     # Maximum number of multiple batches
     # when load model sequentially. To avoid RAM OOM when using tensor
@@ -1366,6 +1367,7 @@ class ParallelConfig:
     # will be determined based on the platform.
     worker_cls: str = "auto"
     sd_worker_cls: str = "auto"
+    worker_extension_cls: str = ""
 
     # world_size is TPxPP, it affects the number of workers we create.
     world_size: int = field(init=False)
@@ -1522,6 +1524,9 @@ class ParallelConfig:
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
+
+        assert isinstance(self.worker_extension_cls, str), (
+            "worker_extension_cls must be a string (qualified class name).")
 
 
 @dataclass
@@ -2284,9 +2289,9 @@ class LoRAConfig:
         return hash_str
 
     def __post_init__(self):
-        # Setting the maximum rank to 256 should be able to satisfy the vast
+        # Setting the maximum rank to 512 should be able to satisfy the vast
         # majority of applications.
-        possible_max_ranks = (8, 16, 32, 64, 128, 256)
+        possible_max_ranks = (8, 16, 32, 64, 128, 256, 320, 512)
         possible_lora_extra_vocab_size = (0, 256, 512)
         if self.max_lora_rank not in possible_max_ranks:
             raise ValueError(
