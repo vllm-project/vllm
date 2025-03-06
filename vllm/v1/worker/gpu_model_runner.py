@@ -1193,7 +1193,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             temperature=dummy_tensors(0.5),
             all_greedy=False,
             all_random=False,
-            spec_token_ids=None,
             top_p=dummy_tensors(0.9),
             top_k=dummy_tensors(logits.size(1) - 1),
             min_p=None,
