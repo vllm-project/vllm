@@ -63,12 +63,10 @@ def test_bgmv(T, D, L, N, dtype, op_type, seed):
         T, D, L, N, seed, dtype)
 
     # Run bgmv
-    match op_type:
-        case "expand":
-            output = torch.ops.xla.bgmv(inputs, loras,
-                                        idxs)  # TODO: Specialise
-        case "shrink":
-            output = torch.ops.xla.bgmv(inputs, loras, idxs)
+    if op_type == "expand":
+        output = torch.ops.xla.bgmv(inputs, loras, idxs)  # TODO: Specialise
+    else:
+        output = torch.ops.xla.bgmv(inputs, loras, idxs)
 
     # Make sure we have no NaNs
     assert not torch.any(torch.isnan(output))

@@ -105,6 +105,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                    lora_b_stacked: Tuple[torch.Tensor, ...],
                    lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
                    output_slices: Tuple[int, ...],
+                   offset_start: int = 0,
                    add_inputs=True,
                    **kwargs) -> torch.Tensor:
         """
