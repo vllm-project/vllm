@@ -4,6 +4,7 @@ import shutil
 from os import path
 from tempfile import TemporaryDirectory
 
+import pytest
 import torch
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
@@ -19,6 +20,14 @@ LLMA_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 VLLM_PLACEHOLDER = "<|reserved_special_token_0|>"
 
 PROMPT = "Tell me about a Fool's mate move in 20 words. Provide the moves!"
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
 
 
 def llama3_1_8b_chess_lora_path():
