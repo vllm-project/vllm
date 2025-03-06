@@ -2344,7 +2344,7 @@ class LazyLoader(types.ModuleType):
             # ensures library is actually loaded.
             sys.modules[self._local_name] = module
         except ModuleNotFoundError as err:
-            raise self._exc(f"{self._exc_msg} (reason: {err})") from None
+            raise err from None
 
         # Update this object's dict so that if someone keeps a
         # reference to the LazyLoader, lookups are efficient
