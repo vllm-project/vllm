@@ -20,15 +20,13 @@ def create_logits_tensor(token_ids: list[list[int]],
                          vocab_size: int = 100) -> torch.Tensor:
     """Helper function to create logits tensor that 
        will produce desired token ids on argmax"""
-    batch_size = len(token_ids)
-    max_spec_len = max(len(tokens) for tokens in token_ids)
-    logits = torch.full((batch_size, max_spec_len, vocab_size),
-                        -100.0,
-                        device=DEVICE)
-
-    for i, tokens in enumerate(token_ids):
+    num_total_tokens = sum(len(tokens) for tokens in token_ids)
+    logits = torch.full((num_total_tokens, vocab_size), -100.0, device=DEVICE)
+    start_loc = 0
+    for tokens in token_ids:
         for j, token_id in enumerate(tokens):
-            logits[i, j, token_id] = 100.0
+            logits[start_loc + j, token_id] = 100.0
+        start_loc += len(tokens)
     return logits
 
 

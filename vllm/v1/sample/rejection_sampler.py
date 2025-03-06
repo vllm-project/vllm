@@ -117,11 +117,10 @@ class RejectionSampler(nn.Module):
                 sample_lens = [len(x) + 1 for x in draft_token_ids]
                 target_probs = _convert_2d_probs(target_probs, sample_lens)
 
-        if (self.forward_method == self.forward_native
-                and not sampling_metadata.all_greedy):
+        if self.forward_method == self.forward_native:
             # Create one-hot tensor for draft token ids.
             # This is used for ngram where we don't have draft_probs.
-            if draft_probs is None:
+            if draft_probs is None and not sampling_metadata.all_greedy:
                 vocab_size = target_probs.size(-1)
                 draft_probs = _create_greedy_token_probs(
                     draft_token_ids_tensor, vocab_size, target_probs.device)
