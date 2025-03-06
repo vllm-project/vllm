@@ -16,7 +16,6 @@ CMakeLists.txt @tlrmchlsmth
 
 # vLLM V1
 /vllm/v1 @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat
-/vllm/v1/struct_output @aarnphm @russellb
 
 # Test ownership
 /tests/async_engine @njhill @robertgshaw2-redhat @simon-mo

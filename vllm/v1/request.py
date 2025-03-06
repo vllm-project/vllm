@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional, Union
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
-from vllm.v1.struct_output.request import StructuredOutputRequest
+from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:

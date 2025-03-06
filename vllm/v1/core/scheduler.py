@@ -20,7 +20,7 @@ from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.struct_output import StructuredOutputManager
+from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
@@ -255,8 +255,9 @@ class Scheduler:
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
                     else:
-                        waiting_struct_output_req = self.waiting.popleft()
-                        waiting_for_fsm.appendleft(waiting_struct_output_req)
+                        waiting_structured_output_req = self.waiting.popleft()
+                        waiting_for_fsm.appendleft(
+                            waiting_structured_output_req)
                         continue
 
                 # Check that adding the request still respects the max_loras

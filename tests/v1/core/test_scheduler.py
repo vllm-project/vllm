@@ -7,7 +7,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.struct_output import StructuredOutputManager
+from vllm.v1.structured_output import StructuredOutputManager
 
 EOS_TOKEN_ID = 50256
 

@@ -19,7 +19,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
-from vllm.v1.struct_output.utils import validate_structured_output_request
+from vllm.v1.structured_output.utils import validate_structured_output_request
 
 
 class Processor:

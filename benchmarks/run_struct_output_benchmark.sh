@@ -13,7 +13,7 @@ DATASET=${3:-"xgrammar_bench"}
 GUIDED_BACKEND=${4:-"xgrammar"}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUTPUT_DIR=${5:-"$SCRIPT_DIR/struct_output_benchmark_results"}
+OUTPUT_DIR=${5:-"$SCRIPT_DIR/structured_output_benchmark_results"}
 
 GUIDED_RATIO=${6:-0.5}
 
@@ -27,8 +27,8 @@ QPS_VALUES=(70 60 50 25 20 15 10)
 COMMON_PARAMS="--backend $BACKEND \
                --model $MODEL \
                --dataset $DATASET \
-               --struct-output-backend $GUIDED_BACKEND \
-               --struct-output-ratio $GUIDED_RATIO \
+               --structured-output-backend $GUIDED_BACKEND \
+               --structured-output-ratio $GUIDED_RATIO \
                --save-results \
                --result-dir $OUTPUT_DIR"
 
@@ -51,7 +51,7 @@ for qps in "${QPS_VALUES[@]}"; do
   FILENAME="${GUIDED_BACKEND}_${BACKEND}_${qps}qps_$(basename $MODEL)_${DATASET}_${GIT_HASH}.json"
 
   # Run the benchmark
-  python "$SCRIPT_DIR/benchmark_serving_struct_output.py" $COMMON_PARAMS \
+  python "$SCRIPT_DIR/benchmark_serving_structured_output.py" $COMMON_PARAMS \
     --request-rate $qps \
     --result-filename "$FILENAME" \
     --port ${PORT:-8000}

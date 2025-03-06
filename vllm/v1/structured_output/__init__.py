@@ -26,6 +26,8 @@ logger = init_logger(__name__)
 class StructuredOutputManager:
 
     def __init__(self, vllm_config: VllmConfig, max_cache_size: int = 500):
+        import torch
+        logger.warning("CUDA initialized: %s", torch.cuda.is_initialized())
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
@@ -52,6 +54,7 @@ class StructuredOutputManager:
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self._grammar_bitmask = xgr.allocate_token_bitmask(
             self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
+        logger.warning("CUDA initialized: %s", torch.cuda.is_initialized())
 
     def __getitem__(self, key: StructuredOutputKey) -> Optional[Grammar]:
         # We need to pop and re-insert the grammar here for LRU cache
