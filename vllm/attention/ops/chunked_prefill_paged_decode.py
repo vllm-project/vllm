@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Authors:
+#  - Burkhard Ringlein
+#  - Jan van Lunteren
+#  - Thomas Parnell
+
 import torch
 import triton
 import triton.language as tl
