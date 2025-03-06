@@ -1308,7 +1308,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             )
 
             kv_c_normed = workspace[:toks]\
-                [..., :self.kv_lora_rank].unsqueeze(1)
+                [..., :self.kv_lora_rank]
             k_pe = workspace[:toks]\
                 [..., self.kv_lora_rank:].unsqueeze(1)
 
