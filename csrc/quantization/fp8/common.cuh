@@ -14,6 +14,9 @@
   #include "amd/quant_utils.cuh"
 #endif
 
+// Determines the preferred FP8 type for the current platform.
+// Note that for CUDA this just returns true,
+// but on ROCm it will check device props.
 static bool is_fp8_ocp() {
 #ifndef USE_ROCM
   return true;
@@ -26,14 +29,10 @@ static bool is_fp8_ocp() {
 }
 
 template <typename T>
-class FP8_E4M3_ADJUSTED_MAX {
- public:
-  static constexpr T val() { return {}; };
-};
+struct fp8_e4m3_adjusted_max;
 
 template <>
-class FP8_E4M3_ADJUSTED_MAX<c10::Float8_e4m3fn> {
- public:
+struct fp8_e4m3_adjusted_max<c10::Float8_e4m3fn> {
   static constexpr c10::Float8_e4m3fn val() {
     return std::numeric_limits<c10::Float8_e4m3fn>::max();
   }
@@ -42,12 +41,14 @@ class FP8_E4M3_ADJUSTED_MAX<c10::Float8_e4m3fn> {
 // Using the default max value from pytorch (240.0 0x7F) will cause accuracy
 // issue when running dynamic quantization. Here use 224.0 0x7E for rocm.
 template <>
-class FP8_E4M3_ADJUSTED_MAX<c10::Float8_e4m3fnuz> {
- public:
+struct fp8_e4m3_adjusted_max<c10::Float8_e4m3fnuz> {
   static constexpr c10::Float8_e4m3fnuz val() {
     return c10::Float8_e4m3fnuz(0x7E, c10::Float8_e4m3fnuz::from_bits());
   }
 };
+
+template <typename T>
+static constexpr T fp8_e4m3_adjusted_max_v = fp8_e4m3_adjusted_max<T>::val();
 
 namespace vllm {
 
@@ -72,8 +73,8 @@ __device__ __forceinline__ void scaled_fp8_conversion(fp8_type& ret,
     x = val / scale;
   }
 
-  float r = fmax(-FP8_E4M3_ADJUSTED_MAX<fp8_type>::val(),
-                 fmin(x, FP8_E4M3_ADJUSTED_MAX<fp8_type>::val()));
+  float r = fmax(-fp8_e4m3_adjusted_max_v<fp8_type>,
+                 fmin(x, fp8_e4m3_adjusted_max_v<fp8_type>));
 #ifndef USE_ROCM
   ret = static_cast<fp8_type>(r);
 #else
@@ -130,7 +131,7 @@ __global__ void segmented_max_reduction(float* __restrict__ scale,
   // Finally, since cache[0] contains the maximum for this thread block,
   // atomically write the max to the target location
   if (threadIdx.x == 0) {
-    atomicMaxFloat(scale, cache[0] / FP8_E4M3_ADJUSTED_MAX<fp8_type>::val());
+    atomicMaxFloat(scale, cache[0] / fp8_e4m3_adjusted_max_v<fp8_type>);
   }
 }
 
