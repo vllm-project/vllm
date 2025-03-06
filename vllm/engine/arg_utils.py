@@ -1613,6 +1613,11 @@ class EngineArgs:
 
         # V1 always uses chunked prefills.
         self.enable_chunked_prefill = True
+
+        # V1 enables prefix caching by default.
+        if self.enable_prefix_caching is None:
+            self.enable_prefix_caching = True
+
         # When no user override, set the default values based on the usage
         # context.
         # Use different default values for different hardware.
