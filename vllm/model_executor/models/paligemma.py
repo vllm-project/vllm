@@ -23,7 +23,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsPP, SupportsV0Only
+from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel, get_max_siglip_image_tokens
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -195,7 +195,7 @@ class PaliGemmaMultiModalProcessor(
     info=PaliGemmaProcessingInfo,
     dummy_inputs=PaliGemmaDummyInputsBuilder)
 class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                        SupportsPP, SupportsV0Only):
+                                        SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
