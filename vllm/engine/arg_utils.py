@@ -174,7 +174,10 @@ class EngineArgs:
 
     guided_decoding_backend: str = 'xgrammar'
     logits_processor_pattern: Optional[str] = None
-    # Speculative decoding configuration.
+
+    speculative_config: Optional[Dict[str, Any]] = None
+
+    # TODO(Shangming): Deprecate these out-of-date params after next release
     speculative_model: Optional[str] = None
     speculative_model_quantization: Optional[str] = None
     speculative_draft_tensor_parallel_size: Optional[int] = None
@@ -187,9 +190,9 @@ class EngineArgs:
     spec_decoding_acceptance_method: str = 'rejection_sampler'
     typical_acceptance_sampler_posterior_threshold: Optional[float] = None
     typical_acceptance_sampler_posterior_alpha: Optional[float] = None
-    qlora_adapter_name_or_path: Optional[str] = None
     disable_logprobs_during_spec_decoding: Optional[bool] = None
 
+    qlora_adapter_name_or_path: Optional[str] = None
     show_hidden_metrics_for_version: Optional[str] = None
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
@@ -756,7 +759,11 @@ class EngineArgs:
             const="True",
             help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens.')
-
+        parser.add_argument('--speculative-config',
+                            type=json.loads,
+                            default=None,
+                            help='The configurations for speculative decoding.'
+                            ' Should be a JSON string.')
         parser.add_argument(
             '--speculative-model',
             type=nullable_str,
@@ -1136,6 +1143,64 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
         )
 
+    def create_speculative_config(
+        self,
+        target_model_config: ModelConfig,
+        target_parallel_config: ParallelConfig,
+        enable_chunked_prefill: bool,
+        disable_log_stats: bool,
+    ) -> Optional["SpeculativeConfig"]:
+
+        if self.speculative_config is None:
+            if (self.speculative_model is None
+                    and self.num_speculative_tokens is None):
+                return None
+
+            # TODO(Shangming): Deprecate this way of setting SpeculativeConfig,
+            # only allow '--speculative-config' after next release
+            logger.warning_once(
+                "Please use '--speculative-config' to set all configurations "
+                "related to speculative decoding. The current method of "
+                "specifying the model through '--speculative-model' and "
+                "adding related parameters (e.g., '--num-speculative-tokens') "
+                "separately will be deprecated in the next release.")
+
+            spec_config_dict = {
+                "model": self.speculative_model,
+                "quantization": self.speculative_model_quantization,
+                "max_model_len": self.speculative_max_model_len,
+                "draft_tensor_parallel_size":
+                self.speculative_draft_tensor_parallel_size,
+                "num_speculative_tokens": self.num_speculative_tokens,
+                "disable_mqa_scorer": self.speculative_disable_mqa_scorer,
+                "disable_by_batch_size":
+                self.speculative_disable_by_batch_size,
+                "ngram_prompt_lookup_max": self.ngram_prompt_lookup_max,
+                "ngram_prompt_lookup_min": self.ngram_prompt_lookup_min,
+                "acceptance_method": self.spec_decoding_acceptance_method,
+                "typical_acceptance_sampler_posterior_threshold":
+                self.typical_acceptance_sampler_posterior_threshold,
+                "typical_acceptance_sampler_posterior_alpha":
+                self.typical_acceptance_sampler_posterior_alpha,
+                "disable_logprobs": self.disable_logprobs_during_spec_decoding,
+            }
+
+            self.speculative_config = spec_config_dict
+
+        # Note(Shangming): These parameters are not obtained from the cli arg
+        # '--speculative-config' and must be passed in when creating the engine
+        # config.
+        self.speculative_config.update({
+            "target_model_config": target_model_config,
+            "target_parallel_config": target_parallel_config,
+            "enable_chunked_prefill": enable_chunked_prefill,
+            "disable_log_stats": disable_log_stats,
+        })
+        speculative_config = SpeculativeConfig.from_dict(
+            self.speculative_config)
+
+        return speculative_config
+
     def create_engine_config(self,
                              usage_context: Optional[UsageContext] = None
                              ) -> VllmConfig:
@@ -1226,31 +1291,11 @@ class EngineArgs:
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
 
-        speculative_config = SpeculativeConfig.maybe_create_spec_config(
+        speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
-            target_dtype=self.dtype,
-            speculative_model=self.speculative_model,
-            speculative_model_quantization = \
-                self.speculative_model_quantization,
-            speculative_draft_tensor_parallel_size = \
-                self.speculative_draft_tensor_parallel_size,
-            num_speculative_tokens=self.num_speculative_tokens,
-            speculative_disable_mqa_scorer=self.speculative_disable_mqa_scorer,
-            speculative_disable_by_batch_size=self.
-            speculative_disable_by_batch_size,
-            speculative_max_model_len=self.speculative_max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_log_stats=self.disable_log_stats,
-            ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
-            ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
-            draft_token_acceptance_method=\
-                self.spec_decoding_acceptance_method,
-            typical_acceptance_sampler_posterior_threshold=self.
-            typical_acceptance_sampler_posterior_threshold,
-            typical_acceptance_sampler_posterior_alpha=self.
-            typical_acceptance_sampler_posterior_alpha,
-            disable_logprobs=self.disable_logprobs_during_spec_decoding,
         )
 
         # Reminder: Please update docs/source/features/compatibility_matrix.md
