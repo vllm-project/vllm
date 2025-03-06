@@ -68,6 +68,8 @@ class RequestState:
         queue: Optional[asyncio.Queue[RequestOutput]],
         log_stats: bool,
     ) -> "RequestState":
+        if not request.sampling_params.detokenize:
+            tokenizer = None
         return cls(
             request_id=request.request_id,
             parent_req=parent_req,
