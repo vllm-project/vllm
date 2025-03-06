@@ -85,8 +85,7 @@ class RejectionSampler(nn.Module):
         draft_probs: Optional[
             torch.Tensor],  # [batch_size, max_spec_len, vocab_size]
         bonus_token_ids_tensor: torch.Tensor,  # [batch_size, 1]
-        target_probs: torch.
-        Tensor,  # [batch_size, max_spec_len + 1, vocab_size]
+        target_probs: torch.Tensor,  # [num_total_tokens, vocab_size]
         sampling_metadata: SamplingMetadata
     ) -> SamplerOutput:
         # NOTE: The following input preparationg can be moved

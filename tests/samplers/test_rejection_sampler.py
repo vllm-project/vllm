@@ -1,21 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for rejection sampling."""
 
-import random
-from typing import Any, Optional
-
 import pytest
 import torch
 import torch.nn.functional as F
 
-import vllm.model_executor.layers.rejection_sampler as v0_rej_sampler
-import vllm.v1.sample.rejection_sampler as v1_rej_sampler
+from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.utils import set_random_seed
 
-CUDA_DEVICES = ["cuda:0"]
-TEST_KS = [1, 3, 5]
-TEST_BATCH_SIZES = [1, 4, 8, 32]
-TEST_VOCAB_SIZES = [30_000, 50_000]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
+
+
+def mock_causal_accepted_tensor(
+        k: int, last_accepted_indices: torch.Tensor) -> torch.Tensor:
+    """Generate an "accepted" tensor which should yield causally-accepted tokens
+    up to last accepted indices.
+
+    Tokens after last_accepted_indices+1 may also be accepted, although they
+    will not be causally accepted.
+    """
+    batch_size = last_accepted_indices.shape[0]
+
+    accepted = (torch.arange(k).expand(batch_size, k)
+                <= last_accepted_indices.unsqueeze(-1).broadcast_to(
+                    batch_size, k))
+
+    # Sprinkle accepted values after the contiguous initial accepted values.
+    # This replicates the behavior of rejection sampling, which may "accept"
+    # a token that cannot be accepted because of causality.
+    sprinkle_candidates = (torch.arange(k).expand(
+        batch_size,
+        k) > last_accepted_indices.unsqueeze(-1).broadcast_to(batch_size, k) +
+                           1)
+    sprinkle = torch.rand(batch_size, k) > 0.5
+    accepted[sprinkle_candidates] = sprinkle[sprinkle_candidates]
+    return accepted
 
 
 @pytest.mark.parametrize("seed", list(range(10)))
@@ -63,9 +84,8 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
 
-    rejection_sampler = get_sampler(use_v1=False,
-                                    use_flashinfer=use_flashinfer,
-                                    device=device)
+    rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
+    rejection_sampler.init_gpu_tensors(device=device)
     output_token_ids = rejection_sampler._create_output(  # pylint: disable=protected-access
         accepted,
         recovered_token_ids,
@@ -104,68 +124,50 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
         assert torch.all(output_token_ids[subsequent_mask] == -1)
 
 
-@pytest.mark.parametrize("k", TEST_KS)
-@pytest.mark.parametrize("vocab_size", TEST_VOCAB_SIZES)
-@pytest.mark.parametrize("batch_size", TEST_BATCH_SIZES)
+@pytest.mark.parametrize("k", list(range(1, 6)))
+@pytest.mark.parametrize("vocab_size", [30_000, 50_000])
+@pytest.mark.parametrize("batch_size", list(range(1, 32)))
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("use_flashinfer", [True, False])
-@pytest.mark.parametrize("use_v1", [True, False])
 @torch.inference_mode()
 def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
-                                    device: str, use_flashinfer: bool,
-                                    use_v1: bool):
+                                    device: str, use_flashinfer: bool):
     torch.set_default_device(device)
-    rejection_sampler = get_sampler(use_v1, use_flashinfer, device)
+    rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
+    rejection_sampler.init_gpu_tensors(device=device)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     target_probs = torch.rand(batch_size,
                               k + 1,
                               vocab_size,
                               dtype=torch.float32)
-    if use_v1:
-        if use_flashinfer:
-            pytest.skip("Flashinfer will cause illegal memory access"
-                        "skip before fixing.")
-        draft_token_ids = [[
-            random.randint(0, vocab_size - 1) for _ in range(k)
-        ] for _ in range(batch_size)]
-        rejection_sampler(draft_token_ids, draft_probs, target_probs,
-                          create_v1_sampling_metadata(all_greedy=False))
-    else:
-        bonus_token_ids = torch.randint(low=0,
-                                        high=vocab_size,
-                                        size=(batch_size, 1),
-                                        dtype=torch.int64)
-        draft_token_ids = torch.randint(low=0,
-                                        high=vocab_size,
-                                        size=(batch_size, k),
-                                        dtype=torch.int64)
+    bonus_token_ids = torch.randint(low=0,
+                                    high=vocab_size,
+                                    size=(batch_size, 1),
+                                    dtype=torch.int64)
+    draft_token_ids = torch.randint(low=0,
+                                    high=vocab_size,
+                                    size=(batch_size, k),
+                                    dtype=torch.int64)
 
-        rejection_sampler(target_probs, bonus_token_ids, draft_probs,
-                          draft_token_ids)
+    rejection_sampler(target_probs, bonus_token_ids, draft_probs,
+                      draft_token_ids)
 
 
 @pytest.mark.parametrize("frac_seeded", [0.0, 0.25, 0.5, 1.0])
-@pytest.mark.parametrize("k", TEST_KS)
-@pytest.mark.parametrize("vocab_size", TEST_VOCAB_SIZES)
-@pytest.mark.parametrize("batch_size", TEST_BATCH_SIZES)
+@pytest.mark.parametrize("k", [1, 3, 6])
+@pytest.mark.parametrize("vocab_size", [30_000, 50_000])
+@pytest.mark.parametrize("batch_size", [1, 8, 32, 128])
 @pytest.mark.parametrize("n_rep", [100])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("use_flashinfer", [False])
-@pytest.mark.parametrize("use_v1", [True])
+@pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
 def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
                                    frac_seeded: float, n_rep: int, device: str,
-                                   use_flashinfer: bool, use_v1: bool):
-    '''
-    Test that the rejection sampler generates the same output when seeded.
-    '''
-    if use_flashinfer and use_v1:
-        pytest.skip("Flashinfer will cause illegal memory access"
-                    "skip before fixing for v1.")
-
+                                   use_flashinfer: bool):
     torch.set_default_device(device)
-    rejection_sampler = get_sampler(use_v1, use_flashinfer, device)
+    rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
+    rejection_sampler.init_gpu_tensors(device=device)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     target_probs = torch.rand(batch_size,
@@ -189,17 +191,9 @@ def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
             i: torch.Generator(device=device).manual_seed(i)
             for i in range(batch_size) if seeded_mask[i]
         }
-        if use_v1:
-            sampling_metadata = create_v1_sampling_metadata(
-                all_greedy=False, generators=seeded_seqs)
-            rep_result = rejection_sampler(draft_token_ids.tolist(),
-                                           draft_probs, target_probs,
-                                           sampling_metadata).sampled_token_ids
-        else:
-            rep_result = rejection_sampler(target_probs, bonus_token_ids,
-                                           draft_probs, draft_token_ids,
-                                           seeded_seqs)
-        results.append(rep_result)
+        results.append(
+            rejection_sampler(target_probs, bonus_token_ids, draft_probs,
+                              draft_token_ids, seeded_seqs))
 
     for i in range(batch_size):
         if seeded_mask[i]:
@@ -207,18 +201,14 @@ def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
                 assert torch.equal(results[j][i], results[0][i])
 
 
-@pytest.mark.parametrize("k", TEST_KS)
-@pytest.mark.parametrize("vocab_size", TEST_VOCAB_SIZES)
-@pytest.mark.parametrize("batch_size", TEST_BATCH_SIZES)
+@pytest.mark.parametrize("k", [1, 3, 6])
+@pytest.mark.parametrize("vocab_size", [30_000, 50_000])
+@pytest.mark.parametrize("batch_size", [3, 8, 32, 128])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("use_flashinfer", [True, False])
-@pytest.mark.parametrize("use_v1", [True, False])
 @torch.inference_mode()
 def test_mixed_seeded_batch(k: int, vocab_size: int, batch_size: int,
-                            device: str, use_flashinfer: bool, use_v1: bool):
-    if use_flashinfer and use_v1:
-        pytest.skip("Flashinfer will cause illegal memory access"
-                    "skip before fixing for v1.")
+                            device: str, use_flashinfer: bool):
     torch.set_default_device(device)
     set_random_seed(0)
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
@@ -244,53 +234,39 @@ def test_mixed_seeded_batch(k: int, vocab_size: int, batch_size: int,
                                draft_token_ids[i].clone().unsqueeze(0)))
 
     set_random_seed(0)
-    rejection_sampler = get_sampler(use_v1, use_flashinfer, device)
+    rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
+    rejection_sampler.init_gpu_tensors(device=device)
 
     results = []
     seeded_seqs = {
         i: torch.Generator(device=device).manual_seed(i)
         for i in range(1, batch_size)  # 0 is seed None
     }
-    if use_v1:
-        sampling_metadata = create_v1_sampling_metadata(all_greedy=False,
-                                                        generators=seeded_seqs)
-        batch_result = rejection_sampler(draft_token_ids.tolist(),
-                                         draft_probs.clone(),
-                                         target_probs.clone(),
-                                         sampling_metadata).sampled_token_ids
-    else:
-        batch_result = rejection_sampler(target_probs.clone(),
-                                         bonus_token_ids.clone(),
-                                         draft_probs.clone(),
-                                         draft_token_ids.clone(), seeded_seqs)
+    batch_result = rejection_sampler(target_probs.clone(),
+                                     bonus_token_ids.clone(),
+                                     draft_probs.clone(),
+                                     draft_token_ids.clone(), seeded_seqs)
 
     set_random_seed(0)
-    rejection_sampler = get_sampler(use_v1, use_flashinfer, device)
+
+    rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
+    rejection_sampler.init_gpu_tensors(device=device)
     for i in range(batch_size):
         request_seeded_seqs = {
             0: torch.Generator(device=device).manual_seed(i)
         } if seeded_seqs.get(i) is not None else None
         (draft_probs, draft_token_ids, target_probs, bonus_token_ids,
          draft_token_ids) = single_batches[i]
-        if use_v1:
-            request_seeded_seqs = request_seeded_seqs or {}
-            sampling_metadata = create_v1_sampling_metadata(
-                all_greedy=False, generators=request_seeded_seqs)
-            results.append(
-                rejection_sampler(draft_token_ids.tolist(), draft_probs,
-                                  target_probs,
-                                  sampling_metadata).sampled_token_ids)
-        else:
-            results.append(
-                rejection_sampler(target_probs, bonus_token_ids, draft_probs,
-                                  draft_token_ids, request_seeded_seqs))
+        results.append(
+            rejection_sampler(target_probs, bonus_token_ids, draft_probs,
+                              draft_token_ids, request_seeded_seqs))
     for i in range(batch_size):
         assert torch.equal(batch_result[i], results[i].squeeze(0))
 
 
-@pytest.mark.parametrize("k", TEST_KS)
-@pytest.mark.parametrize("vocab_size", TEST_VOCAB_SIZES)
-@pytest.mark.parametrize("batch_size", TEST_BATCH_SIZES)
+@pytest.mark.parametrize("k", [1, 3, 6])
+@pytest.mark.parametrize("vocab_size", [30_000, 50_000])
+@pytest.mark.parametrize("batch_size", [1, 8, 32, 128])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_compare_nonflashinfer_backend(k: int, vocab_size: int,
@@ -326,9 +302,8 @@ def test_compare_nonflashinfer_backend(k: int, vocab_size: int,
         }
 
     for use_flashinfer in [True, False]:
-        rejection_sampler = get_sampler(use_v1=False,
-                                        use_flashinfer=use_flashinfer,
-                                        device=device)
+        rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
+        rejection_sampler.init_gpu_tensors(device=device)
         # We use seeded sequences to ensure the same tokens are accepted
         # for both flashinfer and nonflashinfer backends.
         seeded_seqs = get_seeded_seqs()
@@ -357,10 +332,9 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
     vocab_size = 30_000
     torch.set_default_device(device)
 
-    rejection_sampler = get_sampler(use_v1=False,
-                                    use_flashinfer=use_flashinfer,
-                                    device=device,
-                                    strict_mode=True)
+    rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer,
+                                         strict_mode=True)
+    rejection_sampler.init_gpu_tensors(device=device)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     target_probs = torch.rand(batch_size,
@@ -399,11 +373,11 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
 
 
 @pytest.mark.parametrize("draft_and_target_probs_equal", [True, False])
-@pytest.mark.parametrize("seed", [1, 3, 5])
-@pytest.mark.parametrize("use_v1", [True, False])
+@pytest.mark.parametrize("seed", list(range(5)))
+@pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
 def test_rejection_sampling_approximates_target_distribution(
-        seed: int, draft_and_target_probs_equal: bool, use_v1: bool):
+        seed: int, draft_and_target_probs_equal: bool, use_flashinfer: bool):
     """Verify rejection sampling approximates target distribution,
     despite sampling from a potentially distinct draft distribution.
 
@@ -430,15 +404,11 @@ def test_rejection_sampling_approximates_target_distribution(
     probabilities are exactly equal. Rejection sampling should
     still work without any NaNs or exceptions.
     """
-    device = CUDA_DEVICES[0]
-    torch.set_default_device(device)
+    torch.set_default_device("cpu")
     set_random_seed(seed)
-    # Rejection sampler has to be on GPU because all metrics recorded
-    # in the rejection sampler are on GPU.
     helper = _CorrectnessTestHelper(
         vocab_size=10,
-        use_v1=use_v1,
-        device=device,
+        rejection_sampler=RejectionSampler(use_flashinfer=use_flashinfer),
     )
 
     draft_probs, target_probs, reference_probs = helper.generate_probs_for_test(
@@ -490,14 +460,12 @@ class _CorrectnessTestHelper:
     rejection sampling correctness test.
     """
 
-    def __init__(self, vocab_size: int, use_v1: bool, device: str):
-        self.rejection_sampler = get_sampler(use_v1,
-                                             use_flashinfer=False,
-                                             device=device)
-        self.device = device
+    def __init__(self, vocab_size: int, rejection_sampler: RejectionSampler):
+        self.rejection_sampler = rejection_sampler
         self.vocab_size = vocab_size
         self.vocab_range = (0, vocab_size)
-        self.use_v1 = use_v1
+
+        self.rejection_sampler.init_gpu_tensors(device=0)
 
         # Keep test simple, use k=1
         self.k = 1
@@ -534,7 +502,6 @@ class _CorrectnessTestHelper:
         # Sample using rejection sampling.
         rej_sample_probs = self._estimate_rejection_sampling_pdf(
             draft_probs, target_probs, num_samples)
-        rej_sample_probs = rej_sample_probs.to(self.device)
 
         # Average distance from reference probs.
         reference_vs_rejsample_dist = torch.dist(
@@ -572,23 +539,15 @@ class _CorrectnessTestHelper:
                                       device="cuda").repeat(num_samples, 1)
 
         # Get output tokens via rejection sampling.
-        if self.use_v1:
-            draft_token_ids_list = draft_token_ids.tolist()
-            output_token_ids = self.rejection_sampler(
-                draft_token_ids_list, draft_probs, target_probs,
-                create_v1_sampling_metadata(
-                    all_greedy=False)).sampled_token_ids
-        else:
-            output_token_ids = self.rejection_sampler(
-                target_probs.to("cuda"), bonus_token_ids.to("cuda"),
-                draft_probs.to("cuda"), draft_token_ids.to("cuda"))
+        output_token_ids = self.rejection_sampler(target_probs.to("cuda"),
+                                                  bonus_token_ids.to("cuda"),
+                                                  draft_probs.to("cuda"),
+                                                  draft_token_ids.to("cuda"))
 
         # Remove bonus tokens
         output_token_ids = output_token_ids[:, :-1].flatten()
 
         # Estimate probability density function
-        # torch.histogram can only be used with CUDA backend.
-        # Therefore, we move the output token ids to CPU.
         hist = torch.histogram(output_token_ids.to(dtype=torch.float,
                                                    device="cpu"),
                                bins=self.vocab_size,
@@ -596,74 +555,3 @@ class _CorrectnessTestHelper:
                                density=True)
 
         return hist.hist
-
-
-def mock_causal_accepted_tensor(
-        k: int, last_accepted_indices: torch.Tensor) -> torch.Tensor:
-    """Generate an "accepted" tensor which should yield causally-accepted tokens
-    up to last accepted indices.
-
-    Tokens after last_accepted_indices+1 may also be accepted, although they
-    will not be causally accepted.
-    """
-    batch_size = last_accepted_indices.shape[0]
-
-    accepted = (torch.arange(k).expand(batch_size, k)
-                <= last_accepted_indices.unsqueeze(-1).broadcast_to(
-                    batch_size, k))
-
-    # Sprinkle accepted values after the contiguous initial accepted values.
-    # This replicates the behavior of rejection sampling, which may "accept"
-    # a token that cannot be accepted because of causality.
-    sprinkle_candidates = (torch.arange(k).expand(
-        batch_size,
-        k) > last_accepted_indices.unsqueeze(-1).broadcast_to(batch_size, k) +
-                           1)
-    sprinkle = torch.rand(batch_size, k) > 0.5
-    accepted[sprinkle_candidates] = sprinkle[sprinkle_candidates]
-    return accepted
-
-
-def create_v1_sampling_metadata(
-    all_greedy: bool,
-    generators: Optional[dict[int, Any]] = None
-) -> v1_rej_sampler.SamplingMetadata:
-    """Create a v1 sampling metadata object with all_greedy set 
-        to the given value. Either all greedy or all random sampling 
-        is used.
-    """
-    generators = generators or {}
-    return v1_rej_sampler.SamplingMetadata(
-        temperature=torch.tensor([]),
-        all_greedy=all_greedy,
-        all_random=not all_greedy,
-        top_p=None,
-        top_k=None,
-        min_p=torch.empty(1, ),
-        generators=generators,
-        max_num_logprobs=0,
-        no_penalties=False,
-        prompt_token_ids=None,
-        frequency_penalties=torch.tensor([]),
-        presence_penalties=torch.tensor([]),
-        repetition_penalties=torch.tensor([]),
-        output_token_ids=[],
-        min_tokens={},
-        logit_bias=[None],
-        allowed_token_ids_mask=None,
-    )
-
-
-def get_sampler(use_v1: bool,
-                use_flashinfer: bool,
-                device: str = "cuda:0",
-                strict_mode: bool = False) -> Any:
-    if use_v1:
-        import os
-        os.environ[
-            "VLLM_USE_FLASHINFER_SAMPLER"] = "1" if use_flashinfer else "0"
-        return v1_rej_sampler.RejectionSampler()
-    sampler = v0_rej_sampler.RejectionSampler(use_flashinfer=use_flashinfer,
-                                              strict_mode=strict_mode)
-    sampler.init_gpu_tensors(device=device)
-    return sampler

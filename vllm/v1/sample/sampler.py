@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """A layer that samples the next tokens from the model's outputs."""
-from typing import List
 
 import torch
 import torch.nn as nn
@@ -119,7 +118,7 @@ class Sampler(nn.Module):
 
     def compute_probs(self, logits: torch.Tensor,
                       sampling_metadata: SamplingMetadata,
-                      sample_lens: List[int]) -> torch.Tensor:
+                      sample_lens: list[int]) -> torch.Tensor:
         if sampling_metadata.all_greedy:
             return logits
         assert sampling_metadata.temperature is not None
