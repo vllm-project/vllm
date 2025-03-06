@@ -295,19 +295,29 @@ class PunicaWrapperBase(PunicaWrapperABC):
             if magnitudes is not None:
                 # Get slice of output to normalize
                 slice_output = output[:, offset_left:offset_left + slice]
+                # Store original output for this slice
+                original_slice = slice_output.clone()
+
                 # Normalize columns in this slice
                 norms = torch.norm(slice_output, dim=0, keepdim=True)
                 normalized = slice_output / (norms + 1e-6)
 
                 # Select and apply appropriate magnitudes for each position
                 magnitudes = magnitudes.view(-1, magnitudes.shape[-1])
-                magnitudes = magnitudes[indices]
-                magnitudes[indices ==
-                           -1] = 1.0  # No scaling for positions without LoRA
+                selected_magnitudes = magnitudes[indices]
+                # Create a mask for valid LoRA positions (indices != -1)
+                valid_mask = (indices
+                              != -1).view(-1, 1).expand_as(selected_magnitudes)
 
-                # Apply magnitudes and store back in output
+                # Apply magnitudes only where valid, otherwise use zeros
+                masked_magnitudes = torch.where(
+                    valid_mask, selected_magnitudes,
+                    torch.zeros_like(selected_magnitudes))
+
+                # Calculate DoRA contribution and add to the original output (not replace)
+                dora_contribution = normalized * masked_magnitudes
                 output[:, offset_left:offset_left +
-                       slice] = normalized * magnitudes
+                       slice] = original_slice + dora_contribution
 
             offset_left += slice
 

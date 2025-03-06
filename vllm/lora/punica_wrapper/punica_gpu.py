@@ -233,11 +233,18 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             bgmv_expand(x, lora_b_stacked, y, self.token_lora_indices,
                         add_inputs)
         if magnitudes is not None:
-            # Normalize y column-wise and multiply by magnitudes
+            # Store original output
+            original_y = y.clone()
+
+            # Normalize y column-wise
             y_norm = torch.norm(y, p=2, dim=0, keepdim=True)
             y_norm = torch.clamp(y_norm, min=1e-6)  # Avoid division by zero
-            y.div_(y_norm)
-            y.mul_(magnitudes.view(1, -1))
+            normalized_y = y / y_norm
+
+            # Apply magnitudes - this is for embedding where token indices
+            # are handled differently
+            dora_contribution = normalized_y * magnitudes.view(1, -1)
+            y.copy_(original_y + dora_contribution)
 
     def add_lora_linear(
         self,
@@ -352,9 +359,16 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                     self.sampler_indices,
                     add_inputs=True)
         if magnitudes is not None:
-            # Normalize y column-wise and multiply by magnitudes
+            # Store original output
+            original_y = y.clone()
+
+            # Normalize y column-wise
             y_norm = torch.norm(y, p=2, dim=0, keepdim=True)
             y_norm = torch.clamp(y_norm, min=1e-6)  # Avoid division by zero
-            y.div_(y_norm)
-            y.mul_(magnitudes.view(1, -1))
+            normalized_y = y / y_norm
+
+            # Apply magnitudes - this is for logits where token indices
+            # are handled through self.sampler_indices
+            dora_contribution = normalized_y * magnitudes.view(1, -1)
+            y.copy_(original_y + dora_contribution)
         y = y.view_as(y_org)
