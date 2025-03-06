@@ -428,17 +428,17 @@ class TPUModelRunner:
         slot_mapping = self.slot_mapping_cpu[:
                                              padded_total_num_scheduled_tokens].to(
                                                  self.device)
-        padded_block_table = self.block_table_cpu[:self.max_num_reqs]
-        padded_block_table[:num_reqs, :self.max_num_blocks_per_req] = (
+        block_tables = self.block_table_cpu[:self.max_num_reqs]
+        block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
-        padded_block_table = padded_block_table.to(self.device)
+        block_tables = block_tables.to(self.device)
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
             self.device)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
-            block_tables=padded_block_table,
+            block_tables=block_tables,
             context_lens=seq_lens,
             query_start_loc=query_start_loc,
             num_seqs=torch.tensor([num_reqs],
