@@ -25,10 +25,10 @@ def has_xgrammar_unsupported_json_features(schema: dict) -> bool:
 
         # Check for numeric ranges
         if obj.get("type") in ("integer", "number") and any(
-                key in obj for key in [
+                key in obj for key in (
                     "minimum", "maximum", "exclusiveMinimum",
                     "exclusiveMaximum", "multipleOf"
-                ]):
+                )):
             return True
 
         # Check for array unsupported keywords

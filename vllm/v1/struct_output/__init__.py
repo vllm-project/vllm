@@ -124,7 +124,7 @@ class StructOutputManager:
         requests: dict[str, Request],
         struct_output_request_ids: dict[str, int],
         batch_len: int,
-    ) -> Optional[npt.NDArray[np.float32]]:
+    ) -> Optional[npt.NDArray[np.int32]]:
         # Prepare the structured output bitmask for this batch.
         if not struct_output_request_ids:
             return None

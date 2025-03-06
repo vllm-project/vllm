@@ -119,4 +119,4 @@ class SchedulerOutput:
     # for filling the next token bitmask
     struct_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
-    grammar_bitmask: Optional["npt.NDArray[np.float32]"]
+    grammar_bitmask: Optional["npt.NDArray[np.int32]"]
