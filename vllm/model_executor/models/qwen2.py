@@ -461,9 +461,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
 
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors,
-                                   inputs_embeds, self.lm_head.bias)
+        hidden_states = self.model(input_ids, positions,intermediate_tensors, inputs_embeds, self.lm_head.bias)
         return hidden_states
 
     def compute_logits(

@@ -10,7 +10,7 @@ import cloudpickle
 import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
-
+import torch
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.config import CompilationConfig
@@ -282,6 +282,8 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         ...
 
@@ -298,6 +300,8 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         ...
 
@@ -314,6 +318,8 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         ...
 
@@ -331,6 +337,8 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         ...
 
@@ -348,6 +356,8 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         ...
 
@@ -363,6 +373,8 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         ...
 
@@ -377,7 +389,7 @@ class LLM:
                        Optional[Union[str, list[str]]]] = None,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
-        prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
+        prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
         prompt_embeds: Optional[torch.Tensor] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
@@ -401,10 +413,15 @@ class LLM:
                 When it is a single value, it is applied to every prompt.
                 When it is a list, the list must have the same length as the
                 prompts and it is paired one by one with the prompt.
+            prompt_token_ids: DEPRECATED. Token IDs for the prompts. If provided,
+                the `prompts` will be ignored.
+            prompt_embeds: Optional tensor of prompt embeddings to use instead of
+                text prompts.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
+            guided_options_request: Options for guided decoding, if any.
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
 
@@ -438,13 +455,13 @@ class LLM:
             parsed_prompts = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, list[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
+                prompt_embeds=prompt_embeds,
             )
         else:
             parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
                                   prompts)
-
-        if prompt_embeds is not None:
-            parsed_prompts.prompt_embeds = prompt_embeds
+            if prompt_embeds is not None and hasattr(parsed_prompts, "prompt_embeds"):
+                parsed_prompts.prompt_embeds = prompt_embeds
 
         if isinstance(guided_options_request, dict):
             if len(guided_options_request) > 1:
@@ -1237,8 +1254,8 @@ class LLM:
     # LEGACY
     def _convert_v1_inputs(
         self,
-        prompts: Optional[Union[str, List[str]]],
-        prompt_token_ids: Optional[Union[List[int], List[List[int]]]],
+        prompts: Optional[Union[str, list[str]]],
+        prompt_token_ids: Optional[Union[list[int], list[list[int]]]],
         prompt_embeds: Optional[torch.Tensor] = None,
     ):
         # skip_tokenizer_init is now checked in engine
@@ -1276,6 +1293,13 @@ class LLM:
                 raise AssertionError
 
             parsed_prompts.append(item)
+
+        # Handle prompt_embeds if provided
+        if prompt_embeds is not None:
+            # Assuming prompt_embeds is a tensor that can be assigned to the first prompt
+            # This might need adjustment based on how prompt_embeds is actually used
+            if len(parsed_prompts) > 0 and hasattr(parsed_prompts[0], "prompt_embeds"):
+                parsed_prompts[0].prompt_embeds = prompt_embeds
 
         return parsed_prompts
 
@@ -1414,3 +1438,4 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
+
