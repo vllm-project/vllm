@@ -14,7 +14,10 @@ PROMPT = "Hello my name is Robert and I"
 
 @pytest.fixture(scope="module")
 def model() -> LLM:
-    return LLM(MODEL, enforce_eager=True)
+    # Disable prefix caching so that we can test prompt logprobs.
+    # TODO remove this after https://github.com/vllm-project/vllm/pull/13949
+    # is merged
+    return LLM(MODEL, enforce_eager=True, enable_prefix_caching=False)
 
 
 def test_n_gt_1(model):
