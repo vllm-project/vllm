@@ -861,8 +861,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
-    def _apply_grammar_bitmask(self, scheduler_output: "SchedulerOutput",
-                               logits: torch.Tensor):
+    def apply_grammar_bitmask(
+        self,
+        scheduler_output: "SchedulerOutput",
+        logits: torch.Tensor,
+    ):
         # Serialization of np.ndarray is much more efficient than a tensor,
         # so we receive it in that format.
         grammar_bitmask = scheduler_output.grammar_bitmask
@@ -902,7 +905,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         xgr.apply_token_bitmask_inplace(
             logits,
             grammar_bitmask.to(self.device, non_blocking=True),
-            indices=list(struct_out_req_batch_indices.values()))
+            indices=list(struct_out_req_batch_indices.values()),
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -991,7 +995,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
-            self._apply_grammar_bitmask(scheduler_output, logits)
+            self.apply_grammar_bitmask(scheduler_output, logits)
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
