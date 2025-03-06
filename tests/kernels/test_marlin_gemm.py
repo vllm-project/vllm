@@ -231,13 +231,12 @@ def test_gptq_marlin_gemm(
     workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
                                 GPTQ_MARLIN_MAX_PARALLEL)
 
-    opcheck(
-        torch.ops._C.gptq_marlin_gemm,
-        (a_input, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
-         workspace.scratch, quant_type.id, a_input.shape[0], b_weight.shape[1],
-         a_input.shape[1], is_k_full, False, use_atomic_add, use_fp32_reduce,
-         False),
-        test_utils=DEFAULT_OPCHECK_TEST_UTILS)
+    opcheck(torch.ops._C.gptq_marlin_gemm,
+            (a_input, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
+             workspace.scratch, quant_type.id, a_input.shape[0],
+             b_weight.shape[1], a_input.shape[1], is_k_full, False,
+             use_atomic_add, use_fp32_reduce, False),
+            test_utils=DEFAULT_OPCHECK_TEST_UTILS)
 
     output = ops.gptq_marlin_gemm(
         a_input,
