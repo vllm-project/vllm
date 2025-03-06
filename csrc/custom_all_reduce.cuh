@@ -57,6 +57,13 @@ struct __align__(alignof(T) * sz) array_t {
   static constexpr int size = sz;
 };
 
+template <typename T>
+struct quantized_t {
+  T scale;
+  char data[16 / sizeof(T)];
+  using type = char;
+};
+
 // use packed type to maximize memory efficiency
 // goal: generate ld.128 and st.128 instructions
 template <typename T>
@@ -70,13 +77,81 @@ struct packed_t {
 #define DINLINE __device__ __forceinline__
 
 // scalar cast functions
-DINLINE float upcast_s(half val) { return __half2float(val); }
+template <typename I, typename O>
+DINLINE O cast_s(I val);
+
+template <>
+DINLINE float cast_s(float val) {
+  return val;
+}
+
+template <>
+DINLINE float cast_s(half val) {
+  return __half2float(val);
+}
+
+template <>
+DINLINE half cast_s(float val) {
+  return __float2half(val);
+}
+
+template <>
+DINLINE char cast_s(float val) {
+  return static_cast<char>(val);
+}
+
+template <>
+DINLINE char cast_s(half val) {
+  return static_cast<char>(__half2float(val));
+}
+
+template <>
+DINLINE float cast_s(char val) {
+  return static_cast<float>(val);
+}
+
+template <>
+DINLINE half cast_s(char val) {
+  return __float2half(static_cast<float>(val));
+}
 
 template <typename T>
-DINLINE T downcast_s(float val);
+DINLINE T max_s(T a, T b);
+
 template <>
-DINLINE half downcast_s(float val) {
-  return __float2half(val);
+DINLINE float max_s(float a, float b) {
+  return fmaxf(fabsf(a), fabsf(b));
+}
+
+template <>
+DINLINE half max_s(half a, half b) {
+  return __hmax(__habs(a), __habs(b));
+}
+
+template <typename T>
+DINLINE T mul_s(T a, T b);
+
+template <>
+DINLINE float mul_s(float a, float b) {
+  return a * b;
+}
+
+template <>
+DINLINE half mul_s(half a, half b) {
+  return __hmul(a, b);
+}
+
+template <typename T>
+DINLINE T div_s(T a, T b);
+
+template <>
+DINLINE float div_s(float a, float b) {
+  return a / b;
+}
+
+template <>
+DINLINE half div_s(half a, half b) {
+  return __hdiv(a, b);
 }
 
 // scalar add functions
@@ -89,11 +164,43 @@ DINLINE half& assign_add(half& a, half b) {
 DINLINE float& assign_add(float& a, float b) { return a += b; }
 
 #if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
-DINLINE float upcast_s(nv_bfloat16 val) { return __bfloat162float(val); }
+DINLINE float cast_s(nv_bfloat16 val) { return __bfloat162float(val); }
+
 template <>
-DINLINE nv_bfloat16 downcast_s(float val) {
+DINLINE float cast_s(nv_bfloat16 val) {
+  return __bfloat162float(val);
+}
+
+template <>
+DINLINE nv_bfloat16 cast_s(float val) {
   return __float2bfloat16(val);
 }
+
+template <>
+DINLINE char cast_s(nv_bfloat16 val) {
+  return static_cast<char>(__bfloat162float(val));
+}
+
+template <>
+DINLINE nv_bfloat16 cast_s(char val) {
+  return __float2bfloat16(static_cast<float>(val));
+}
+
+template <>
+DINLINE nv_bfloat16 max_s(nv_bfloat16 a, nv_bfloat16 b) {
+  return __hmax(__habs(a), __habs(b));
+}
+
+template <>
+DINLINE nv_bfloat16 mul_s(nv_bfloat16 a, nv_bfloat16 b) {
+  return __hmul(a, b);
+}
+
+template <>
+DINLINE nv_bfloat16 div_s(nv_bfloat16 a, nv_bfloat16 b) {
+  return __hdiv(a, b);
+}
+
 DINLINE nv_bfloat16& assign_add(nv_bfloat16& a, nv_bfloat16 b) {
   a = __hadd(a, b);
   return a;
@@ -117,7 +224,7 @@ DINLINE array_t<float, N> upcast(array_t<T, N> val) {
     array_t<float, N> out;
 #pragma unroll
     for (int i = 0; i < N; i++) {
-      out.data[i] = upcast_s(val.data[i]);
+      out.data[i] = cast_s<T, float>(val.data[i]);
     }
     return out;
   }
@@ -131,7 +238,61 @@ DINLINE O downcast(array_t<float, O::size> val) {
     O out;
 #pragma unroll
     for (int i = 0; i < O::size; i++) {
-      out.data[i] = downcast_s<typename O::type>(val.data[i]);
+      out.data[i] = cast_s<float, typename O::type>(val.data[i]);
+    }
+    return out;
+  }
+}
+
+template <typename A, typename C>
+DINLINE C compress(A val) {
+  using T = typename A::type;
+  if constexpr (std::is_same<A, C>::value) {
+    return val;
+  } else if constexpr (std::is_same<C, quantized_t<T>>::value) {
+    C out;
+    out.scale = cast_s<float, T>(0.0);
+#pragma unroll
+    for (int i = 0; i < A::size; i++) {
+      out.scale = max_s(out.scale, val.data[i]);
+    }
+    const T num_levels = cast_s<float, T>(127.0);
+    out.scale = div_s(out.scale, num_levels);
+#pragma unroll
+    for (int i = 0; i < A::size; i++) {
+      out.data[i] = cast_s<T, char>(div_s(val.data[i], out.scale));
+    }
+    return out;
+  } else {
+    C out;
+#pragma unroll
+    for (int i = 0; i < A::size; i++) {
+      out.data[i] = cast_s<T, char>(val.data[i]);
+    }
+    return out;
+  }
+}
+
+template <typename P, typename C>
+DINLINE P decompress(C val) {
+  using T = typename P::type;
+  using A_type = float;
+  if constexpr (std::is_same<P, C>::value) {
+    return val;
+  } else if constexpr (std::is_same<quantized_t<A_type>, C>::value) {
+    A_type scale = val.scale;
+    P out;
+#pragma unroll
+    for (int i = 0; i < P::size; i++) {
+      out.data[i] = cast_s<A_type, T>(
+          mul_s(cast_s<char, A_type>(static_cast<char>(val.data[i])), scale));
+    }
+    return out;
+  } else {
+    P out;
+#pragma unroll
+    for (int i = 0; i < P::size; i++) {
+      out.data[i] = cast_s<char, T>(val.data[i]);
     }
     return out;
   }
@@ -254,18 +415,22 @@ DINLINE void end_sync(const RankSignals& sg, Signal* self_sg, int rank) {
   if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
 }
 
-template <typename P, int ngpus, typename A>
-DINLINE P packed_reduce(const P* ptrs[], int idx) {
+template <typename P, int ngpus, typename A, typename C>
+DINLINE C packed_reduce(const P* ptrs[], int idx) {
   A tmp = upcast(ptrs[0][idx]);
 #pragma unroll
   for (int i = 1; i < ngpus; i++) {
     packed_assign_add(tmp, upcast(ptrs[i][idx]));
   }
-  return downcast<P>(tmp);
+  if constexpr (!std::is_same<C, P>::value) {
+    return compress<A, C>(tmp);
+  } else {
+    return downcast<C>(tmp);
+  }
 }
 
 template <typename T, int ngpus>
-__global__ void __launch_bounds__(512, 1)
+__global__ void __launch_bounds__(1024, 1)
     cross_device_reduce_1stage(RankData* _dp, RankSignals sg, Signal* self_sg,
                                T* __restrict__ result, int rank, int size) {
   using P = typename packed_t<T>::P;
@@ -277,7 +442,8 @@ __global__ void __launch_bounds__(512, 1)
   // do the actual reduction
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
-    ((P*)result)[idx] = packed_reduce<P, ngpus, A>((const P**)&dp.ptrs[0], idx);
+    ((P*)result)[idx] =
+        packed_reduce<P, ngpus, A, P>((const P**)&dp.ptrs[0], idx);
   }
   end_sync<ngpus, true>(sg, self_sg, rank);
 }
@@ -287,8 +453,8 @@ DINLINE P* get_tmp_buf(Signal* sg) {
   return (P*)(((Signal*)sg) + 1);
 }
 
-template <typename T, int ngpus>
-__global__ void __launch_bounds__(512, 1)
+template <typename T, int ngpus, bool compress_2stage = false>
+__global__ void __launch_bounds__(1024, 1)
     cross_device_reduce_2stage(RankData* _dp, RankSignals sg, Signal* self_sg,
                                T* __restrict__ result, int rank, int size,
                                int compression_factor = 1) {
@@ -296,24 +462,27 @@ __global__ void __launch_bounds__(512, 1)
   int stride = gridDim.x * blockDim.x;
   using P = typename packed_t<T>::P;
   using A = typename packed_t<T>::A;
+  using C =
+      std::conditional_t<compress_2stage, quantized_t<typename A::type>, P>;
+
   int part = size / ngpus;
   int start = rank * part;
   int end = rank == ngpus - 1 ? size : start + part;
   int largest_part = part + size % ngpus;
   const P* ptrs[ngpus];
-  P* tmps[ngpus];
+  C* tmps[ngpus];
 #pragma unroll
   for (int i = 0; i < ngpus; i++) {
     int target = (rank + i) % ngpus;
     ptrs[i] = (const P*)_dp->ptrs[target];
-    tmps[i] = get_tmp_buf<P>(sg.signals[target]);
+    tmps[i] = get_tmp_buf<C>(sg.signals[target]);
   }
   auto tmp_out = tmps[0];
   start_sync<ngpus>(sg, self_sg, rank);
 
   // stage 1: reduce scatter
   for (int idx = start + tid; idx < end; idx += stride) {
-    tmp_out[idx - start] = packed_reduce<P, ngpus, A>(ptrs, idx);
+    tmp_out[idx - start] = packed_reduce<P, ngpus, A, C>(ptrs, idx);
   }
   // multi_gpu_barrier<ngpus, false, true>(sg, self_sg, rank);
   end_sync<ngpus>(sg, self_sg, rank);
@@ -323,14 +492,15 @@ __global__ void __launch_bounds__(512, 1)
   // between threads that have the same tid. If thread i computes the sum of
   // start + i in the first stage, then thread i also gathers start + i from
   // all ranks. largest_part /= compression_factor;
-
+  C tmp;
   for (int idx = tid; idx < largest_part; idx += stride) {
 #pragma unroll
     for (int i = 0; i < ngpus; i++) {
       int gather_from_rank = ((rank + i) % ngpus);
       if (gather_from_rank == ngpus - 1 || idx < part) {
         int dst_idx = gather_from_rank * part + idx;
-        ((P*)result)[dst_idx] = tmps[i][idx];
+        tmp = tmps[i][idx];
+        ((P*)result)[dst_idx] = decompress<P>(tmp);
       }
     }
   }
@@ -534,25 +704,41 @@ class CustomAllreduce {
       ptrs = it->second;
     }
 
+    bool do_compress =
+        std::getenv("VLLM_CA_2STAGE_CAST_ENABLE")
+            ? std::stoi(std::getenv("VLLM_CA_2STAGE_CAST_ENABLE"))
+            : false;
     size /= d;
+
+    threads = std::getenv("VLLM_CA_THREADS")
+                  ? std::stoi(std::getenv("VLLM_CA_THREADS"))
+                  : threads;
     auto bytes = size * sizeof(typename packed_t<T>::P);
     int blocks = std::min(block_limit, (size + threads - 1) / threads);
 #define KL(ngpus, name)                                                       \
   name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
                                                  rank_, size);
-#define REDUCE_CASE(ngpus)                            \
-  case ngpus: {                                       \
-    if (world_size_ == 2) {                           \
-      KL(ngpus, cross_device_reduce_1stage);          \
-    } else if (full_nvlink_) {                        \
-      if ((world_size_ <= 4 && bytes < 512 * 1024) || \
-          (world_size_ <= 8 && bytes < 256 * 1024)) { \
-        KL(ngpus, cross_device_reduce_1stage);        \
-      } else {                                        \
-        KL(ngpus, cross_device_reduce_2stage);        \
-      }                                               \
-    }                                                 \
-    break;                                            \
+#define REDUCE_CASE(ngpus)                                                  \
+  case ngpus: {                                                             \
+    if (world_size_ == 2) {                                                 \
+      KL(ngpus, cross_device_reduce_1stage);                                \
+    } else if (full_nvlink_) {                                              \
+      if ((world_size_ <= 4 && bytes < 512 * 1024) ||                       \
+          (world_size_ <= 8 && bytes < 256 * 1024)) {                       \
+        KL(ngpus, cross_device_reduce_1stage);                              \
+      } else {                                                              \
+        if (do_compress) {                                                  \
+          cross_device_reduce_2stage<T, ngpus, true>                        \
+              <<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
+                                               rank_, size);                \
+        } else {                                                            \
+          cross_device_reduce_2stage<T, ngpus, false>                       \
+              <<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
+                                               rank_, size);                \
+        }                                                                   \
+      }                                                                     \
+    }                                                                       \
+    break;                                                                  \
   }
 
     switch (world_size_) {
