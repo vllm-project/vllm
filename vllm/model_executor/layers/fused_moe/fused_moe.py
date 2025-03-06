@@ -37,11 +37,11 @@ if True or envs.VLLM_USE_DEEP_GEMM:
 
 
 def p(s, t):
-    print(f"{s}: {t.shape}\n{t}")
+    #print(f"{s}: {t.shape}\n{t}")
     pass
 
 def pp(x):
-    print(x)
+    #print(x)
     pass
 
 
@@ -1321,13 +1321,16 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     use_dg = valid_deep_gemm(hidden_states, w1, w2, config, use_fp8_w8a8)
 
     if use_dg:
-        print("USE_DG!!!!!!!!!!!!!")
+        #print("USE_DG!!!!!!!!!!!!!")
         num_chunks = 1
+        CHUNK_SIZE = num_tokens
         assert w1_scale is not None
         assert w2_scale is not None
         # TODO: do this offline
+        #print("GOT HERE A")
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
+        #print("GOT HERE B")
     else:
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
