@@ -24,7 +24,7 @@ def stateless_init_process_group(master_address, master_port, rank, world_size,
 class WorkerMixin:
     """
     The class for vLLM's worker to inherit from.
-    By defining an adapter, the code can work no matter what is
+    By defining a mixin class, the code can work no matter what is
     the underlying worker class. This way, the code can be compatible
     with both vLLM V0 and V1.
     NOTE: we define this class in a separate module, and the main module
@@ -67,7 +67,7 @@ class WorkerMixin:
 class ColocateWorkerMixin:
     """
     The class for vLLM's worker to inherit from, in the colocate setting.
-    By defining an adapter, the code can work no matter what is
+    By defining a mixin class, the code can work no matter what is
     the underlying worker class. This way, the code can be compatible
     with both vLLM V0 and V1.
     NOTE: we define this class in a separate module, and the main module
