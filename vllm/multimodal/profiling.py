@@ -210,7 +210,6 @@ class MultiModalProfiler(Generic[_I]):
         seq_len: int,
         is_encoder_data: bool = False,
     ) -> DummyData:
-        # Avoid circular import
 
         mm_counts = self.get_mm_limits()
 
