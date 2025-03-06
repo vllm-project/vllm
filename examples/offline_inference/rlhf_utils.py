@@ -21,7 +21,7 @@ def stateless_init_process_group(master_address, master_port, rank, world_size,
     return pynccl
 
 
-class WorkerAdapter:
+class WorkerMixin:
     """
     The class for vLLM's worker to inherit from.
     By defining an adapter, the code can work no matter what is
@@ -64,7 +64,7 @@ class WorkerAdapter:
         return weights_updated
 
 
-class ColocateWorkerAdapter:
+class ColocateWorkerMixin:
     """
     The class for vLLM's worker to inherit from, in the colocate setting.
     By defining an adapter, the code can work no matter what is

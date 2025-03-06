@@ -68,7 +68,7 @@ llm = ray.remote(
 )(MyLLM).remote(
     model="facebook/opt-125m",
     enforce_eager=True,
-    worker_mixin_cls="rlhf_utils.WorkerAdapter",
+    worker_mixin_cls="rlhf_utils.WorkerMixin",
     tensor_parallel_size=2,
     distributed_executor_backend="ray",
 )
