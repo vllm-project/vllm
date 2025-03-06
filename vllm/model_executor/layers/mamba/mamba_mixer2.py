@@ -14,6 +14,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -376,17 +377,16 @@ class MambaMixer2(CustomOp):
                                        eps=rms_norm_eps)
 
     def forward_native(self, hidden_states: torch.Tensor,
-                       attn_metadata: AttentionMetadata,
                        conv_state: torch.Tensor, ssm_state: torch.Tensor):
         pass
 
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
     ):
+        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
         seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size

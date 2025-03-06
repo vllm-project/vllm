@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import random
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import pytest
 import torch
@@ -17,6 +17,8 @@ if not current_platform.is_rocm():
     from xformers import ops as xops
     from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
+    from vllm.attention.backends.xformers import _make_alibi_bias
+
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
@@ -25,6 +27,7 @@ MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 # Reduce NUM_BLOCKS when it happens.
 NUM_BLOCKS = 4321  # Arbitrary values for testing
 PARTITION_SIZE = 512
+PARTITION_SIZE_ROCM = 256
 # flshattF and tritonflashattF supported: {torch.float16, torch.bfloat16}
 DTYPES = [
     torch.half, torch.bfloat16, torch.float
@@ -85,8 +88,8 @@ def ref_single_query_cached_kv_attention(
         block_table = block_tables_lst[i]
         seq_len = int(seq_lens_lst[i])
 
-        keys_lst: List[torch.Tensor] = []
-        values_lst: List[torch.Tensor] = []
+        keys_lst: list[torch.Tensor] = []
+        values_lst: list[torch.Tensor] = []
         for j in range(seq_len):
             block_number = int(block_table[j // block_size])
             block_offset = j % block_size
@@ -133,7 +136,7 @@ def test_paged_attention(
     kv_cache_factory,
     version: str,
     num_seqs: int,
-    num_heads: Tuple[int, int],
+    num_heads: tuple[int, int],
     head_size: int,
     use_alibi: bool,
     block_size: int,
@@ -145,6 +148,8 @@ def test_paged_attention(
     if ((kv_cache_dtype == "fp8" and head_size % 16)
             or (version == "rocm" and head_size not in (64, 128))):
         pytest.skip()
+
+    global PARTITION_SIZE
 
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
@@ -166,7 +171,7 @@ def test_paged_attention(
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
-    block_tables_lst: List[List[int]] = []
+    block_tables_lst: list[list[int]] = []
     for _ in range(num_seqs):
         block_table = [
             random.randint(0, NUM_BLOCKS - 1)
@@ -214,6 +219,9 @@ def test_paged_attention(
                       and block_size == BLOCK_SIZES[0]))
 
     elif version in ("v2", "rocm"):
+        if current_platform.is_rocm() and version == "rocm":
+            PARTITION_SIZE = PARTITION_SIZE_ROCM
+
         num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
         assert PARTITION_SIZE % block_size == 0
         num_seqs, num_heads, head_size = output.shape
@@ -334,25 +342,31 @@ def test_paged_attention(
 
 
 def ref_multi_query_kv_attention(
-    cu_seq_lens: List[int],
+    cu_seq_lens: list[int],
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     scale: float,
+    alibi_bias: Optional[list[torch.Tensor]],
     dtype: torch.dtype,
 ) -> torch.Tensor:
     num_seqs = len(cu_seq_lens) - 1
-    ref_outputs: List[torch.Tensor] = []
+    ref_outputs: list[torch.Tensor] = []
+    if alibi_bias:
+        assert len(alibi_bias) == num_seqs
     for i in range(num_seqs):
         start_idx = cu_seq_lens[i]
         end_idx = cu_seq_lens[i + 1]
         seq_len = end_idx - start_idx
 
-        # Create attention mask.
-        attn_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=dtype),
-                               diagonal=1)
-        attn_mask = attn_mask * torch.finfo(dtype).min
-        attn_mask = attn_mask.to(dtype=dtype)
+        # Create attention mask. ALiBi already includes a tril causal mask.
+        if alibi_bias:
+            attn_mask = alibi_bias[i]
+        else:
+            attn_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=dtype),
+                                   diagonal=1)
+            attn_mask = attn_mask * torch.finfo(dtype).min
+            attn_mask = attn_mask.to(dtype=dtype)
 
         ref_output = ref_masked_attention(
             query[start_idx:end_idx],
@@ -366,7 +380,6 @@ def ref_multi_query_kv_attention(
     return torch.cat(ref_outputs, dim=0)
 
 
-# TODO(woosuk): Add tests for USE_ALIBI=True.
 @pytest.mark.parametrize("num_seqs", NUM_PREFILL_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -378,11 +391,12 @@ def ref_multi_query_kv_attention(
 @torch.inference_mode()
 def test_multi_query_kv_attention(
     num_seqs: int,
-    num_heads: Tuple[int, int],
+    num_heads: tuple[int, int],
     head_size: int,
     dtype: torch.dtype,
     seed: int,
     device: str,
+    use_alibi: bool = False,
 ) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
@@ -408,16 +422,40 @@ def test_multi_query_kv_attention(
         # Handle MQA and GQA
         key = torch.repeat_interleave(key, num_queries_per_kv, dim=1)
         value = torch.repeat_interleave(value, num_queries_per_kv, dim=1)
-    attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
-    output = xops.memory_efficient_attention_forward(
-        query.unsqueeze(0),
-        key.unsqueeze(0),
-        value.unsqueeze(0),
-        attn_bias=attn_bias,
-        p=0.0,
-        scale=scale,
-    )
-    output = output.squeeze(0)
+    alibi_bias = None
+    if use_alibi:
+        alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
+        attn_bias = _make_alibi_bias(alibi_slopes, num_kv_heads, dtype,
+                                     seq_lens)
+        output = torch.empty_like(query)
+        start = 0
+        # Dynamic sequence length not supported with custom attn_bias.
+        for i, seq_len in enumerate(seq_lens):
+            end = start + seq_len
+            out = xops.memory_efficient_attention_forward(
+                query[None, start:end],
+                key[None, start:end],
+                value[None, start:end],
+                attn_bias=attn_bias[i],
+                p=0.0,
+                scale=scale)
+            output[start:end].copy_(out.view_as(query[start:end]))
+            start += seq_len
+        # xformers.AttentionBias to Tensor for use in reference impl.
+        alibi_bias = [
+            b.materialize(b.shape, device=device).squeeze() for b in attn_bias
+        ]
+    else:
+        attn_bias = BlockDiagonalCausalMask.from_seqlens(seq_lens)
+        output = xops.memory_efficient_attention_forward(
+            query.unsqueeze(0),
+            key.unsqueeze(0),
+            value.unsqueeze(0),
+            attn_bias=attn_bias,
+            p=0.0,
+            scale=scale,
+        )
+        output = output.squeeze(0)
 
     cu_seq_lens = [0]
     for seq_len in seq_lens:
@@ -428,8 +466,37 @@ def test_multi_query_kv_attention(
         key,
         value,
         scale,
+        alibi_bias,
         dtype,
     )
     atol = get_default_atol(output) if current_platform.is_rocm() else 1e-3
     rtol = get_default_rtol(output) if current_platform.is_rocm() else 1e-5
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("num_seqs", NUM_PREFILL_SEQS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [64])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Xformers backend is not supported on ROCm.")
+@torch.inference_mode()
+def test_multi_query_kv_attention_with_alibi(
+    num_seqs: int,
+    num_heads: tuple[int, int],
+    head_size: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    return test_multi_query_kv_attention(
+        num_seqs,
+        num_heads,
+        head_size,
+        dtype,
+        seed,
+        device,
+        use_alibi=True,
+    )

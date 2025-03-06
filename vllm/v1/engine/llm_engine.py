@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Mapping, Optional, Type, Union
+from collections.abc import Mapping
+from typing import Optional, Union
 
 from typing_extensions import TypeVar
 
@@ -21,6 +22,7 @@ from vllm.transformers_utils.tokenizer_group import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 
@@ -35,10 +37,10 @@ class LLMEngine:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
@@ -93,7 +95,7 @@ class LLMEngine:
         cls,
         engine_args: EngineArgs,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
         enable_multiprocessing: bool = False,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
@@ -134,7 +136,7 @@ class LLMEngine:
     def validate_outputs(cls, outputs, output_type):
         return outputs
 
-    def abort_request(self, request_ids: List[str]) -> None:
+    def abort_request(self, request_ids: list[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
         self.engine_core.abort_requests(request_ids)
@@ -151,21 +153,27 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
+        # 1) Fan out child requests (for n>1)
+        parent_req = ParentRequest.from_params(request_id, params)
+        n = params.n if isinstance(params, SamplingParams) else 1
+        for idx in range(n):
+            if parent_req is not None:
+                request_id, params = parent_req.get_child_info(idx)
 
-        # 1) Process raw inputs into the request.
-        request = self.processor.process_inputs(request_id, prompt, params,
-                                                arrival_time, lora_request,
-                                                trace_headers,
-                                                prompt_adapter_request,
-                                                priority)
+            # 2) Process raw inputs into the request.
+            request = self.processor.process_inputs(request_id, prompt, params,
+                                                    arrival_time, lora_request,
+                                                    trace_headers,
+                                                    prompt_adapter_request,
+                                                    priority)
 
-        # 2) Make a new RequestState and queue.
-        self.output_processor.add_request(request)
+            # 3) Make a new RequestState and queue.
+            self.output_processor.add_request(request, parent_req, idx)
 
-        # 3) Add the request to EngineCore.
-        self.engine_core.add_request(request)
+            # 3) Add the request to EngineCore.
+            self.engine_core.add_request(request)
 
-    def step(self) -> List[RequestOutput]:
+    def step(self) -> list[RequestOutput]:
 
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
@@ -204,7 +212,7 @@ class LLMEngine:
 
     def get_tokenizer_group(
         self,
-        group_type: Type[_G] = BaseTokenizerGroup,
+        group_type: type[_G] = BaseTokenizerGroup,
     ) -> _G:
         tokenizer_group = self.tokenizer
 
@@ -217,3 +225,19 @@ class LLMEngine:
                             f"found type: {type(tokenizer_group)}")
 
         return tokenizer_group
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        """Load a new LoRA adapter into the engine for future requests."""
+        return self.engine_core.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        """Remove an already loaded LoRA adapter."""
+        return self.engine_core.remove_lora(lora_id)
+
+    def list_loras(self) -> set[int]:
+        """List all registered adapters."""
+        return self.engine_core.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        """Prevent an adapter from being evicted."""
+        return self.engine_core.pin_lora(lora_id)

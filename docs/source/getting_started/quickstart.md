@@ -24,6 +24,12 @@ source myenv/bin/activate
 uv pip install vllm
 ```
 
+Another delightful way is to use `uv run` with `--with [dependency]` option, which allows you to run commands such as `vllm serve` without creating an environment:
+
+```console
+uv run --with vllm vllm --help
+```
+
 You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments.
 
 ```console
@@ -183,4 +189,14 @@ chat_response = client.chat.completions.create(
     ]
 )
 print("Chat response:", chat_response)
+```
+
+## On Attention Backends
+
+Currently, vLLM supports multiple backends for efficient Attention computation across different platforms and accelerator architectures. It automatically selects the most performant backend compatible with your system and model specifications.
+
+If desired, you can also manually set the backend of your choice by configuring the environment variable `VLLM_ATTENTION_BACKEND` to one of the following options: `FLASH_ATTN`, `FLASHINFER` or `XFORMERS`.
+
+```{attention}
+There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see [Dockerfile](https://github.com/vllm-project/vllm/blob/main/Dockerfile) for instructions on how to install it.
 ```

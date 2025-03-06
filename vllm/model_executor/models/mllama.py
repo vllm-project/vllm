@@ -15,8 +15,8 @@
 # limitations under the License.
 """PyTorch Mllama model."""
 import math
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from collections.abc import Iterable, Mapping, Sequence
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import numpy as np
 import torch
@@ -38,10 +38,12 @@ from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.selector import _Backend
 from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tp_group
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVCrossParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -53,16 +55,17 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalEncDecInputs,
+                                    MultiModalFieldConfig, MultiModalKwargs)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataDict, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
-                                        PromptReplacement)
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
 from .clip import CLIPMLP
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsV0Only
 from .llama import LlamaDecoderLayer, LlamaMLP
 from .utils import maybe_prefix
 
@@ -168,6 +171,29 @@ class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
 class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
                                 ):
 
+    def apply(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
+    ) -> MultiModalEncDecInputs:
+        mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
+                                  return_mm_hashes)
+
+        # Check that the number of image tokens in the decoder prompt matches
+        # the number of images provided in mm_data
+        num_image_tokens = mm_inputs['prompt_token_ids'].count(
+            self.info.get_hf_config().image_token_index)
+        image_data = mm_data.get("image", [])
+        num_images = 1 if isinstance(image_data, Image) else len(image_data)
+        if num_image_tokens != num_images:
+            raise ValueError(
+                f"The number of image tokens ({num_image_tokens}) must be"
+                f" the same as the number of images ({num_images})")
+
+        return mm_inputs
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -242,12 +268,12 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         image_token_id = self.info.get_hf_config().image_token_index
         return [image_token_id] * num_images
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         token_per_chunk = self.info.get_token_per_chunk_from_config()
         image_token_id = self.info.get_hf_config().image_token_index
 
@@ -416,11 +442,11 @@ class MllamaVisionSdpaAttention(nn.Module):
                  prefix: str = ""):
         super().__init__()
 
-        model_parallel_size = get_tensor_model_parallel_world_size()
+        tensor_parallel_size = get_tp_group().world_size
         self.embed_dim = config.hidden_size
         self.num_heads = config.attention_heads
         self.head_dim = config.hidden_size // config.attention_heads
-        self.num_local_heads = self.num_heads // model_parallel_size
+        self.num_local_heads = self.num_heads // tensor_parallel_size
         self.q_size = self.num_local_heads * self.head_dim
         self.kv_size = self.num_local_heads * self.head_dim
 
@@ -771,22 +797,24 @@ class MllamaTextCrossAttention(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.model_parallel_size = get_tensor_model_parallel_world_size()
-        self.num_heads = self.config.num_attention_heads
-        self.num_local_heads = self.num_heads // self.model_parallel_size
-        self.num_key_value_heads = self.config.num_key_value_heads
+        self.pipeline_parallel_rank = get_pp_group().rank_in_group
+        self.tensor_parallel_size = get_tp_group().world_size
+        self.num_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
+
+        self.num_local_heads = self.num_heads // self.tensor_parallel_size
         self.num_local_key_value_heads = \
-            self.num_key_value_heads // self.model_parallel_size
-        self.dropout = config.dropout
+            self.num_key_value_heads // self.tensor_parallel_size
         self.hidden_size = config.hidden_size
         self.head_dim = config.hidden_size // self.num_heads
+        self.num_key_value_heads = config.num_key_value_heads
+
         self.layer_idx = layer_idx
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.q_local_size = self.num_local_heads * self.head_dim
         self.kv_local_size = self.num_local_key_value_heads * self.head_dim
 
-        # TODO: change to Q/KV separate linear after #7448 is merged
-        self.qkv_proj = QKVParallelLinear(
+        self.qkv_proj = QKVCrossParallelLinear(
             self.hidden_size,
             self.head_dim,
             self.num_heads,
@@ -795,6 +823,7 @@ class MllamaTextCrossAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+
         self.o_proj = RowParallelLinear(
             self.num_heads * self.head_dim,
             self.hidden_size,
@@ -824,36 +853,22 @@ class MllamaTextCrossAttention(nn.Module):
         attention_mask: Optional[torch.Tensor],
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        qkv_dec, _ = self.qkv_proj(hidden_states)
-        q, _, _ = qkv_dec.split(
-            [self.q_local_size, self.kv_local_size, self.kv_local_size],
-            dim=-1)
-        if cross_attention_states is None:
-            k = None
-            v = None
-        else:
-            qkv_enc, _ = self.qkv_proj(cross_attention_states)
-            _, k, v = qkv_enc.split(
-                [self.q_local_size, self.kv_local_size, self.kv_local_size],
-                dim=-1)
+        q, k, v = self.qkv_proj(hidden_states, cross_attention_states)
+        if cross_attention_states is not None:
             k = k.view(-1, self.num_local_key_value_heads, self.head_dim)
             v = v.view(-1, self.num_local_key_value_heads, self.head_dim)
             k = self.k_norm(k)
+
         q = q.view(-1, self.num_local_heads, self.head_dim)
         q = self.q_norm(q)
 
         if attention_mask is not None:
-            output = self._attention_with_mask(q, k, v, kv_cache,
-                                               attention_mask,
-                                               kv_range_for_decode,
-                                               attn_metadata)
+            output = self._attention_with_mask(q, k, v, attention_mask,
+                                               kv_range_for_decode)
         else:
             output = self.attn(
-                q.view(-1, self.num_local_heads * self.head_dim), k, v,
-                kv_cache, attn_metadata)
+                q.view(-1, self.num_local_heads * self.head_dim), k, v)
         out, _ = self.o_proj(output)
         return out
 
@@ -862,12 +877,13 @@ class MllamaTextCrossAttention(nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        kv_cache: torch.Tensor,
         attention_mask: torch.Tensor,
         kv_range_for_decode: List[Tuple[int, int]],
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        kv_cache = self.attn.kv_cache[self.pipeline_parallel_rank]
+        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
         # Skip writing kv-cache for the initial profiling run.
+        # TODO (NickLucche) replace with custom attn bias and use standard attn
         if len(kv_cache.shape) > 1:
             i = torch.ones(1, dtype=torch.float32)
             if self.attn.backend in (_Backend.FLASH_ATTN,
@@ -978,8 +994,6 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
         cross_attention_mask: torch.Tensor,
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         full_text_row_masked_out_mask: torch.Tensor,
-        kv_cache: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -989,8 +1003,6 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
             attention_mask=cross_attention_mask,
             kv_range_for_decode=kv_range_for_decode,
             cross_attention_states=cross_attention_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
         hidden_states = full_text_row_masked_out_mask * hidden_states
         hidden_states = residual + self.cross_attn_attn_gate.tanh(
@@ -1016,7 +1028,6 @@ class MllamaTextModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size + 8,
                                                    config.hidden_size)
@@ -1054,14 +1065,12 @@ class MllamaTextModel(nn.Module):
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor,
                                                       torch.Tensor]],
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         skip_cross_attention: bool,
     ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
         hidden_states = inputs_embeds
 
-        for idx, decoder_layer in enumerate(self.layers):
+        for decoder_layer in self.layers:
             if isinstance(decoder_layer, MllamaCrossAttentionDecoderLayer):
                 if not skip_cross_attention:
                     hidden_states = decoder_layer(
@@ -1071,15 +1080,11 @@ class MllamaTextModel(nn.Module):
                         kv_range_for_decode=kv_range_for_decode,
                         full_text_row_masked_out_mask=
                         full_text_row_masked_out_mask,
-                        kv_cache=kv_caches[idx],
-                        attn_metadata=attn_metadata,
                     )
             elif isinstance(decoder_layer, LlamaDecoderLayer):
                 hidden_states, residual = decoder_layer(
                     positions=positions,
                     hidden_states=hidden_states,
-                    kv_cache=kv_caches[idx],
-                    attn_metadata=attn_metadata,
                     residual=None,
                 )
                 hidden_states = hidden_states + residual
@@ -1124,8 +1129,6 @@ class MllamaForCausalLM(nn.Module):
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         full_text_row_masked_out_mask: Optional[Tuple[torch.Tensor,
                                                       torch.Tensor]],
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         skip_cross_attention: bool,
     ) -> torch.Tensor:
         hidden_states = self.model(
@@ -1135,8 +1138,6 @@ class MllamaForCausalLM(nn.Module):
             cross_attention_mask=cross_attention_mask,
             kv_range_for_decode=kv_range_for_decode,
             full_text_row_masked_out_mask=full_text_row_masked_out_mask,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             skip_cross_attention=skip_cross_attention,
         )
         return hidden_states
@@ -1145,7 +1146,8 @@ class MllamaForCausalLM(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(MllamaMultiModalProcessor,
                                         info=MllamaProcessingInfo,
                                         dummy_inputs=MllamaDummyInputsBuilder)
-class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
+class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                     SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
@@ -1353,10 +1355,9 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         **kwargs: object,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        attn_metadata = get_forward_context().attn_metadata
         if attn_metadata.num_prefill_tokens > 0 and \
             attn_metadata.num_decode_tokens > 0:
             raise ValueError("Chunk prefill not supported")
@@ -1410,8 +1411,6 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             cross_attention_mask=cross_attention_mask,
             kv_range_for_decode=kv_range_for_decode,
             full_text_row_masked_out_mask=full_text_row_masked_out_mask,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             skip_cross_attention=skip_cross_attention,
         )
 
