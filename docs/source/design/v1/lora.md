@@ -24,9 +24,9 @@ When using Long Context LoRA adapters with V1, we recommend that you,
 
 The following is the expected behaviour for different scenarios when Long Context LoRA models are in play.
 
-- The engine is constructed with an unspecified `max_model_len` or the `max_model_len` is set to the base model's model length. When the engine receives Long Context LoRA requests,
-  - If prompt length <= `max_model_len` : The request will be accepted, but the output will be truncated at max_model_len
-  - If prompt length  > `max_model_len` : The request will be rejected citing that the prompt is too long
+- The engine is constructed with `max_model_len` set to None or set to the base model's model length. When the engine receives Long Context LoRA requests,
+  - If prompt length <= `max_model_len` : The request will be accepted, but the output will be truncated at max_model_len.
+  - If prompt length  > `max_model_len` : The request will be rejected citing that the prompt is too long.
 
 - The engine is constructed with `max_model_len` set to the largest context length of any adapter that it might receive requests for. As an example, let the base model’s model length be 4K and let there be 2 Long Context LoRA adapters,
   - 16K adapter : Can support a context length upto 16K
