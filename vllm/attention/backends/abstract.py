@@ -294,3 +294,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+
+def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+    return kv_cache_dtype != "auto"
