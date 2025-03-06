@@ -549,6 +549,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                 w1_scale=w1_s,
                 w2_scale=w2_s,
                 block_shape=block_size,
+                allow_deep_gemm=True
             )
 
     #print(f"{out.sum()=}")
