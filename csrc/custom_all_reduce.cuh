@@ -176,11 +176,6 @@ static DINLINE FlagType ld_flag_volatile(FlagType* flag_addr) {
 }
 #endif
 
-// is_start: whether this is the very first synchronization barrier.
-// need_fence: whether a memory fence is needed. If true, a release-acquire
-// semantic is used to enforce memory access order before and after this
-// barrier.
-
 // This function is meant to be used as the first synchronization in the all
 // reduce kernel. Thus, it doesn't need to make any visibility guarantees for
 // prior memory accesses. Note: volatile writes will not be reordered against
