@@ -173,9 +173,6 @@ def test_v1_multimodal(monkeypatch):
             max_model_len=max_img_per_msg * max_tokens_per_img,
         )
 
-        prompt = "Describe the following image."
-        url = "https://picsum.photos/seed/picsum/200/300"
-
         messages = [
             {
                 "role":
@@ -183,12 +180,12 @@ def test_v1_multimodal(monkeypatch):
                 "content": [
                     {
                         "type": "text",
-                        "text": prompt
+                        "text": "Describe the following image."
                     },
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": url
+                            "url": "https://picsum.photos/seed/picsum/200/300"
                         }
                     },
                 ],
