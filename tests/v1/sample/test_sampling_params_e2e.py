@@ -101,9 +101,9 @@ def test_detokenize_false(model):
 
     prompt_logprobs = output[0].prompt_logprobs
     sampled_logprobs = output[0].outputs[0].logprobs
-    assert len(prompt_logprobs) > 0
-    assert len(sampled_logprobs) > 0
-    for all_logprobs in (prompt_logprobs, sampled_logprobs):
+    assert len(prompt_logprobs) > 1
+    assert len(sampled_logprobs) > 1
+    for all_logprobs in (prompt_logprobs[1:], sampled_logprobs):
         for logprobs in all_logprobs:
             assert 3 <= len(logprobs) <= 4
             assert all(lp.decoded_token is None for lp in logprobs.values())
