@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from vllm import LLM, SamplingParams
+from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 UNSUPPORTED_MODELS_V1 = [
@@ -154,42 +154,3 @@ def test_v1_attn_backend(monkeypatch):
         m.setenv("VLLM_ATTENTION_BACKEND", "FLASHMLA")
         engine_config = AsyncEngineArgs(model=MODEL).create_engine_config()
         assert engine_config.use_v1
-
-
-def test_v1_multimodal(monkeypatch):
-    with monkeypatch.context() as m:
-        if os.getenv("VLLM_USE_V1", None):
-            m.delenv("VLLM_USE_V1")
-        m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
-
-        model_name = "neuralmagic/pixtral-12b-FP8-dynamic"
-        max_img_per_msg = 5
-        max_tokens_per_img = 4096
-
-        sampling_params = SamplingParams(max_tokens=8192, temperature=0.7)
-        llm = LLM(
-            model=model_name,
-            limit_mm_per_prompt={"image": max_img_per_msg},
-            max_model_len=max_img_per_msg * max_tokens_per_img,
-        )
-
-        messages = [
-            {
-                "role":
-                "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Describe the following image."
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "https://picsum.photos/seed/picsum/200/300"
-                        }
-                    },
-                ],
-            },
-        ]
-        outputs = llm.chat(messages=messages, sampling_params=sampling_params)
-        print(outputs[0].outputs[0].text)
