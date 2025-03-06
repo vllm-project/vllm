@@ -282,8 +282,6 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         ...
 
@@ -300,8 +298,6 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         ...
 
@@ -318,8 +314,6 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         ...
 
@@ -337,8 +331,6 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         ...
 
@@ -356,8 +348,6 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         ...
 
@@ -373,8 +363,6 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        priority: Optional[list[int]] = None,
     ) -> list[RequestOutput]:
         ...
 
@@ -455,13 +443,15 @@ class LLM:
             parsed_prompts = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, list[str]]], prompts),
                 prompt_token_ids=prompt_token_ids,
-                prompt_embeds=prompt_embeds,
             )
         else:
             parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
                                   prompts)
-            if prompt_embeds is not None and hasattr(parsed_prompts, "prompt_embeds"):
-                parsed_prompts.prompt_embeds = prompt_embeds
+
+        # Handle prompt_embeds separately
+        # This is a simplified approach - you may need to adjust based on how prompt_embeds is used
+        if prompt_embeds is not None:
+            parsed_prompts.prompt_embeds = prompt_embeds
 
         if isinstance(guided_options_request, dict):
             if len(guided_options_request) > 1:
@@ -1294,15 +1284,10 @@ class LLM:
 
             parsed_prompts.append(item)
 
-        # Handle prompt_embeds if provided
-        if prompt_embeds is not None:
-            # Assuming prompt_embeds is a tensor that can be assigned to the first prompt
-            # This might need adjustment based on how prompt_embeds is actually used
-            if len(parsed_prompts) > 0 and hasattr(parsed_prompts[0], "prompt_embeds"):
-                parsed_prompts[0].prompt_embeds = prompt_embeds
-
+        # We don't need to handle prompt_embeds here since it's handled in the generate method
         return parsed_prompts
 
+<<<<<<< HEAD
     def _validate_and_add_requests(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
@@ -1439,3 +1424,5 @@ class LLM:
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
 
+=======
+>>>>>>> def7f49d ((vllm) fix pre commit error)
