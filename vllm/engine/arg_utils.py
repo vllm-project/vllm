@@ -446,7 +446,10 @@ class EngineArgs:
                             '-dp',
                             type=int,
                             default=EngineArgs.data_parallel_size,
-                            help='Number of data parallel replicas.')
+                            help='Number of data parallel replicas. '
+                            'MoE layers will be sharded according to the '
+                            'product of the tensor-parallel-size and '
+                            'data-parallel-size.')
         parser.add_argument(
             '--enable-expert-parallel',
             action='store_true',
