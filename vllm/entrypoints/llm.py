@@ -97,7 +97,11 @@ class LLM:
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors.
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
-           Too small values may cause out-of-memory (OOM) errors.
+            This can be used for temporarily storing the states of the requests
+            when their `best_of` sampling parameters are larger than 1. If all
+            requests will have `best_of=1`, you can safely set this to 0.
+            Noting that `best_of` is only supported in V0. Otherwise, too small
+            values may cause out-of-memory (OOM) errors.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
