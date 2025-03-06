@@ -97,9 +97,6 @@ class Processor:
         self,
         params: SamplingParams,
     ) -> None:
-        # Best of not yet supported.
-        if params.best_of:
-            raise ValueError("VLLM V1 does not yet support best_of.")
         # Bad words not yet supported.
         if params.bad_words:
             raise ValueError("VLLM V1 does not yet support bad_words.")
