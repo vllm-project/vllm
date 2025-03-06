@@ -771,7 +771,7 @@ class HPUModelRunner:
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config).tokenizer
-        self.validate_accesses = True
+        self.validate_accesses = False
         self.cache_access_validator: Optional[CacheAccessValidator] = None
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
