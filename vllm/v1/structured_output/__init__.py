@@ -14,8 +14,8 @@ import xgrammar as xgr
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.v1.struct_output.grammar import (Grammar, StructuredOutputKey,
-                                           StructuredOutputOptions)
+from vllm.v1.structured_output.grammar import (Grammar, StructuredOutputKey,
+                                               StructuredOutputOptions)
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request

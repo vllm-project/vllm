@@ -9,8 +9,8 @@ from concurrent.futures._base import TimeoutError
 from typing import Optional, Union, cast
 
 from vllm.sampling_params import SamplingParams
-from vllm.v1.struct_output.grammar import (Grammar, StructuredOutputKey,
-                                           StructuredOutputOptions)
+from vllm.v1.structured_output.grammar import (Grammar, StructuredOutputKey,
+                                               StructuredOutputOptions)
 
 
 @dataclasses.dataclass
