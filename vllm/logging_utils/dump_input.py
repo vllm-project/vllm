@@ -34,7 +34,7 @@ def prepare_object_to_dump(obj) -> str:
         return repr(obj)
     elif isinstance(obj, torch.Tensor):
         # We only print the 'draft' of the tensor to not expose sensitive data
-        # and to get some metadata in case of CUDA illegal memory access
+        # and to get some metadata in case of CUDA runtime crashed
         return (f"Tensor(shape={obj.shape}, "
                 f"device={obj.device},"
                 f"dtype={obj.dtype})")
@@ -83,6 +83,8 @@ def dump_engine_exception_v0(err: BaseException,
                              use_cached_outputs: Union[bool, None] = None,
                              execute_model_req: Union[ExecuteModelRequest,
                                                       None] = None):
+
+    logger.error("Dumping input data")
 
     logger.error(
         "V0 LLM engine (v%s) with config: %s, "
