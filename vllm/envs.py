@@ -78,9 +78,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = True
-    VLLM_ROCM_USE_AITER_NORM: bool = True
+    VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
-    VLLM_ROCM_USE_AITER_BLOCK_GEMM: bool = False
+    VLLM_ROCM_USE_AITER_W8A8_BLOCK_GEMM: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -552,11 +552,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
                                          ).lower() in ("true", "1")),
 
     # use aiter rms norm op if aiter ops are enabled.
-    "VLLM_ROCM_USE_AITER_NORM":
-    lambda:
-    (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
-     ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_NORM", "True").lower() in
-     ("true", "1")),
+    "VLLM_ROCM_USE_AITER_RMSNORM":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True"
+                                         ).lower() in ("true", "1")),
 
     # use aiter paged attention if aiter ops are enabled.
     # this is disabled by default.
@@ -567,9 +566,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # use aiter w8a8 block gemm kernel if aiter ops are enabled.
     # this is disabled by default.
-    "VLLM_ROCM_USE_AITER_BLOCK_GEMM":
+    "VLLM_ROCM_USE_AITER_W8A8_BLOCK_GEMM":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
-             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_BLOCK_GEMM",
+             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_W8A8_BLOCK_GEMM",
                                          "False").lower() in ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm.

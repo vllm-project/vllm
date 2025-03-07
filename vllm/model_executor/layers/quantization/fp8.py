@@ -33,8 +33,6 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            PerTensorScaleParameter)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import (rocm_aiter_fp8_block_scaled_moe_enabled,
-                        rocm_aiter_moe_enabled)
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -559,7 +557,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
-            if rocm_aiter_fp8_block_scaled_moe_enabled():
+            if current_platform.is_rocm_aiter_fp8_block_scaled_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
                 from aiter.ops.shuffle import (shuffle_weight as
                                                rocm_aiter_shuffle_weight)
@@ -600,7 +598,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                  requires_grad=False)
 
-            if rocm_aiter_moe_enabled():
+            if current_platform.is_rocm_aiter_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
                 from aiter.ops.shuffle import (shuffle_weight as
                                                rocm_aiter_shuffle_weight)
@@ -688,7 +686,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
 
-            if rocm_aiter_moe_enabled():
+            if current_platform.is_rocm_aiter_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
                 from aiter.ops.shuffle import (shuffle_weight as
                                                rocm_aiter_shuffle_weight)

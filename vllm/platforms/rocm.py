@@ -231,3 +231,22 @@ class RocmPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+
+    def is_rocm_aiter_moe_enabled(self) -> bool:
+        return envs.VLLM_ROCM_USE_AITER_MOE
+
+    def is_rocm_aiter_paged_attn_enabled(self) -> bool:
+        return envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
+
+    def is_rocm_aiter_linear_enabled(self) -> bool:
+        return envs.VLLM_ROCM_USE_AITER_LINEAR
+
+    def is_rocm_aiter_rmsnorm_enabled(self) -> bool:
+        return envs.VLLM_ROCM_USE_AITER_RMSNORM
+
+    def is_rocm_aiter_fp8_block_scaled_moe_enabled(self) -> bool:
+        return self.rocm_aiter_moe_enabled(
+        ) and envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
+
+    def is_rocm_aiter_w8a8_block_gemm_enabled(self) -> bool:
+        return envs.VLLM_ROCM_USE_AITER_W8A8_BLOCK_GEMM

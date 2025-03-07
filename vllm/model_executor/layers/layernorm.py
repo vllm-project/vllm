@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
-from vllm.utils import rocm_aiter_norm_enabled
+from vllm.platforms import current_platform
 
 
 def rms_norm(*, x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float,
@@ -57,7 +57,7 @@ def dispatch_cuda_rmsnorm_func(
 ) -> Callable[..., Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]:
     if not add_residual:
         return rms_norm
-    if rocm_aiter_norm_enabled():
+    if current_platform.is_rocm_aiter_rmsnorm_enabled():
         return rocm_aiter_rmsnorm2d_fwd_with_add
     return fused_add_rms_norm
 

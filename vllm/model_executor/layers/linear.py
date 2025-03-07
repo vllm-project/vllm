@@ -25,7 +25,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            RowvLLMParameter)
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import rocm_aiter_linear_enabled
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -46,7 +46,7 @@ def rocm_aiter_tgemm_mm(x: torch.Tensor, weight: torch.Tensor,
 
 
 def dispatch_unquantized_linear_func() -> Callable[..., torch.Tensor]:
-    if rocm_aiter_linear_enabled():
+    if current_platform.is_rocm_aiter_linear_enabled():
         return rocm_aiter_tgemm_mm
     return F.linear
 

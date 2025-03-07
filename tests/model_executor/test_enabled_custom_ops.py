@@ -135,7 +135,7 @@ def test_block_gemm_dispatch(use_cutlass: bool, use_rocm_aiter: str,
                              use_rocm_aiter_block_gemm: str, monkeypatch):
 
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_BLOCK_GEMM",
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_W8A8_BLOCK_GEMM",
                        use_rocm_aiter_block_gemm)
     block_scale_func = dispatch_w8a8_blockscale_func(use_cutlass)
 
@@ -154,7 +154,7 @@ def test_block_gemm_dispatch(use_cutlass: bool, use_rocm_aiter: str,
 def test_rms_norm_dispatch(add_residual: bool, use_rocm_aiter: str,
                            use_rocm_aiter_norm: str, monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_NORM", use_rocm_aiter_norm)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_RMSNORM", use_rocm_aiter_norm)
     rms_norm_func = dispatch_cuda_rmsnorm_func(add_residual)
 
     if not add_residual:

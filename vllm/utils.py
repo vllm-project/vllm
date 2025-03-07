@@ -997,36 +997,6 @@ def enable_trace_function_call_for_thread(vllm_config: "VllmConfig") -> None:
         enable_trace_function_call(log_path)
 
 
-def is_hip() -> bool:
-    from vllm.platforms import current_platform
-    return current_platform.is_rocm()
-
-
-def rocm_aiter_moe_enabled() -> bool:
-    return is_hip() and envs.VLLM_ROCM_USE_AITER_MOE
-
-
-def rocm_aiter_paged_attn_enabled() -> bool:
-    return is_hip() and envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
-
-
-def rocm_aiter_linear_enabled() -> bool:
-    return is_hip() and envs.VLLM_ROCM_USE_AITER_LINEAR
-
-
-def rocm_aiter_norm_enabled() -> bool:
-    return is_hip() and envs.VLLM_ROCM_USE_AITER_NORM
-
-
-def rocm_aiter_fp8_block_scaled_moe_enabled() -> bool:
-    return rocm_aiter_moe_enabled(
-    ) and envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
-
-
-def rocm_aiter_w8a8_block_gemm_enabled() -> bool:
-    return is_hip() and envs.VLLM_ROCM_USE_AITER_BLOCK_GEMM
-
-
 # `functools` helpers
 def identity(value: T, **kwargs) -> T:
     """Returns the first provided value."""

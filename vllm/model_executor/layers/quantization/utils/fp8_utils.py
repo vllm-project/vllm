@@ -17,8 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED, CUTLASS_FP8_SUPPORTED, apply_fp8_linear)
 from vllm.platforms import current_platform
-from vllm.utils import (direct_register_custom_op,
-                        rocm_aiter_w8a8_block_gemm_enabled)
+from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -77,7 +76,7 @@ def dispatch_w8a8_blockscale_func(
         use_cutlass: bool) -> Callable[..., torch.Tensor]:
     if use_cutlass:
         return cutlass_scaled_mm
-    if rocm_aiter_w8a8_block_gemm_enabled():
+    if current_platform.is_rocm_aiter_w8a8_block_gemm_enabled():
         return rocm_aiter_gemm_a8w8_blockscale
     return w8a8_block_fp8_matmul
 
