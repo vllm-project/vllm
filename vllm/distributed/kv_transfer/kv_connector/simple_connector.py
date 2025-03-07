@@ -157,7 +157,7 @@ class SimpleConnector(KVConnectorBase):
     ) -> None:
 
         input_tokens_tensor = model_input.input_tokens
-        seq_lens = model_input.attn_metadata.seq_lens
+        seq_lens = (model_input.attn_metadata.seq_lens_tensor - model_input.attn_metadata.context_lens_tensor).tolist()
         slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
@@ -213,7 +213,7 @@ class SimpleConnector(KVConnectorBase):
         bypass_model_exec = True
 
         input_tokens_tensor = model_input.input_tokens
-        seq_lens = model_input.attn_metadata.seq_lens
+        seq_lens = (model_input.attn_metadata.seq_lens_tensor - model_input.attn_metadata.context_lens_tensor).tolist()
         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
 
