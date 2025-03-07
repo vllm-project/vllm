@@ -13,12 +13,16 @@ from huggingface_hub import snapshot_download
 
 import vllm
 from vllm.config import LoRAConfig
-from vllm.distributed import (cleanup_dist_env_and_memory,
-                              init_distributed_environment,
-                              initialize_model_parallel)
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               RowParallelLinear)
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -37,16 +41,20 @@ class ContextInfo(TypedDict):
     context_length: str
 
 
-LONG_LORA_INFOS: list[ContextIDInfo] = [{
-    "lora_id": 1,
-    "context_length": "16k",
-}, {
-    "lora_id": 2,
-    "context_length": "16k",
-}, {
-    "lora_id": 3,
-    "context_length": "32k",
-}]
+LONG_LORA_INFOS: list[ContextIDInfo] = [
+    {
+        "lora_id": 1,
+        "context_length": "16k",
+    },
+    {
+        "lora_id": 2,
+        "context_length": "16k",
+    },
+    {
+        "lora_id": 3,
+        "context_length": "32k",
+    },
+]
 
 
 @pytest.fixture()
@@ -95,10 +103,9 @@ def dist_init_torch_only():
         backend = "gloo"
 
     temp_file = tempfile.mkstemp()[1]
-    torch.distributed.init_process_group(world_size=1,
-                                         rank=0,
-                                         init_method=f"file://{temp_file}",
-                                         backend=backend)
+    torch.distributed.init_process_group(
+        world_size=1, rank=0, init_method=f"file://{temp_file}", backend=backend
+    )
 
 
 class DummyLoRAModel(nn.Sequential, SupportsLoRA):
@@ -108,25 +115,31 @@ class DummyLoRAModel(nn.Sequential, SupportsLoRA):
 @pytest.fixture
 def dummy_model() -> nn.Module:
     model = DummyLoRAModel(
-        OrderedDict([
-            ("dense1", ColumnParallelLinear(764, 100)),
-            ("dense2", RowParallelLinear(100, 50)),
-            (
-                "layer1",
-                nn.Sequential(
-                    OrderedDict([
-                        ("dense1", ColumnParallelLinear(100, 10)),
-                        ("dense2", RowParallelLinear(10, 50)),
-                    ])),
-            ),
-            ("act2", nn.ReLU()),
-            ("output", ColumnParallelLinear(50, 10)),
-            ("outact", nn.Sigmoid()),
-            # Special handling for lm_head & sampler
-            ("lm_head", ParallelLMHead(512, 10)),
-            ("logits_processor", LogitsProcessor(512)),
-            ("sampler", Sampler()),
-        ]))
+        OrderedDict(
+            [
+                ("dense1", ColumnParallelLinear(764, 100)),
+                ("dense2", RowParallelLinear(100, 50)),
+                (
+                    "layer1",
+                    nn.Sequential(
+                        OrderedDict(
+                            [
+                                ("dense1", ColumnParallelLinear(100, 10)),
+                                ("dense2", RowParallelLinear(10, 50)),
+                            ]
+                        )
+                    ),
+                ),
+                ("act2", nn.ReLU()),
+                ("output", ColumnParallelLinear(50, 10)),
+                ("outact", nn.Sigmoid()),
+                # Special handling for lm_head & sampler
+                ("lm_head", ParallelLMHead(512, 10)),
+                ("logits_processor", LogitsProcessor(512)),
+                ("sampler", Sampler()),
+            ]
+        )
+    )
     model.config = MagicMock()
     model.embedding_modules = {"lm_head": "lm_head"}
     return model
@@ -135,25 +148,31 @@ def dummy_model() -> nn.Module:
 @pytest.fixture
 def dummy_model_gate_up() -> nn.Module:
     model = DummyLoRAModel(
-        OrderedDict([
-            ("dense1", ColumnParallelLinear(764, 100)),
-            ("dense2", RowParallelLinear(100, 50)),
-            (
-                "layer1",
-                nn.Sequential(
-                    OrderedDict([
-                        ("dense1", ColumnParallelLinear(100, 10)),
-                        ("dense2", RowParallelLinear(10, 50)),
-                    ])),
-            ),
-            ("act2", nn.ReLU()),
-            ("gate_up_proj", MergedColumnParallelLinear(50, [5, 5])),
-            ("outact", nn.Sigmoid()),
-            # Special handling for lm_head & sampler
-            ("lm_head", ParallelLMHead(512, 10)),
-            ("logits_processor", LogitsProcessor(512)),
-            ("sampler", Sampler()),
-        ]))
+        OrderedDict(
+            [
+                ("dense1", ColumnParallelLinear(764, 100)),
+                ("dense2", RowParallelLinear(100, 50)),
+                (
+                    "layer1",
+                    nn.Sequential(
+                        OrderedDict(
+                            [
+                                ("dense1", ColumnParallelLinear(100, 10)),
+                                ("dense2", RowParallelLinear(10, 50)),
+                            ]
+                        )
+                    ),
+                ),
+                ("act2", nn.ReLU()),
+                ("gate_up_proj", MergedColumnParallelLinear(50, [5, 5])),
+                ("outact", nn.Sigmoid()),
+                # Special handling for lm_head & sampler
+                ("lm_head", ParallelLMHead(512, 10)),
+                ("logits_processor", LogitsProcessor(512)),
+                ("sampler", Sampler()),
+            ]
+        )
+    )
     model.config = MagicMock()
     model.packed_modules_mapping = {
         "gate_up_proj": [
@@ -209,8 +228,8 @@ def jamba_lora_files():
         safetensors.torch.save_file(tensors, lora_path)
 
     adapter_path = snapshot_download(
-        repo_id=
-        "hf-100/Jamba-1.5-mini-Spellbound-StoryWriter-0.1-6583896-ckpt53-lora")
+        repo_id="hf-100/Jamba-1.5-mini-Spellbound-StoryWriter-0.1-6583896-ckpt53-lora"
+    )
 
     remove_unnecessary_weights(adapter_path)
     return adapter_path
@@ -280,7 +299,8 @@ def long_context_lora_files_16k_1():
 @pytest.fixture(scope="session")
 def dora_files():
     return snapshot_download(
-        repo_id="makcedward/Llama-3.2-1B-Instruct-DoRA-Adapter")
+        repo_id="makcedward/Llama-3.2-1B-Instruct-DoRA-Adapter"
+    )
 
 
 @pytest.fixture(scope="session")
@@ -324,8 +344,9 @@ def llama_2_7b_engine_extra_embeddings():
     get_model_old = get_model
 
     def get_model_patched(**kwargs):
-        kwargs["vllm_config"].lora_config = LoRAConfig(max_loras=4,
-                                                       max_lora_rank=8)
+        kwargs["vllm_config"].lora_config = LoRAConfig(
+            max_loras=4, max_lora_rank=8
+        )
         return get_model_old(**kwargs)
 
     with patch("vllm.worker.model_runner.get_model", get_model_patched):
@@ -334,7 +355,8 @@ def llama_2_7b_engine_extra_embeddings():
             "meta-llama/Llama-2-7b-hf",
             enable_lora=False,
             gpu_memory_utilization=0.5,  # Lower memory usage
-            max_model_len=128)  # Reduce context size to save memory
+            max_model_len=128,
+        )  # Reduce context size to save memory
     yield engine.llm_engine
     del engine
     cleanup_dist_env_and_memory(shutdown_ray=True)
@@ -342,8 +364,9 @@ def llama_2_7b_engine_extra_embeddings():
 
 @pytest.fixture
 def llama_2_7b_model_extra_embeddings(llama_2_7b_engine_extra_embeddings):
-    yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.
-           model_runner.model)
+    yield (
+        llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.model_runner.model
+    )
 
 
 @pytest.fixture(params=[True, False])
