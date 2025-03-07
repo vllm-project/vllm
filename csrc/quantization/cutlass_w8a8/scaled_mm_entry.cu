@@ -124,7 +124,7 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
 
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
   int32_t version_num = get_sm_version_num();
-  
+
 #if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
   if (version_num >= 100) {
     cutlass_scaled_mm_sm100(c, a, b, a_scales, b_scales, bias);
@@ -138,7 +138,7 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
     // Hopper
     cutlass_scaled_mm_sm90(c, a, b, a_scales, b_scales, bias);
     return;
-  } 
+  }
 #endif
 
 #if defined ENABLE_SCALED_MM_C2X && ENABLE_SCALED_MM_C2X
