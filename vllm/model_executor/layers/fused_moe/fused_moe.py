@@ -33,11 +33,11 @@ if True or envs.VLLM_USE_DEEP_GEMM:
 
 
 def p(s, t):
-    #print(f"{s}: {t.shape}\n{t}")
+    print(f"{s}: {t.shape}\n{t}")
     pass
 
 def pp(x):
-    #print(x)
+    print(x)
     pass
 
 
@@ -792,6 +792,10 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                  A.shape[0] * top_k * config['BLOCK_SIZE_M'])
     grid = lambda META: (triton.cdiv(EM, META['BLOCK_SIZE_M']) * triton.cdiv(
         B.shape[1], META['BLOCK_SIZE_N']), )
+
+    p("fused a_q", A)
+    p("fused a_s", A_scale)
+    p("fused expert ids", expert_ids)
 
     if (use_int8_w8a16 or use_int4_w4a16) and \
             block_shape is not None and block_shape[1] > 0:
@@ -1571,6 +1575,11 @@ def fused_experts_impl(
             #expert_ids = expert_ids.unsqueeze(-1).expand(top_k_num, tokens_in_chunk).contiguous().view(-1)
             assert sorted_token_ids[sorted_token_ids >= top_k_num*M].sum() == 0
 
+
+        p("fused topk", topk_ids)
+        p("fused sorted", sorted_token_ids)
+        p("fused topk_weight", topk_weights)
+
         invoke_fused_moe_kernel(curr_hidden_states,
                                 w1,
                                 intermediate_cache1,
@@ -1591,6 +1600,8 @@ def fused_experts_impl(
                                 use_int4_w4a16=use_int4_w4a16,
                                 use_dg=use_dg,
                                 block_shape=block_shape)
+
+        p("fused inter_out", intermediate_cache1)
 
         if activation == "silu":
             torch.ops._C.silu_and_mul(intermediate_cache2,
@@ -1621,10 +1632,6 @@ def fused_experts_impl(
                                 use_int4_w4a16=use_int4_w4a16,
                                 use_dg=use_dg,
                                 block_shape=block_shape)
-
-        p("fused topk", topk_ids)
-        p("fused sorted", sorted_token_ids)
-        p("fused topk_weight", topk_weights)
 
         ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
                     out_hidden_states[begin_chunk_idx:end_chunk_idx])
