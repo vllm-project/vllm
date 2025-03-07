@@ -771,7 +771,7 @@ class TPUModelRunner:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(self.kv_caches, num_tokens)
             xm.mark_step()
-            if num_tokens >= self.scheduler_config.max_num_batched_tokens:
+            if num_tokens >= self.max_num_tokens:
                 break
             num_tokens *= 2
         xm.wait_device_ops()
@@ -799,7 +799,7 @@ class TPUModelRunner:
                 if num_reqs_to_sample >= self.max_num_reqs:
                     break
                 num_reqs_to_sample *= 2
-            if num_tokens >= self.scheduler_config.max_num_batched_tokens:
+            if num_tokens >= self.max_num_tokens:
                 break
             num_tokens *= 2
         xm.wait_device_ops()
