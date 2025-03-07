@@ -33,11 +33,11 @@ if True or envs.VLLM_USE_DEEP_GEMM:
 
 
 def p(s, t):
-    print(f"{s}: {t.shape}\n{t}")
+    #print(f"{s}: {t.shape}\n{t}")
     pass
 
 def pp(x):
-    print(x)
+    #print(x)
     pass
 
 

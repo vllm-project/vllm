@@ -44,11 +44,11 @@ SEEDS = [0]
 
 
 def p(s, t):
-    print(f"{s}: {t.shape}\n{t}")
+    #print(f"{s}: {t.shape}\n{t}")
     pass
 
 def pp(x):
-    print(x)
+    #print(x)
     pass
 
 
@@ -393,6 +393,11 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     assert rel_diff < 0.001
 
 
+# dtype=torch.float8_e4m3fn
+def fp8_perm(m, idx):
+    return m.view(dtype=torch.uint8)[idx, ...].view(dtype=m.dtype)
+
+
 def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
                                  block_shape):
     """Fused moe with block-wise quantization using DeepGemm torch."""
@@ -447,15 +452,16 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 #                                        1).reshape(-1, a_s.shape[1])
 
     # Permute activations according to sorted token ids
-    a_q = a_q.view(dtype=torch.uint8)[sorted_token_ids,
-                                      ...].view(dtype=torch.float8_e4m3fn)
+    a_q = fp8_perm(a_q, sorted_token_ids)
     a_s = a_s[sorted_token_ids]
+
+    #a_q.view(dtype=torch.uint8)[mask] = 0
 
     p("topk_ids", topk_ids)
     p("sorted", sorted_token_ids)
     p("topk_weight", topk_weight)
 
-    p("a_q", a_q)
+    p("a_q", fp8_perm(a_q, inv_perm))
     p("a_s", a_s)
     p("m_indices", m_indices)
 
@@ -489,8 +495,11 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     p("inter_out", inter_out)
     #p("out", out)
 
-    final_out = (out.view(M, -1, w2.shape[1]) *
-            topk_weight.view(M, -1, 1).to(out.dtype))[:topk*M].sum(dim=1)
+    #final_out = (out.view(M, -1, w2.shape[1]) *
+    #   topk_weight.view(M, -1, 1).to(out.dtype))[:topk*M].sum(dim=1)
+
+    final_out = (out.view(-1, topk, w2.shape[1])[:topk*M] *
+       topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
 
     p("final_out", final_out)
 
