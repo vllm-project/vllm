@@ -158,6 +158,7 @@ class EngineArgs:
     max_prompt_adapter_token: int = 0
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
+    lora_ignored_layers: Optional[Union[str, List[str]]] = None
     long_lora_scaling_factors: Optional[Tuple[float]] = None
     lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
@@ -695,6 +696,13 @@ class EngineArgs:
             help=('Maximum size of extra vocabulary that can be '
                   'present in a LoRA adapter (added to the base '
                   'model vocabulary).'))
+        parser.add_argument(
+            '--lora-ignored-layers',
+            type=nullable_str,
+            default=EngineArgs.lora_ignored_layers,
+            help='layer names to exclude from LoRA adaptation. '
+            'Can be a comma-separated string (e.g., "gate_proj, up_proj") '
+            'or a list of strings (e.g., ["gate_proj, "up_proj"]).')
         parser.add_argument(
             '--lora-dtype',
             type=str,
@@ -1351,6 +1359,7 @@ class EngineArgs:
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             long_lora_scaling_factors=self.long_lora_scaling_factors,
             lora_dtype=self.lora_dtype,
+            lora_ignored_layers=self.lora_ignored_layers,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
