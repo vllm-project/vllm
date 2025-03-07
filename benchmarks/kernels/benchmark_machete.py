@@ -45,7 +45,6 @@ def terse_type_name(dt):
         torch.float16: "fp16",
         torch.int8: "int8",
         torch.float8_e4m3fn: "fp8",
-        torch.bfloat16: "bf16",
         torch.float: "float",
         torch.int: "int",
     }[dt]
@@ -259,7 +258,7 @@ def machete_create_bench_fn(bt: BenchmarkTensors,
 
     return lambda: ops.machete_mm(
         a=bt.a,
-        b_q=bt.w_q,
+        b_q=w_q,
         b_type=bt.wtype,
         b_group_scales=bt.w_g_s,
         b_group_zeros=w_g_zp,

@@ -128,6 +128,8 @@ class EngineCoreOutputs(
     #NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout
 
+    engine_index: int = 0
+
     # [num_reqs]
     outputs: list[EngineCoreOutput] = []
     scheduler_stats: Optional[SchedulerStats] = None

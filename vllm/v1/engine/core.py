@@ -30,7 +30,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
-from vllm.v1.stats.common import SchedulerStats
+from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -63,6 +63,8 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
+        self.structured_output_manager = StructuredOutputManager(vllm_config)
+
         # Setup scheduler.
         self.scheduler = Scheduler(
             scheduler_config=vllm_config.scheduler_config,
@@ -73,6 +75,7 @@ class EngineCore:
             include_finished_set=vllm_config.parallel_config.data_parallel_size
             > 1,
             log_stats=self.log_stats,
+            structured_output_manager=self.structured_output_manager,
         )
 
         # Setup MM Input Mapper.
@@ -135,6 +138,9 @@ class EngineCore:
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
+        if req.use_structured_output:
+            # Start grammar compilation asynchronously
+            self.structured_output_manager.populate_cache(req)
 
         self.scheduler.add_request(req)
 
@@ -150,13 +156,18 @@ class EngineCore:
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
-        if not self.scheduler.has_unfinished_requests():
+        # Check for any requests remaining in the scheduler - unfinished,
+        # or finished and not yet removed from the batch.
+        if not self.scheduler.has_requests():
             return EngineCoreOutputs(
-                outputs=[], scheduler_stats=self.scheduler.make_stats())
+                outputs=[],
+                scheduler_stats=self.scheduler.make_stats(),
+            )
         scheduler_output = self.scheduler.schedule()
         output = self.model_executor.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
+
         return engine_core_outputs
 
     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:
@@ -248,6 +259,7 @@ class EngineCoreProc(EngineCore):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
+        engine_index: int = 0,
     ):
         super().__init__(vllm_config, executor_class, log_stats)
 
@@ -263,7 +275,7 @@ class EngineCoreProc(EngineCore):
                          args=(input_path, ),
                          daemon=True).start()
         threading.Thread(target=self.process_output_socket,
-                         args=(output_path, ),
+                         args=(output_path, engine_index),
                          daemon=True).start()
 
         self.global_unfinished_reqs = False
@@ -336,8 +348,8 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
 
         while not self.global_unfinished_reqs and not (
-                self.scheduler.has_unfinished_requests()):
-            logger.debug("EngineCore busy loop waiting.")
+                self.scheduler.has_requests()):
+            logger.info("EngineCore waiting for work.")
             req = self.input_queue.get()
             self._handle_client_request(*req)
 
@@ -364,7 +376,9 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.START_DP:
-            self.global_unfinished_reqs = True
+            if not self.global_unfinished_reqs:
+                logger.info("EngineCore starting idle loop.")
+                self.global_unfinished_reqs = True
         elif request_type == EngineCoreRequestType.UTILITY:
             call_id, method_name, args = request
             output = UtilityOutput(call_id)
@@ -415,7 +429,7 @@ class EngineCoreProc(EngineCore):
                 # Push to input queue for core busy loop.
                 self.input_queue.put_nowait((request_type, request))
 
-    def process_output_socket(self, output_path: str):
+    def process_output_socket(self, output_path: str, engine_index: int):
         """Output socket IO thread."""
 
         # Msgpack serialization encoding.
@@ -426,12 +440,12 @@ class EngineCoreProc(EngineCore):
         with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 outputs = self.output_queue.get()
+                outputs.engine_index = engine_index
                 encoder.encode_into(outputs, buffer)
                 socket.send(buffer, copy=False)
 
 
 ENGINE_PAUSED_OUTPUTS = EngineCoreOutputs(engine_paused=True)
-EMPTY_STATS_OUTPUTS = EngineCoreOutputs(scheduler_stats=SchedulerStats())
 
 
 class DPEngineCoreProc(EngineCoreProc):
@@ -454,11 +468,12 @@ class DPEngineCoreProc(EngineCoreProc):
         _add_prefix(sys.stdout, process_name, pid)
         _add_prefix(sys.stderr, process_name, pid)
 
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
+
         from vllm.platforms import current_platform
         if current_platform.is_cuda_alike():
             from vllm.platforms.cuda import device_id_to_physical_device_id
             tp_size = vllm_config.parallel_config.tensor_parallel_size
-            dp_rank = vllm_config.parallel_config.data_parallel_rank
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
                 str(device_id_to_physical_device_id(i))
                 for i in range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
@@ -469,7 +484,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
         # Initialize the engine after setting up environment.
         super().__init__(input_path, output_path, vllm_config, executor_class,
-                         log_stats)
+                         log_stats, dp_rank)
 
         self.counter = 0
 
@@ -482,6 +497,13 @@ class DPEngineCoreProc(EngineCoreProc):
             self._process_input_queue()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+
+            if not local_unfinished_reqs and (
+                    self.scheduler.has_finished_requests()):
+                self._process_engine_step()
+                if not self.global_unfinished_reqs:
+                    continue
+
             if local_unfinished_reqs:
                 # 2) Step the engine core.
                 self._process_engine_step()
@@ -490,15 +512,14 @@ class DPEngineCoreProc(EngineCoreProc):
                 local_unfinished_reqs = (
                     self.scheduler.has_unfinished_requests())
             else:
-                assert self.global_unfinished_reqs
+                if self.scheduler.has_finished_requests():
+                    self._process_engine_step()
+                if not self.global_unfinished_reqs:
+                    continue
+
                 # There must be unfinished requests in DP peers, run a
                 # dummy forward pass.
                 self.execute_dummy_batch()
-
-                #TODO we currently need to send empty stats here since the
-                # client won't know how many to aggregate each step otherwise.
-                if self.log_stats:
-                    self.output_queue.put_nowait(EMPTY_STATS_OUTPUTS)
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.global_unfinished_reqs = self._has_global_unfinished_reqs(

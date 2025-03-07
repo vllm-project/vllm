@@ -496,7 +496,7 @@ class AsyncMPClient(MPClient):
         self.outputs_queue: Optional[asyncio.Queue[EngineCoreOutputs]] = None
         self.queue_task: Optional[asyncio.Task] = None
 
-        self.output_handler: Optional[Callable[
+        self.outputs_handler: Optional[Callable[
             [AsyncMPClient, EngineCoreOutputs], Awaitable[None]]] = None
 
     async def _start_output_queue_task(self):
@@ -506,7 +506,7 @@ class AsyncMPClient(MPClient):
         decoder = self.decoder
         utility_results = self.utility_results
         outputs_queue = self.outputs_queue
-        output_handler = self.output_handler
+        output_handler = self.outputs_handler
         _self_ref = weakref.ref(self) if output_handler else None
         output_path = self.output_path
         output_socket = make_zmq_socket(self.ctx, output_path,
@@ -687,7 +687,7 @@ class DPAsyncMPClient(AsyncMPClient):
         if outputs.engine_paused:
             assert self.num_engines_running >= 1
             self.num_engines_running -= 1
-            if self.num_engines_running == 0 and self.reqs_in_flight:
+            if not self.num_engines_running and self.reqs_in_flight:
                 # If there are requests in flight here, they must have
                 # been sent after the engines paused. We must make
                 # sure to start the other engines:
