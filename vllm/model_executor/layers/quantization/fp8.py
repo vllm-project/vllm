@@ -354,6 +354,12 @@ class Fp8LinearMethod(LinearMethodBase):
             # Activations not quantized for marlin.
             del layer.input_scale
 
+        if self.cutlass_block_fp8_supported and self.block_quant:
+            shape_supported_by_cutlass = (weight.shape[0] % 128 == 0
+                                          and weight.shape[1] % 128 == 0)
+            if shape_supported_by_cutlass:
+                layer.weight_scale = layer.weight_scale.t().contiguous().t()
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,

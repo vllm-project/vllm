@@ -226,7 +226,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Fp8)
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    apply_fp8_linear_generic, current_platform_fp8_dtype, is_fp8)
+    create_fp8_linear, current_platform_fp8_dtype, is_fp8)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_quantize)
 from vllm.model_executor.layers.rotary_embedding import (
@@ -1070,14 +1070,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
     def _v_up_proj_and_o_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
-            if is_fp8(self.W_UV_O):
-                output_parallel = apply_fp8_linear_generic(
-                    x.flatten(start_dim=1), self.W_UV_O, self.W_UV_O_scales,
-                    self.reqaunt_input_group_shape,
-                    self.reqaunt_weight_group_shape)
-            else:
-                output_parallel = torch.matmul(x.flatten(start_dim=1),
-                                               self.W_UV_O)
+            output_parallel = self.W_UV_O_linear(x.flatten(start_dim=1))
             if self.tp_size > 1:
                 output = tensor_model_parallel_all_reduce(output_parallel)
             else:
@@ -1090,13 +1083,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
     def _q_proj_and_k_up_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
-            if is_fp8(self.W_Q_UK):
-                return apply_fp8_linear_generic(
-                    x, self.W_Q_UK, self.W_Q_UK_scales,
-                    self.reqaunt_input_group_shape,
-                    self.reqaunt_weight_group_shape).view(
-                        -1, self.num_heads, self.kv_lora_rank)
-            return torch.matmul(x, self.W_Q_UK)\
+            x = self.W_Q_UK_linear(x)\
                 .view(-1, self.num_heads, self.kv_lora_rank)
         else:
             x = torch.matmul(x, self.W_Q)\
@@ -1204,6 +1191,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
             requantization_enabled = not envs.VLLM_MLA_DISABLE_REQUANTIZATION
+            requant_input_group_shape, requant_weight_group_shape = \
+                (None, None)
             if is_fp8(weight_dtype) and requantization_enabled:
                 # This assumes it wise to requantize using the same group shapes
                 # (i.e. strategy, per-tensor, per-channel, block etc.) that the
@@ -1214,8 +1203,6 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                     == get_scale_group_shapes_for_fp8(self.kv_b_proj)
                 assert (requant_input_group_shape, requant_weight_group_shape)\
                     == get_scale_group_shapes_for_fp8(self.o_proj)
-                self.reqaunt_input_group_shape = requant_input_group_shape
-                self.reqaunt_weight_group_shape = requant_weight_group_shape
 
             #
             # Perform matrix-absorption following
@@ -1234,16 +1221,23 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 .flatten(start_dim=1).contiguous()
 
             if is_fp8(weight_dtype) and requantization_enabled:
+                assert requant_input_group_shape is not None
+                assert requant_weight_group_shape is not None
+
                 W_Q_UK, W_Q_UK_scales = scaled_quantize(
                     W_Q_UK,
-                    self.reqaunt_weight_group_shape,
+                    requant_weight_group_shape,
                     quant_dtype=current_platform_fp8_dtype)
-                # For FP8 save the transpose so we can use
-                # `apply_w8a8_block_fp8_linear` directly
-                self.W_Q_UK = W_Q_UK.T.contiguous()
-                self.W_Q_UK_scales = W_Q_UK_scales.T.contiguous()
+
+                self.W_Q_UK_linear = create_fp8_linear(
+                    weight=W_Q_UK,
+                    weight_scale=W_Q_UK_scales,
+                    weight_group_shape=requant_weight_group_shape,
+                    input_group_shape=requant_input_group_shape,
+                )
             else:
-                self.W_Q_UK = W_Q_UK.to(act_dtype)
+                W_Q_UK = W_Q_UK.to(act_dtype)
+                self.W_Q_UK_linear = lambda x: torch.matmul(x, W_Q_UK)
 
             W_O = get_and_maybe_dequant_weights(self.o_proj)\
                 .view(-1, self.num_heads, self.v_head_dim)
@@ -1253,14 +1247,18 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             if is_fp8(weight_dtype) and requantization_enabled:
                 W_UV_O, W_UV_O_scales = scaled_quantize(
                     W_UV_O,
-                    self.reqaunt_weight_group_shape,
+                    requant_weight_group_shape,
                     quant_dtype=current_platform_fp8_dtype)
-                # For FP8 save the transpose so we can use
-                # `apply_w8a8_block_fp8_linear` directly
-                self.W_UV_O = W_UV_O.T.contiguous()
-                self.W_UV_O_scales = W_UV_O_scales.T.contiguous()
+
+                self.W_UV_O_linear = create_fp8_linear(
+                    weight=W_UV_O,
+                    weight_scale=W_UV_O_scales,
+                    weight_group_shape=requant_weight_group_shape,
+                    input_group_shape=requant_input_group_shape,
+                )
             else:
-                self.W_UV_O = W_UV_O.to(act_dtype)
+                W_UV_O = W_UV_O.to(act_dtype)
+                self.W_UV_O_linear = lambda x: torch.matmul(x, W_UV_O)
 
             self.tp_size = get_tensor_model_parallel_world_size()
         else:
