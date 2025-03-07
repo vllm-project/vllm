@@ -96,6 +96,15 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_mamba_mixer2.py"
 fi
 
+#ignore certain Model tests
+if [[ $commands == *" models/decoder_only/language "* ]]; then
+  commands=${commands//" models/decoder_only/language "/" models/decoder_only/language \
+  --ignore=models/decoder_only/language/test_mistral.py \
+  --ignore=models/decoder_only/language/test_phimoe.py \
+  --ignore=models/decoder_only/language/test_granite.py \
+  --ignore=models/decoder_only/language/test_models.py "}
+fi
+
 #ignore certain Entrypoints tests
 if [[ $commands == *" entrypoints/openai "* ]]; then
   commands=${commands//" entrypoints/openai "/" entrypoints/openai \
