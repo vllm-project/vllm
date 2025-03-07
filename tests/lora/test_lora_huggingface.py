@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import json
 import os
-from typing import List
 
 import pytest
 import safetensors.torch
@@ -17,8 +15,12 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 # Provide absolute path and huggingface lora ids
 lora_fixture_name = ["sql_lora_files", "sql_lora_huggingface_id"]
 LLAMA_LORA_MODULES = [
-    "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens",
-    "lm_head"
+    "qkv_proj",
+    "o_proj",
+    "gate_up_proj",
+    "down_proj",
+    "embed_tokens",
+    "lm_head",
 ]
 
 
@@ -28,7 +30,7 @@ def test_load_checkpoints_from_huggingface(lora_fixture_name, request):
     packed_modules_mapping = LlamaForCausalLM.packed_modules_mapping
     embedding_modules = LlamaForCausalLM.embedding_modules
     embed_padding_modules = LlamaForCausalLM.embedding_padding_modules
-    expected_lora_modules: List[str] = []
+    expected_lora_modules: list[str] = []
     for module in LLAMA_LORA_MODULES:
         if module in packed_modules_mapping:
             expected_lora_modules.extend(packed_modules_mapping[module])
@@ -46,7 +48,8 @@ def test_load_checkpoints_from_huggingface(lora_fixture_name, request):
         lora_model_id=1,
         device="cpu",
         embedding_modules=embedding_modules,
-        embedding_padding_modules=embed_padding_modules)
+        embedding_padding_modules=embed_padding_modules,
+    )
 
     # Assertions to ensure the model is loaded correctly
     assert lora_model is not None, "LoRAModel is not loaded correctly"
@@ -96,7 +99,8 @@ def test_load_dora_checkpoint_from_huggingface(dora_files):
         lora_model_id=1,
         device="cpu",
         embedding_modules=embedding_modules,
-        embedding_padding_modules=embed_padding_modules)
+        embedding_padding_modules=embed_padding_modules,
+    )
 
     # Verify that the model loaded correctly
     assert lora_model is not None, "DoRA model failed to load"
@@ -108,10 +112,11 @@ def test_load_dora_checkpoint_from_huggingface(dora_files):
         assert hasattr(
             lora_weights,
             "magnitude_param"), f"No magnitude parameter for {module_name}"
-        assert lora_weights.magnitude_param is not None, f"Magnitude parameter is None for {module_name}"
+        assert (lora_weights.magnitude_param
+                is not None), f"Magnitude parameter is None for {module_name}"
         # Verify it has the correct shape
-        assert lora_weights.magnitude_param.shape[0] == lora_weights.lora_b.shape[1], \
-            f"Magnitude shape mismatch for {module_name}"
+        assert (lora_weights.magnitude_param.shape[0] == lora_weights.lora_b.
+                shape[1]), f"Magnitude shape mismatch for {module_name}"
 
 
 def test_dora_weight_structure_in_huggingface(dora_files):
@@ -154,8 +159,10 @@ def test_dora_weight_structure_in_huggingface(dora_files):
                 lora_b_pattern = key
 
         # Assert that both LoRA A and B weights exist
-        assert lora_a_pattern is not None, f"Missing LoRA A weight for module {module_name}"
-        assert lora_b_pattern is not None, f"Missing LoRA B weight for module {module_name}"
+        assert (lora_a_pattern
+                is not None), f"Missing LoRA A weight for module {module_name}"
+        assert (lora_b_pattern
+                is not None), f"Missing LoRA B weight for module {module_name}"
 
         # Check tensor shapes
         magnitude_tensor = tensors[magnitude_key]
@@ -173,9 +180,9 @@ def test_dora_weight_structure_in_huggingface(dora_files):
         ) == 2, f"LoRA B should be 2D for {module_name}"
 
         # Magnitude vector shape should match output dimension
-        assert magnitude_tensor.shape[0] == lora_b_tensor.shape[0], \
-            f"Magnitude vector shape mismatch for {module_name}: " \
-            f"{magnitude_tensor.shape[0]} vs {lora_b_tensor.shape[0]}"
+        assert magnitude_tensor.shape[0] == lora_b_tensor.shape[0], (
+            f"Magnitude vector shape mismatch for {module_name}: "
+            f"{magnitude_tensor.shape[0]} vs {lora_b_tensor.shape[0]}")
 
 
 def test_dora_vector_values_in_huggingface(dora_files):
@@ -201,16 +208,21 @@ def test_dora_vector_values_in_huggingface(dora_files):
             0), f"Found negative magnitude values in {magnitude_key}"
 
         # Check that the magnitude vector has some variation (trained values should vary)
-        assert magnitude_tensor.min() != magnitude_tensor.max(), \
-            f"Magnitude vector {magnitude_key} has constant values, which is unusual for a trained DoRA model"
+        assert (
+            magnitude_tensor.min() != magnitude_tensor.max()
+        ), f"Magnitude vector {magnitude_key} has constant values, which is unusual for a trained DoRA model"
 
         # Basic statistical checks for a reasonably trained model
         mean = magnitude_tensor.mean().item()
         std = magnitude_tensor.std().item()
 
         # A trained model should have reasonable statistics in magnitudes
-        assert mean > 0, f"Magnitude vector {magnitude_key} has zero mean, which is unusual"
-        assert std > 0, f"Magnitude vector {magnitude_key} has zero std, which is unusual"
+        assert (
+            mean > 0
+        ), f"Magnitude vector {magnitude_key} has zero mean, which is unusual"
+        assert (
+            std > 0
+        ), f"Magnitude vector {magnitude_key} has zero std, which is unusual"
 
         # Log statistics for reference (valuable for debugging but not strict assertions)
         min_val = magnitude_tensor.min().item()

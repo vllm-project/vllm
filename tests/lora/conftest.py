@@ -2,7 +2,7 @@
 
 import tempfile
 from collections import OrderedDict
-from typing import Dict, List, TypedDict
+from typing import TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -37,20 +37,16 @@ class ContextInfo(TypedDict):
     context_length: str
 
 
-LONG_LORA_INFOS: List[ContextIDInfo] = [
-    {
-        "lora_id": 1,
-        "context_length": "16k",
-    },
-    {
-        "lora_id": 2,
-        "context_length": "16k",
-    },
-    {
-        "lora_id": 3,
-        "context_length": "32k",
-    },
-]
+LONG_LORA_INFOS: list[ContextIDInfo] = [{
+    "lora_id": 1,
+    "context_length": "16k",
+}, {
+    "lora_id": 2,
+    "context_length": "16k",
+}, {
+    "lora_id": 3,
+    "context_length": "32k",
+}]
 
 
 @pytest.fixture()
@@ -247,6 +243,11 @@ def baichuan_regex_lora_files():
 
 
 @pytest.fixture(scope="session")
+def ilama_lora_files():
+    return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
 def minicpmv_lora_files():
     return snapshot_download(repo_id="jeeejeee/minicpmv25-lora-pokemon")
 
@@ -299,7 +300,7 @@ def long_context_infos(
     long_context_lora_files_32k,
 ):
     cleanup_dist_env_and_memory(shutdown_ray=True)
-    infos: Dict[int, ContextInfo] = {}
+    infos: dict[int, ContextInfo] = {}
     for lora_checkpoint_info in LONG_LORA_INFOS:
         lora_id = lora_checkpoint_info["lora_id"]
         if lora_id == 1:

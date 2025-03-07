@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
-                    Union)
+from collections.abc import Iterable, Mapping, Sequence
+from typing import List, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 from torch import nn
@@ -31,11 +31,13 @@ from vllm.multimodal.parse import (MultiModalDataDict, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
-                                        PromptReplacement)
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
-from .interfaces import SupportsMultiModal, SupportsTranscription
-from .utils import AutoWeightsLoader, WeightsMapper, make_layers
+from .interfaces import (SupportsMultiModal, SupportsTranscription,
+                         SupportsV0Only)
+from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
+                    make_layers)
 
 logger = init_logger(__name__)
 
@@ -47,10 +49,7 @@ class WhisperAudioInputs(TypedDict):
 
 class WhisperPositionalEmbedding(nn.Embedding):
 
-    def __init__(self,
-                 num_positions: int,
-                 embedding_dim: int,
-                 padding_idx: Optional[int] = None):
+    def __init__(self, num_positions: int, embedding_dim: int):
         super().__init__(num_positions, embedding_dim)
 
     def forward(self, position_ids):
@@ -285,11 +284,7 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        if hidden_states.isinf().any() or hidden_states.isnan().any():
-            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
-            hidden_states = torch.clamp(hidden_states,
-                                        min=-clamp_value,
-                                        max=clamp_value)
+        hidden_states = cast_overflow_tensors(hidden_states)
 
         return hidden_states
 
@@ -361,7 +356,6 @@ class WhisperEncoder(nn.Module):
         config = vllm_config.model_config.hf_config
         embed_dim = config.d_model
         self.num_mel_bins = config.num_mel_bins
-        self.padding_idx = config.pad_token_id
         self.max_source_positions = config.max_source_positions
         self.embed_scale = (math.sqrt(embed_dim)
                             if config.scale_embedding else 1.0)
@@ -626,12 +620,12 @@ class WhisperMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(input_features=MultiModalFieldConfig.batched("audio"))
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         num_tokens = self.info.get_max_audio_tokens()
         return [
             PromptReplacement(
@@ -646,7 +640,7 @@ class WhisperMultiModalProcessor(
                                         info=WhisperProcessingInfo,
                                         dummy_inputs=WhisperDummyInputsBuilder)
 class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
-                                      SupportsMultiModal):
+                                      SupportsMultiModal, SupportsV0Only):
     packed_modules_mapping = {
         "self_attn.qkv_proj": [
             "self_attn.q_proj",
@@ -694,7 +688,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         )
         return decoder_outputs
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         # TODO: This method does not obey the interface for SupportsMultiModal.
         # Refactor this once encoder/decoder support is implemented in V1.
         audio_input = self._parse_and_validate_audio_input(**kwargs)
@@ -750,11 +746,11 @@ def _create_fake_bias_for_k_proj(
     weights: Iterable[Tuple[str, torch.Tensor]]
 ) -> Iterable[Tuple[str, torch.Tensor]]:
     """
-    Create full zeros bias for k_proj weight in self-attention layers.
+    Create full zeros bias for k_proj weight in self-attn and x-attn layers.
     So that the bias for k_proj in qkv_proj can be initialized with zeros.
     """
     for name, weight in weights:
-        if name.endswith(".self_attn.k_proj.weight"):
+        if name.endswith(".k_proj.weight"):
             bias = torch.zeros(weight.size(0))
             bias_name = name.replace("weight", "bias")
             yield from [(name, weight), (bias_name, bias)]

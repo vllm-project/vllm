@@ -164,7 +164,8 @@ def make_mistral_chat_completion_request(
                 tool["function"] for tool in tools
                 if tool["type"] == "function"
         ]:
-            function.setdefault("parameters", {})
+            if function.get("parameters") is None:
+                function["parameters"] = {}
 
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     return ChatCompletionRequest(messages=messages,

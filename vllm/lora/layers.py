@@ -387,7 +387,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         lora_bias: Optional[torch.Tensor] = None,
         lora_magnitudes: Optional[torch.Tensor] = None,
     ):
-        # Except for QKVParallelLinearWithLora and
+        # Except for QKVParallelLinearWithLoRA and
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
         # store weights in a tuple of size 1. These two layers will
         # override this function.
@@ -454,7 +454,7 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def forward(
         self, input_: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """Forward of ReplicatedLinearWithLoRA
 
         Args:
@@ -469,7 +469,12 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         # Matrix multiply.
         output = self.apply(input_, bias)
 
-        output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
+        output_bias = (self.base_layer.bias
+                       if self.base_layer.skip_bias_add else None)
+
+        if not self.base_layer.return_bias:
+            return output
+
         return output, output_bias
 
     # ReplicatedLinear should always be replaced, regardless of the fully
@@ -556,7 +561,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def forward(
         self, input_: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """Forward of ColumnParallelLinear
 
         Args:
@@ -575,7 +580,12 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             output = tensor_model_parallel_all_gather(output_parallel)
         else:
             output = output_parallel
-        output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
+
+        if not self.base_layer.return_bias:
+            return output
+
+        output_bias = (self.base_layer.bias
+                       if self.base_layer.skip_bias_add else None)
         return output, output_bias
 
     @classmethod
@@ -763,7 +773,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 and len(packed_modules_list) == 2)
 
 
-class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
+class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     """
     ColumnParallelLinear layer that is specifically designed for
     qkv_proj. Certain models, such as chatglm3 and baichuan-7b,
@@ -858,7 +868,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
             packed_modules_list) == 1
 
 
-class MergedQKVParallelLinearWithLora(MergedColumnParallelLinearWithLoRA):
+class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
     """MergedColumnParallelLinear layer that is composed of 3 sublayers (slices)
     packed together in qkv proj fashion
     (q_proj + k_proj + v_proj -> qkv_proj).
@@ -951,7 +961,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def forward(
         self, input_: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
         """Forward of RowParallelLinear
 
         Args:
@@ -986,7 +996,10 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         else:
             output = output_
             output_bias = self.base_layer.bias
-        # TODO: do we care about adding DoRA magnitude scaling here? if so, how?
+
+        if not self.base_layer.return_bias:
+            return output
+
         return output, output_bias
 
     @property
@@ -1234,7 +1247,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         return False
 
 
-class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
+class LinearScalingRotaryEmbeddingWithLoRA(BaseLayerWithLoRA):
     """Implements RoPE-scaled embeddings with linear scaling for
     multiple LoRA adapters with a specialized kernel.
 

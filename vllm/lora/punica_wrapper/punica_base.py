@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Based on:
-Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
-Punica: Multi-Tenant LoRA Serving. 
+Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
+Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
@@ -311,13 +311,15 @@ class PunicaWrapperBase(PunicaWrapperABC):
 
                 # Apply magnitudes only where valid, otherwise use zeros
                 masked_magnitudes = torch.where(
-                    valid_mask, selected_magnitudes,
-                    torch.zeros_like(selected_magnitudes))
+                    valid_mask,
+                    selected_magnitudes,
+                    torch.zeros_like(selected_magnitudes),
+                )
 
                 # Calculate DoRA contribution and add to the original output (not replace)
                 dora_contribution = normalized * masked_magnitudes
                 output[:, offset_left:offset_left +
-                       slice] = original_slice + dora_contribution
+                       slice] = (original_slice + dora_contribution)
 
             offset_left += slice
 

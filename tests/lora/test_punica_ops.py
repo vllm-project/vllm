@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 from threading import Lock
-from typing import List
 
 import pytest
 import torch
@@ -52,7 +51,7 @@ def apply_dora_norm_magnitudes(lora_a: torch.Tensor, lora_b: torch.Tensor,
 # Utility shrink and expand operations used as reference implementations.
 def sgmv_shrink_for_nslices(
         nslices: int, inputs_tensor: torch.Tensor,
-        lora_weights_lst: List[torch.Tensor], out_tensor: torch.Tensor,
+        lora_weights_lst: list[torch.Tensor], out_tensor: torch.Tensor,
         b_seq_start_loc: torch.Tensor, seq_len_tensor: torch.Tensor,
         prompt_lora_mapping: torch.Tensor, batches: int, max_seq_length: int,
         num_tokens: int, scaling: float):
@@ -76,7 +75,7 @@ def sgmv_shrink_for_nslices(
 
 def sgmv_expand_for_nslices(nslices: int, hidden_size: int,
                             inputs_tensor: torch.Tensor,
-                            lora_weights_lst: List[torch.Tensor],
+                            lora_weights_lst: list[torch.Tensor],
                             out_tensor: torch.Tensor,
                             b_seq_start_loc: torch.Tensor,
                             seq_len_tensor: torch.Tensor,

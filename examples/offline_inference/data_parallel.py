@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-# usage: VLLM_USE_V1=1 python examples/offline_inference/data_parallel.py
+# usage:
+# VLLM_USE_V1=1 python examples/offline_inference/data_parallel.py
 # we need to have a launcher to create multiple data parallel
 # ranks. And each rank will create a vLLM instance to process its own prompts.
 import os
 
 from vllm import LLM, SamplingParams
 from vllm.utils import get_open_port
+
+GPUs_per_dp_rank = 2
+DP_size = 2
 
 
 def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
@@ -48,9 +52,10 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
                                      max_tokens=16 * (dp_rank + 1))
 
     # Create an LLM.
-    llm = LLM(model="facebook/opt-125m",
-              tensor_parallel_size=2,
-              enforce_eager=True)
+    llm = LLM(model="ibm-research/PowerMoE-3b",
+              tensor_parallel_size=GPUs_per_dp_rank,
+              enforce_eager=True,
+              enable_expert_parallel=True)
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
     for output in outputs:
@@ -62,14 +67,12 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
 
 if __name__ == "__main__":
     from multiprocessing import Process
-    dp_size = 2
-    GPUs_per_dp_rank = 2
     dp_master_ip = "127.0.0.1"
     dp_master_port = get_open_port()
     procs = []
-    for i in range(dp_size):
+    for i in range(DP_size):
         proc = Process(target=main,
-                       args=(dp_size, i, dp_master_ip, dp_master_port,
+                       args=(DP_size, i, dp_master_ip, dp_master_port,
                              GPUs_per_dp_rank))
         proc.start()
         procs.append(proc)

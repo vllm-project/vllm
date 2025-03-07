@@ -93,6 +93,7 @@ class EngineArgs:
     model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[str, List[str]]] = None
     tokenizer: Optional[str] = None
+    hf_config_path: Optional[str] = None
     task: TaskOption = "auto"
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
@@ -113,6 +114,7 @@ class EngineArgs:
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
+    enable_expert_parallel: bool = False
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
@@ -201,6 +203,7 @@ class EngineArgs:
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = "auto"
+    worker_extension_cls: str = ""
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
@@ -212,6 +215,8 @@ class EngineArgs:
     calculate_kv_scales: Optional[bool] = None
 
     additional_config: Optional[Dict[str, Any]] = None
+    enable_reasoning: Optional[bool] = None
+    reasoning_parser: Optional[str] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -261,6 +266,12 @@ class EngineArgs:
             type=nullable_str,
             default=EngineArgs.tokenizer,
             help='Name or path of the huggingface tokenizer to use. '
+            'If unspecified, model name or path will be used.')
+        parser.add_argument(
+            "--hf-config-path",
+            type=nullable_str,
+            default=EngineArgs.hf_config_path,
+            help='Name or path of the huggingface config to use. '
             'If unspecified, model name or path will be used.')
         parser.add_argument(
             '--skip-tokenizer-init',
@@ -382,9 +393,10 @@ class EngineArgs:
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
             ' parameter.\n'
-            'Backend-sepcific options can be supplied in a comma-separated '
+            'Backend-specific options can be supplied in a comma-separated '
             'list following a colon after the backend name. Valid backends and '
             'all available options are: [xgrammar:no-fallback, '
+            'xgrammar:disable-any-whitespace, '
             'outlines:no-fallback, lm-format-enforcer:no-fallback]')
         parser.add_argument(
             '--logits-processor-pattern',
@@ -429,6 +441,11 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.tensor_parallel_size,
                             help='Number of tensor parallel replicas.')
+        parser.add_argument(
+            '--enable-expert-parallel',
+            action='store_true',
+            help='Use expert parallelism instead of tensor parallelism '
+            'for MoE layers.')
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,
@@ -1006,6 +1023,13 @@ class EngineArgs:
             default="auto",
             help='The worker class to use for distributed execution.')
         parser.add_argument(
+            '--worker-extension-cls',
+            type=str,
+            default="",
+            help='The worker extension class on top of the worker cls, '
+            'it is useful if you just want to add new functions to the worker '
+            'class without changing the existing functions.')
+        parser.add_argument(
             "--generation-config",
             type=nullable_str,
             default=None,
@@ -1051,6 +1075,25 @@ class EngineArgs:
             "Different platforms may support different configs. Make sure the "
             "configs are valid for the platform you are using. The input format"
             " is like '{\"config_key\":\"config_value\"}'")
+
+        parser.add_argument(
+            "--enable-reasoning",
+            action="store_true",
+            default=False,
+            help="Whether to enable reasoning_content for the model. "
+            "If enabled, the model will be able to generate reasoning content."
+        )
+
+        parser.add_argument(
+            "--reasoning-parser",
+            type=str,
+            choices=["deepseek_r1"],
+            default=None,
+            help=
+            "Select the reasoning parser depending on the model that you're "
+            "using. This is used to parse the reasoning content into OpenAI "
+            "API format. Required for ``--enable-reasoning``.")
+
         return parser
 
     @classmethod
@@ -1075,6 +1118,7 @@ class EngineArgs:
 
         return ModelConfig(
             model=self.model,
+            hf_config_path=self.hf_config_path,
             task=self.task,
             # We know this is not None because we set it in __post_init__
             tokenizer=cast(str, self.tokenizer),
@@ -1169,6 +1213,7 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
+            enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             tokenizer_pool_config=TokenizerPoolConfig.create_config(
@@ -1179,6 +1224,7 @@ class EngineArgs:
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
+            worker_extension_cls=self.worker_extension_cls,
         )
 
         max_model_len = model_config.max_model_len
@@ -1323,7 +1369,10 @@ class EngineArgs:
                                         if self.enable_prompt_adapter else None
 
         decoding_config = DecodingConfig(
-            guided_decoding_backend=self.guided_decoding_backend)
+            guided_decoding_backend=self.guided_decoding_backend,
+            reasoning_backend=self.reasoning_parser
+            if self.enable_reasoning else None,
+        )
 
         show_hidden_metrics = False
         if self.show_hidden_metrics_for_version is not None:
