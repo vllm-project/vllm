@@ -31,7 +31,10 @@ model = models.data[0].id
 
 # Round 1
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
-response = client.chat.completions.create(model=model, messages=messages)
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+)
 
 reasoning_content = response.choices[0].message.reasoning_content
 content = response.choices[0].message.content
