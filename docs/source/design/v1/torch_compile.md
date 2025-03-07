@@ -14,6 +14,8 @@ INFO 03-07 03:06:55 [backends.py:409] Using cache directory: ~/.cache/vllm/torch
 
 vLLM will take all the available factors into consideration, and decide a directory to store all the compilation artifact. This means, you can directly copy the whole `~/.cache/vllm/torch_compile_cache` directory in your deployment scenario to save a great amount of compilation time, and hence accelerating the starting time of the vLLM instance.
 
+The compilation cache is enabled by default. You can disable it by setting `VLLM_DISABLE_COMPILE_CACHE=1`. This is useful if you want to debug the compilation process, or if you suspect the cache is causing some issues.
+
 A unique aspect of vLLM's `torch.compile` integration, is that we guarantee all the compilation finishes before we serve any requests. No requests will trigger new compilations. Otherwise, the engine would be blocked on that request, and the response time will have unexpected spikes.
 
 ## Python Code Compilation
