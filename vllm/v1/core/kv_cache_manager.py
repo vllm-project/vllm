@@ -102,7 +102,7 @@ class KVCacheManager:
                 - The number of computed tokens.
         """
         if not self.enable_caching:
-            # Prefix caching is disabled
+            # Prefix caching is disabled.
             return [], 0
 
         # The block hashes for the request may already be computed

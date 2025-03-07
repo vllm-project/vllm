@@ -149,7 +149,11 @@ def test_prefill():
 
 
 def test_prefill_plp():
-    '''Test prefill with APC & some prompt logprobs requests.
+    '''Test prefill with APC and some prompt logprobs (plp) requests.
+
+    1. Schedule plp request and validate APC block allocation
+    2. Schedule non-plp request and validate blocks
+    3. Schedule plp request; no hit should occur; validate blocks
     '''
     manager = KVCacheManager(
         block_size=16,
