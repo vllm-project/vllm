@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    all_close_1d, apply_fp8_linear, convert_to_channelwise,
+    Fp8LinearOp, all_close_1d, convert_to_channelwise,
     cutlass_block_fp8_supported, cutlass_fp8_supported,
     maybe_create_device_identity, normalize_e4m3fn_to_e4m3fnuz,
     per_tensor_dequantize, requantize_with_max_scale)
@@ -137,7 +137,6 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
-        self.cutlass_fp8_supported = cutlass_fp8_supported()
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
@@ -152,6 +151,10 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             # Marlin doesn't support block-wise fp8
             self.use_marlin = False
+
+        self.fp8_linear = Fp8LinearOp(
+            # Default to using per_token quantization if cutlass is supported
+            use_per_token_if_dynamic=cutlass_fp8_supported())
 
     def create_weights(
         self,
@@ -381,15 +384,11 @@ class Fp8LinearMethod(LinearMethodBase):
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
             )
 
-        return apply_fp8_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=layer.input_scale,
-            bias=bias,
-            cutlass_fp8_supported=self.cutlass_fp8_supported,
-            # Default to using per_token quantization if cutlass is supported
-            use_per_token_if_dynamic=self.cutlass_fp8_supported)
+        return self.fp8_linear.apply(input=x,
+                                     weight=layer.weight,
+                                     weight_scale=layer.weight_scale,
+                                     input_scale=layer.input_scale,
+                                     bias=bias)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):

@@ -13,7 +13,7 @@ from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    CUTLASS_FP8_SUPPORTED, apply_fp8_linear, maybe_create_device_identity)
+    CUTLASS_FP8_SUPPORTED, Fp8LinearOp, maybe_create_device_identity)
 
 from .backend import TestBackend
 
@@ -34,26 +34,20 @@ class TestModel(torch.nn.Module):
             torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
             for _ in range(2)
         ]
+        self.fp8_linear = Fp8LinearOp(
+            cutlass_fp8_supported=cutlass_fp8_enabled,
+            use_per_token_if_dynamic=True)
 
     def forward(self, x):
         resid = torch.sqrt(x)
         y = self.norm[0](x)
 
-        x2 = apply_fp8_linear(y,
-                              self.w[0],
-                              self.wscale[0],
-                              self.scale[0],
-                              use_per_token_if_dynamic=True,
-                              cutlass_fp8_supported=self.cutlass_fp8_enabled)
+        x2 = self.fp8_linear.apply(y, self.w[0], self.wscale[0], self.scale[0])
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = apply_fp8_linear(y2,
-                              self.w[1],
-                              self.wscale[1],
-                              self.scale[1],
-                              use_per_token_if_dynamic=True,
-                              cutlass_fp8_supported=self.cutlass_fp8_enabled)
+        x3 = self.fp8_linear.apply(y2, self.w[1], self.wscale[1],
+                                   self.scale[1])
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
 
