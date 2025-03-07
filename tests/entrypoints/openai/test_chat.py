@@ -655,11 +655,9 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
         "role": "system",
         "content": "you are a helpful assistant"
     }, {
-        "role":
-        "user",
-        "content":
-        f"Give an example JSON for an employee profile that "
-        f"fits this schema: {sample_json_schema}"
+        "role": "user",
+        "content":f"Give an example JSON for an employee profile that "
+                  f"fits this schema: {sample_json_schema}"
     }]
 
     # non-streaming
@@ -691,10 +689,8 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
 
     messages.append({"role": "assistant", "content": json_string})
     messages.append({
-        "role":
-        "user",
-        "content":
-        "Give me another one with a different name and age"
+        "role": "user",
+        "content": "Give me another one with a different name and age"
     })
 
     # streaming
