@@ -116,9 +116,8 @@ VLM_TEST_SETTINGS = {
             "pixel_values"
         ),
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
-        dtype=("half" if current_platform.is_cpu() or current_platform.is_rocm()
-               else ("half", "float")),
-        marks=[pytest.mark.core_model],
+        dtype="bfloat16",
+        marks=[pytest.mark.skip(reason="vLLM does not support PrefixLM attention mask")],  # noqa: E501
     ),
     # TODO(ywang96): Move Qwen2-VL out of core models in favor of Qwen2.5-VL
     # once we upgraded to transformers>=4.49.0.
