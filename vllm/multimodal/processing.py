@@ -984,10 +984,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         before passing them to :meth:`_get_hf_mm_data`.
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
+        mm_config = self.info.ctx.get_mm_config()
 
-        mm_limits = self.info.ctx.get_mm_config().limit_per_prompt
         for modality, items in mm_items.items():
-            limit = mm_limits.get(modality, 1)
+            limit = mm_config.get_limit_per_prompt(modality)
             if len(items) > limit:
                 raise ValueError(
                     f"You set {modality}={limit} (or defaulted to 1) in "

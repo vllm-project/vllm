@@ -110,12 +110,10 @@ class MultiModalProfiler(Generic[_I]):
 
     def get_mm_limits(self) -> Mapping[str, int]:
         mm_config = self.processing_info.ctx.get_mm_config()
-        mm_limit_per_prompt = mm_config.limit_per_prompt
-
         supported_mm_limits = self.processing_info.get_supported_mm_limits()
 
         mm_limits = {
-            modality: mm_limit_per_prompt.get(modality, 1)
+            modality: mm_config.get_limit_per_prompt(modality)
             for modality in supported_mm_limits
         }
 
