@@ -27,7 +27,7 @@ def load_module_from_path(module_name, path):
     return module
 
 
-ROOT_DIR = os.path.dirname(__file__)
+ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
 # cannot import envs directly because it depends on vllm,
@@ -587,16 +587,15 @@ def get_vllm_version() -> str:
 
 def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
+    requirements_dir = ROOT_DIR / "requirements"
 
     def _read_requirements(filename: str) -> list[str]:
-        with open(os.path.join(ROOT_DIR, filename)) as f:
+        with open(requirements_dir / filename) as f:
             requirements = f.read().strip().split("\n")
         resolved_requirements = []
         for line in requirements:
             if line.startswith("-r "):
-                resolved_requirements += _read_requirements(
-                    os.path.join("requirements",
-                                 line.split()[1]))
+                resolved_requirements += _read_requirements(line.split()[1])
             elif line.startswith("--"):
                 continue
             else:
@@ -604,9 +603,9 @@ def get_requirements() -> list[str]:
         return resolved_requirements
 
     if _no_device():
-        requirements = _read_requirements("requirements/common.txt")
+        requirements = _read_requirements("common.txt")
     elif _is_cuda():
-        requirements = _read_requirements("requirements/cuda.txt")
+        requirements = _read_requirements("cuda.txt")
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
@@ -617,19 +616,19 @@ def get_requirements() -> list[str]:
             modified_requirements.append(req)
         requirements = modified_requirements
     elif _is_hip():
-        requirements = _read_requirements("requirements/rocm.txt")
+        requirements = _read_requirements("rocm.txt")
     elif _is_neuron():
-        requirements = _read_requirements("requirements/neuron.txt")
+        requirements = _read_requirements("neuron.txt")
     elif _is_hpu():
-        requirements = _read_requirements("requirements/hpu.txt")
+        requirements = _read_requirements("hpu.txt")
     elif _is_openvino():
-        requirements = _read_requirements("requirements/openvino.txt")
+        requirements = _read_requirements("openvino.txt")
     elif _is_tpu():
-        requirements = _read_requirements("requirements/tpu.txt")
+        requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
-        requirements = _read_requirements("requirements/cpu.txt")
+        requirements = _read_requirements("cpu.txt")
     elif _is_xpu():
-        requirements = _read_requirements("requirements/xpu.txt")
+        requirements = _read_requirements("xpu.txt")
     else:
         raise ValueError(
             "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
