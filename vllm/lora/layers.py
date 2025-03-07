@@ -274,6 +274,10 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     ) -> bool:
         return type(source_layer) is VocabParallelEmbedding
 
+    @property
+    def weight(self):
+        return self.base_layer.weight
+
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
@@ -408,6 +412,34 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                                             self.lora_bias_stacked, 1.0,
                                             self.output_slices)
         return output
+
+    @property
+    def weight(self) -> torch.Tensor:
+
+        # unquantizedLinear
+        if hasattr(self.base_layer, "weight"):
+            return self.base_layer.weight
+        # Compressed Tensor
+        elif hasattr(self.base_layer, "weight_packed"):
+            return self.base_layer.weight_packed
+        # GPTQ/AWQ
+        elif hasattr(self.base_layer, "qweight"):
+            return self.base_layer.qweight
+        # marlin
+        elif hasattr(self.base_layer, "B"):
+            return self.base_layer.B
+        # HQQ marlin
+        elif hasattr(self.base_layer, "W_q"):
+            return self.base_layer.W_q
+        else:
+            raise ValueError(f"Unsupported base layer: {self.base_layer}")
+
+    @property
+    def bias(self) -> Optional[torch.Tensor]:
+        if hasattr(self.base_layer, "bias"):
+            return self.base_layer.bias
+        else:
+            return None
 
 
 class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
@@ -901,11 +933,6 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             return output
 
         return output, output_bias
-
-    @property
-    def weight(self):
-        return (self.base_layer.weight if hasattr(self.base_layer, "weight")
-                else self.base_layer.qweight)
 
     @classmethod
     @_not_fully_sharded_can_replace
