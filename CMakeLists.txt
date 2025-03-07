@@ -350,7 +350,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM90=1")
-    # Let scaled_mm_c2x know it doesnt need to build these arches
+    # Let scaled_mm_c2x know it doesn't need to build these arches
     list(APPEND SCALED_MM_3X_ARCHS "${SCALED_MM_ARCHS}")
     message(STATUS "Building scaled_mm_c3x_sm90 for archs: ${SCALED_MM_ARCHS}")
   else()
@@ -378,7 +378,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM100=1")
-    # Let scaled_mm_c2x know it doesnt need to build these arches
+    # Let scaled_mm_c2x know it doesn't need to build these arches
     list(APPEND SCALED_MM_3X_ARCHS "${SCALED_MM_ARCHS}")
     message(STATUS "Building scaled_mm_c3x_sm100 for archs: ${SCALED_MM_ARCHS}")
   else()
@@ -391,10 +391,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Not building scaled_mm_c3x_100 as no compatible archs found "
                      "in CUDA target architectures")
     endif()
-
-    # clear SCALED_MM_ARCHS so the scaled_mm_c2x kernels know we didn't
-    # build any 3x kernels
-    set(SCALED_MM_ARCHS)
   endif()
 
   #
