@@ -3,8 +3,8 @@
 import enum
 import time
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
-                    Tuple, Type, Union)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Type, Union)
 from unittest.mock import patch
 
 import numpy as np
@@ -17,12 +17,8 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
-from vllm.lora.layers import LoRAMapping
-from vllm.lora.request import LoRARequest
-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models import supports_lora
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
@@ -66,7 +62,6 @@ class ModelInputForTPU(ModelRunnerInputBase):
     num_samples: int
     n: List[int]
     seq_groups: List[List[int]]
-    lora_inputs: List[Tuple[Set[LoRARequest], LoRAMapping]]
     is_first_multi_step: bool = True
     is_last_step: bool = True
     virtual_engine: int = 0
@@ -77,7 +72,6 @@ class ModelInputForTPU(ModelRunnerInputBase):
         tensor_dict = {
             "token_ids": self.token_ids,
             "position_ids": self.position_ids,
-            "lora_inputs": self.lora_inputs,
             "input_lens": self.input_lens,
             "t": self.t,
             "p": self.p,
@@ -129,9 +123,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         )
         self.cached_step_outputs: List[torch.Tensor] = []
 
-        # LoRA support
-        self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
-
         smem_size = 512 * 1024
         block_table_size = 4 * self.block_tables.size
         if block_table_size >= smem_size:
@@ -163,29 +154,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
         xm.wait_device_ops()
-        self.model = model
-
-        if self.lora_config:
-            assert supports_lora(
-                self.model
-            ), f"{self.model.__class__.__name__} does not support LoRA yet."
-
-            max_pos_embeddings = self.model.config.max_position_embeddings
-
-            self.lora_manager = LRUCacheWorkerLoRAManager(
-                self.scheduler_config.max_num_seqs,
-                self.scheduler_config.max_num_batched_tokens,
-                self.model_config.get_vocab_size(),
-                self.lora_config,
-                self.device,
-                self.model.embedding_modules,
-                self.model.embedding_padding_modules,
-                max_position_embeddings=max_pos_embeddings,
-            )
-            self.model = self.lora_manager.create_lora_manager(self.model)
-
-        self.model = ModelWrapper(self.model)
-        self.model = torch.compile(self.model,
+        model = ModelWrapper(model)
+        self.model = torch.compile(model,
                                    backend="openxla",
                                    fullgraph=True,
                                    dynamic=False)
@@ -281,29 +251,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
         num_samples = _MAX_NUM_SAMPLES if exec_mode.is_prefill() else 1
 
-        # Create a series of dummy loras and requests for them.
-        # Make to fill all lora slots.
-        if self.lora_config:
-            dummy_lora_requests: Set[LoRARequest] = set()
-            dummy_lora_mapping: LoRAMapping
-
-            assert self.lora_manager is not None
-            with self.lora_manager.dummy_lora_cache():
-                for lora_id in range(1, self.lora_config.max_loras + 1):
-                    dummy_lora_request = LoRARequest(
-                        lora_name=f"warmup_{lora_id}",
-                        lora_int_id=lora_id,
-                        lora_path="/not/a/real/path",
-                    )
-                    self.lora_manager.add_dummy_lora(
-                        dummy_lora_request,
-                        rank=self.lora_config.max_lora_rank)
-                    dummy_lora_requests.add(dummy_lora_request)
-                dummy_lora_mapping = LoRAMapping(
-                    [lora_id] * batch_size * seq_len, [lora_id] * batch_size,
-                    is_prefill=exec_mode.is_prefill())
-            self.set_active_loras(dummy_lora_requests, dummy_lora_mapping)
-
         # NOTE(woosuk): There are two stages of compilation: torch.compile and
         # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
         # overhead by reusing the FX graph for different shapes.
@@ -312,25 +259,19 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         # in the first run, but can be skipped afterwards as we cache the XLA
         # graphs in the disk (VLLM_XLA_CACHE_PATH).
         if exec_mode.is_prefill():
-            # Prefill
-            if self.lora_config is not None:
-                torch._dynamo.config.capture_dynamic_output_shape_ops = True
-            else:
-                torch._dynamo.mark_dynamic(token_ids, 1)
-                torch._dynamo.mark_dynamic(position_ids, 1)
+            # Prefll
+            torch._dynamo.mark_dynamic(token_ids, 1)
+            torch._dynamo.mark_dynamic(position_ids, 1)
             torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
         else:
             # Decode
-            if self.lora_config is not None:
-                torch._dynamo.config.capture_dynamic_output_shape_ops = True
-            else:
-                torch._dynamo.mark_dynamic(token_ids, 0)
-                torch._dynamo.mark_dynamic(position_ids, 0)
-                torch._dynamo.mark_dynamic(input_lens, 0)
-                torch._dynamo.mark_dynamic(t, 0)
+            torch._dynamo.mark_dynamic(token_ids, 0)
+            torch._dynamo.mark_dynamic(position_ids, 0)
+            torch._dynamo.mark_dynamic(input_lens, 0)
             torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
             torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
             torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
+            torch._dynamo.mark_dynamic(t, 0)
             torch._dynamo.mark_dynamic(p, 0)
         # Dummy run.
         with set_forward_context(attn_metadata, self.vllm_config, 0):
@@ -388,7 +329,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         # Decode
         start = time.time()
         seq_len = 1
-        batch_size = _get_padded_batch_size(1)
+        batch_size = 8  # Must be in sync with _get_padded_batch_size()
         while True:
             self._dummy_run(batch_size,
                             seq_len,
@@ -641,77 +582,8 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             list(metadata.seq_data.keys())
             for metadata in seq_group_metadata_list
         ]
-
-        lora_inputs = []
-        if self.load_config is not None:
-            lora_inputs = self._prepare_lora_input(seq_group_metadata_list,
-                                                   is_prompt,
-                                                   padded_batch_size)
-
-        return ModelInputForTPU(token_ids=input_tokens,
-                                position_ids=input_positions,
-                                attn_metadata=attn_metadata,
-                                input_lens=input_lens,
-                                t=t,
-                                p=p,
-                                num_samples=num_samples,
-                                n=n,
-                                seq_groups=seq_groups,
-                                lora_inputs=lora_inputs)
-
-    def _prepare_lora_input(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            is_prefill: bool, padded_batch_size: int
-    ) -> List[Tuple[Set[LoRARequest], LoRAMapping]]:
-        """
-        Prepares a list of LoRA inputs. If we're decoding then the list will
-        only have 1 item, otherwise there'll be an item for each sequence
-        """
-
-        lora_input = []
-        if is_prefill:
-            for seq in seq_group_metadata_list:
-                lora_id = seq.lora_int_id
-                query_len = seq.token_chunk_size
-                padded_query_len = _get_padded_prefill_len(query_len)
-
-                index_mapping = [lora_id] * padded_query_len
-                prompt_mapping = [lora_id]
-
-                lora_request = set()
-                if seq.lora_request is not None:
-                    lora_request.add(seq.lora_request)
-
-                lora_input.append(
-                    (lora_request,
-                     LoRAMapping(index_mapping=tuple(index_mapping),
-                                 prompt_mapping=tuple(prompt_mapping),
-                                 is_prefill=True)))
-        else:
-            lora_request = set()
-            index_mapping = []
-            prompt_mapping = []
-            for seq in seq_group_metadata_list:
-                lora_id = seq.lora_int_id
-
-                index_mapping += [lora_id]
-                prompt_mapping += [lora_id]
-
-                if seq.lora_request is not None:
-                    lora_request.add(seq.lora_request)
-
-            index_mapping += [0] * (padded_batch_size -
-                                    len(seq_group_metadata_list))
-            prompt_mapping += [0] * (padded_batch_size -
-                                     len(seq_group_metadata_list))
-
-            lora_input.append(
-                (lora_request,
-                 LoRAMapping(index_mapping=tuple(index_mapping),
-                             prompt_mapping=tuple(prompt_mapping),
-                             is_prefill=False)))
-
-        return lora_input
+        return ModelInputForTPU(input_tokens, input_positions, attn_metadata,
+                                input_lens, t, p, num_samples, n, seq_groups)
 
     def make_model_input_from_broadcasted_tensor_dict(
             self, tensor_dict: Dict[str, Any]) -> ModelInputForTPU:
@@ -728,7 +600,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         num_steps: int = 1,
     ) -> List[SamplerOutput]:
         assert intermediate_tensors is None
-
         if not model_input.is_first_multi_step:
             if not model_input.is_last_step:
                 return []
@@ -804,12 +675,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 input_lens = model_input.input_lens[i:i + 1].to(self.device)
                 t = model_input.t[i:i + 1].to(self.device)
                 p = model_input.p[i:i + 1].to(self.device)
-
-                if self.lora_config is not None:
-                    assert len(model_input.lora_inputs) == batch_size
-                    lora_requests, lora_mapping = model_input.lora_inputs[i]
-                    self.set_active_loras(lora_requests, lora_mapping)
-
                 with set_forward_context(model_input.attn_metadata,
                                          self.vllm_config,
                                          model_input.virtual_engine):
@@ -859,12 +724,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             t = model_input.t.to(self.device)
             p = model_input.p.to(self.device)
             input_lens = model_input.input_lens.to(self.device)
-
-            if self.lora_config is not None:
-                assert len(model_input.lora_inputs) == 1
-                lora_requests, lora_mapping = model_input.lora_inputs[0]
-                self.set_active_loras(lora_requests, lora_mapping)
-
             for i in range(num_steps):
                 slot_mapping = attn_metadata.slot_mapping
                 with set_forward_context(model_input.attn_metadata,
@@ -906,37 +765,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             sampler_output = _make_decode_output(next_token_ids,
                                                  model_input.seq_groups)
             return [sampler_output]
-
-    def remove_all_loras(self):
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
-        self.lora_manager.remove_all_adapters()
-
-    def set_active_loras(self, lora_requests: Set[LoRARequest],
-                         lora_mapping: LoRAMapping) -> None:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
-        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.add_adapter(lora_request)
-
-    def remove_lora(self, lora_id: int) -> bool:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.remove_adapter(lora_id)
-
-    def pin_lora(self, lora_id: int) -> bool:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.pin_adapter(lora_id)
-
-    def list_loras(self) -> Set[int]:
-        if not self.lora_manager:
-            raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.list_adapters()
 
 
 class ModelWrapper(nn.Module):

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import List, Optional, Set, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torch_xla.core.xla_model as xm
@@ -13,18 +13,18 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, bind_kv_cache, get_dtype_size
 from vllm.worker.tpu_model_runner import ExecutionMode, TPUModelRunner
-from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
+                                     LoRANotSupportedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 logger = init_logger(__name__)
 
 
-class TPUWorker(LocalOrDistributedWorkerBase):
+class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
@@ -85,7 +85,6 @@ class TPUWorker(LocalOrDistributedWorkerBase):
         # NOTE(woosuk): Usually, we compile 10-15 graphs for prefill and
         # 30-40 graphs for decode. 128 is an arbitrary safe number.
         torch._dynamo.config.cache_size_limit = 128
-        torch._dynamo.config.reorderable_logging_functions = set([print])
         # Use persistent cache to avoid XLA recompilation.
         # NOTE(woosuk): Set per-rank cache path since different ranks
         # can have slightly different XLA graphs.
@@ -288,18 +287,6 @@ class TPUWorker(LocalOrDistributedWorkerBase):
             if src_indices.numel() > 0:
                 attn_backend.copy_blocks(self.tpu_cache,
                                          (src_indices, dst_indices))
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_runner.add_lora(lora_request)
-
-    def remove_lora(self, lora_id: int) -> bool:
-        return self.model_runner.remove_lora(lora_id)
-
-    def pin_lora(self, lora_id: int) -> bool:
-        return self.model_runner.pin_lora(lora_id)
-
-    def list_loras(self) -> Set[int]:
-        return self.model_runner.list_loras()
 
 
 def _make_src_to_dst(
