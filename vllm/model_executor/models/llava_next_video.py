@@ -133,7 +133,7 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
 
     def get_num_frames_with_most_features(self, seq_len: int) -> int:
         mm_config = self.ctx.get_mm_config()
-        max_videos = mm_config.limit_per_prompt.get("video", 1)
+        max_videos = mm_config.get_limit_per_prompt("video")
 
         max_total_frames = self._get_max_video_frames(seq_len)
 

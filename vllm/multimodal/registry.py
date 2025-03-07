@@ -355,7 +355,7 @@ class MultiModalRegistry:
             # TODO: Automatically determine the limits based on budget
             # once more models support multi-image inputs
             limits_per_plugin = {
-                key: config_limits_per_plugin.get(key, 1)
+                key: multimodal_config.get_limit_per_prompt(key)
                 for key in self._plugins
             }
 

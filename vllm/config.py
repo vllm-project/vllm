@@ -2405,6 +2405,15 @@ class MultiModalConfig:
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
+    def get_limit_per_prompt(self, modality: str) -> int:
+        """
+        Get the maximum number of input items allowed per prompt
+        for the given modality.
+
+        If not set by the user, this defaults to `1`.
+        """
+        return self.limit_per_prompt.get(modality, 1)
+
     # TODO: Add configs to init vision tower or not.
 
 
