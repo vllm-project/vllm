@@ -13,9 +13,6 @@
 #include "cutlass/epilogue/dispatch_policy.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 
-#include "cutlass_extensions/gemm/dispatch_policy.hpp"
-#include "cutlass_extensions/gemm/collective/collective_builder.hpp"
-
 #include "cutlass_gemm_caller.cuh"
 
 namespace vllm {
@@ -59,9 +56,9 @@ struct cutlass_3x_gemm_fp8_blockwise {
   using OperatorClass = cutlass::arch::OpClassTensorOp;
   using TileShape = Shape<TileSizeM, GroupSizeN, GroupSizeK>;
 
-  using KernelSchedule = cutlass::gemm::
-      KernelTmaWarpSpecializedCooperativeFP8BlockScaledSubGroupMAccum<
-          GroupSizeM_>;
+  using KernelSchedule =
+      cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8BlockScaledAccum<
+          GroupSizeM::value, GroupSizeN::value>;
   using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecializedCooperative;
   using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
 
@@ -142,10 +139,13 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
               "a_scales must be M major");
   TORCH_CHECK(b_scales.size(0) == k / Gemm::GroupSizeK::value);
   TORCH_CHECK(b_scales.size(1) == n / Gemm::GroupSizeN::value);
-  TORCH_CHECK(b_scales.stride(0) == 1 || is_contiguous_vector(b_scales),
-              "b_scales must be K major");
+  TORCH_CHECK(b_scales.stride(1) == 1 || is_contiguous_vector(b_scales),
+              "b_scales must be N major");
+
+  uint32_t mma_promotion_interval = 4;  // To be deprecated
   typename GemmKernel::MainloopArguments mainloop_args{
-      a_ptr, a_stride, b_ptr, b_stride, a_scales_ptr, b_scales_ptr};
+      a_ptr,        a_stride,    b_ptr, b_stride, mma_promotion_interval,
+      a_scales_ptr, b_scales_ptr};
 
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
