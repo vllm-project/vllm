@@ -42,7 +42,9 @@ pull_request_rules:
     - or:
       - files~=^vllm/multimodal/
       - files~=^tests/multimodal/
-      - files~=^tests/models/*multimodal/
+      - files~=^tests/models/multimodal/
+      - files~=^tests/models/*/audio_language/
+      - files~=^tests/models/*/vision_language/
       - files=tests/models/test_vision.py
   actions:
     label:
