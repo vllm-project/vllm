@@ -146,6 +146,8 @@ class EngineCore:
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
+        # Check for any requests remaining in the scheduler - unfinished,
+        # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())

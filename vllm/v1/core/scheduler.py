@@ -625,7 +625,8 @@ class Scheduler:
         assert RequestStatus.is_finished(finished_status)
         if isinstance(request_ids, str):
             request_ids = (request_ids, )
-        request_ids = set(request_ids)
+        else:
+            request_ids = set(request_ids)
 
         for req_id in request_ids:
             request = self.requests.get(req_id)
@@ -661,6 +662,8 @@ class Scheduler:
         return len(self.finished_req_ids) > 0
 
     def has_requests(self):
+        """Returns True if there are unfinished requests, or finished requests
+        not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
 
     def get_num_unscheduled_requests(self) -> int:
