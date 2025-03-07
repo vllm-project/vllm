@@ -37,7 +37,7 @@ import vllm.distributed.parallel_state as ps
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.selector import _Backend
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -791,6 +791,7 @@ class MllamaTextCrossAttention(nn.Module):
         self,
         config: Optional[config_mllama.MllamaTextConfig] = None,
         layer_idx: Optional[int] = None,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -841,6 +842,7 @@ class MllamaTextCrossAttention(nn.Module):
             self.scaling,
             self.num_local_key_value_heads,
             prefix=f"{prefix}.attn",
+            cache_config=cache_config,
             attn_type=AttentionType.ENCODER_DECODER,
         )
 
@@ -965,6 +967,7 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
         config: config_mllama.MllamaTextConfig,
         layer_idx: int,
         quant_config: Optional[QuantizationConfig],
+        cache_config: Optional[CacheConfig],
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -974,6 +977,7 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
             config=config,
             layer_idx=layer_idx,
             quant_config=quant_config,
+            cache_config=cache_config,
             prefix=f"{prefix}.cross_attn",
         )
 
@@ -1045,6 +1049,7 @@ class MllamaTextModel(nn.Module):
                     MllamaCrossAttentionDecoderLayer(
                         config,
                         layer_idx,
+                        cache_config=cache_config,
                         quant_config=quant_config,
                         prefix=f"{prefix}.layers.{layer_idx}",
                     ))
