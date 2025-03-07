@@ -217,6 +217,7 @@ class EngineArgs:
     additional_config: Optional[Dict[str, Any]] = None
     enable_reasoning: Optional[bool] = None
     reasoning_parser: Optional[str] = None
+    use_tqdm_on_load: bool = True
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -751,6 +752,12 @@ class EngineArgs:
                             default=1,
                             help=('Maximum number of forward steps per '
                                   'scheduler call.'))
+        parser.add_argument(
+            '--use-tqdm-on-load',
+            action=StoreBoolean,
+            default=EngineArgs.use_tqdm_on_load,
+            help='Whether to disable progress bar (using tqdm)',
+        )
 
         parser.add_argument(
             '--multi-step-stream-outputs',
@@ -1179,6 +1186,7 @@ class EngineArgs:
             download_dir=self.download_dir,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
+            use_tqdm_on_load=not self.use_tqdm_on_load,
         )
 
     def create_engine_config(self,
