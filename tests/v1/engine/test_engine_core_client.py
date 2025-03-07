@@ -50,7 +50,7 @@ def loop_until_done(client: EngineCoreClient, outputs: dict):
         engine_core_outputs = client.get_output().outputs
 
         if len(engine_core_outputs) == 0:
-            break
+            continue
 
         all_finished = True
         for out in engine_core_outputs:
@@ -68,7 +68,7 @@ async def loop_until_done_async(client: EngineCoreClient, outputs: dict):
         engine_core_outputs = (await client.get_output_async()).outputs
 
         if len(engine_core_outputs) == 0:
-            break
+            continue
 
         all_finished = True
         for out in engine_core_outputs:

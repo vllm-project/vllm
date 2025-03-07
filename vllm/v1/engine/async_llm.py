@@ -253,13 +253,14 @@ class AsyncLLM(EngineClient):
             while True:
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
+                num_outputs = len(outputs.outputs)
 
-                iteration_stats = IterationStats() if self.log_stats else None
+                iteration_stats = IterationStats() if (
+                    self.log_stats and num_outputs) else None
 
                 # Split outputs into chunks of at most
                 # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                 # event loop for too long.
-                num_outputs = len(outputs.outputs)
                 if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
                     slices = (outputs.outputs, )
                 else:
@@ -313,7 +314,6 @@ class AsyncLLM(EngineClient):
             return
 
         assert scheduler_stats is not None
-        assert iteration_stats is not None
         for stat_logger in self.stat_loggers:
             stat_logger.record(scheduler_stats=scheduler_stats,
                                iteration_stats=iteration_stats)
