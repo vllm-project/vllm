@@ -367,9 +367,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # The cutlass_scaled_mm kernels for Blackwell (c3x, i.e. CUTLASS 3.x) require
   # CUDA 12.8 or later
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0;10.1;12.0" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a;12.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND SCALED_MM_ARCHS)
-    set(SRCS 
+    set(SRCS
       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm100.cu"
       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm100_fp8.cu"
     )
@@ -459,7 +459,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     # clear FP4_ARCHS
     set(FP4_ARCHS)
   endif()
-  
+
   #
   # Machete kernels
 
