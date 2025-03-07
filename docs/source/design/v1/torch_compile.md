@@ -126,7 +126,7 @@ Unfortunately, because auto-tuning takes quite a long time (even though it can b
 
 ## Cudagraph Capture
 
-vLLM's V1 architecture uses piecewise cudagraph. The full computation graph is split as mentioned above, and we only capture the cudagraph for the piece of graph between attention operations (including the first graph before any attention operation, and the last graph after all the attention operation). This is based on the common observation, that computation between attention are usually token-wise, and easy to deal with for cudagraph, while the attention operation is non-trival to be cudagraph compatible. By running the attention operation in eager mode, we keep the flexibility of the attention operation, while the rest operations run in cudagraph mode.
+vLLM's V1 architecture uses piecewise cudagraph. The full computation graph is split as mentioned above, and we only capture the cudagraph for the piece of graph between attention operations (including the first graph before any attention operation, and the last graph after all the attention operation). This is based on a common observation: computation between attentions are usually token-wise and easy to deal with for cudagraph; while the attention operation is non-trival to be cudagraph compatible. Thus, by running the attention operation in eager mode while the rest operations in cudagraph, we keep the flexibility of the attention operation.
 
 The piecewise cudagraph also has fine-grained memory management. The purpose is to only exclude the attention kernel from cudagraph, while keeping all the rest modules and the memory allocation operations in the cudagraph. This is why the attention operation in V1 has the output tensor as the input of the attention.
 
