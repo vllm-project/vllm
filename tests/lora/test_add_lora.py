@@ -58,20 +58,22 @@ def v1(run_with_both_engines_lora):
 
 def get_lora_requests() -> list[LoRARequest]:
     lora_requests: list[LoRARequest] = [
-        LoRARequest(
-            lora_name=f"{i}", lora_int_id=i, lora_path=LORA_MODULE_DOWNLOAD_PATH
-        )
+        LoRARequest(lora_name=f"{i}",
+                    lora_int_id=i,
+                    lora_path=LORA_MODULE_DOWNLOAD_PATH)
         for i in range(1, DEFAULT_MAX_LORAS + 1)
     ]
     return lora_requests
 
 
-async def requests_processing_time(
-    llm, lora_requests: list[LoRARequest]
-) -> float:
-    sampling_params = SamplingParams(
-        n=1, temperature=0.0, top_p=1.0, ignore_eos=True, max_tokens=1
-    )
+async def requests_processing_time(llm,
+                                   lora_requests: list[LoRARequest]) -> float:
+
+    sampling_params = SamplingParams(n=1,
+                                     temperature=0.0,
+                                     top_p=1.0,
+                                     ignore_eos=True,
+                                     max_tokens=1)
 
     generators = []
     start = time.perf_counter()
@@ -79,9 +81,8 @@ async def requests_processing_time(
     for lora_request in lora_requests:
         lora_int_id = lora_request.lora_int_id
         generator = llm.generate(
-            prompt=TextPrompt(
-                prompt=f"hello {lora_int_id}", multi_modal_data=None
-            ),  # type: ignore
+            prompt=TextPrompt(prompt=f"hello {lora_int_id}",
+                              multi_modal_data=None),  # type: ignore
             sampling_params=sampling_params,
             lora_request=lora_request,
             request_id=f"test{lora_int_id}",
@@ -135,16 +136,16 @@ async def test_add_lora():
 
     importlib.reload(vllm.engine.async_llm_engine)
     from vllm.entrypoints.openai.api_server import (
-        build_async_engine_client_from_engine_args,
-    )
+        build_async_engine_client_from_engine_args)
 
     # split lora_requests into 3 parts
     part_size = len(lora_requests) // 3
     dummy_run_requests = lora_requests[:part_size]
-    warmup_run_requests = lora_requests[part_size : part_size * 2]
-    cold_run_requests = lora_requests[part_size * 2 :]
+    warmup_run_requests = lora_requests[part_size:part_size * 2]
+    cold_run_requests = lora_requests[part_size * 2:]
 
     async with build_async_engine_client_from_engine_args(engine_args) as llm:
+
         # Dummy run - So any 1-time functionality like triton kernel compilation
         # is complete here.
         await requests_processing_time(llm, dummy_run_requests)
@@ -159,20 +160,17 @@ async def test_add_lora():
             # No way to check V0 engine results as the calls just return None.
             pass
         time_with_add_lora = await requests_processing_time(
-            llm, warmup_run_requests
-        )
+            llm, warmup_run_requests)
 
         # Run without any warmup
-        time_cold_start = await requests_processing_time(llm, cold_run_requests)
+        time_cold_start = await requests_processing_time(
+            llm, cold_run_requests)
 
-    print(
-        f"time hot-start {time_with_add_lora} vs "
-        f"time cold-start {time_cold_start} "
-    )
+    print(f"time hot-start {time_with_add_lora} vs "
+          f"time cold-start {time_cold_start} ")
 
     assert time_with_add_lora < time_cold_start, (
         f"time_with_add_lora={time_with_add_lora}, "
         f"time_cold_start={time_cold_start}"
         "The engine request processing time with LoRA pre-loading "
-        "must be less than the version that does on-demand LoRA loading."
-    )
+        "must be less than the version that does on-demand LoRA loading.")

@@ -7,30 +7,17 @@ import pytest
 from huggingface_hub.utils import HfHubHTTPError
 from torch import nn
 
-from vllm.lora.utils import (
-    get_adapter_absolute_path,
-    parse_fine_tuned_lora_name,
-    replace_submodule,
-)
+from vllm.lora.utils import (get_adapter_absolute_path,
+                             parse_fine_tuned_lora_name, replace_submodule)
 from vllm.utils import LRUCache
 
 
 def test_parse_fine_tuned_lora_name_valid():
     fixture = {
-        (
-            "base_model.model.lm_head.lora_A.weight",
-            "lm_head",
-            True,
-            False,
-            False,
-        ),
-        (
-            "base_model.model.lm_head.lora_B.weight",
-            "lm_head",
-            False,
-            False,
-            False,
-        ),
+        ("base_model.model.lm_head.lora_A.weight", "lm_head", True, False,
+         False),
+        ("base_model.model.lm_head.lora_B.weight", "lm_head", False, False,
+         False),
         (
             "base_model.model.model.embed_tokens.lora_embedding_A",
             "model.embed_tokens",
@@ -95,28 +82,22 @@ def test_parse_fine_tuned_lora_name_invalid():
 
 def test_replace_submodule():
     model = nn.Sequential(
-        OrderedDict(
-            [
-                ("dense1", nn.Linear(764, 100)),
-                ("act1", nn.ReLU()),
-                ("dense2", nn.Linear(100, 50)),
-                (
-                    "seq1",
-                    nn.Sequential(
-                        OrderedDict(
-                            [
-                                ("dense1", nn.Linear(100, 10)),
-                                ("dense2", nn.Linear(10, 50)),
-                            ]
-                        )
-                    ),
-                ),
-                ("act2", nn.ReLU()),
-                ("output", nn.Linear(50, 10)),
-                ("outact", nn.Sigmoid()),
-            ]
-        )
-    )
+        OrderedDict([
+            ("dense1", nn.Linear(764, 100)),
+            ("act1", nn.ReLU()),
+            ("dense2", nn.Linear(100, 50)),
+            (
+                "seq1",
+                nn.Sequential(
+                    OrderedDict([
+                        ("dense1", nn.Linear(100, 10)),
+                        ("dense2", nn.Linear(10, 50)),
+                    ])),
+            ),
+            ("act2", nn.ReLU()),
+            ("output", nn.Linear(50, 10)),
+            ("outact", nn.Sigmoid()),
+        ]))
 
     sigmoid = nn.Sigmoid()
 
@@ -129,6 +110,7 @@ def test_replace_submodule():
 
 
 class TestLRUCache(LRUCache):
+
     def _on_remove(self, key, value):
         if not hasattr(self, "_remove_counter"):
             self._remove_counter = 0
@@ -265,9 +247,8 @@ def test_get_adapter_absolute_path_local_existing(mock_abspath, mock_exist):
 
 @patch("huggingface_hub.snapshot_download")
 @patch("os.path.exists")
-def test_get_adapter_absolute_path_huggingface(
-    mock_exist, mock_snapshot_download
-):
+def test_get_adapter_absolute_path_huggingface(mock_exist,
+                                               mock_snapshot_download):
     # Hugging Face model identifier
     path = "org/repo"
     absolute_path = "/mock/snapshot/path"
@@ -278,13 +259,11 @@ def test_get_adapter_absolute_path_huggingface(
 
 @patch("huggingface_hub.snapshot_download")
 @patch("os.path.exists")
-def test_get_adapter_absolute_path_huggingface_error(
-    mock_exist, mock_snapshot_download
-):
+def test_get_adapter_absolute_path_huggingface_error(mock_exist,
+                                                     mock_snapshot_download):
     # Hugging Face model identifier with download error
     path = "org/repo"
     mock_exist.return_value = False
     mock_snapshot_download.side_effect = HfHubHTTPError(
-        "failed to query model info"
-    )
+        "failed to query model info")
     assert get_adapter_absolute_path(path) == path

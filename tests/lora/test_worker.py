@@ -11,16 +11,9 @@ import safetensors.torch
 import torch
 
 import vllm.envs as envs
-from vllm.config import (
-    CacheConfig,
-    DeviceConfig,
-    LoadConfig,
-    LoRAConfig,
-    ModelConfig,
-    ParallelConfig,
-    SchedulerConfig,
-    VllmConfig,
-)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VllmConfig)
 from vllm.lora.models import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.v1.worker.gpu_worker import Worker as V1Worker
@@ -37,9 +30,9 @@ def v1(run_with_both_engines_lora):
 
 @patch.dict(os.environ, {"RANK": "0"})
 def test_worker_apply_lora(sql_lora_files):
-    def set_active_loras(
-        worker: Union[Worker, V1Worker], lora_requests: list[LoRARequest]
-    ):
+
+    def set_active_loras(worker: Union[Worker, V1Worker],
+                         lora_requests: list[LoRARequest]):
         lora_mapping = LoRAMapping([], [])
         if isinstance(worker, Worker):
             # v0 case
@@ -47,8 +40,7 @@ def test_worker_apply_lora(sql_lora_files):
         else:
             # v1 case
             worker.model_runner.lora_manager.set_active_adapters(
-                lora_requests, lora_mapping
-            )
+                lora_requests, lora_mapping)
 
     worker_cls = V1Worker if envs.VLLM_USE_V1 else Worker
 
@@ -70,13 +62,12 @@ def test_worker_apply_lora(sql_lora_files):
         parallel_config=ParallelConfig(1, 1, False),
         scheduler_config=SchedulerConfig("generate", 32, 32, 32),
         device_config=DeviceConfig("cuda"),
-        cache_config=CacheConfig(
-            block_size=16,
-            gpu_memory_utilization=1.0,
-            swap_space=0,
-            cache_dtype="auto",
-        ),
-        lora_config=LoRAConfig(max_lora_rank=8, max_cpu_loras=32, max_loras=32),
+        cache_config=CacheConfig(block_size=16,
+                                 gpu_memory_utilization=1.0,
+                                 swap_space=0,
+                                 cache_dtype="auto"),
+        lora_config=LoRAConfig(max_lora_rank=8, max_cpu_loras=32,
+                               max_loras=32),
     )
     worker = worker_cls(
         vllm_config=vllm_config,
@@ -98,20 +89,20 @@ def test_worker_apply_lora(sql_lora_files):
 
     set_active_loras(worker, lora_requests)
     assert worker.list_loras() == {
-        lora_request.lora_int_id for lora_request in lora_requests
+        lora_request.lora_int_id
+        for lora_request in lora_requests
     }
 
     for i in range(32):
         random.seed(i)
-        iter_lora_requests = random.choices(
-            lora_requests, k=random.randint(1, n_loras)
-        )
+        iter_lora_requests = random.choices(lora_requests,
+                                            k=random.randint(1, n_loras))
         random.shuffle(iter_lora_requests)
-        iter_lora_requests = iter_lora_requests[: -random.randint(0, n_loras)]
+        iter_lora_requests = iter_lora_requests[:-random.randint(0, n_loras)]
         set_active_loras(worker, lora_requests)
         assert worker.list_loras().issuperset(
-            {lora_request.lora_int_id for lora_request in iter_lora_requests}
-        )
+            {lora_request.lora_int_id
+             for lora_request in iter_lora_requests})
 
 
 @patch.dict(os.environ, {"RANK": "0"})
@@ -139,9 +130,8 @@ def test_worker_apply_dora(dora_files):
             load_format="dummy",
         ),
         parallel_config=ParallelConfig(1, 1, False),
-        scheduler_config=SchedulerConfig(
-            "generate", 16, 16, 16
-        ),  # Reduced from 32 to save memory
+        scheduler_config=SchedulerConfig("generate", 16, 16,
+                                         16),  # Reduced from 32 to save memory
         device_config=DeviceConfig("cuda"),
         cache_config=CacheConfig(
             block_size=16,
@@ -187,10 +177,8 @@ def test_worker_apply_dora(dora_files):
     has_magnitude_params = False
     for module_name, lora_weights in dora_model.loras.items():
         # Check for magnitude parameters
-        if (
-            hasattr(lora_weights, "magnitude_param")
-            and lora_weights.magnitude_param is not None
-        ):
+        if (hasattr(lora_weights, "magnitude_param")
+                and lora_weights.magnitude_param is not None):
             has_magnitude_params = True
 
             # Different implementations handle magnitudes differently
@@ -201,19 +189,17 @@ def test_worker_apply_dora(dora_files):
                     if mag is not None:
                         has_valid_mag = True
                         assert isinstance(mag, torch.Tensor)
-                assert has_valid_mag, (
-                    f"Module {module_name} has magnitude_param list with all None values"
-                )
+                assert (
+                    has_valid_mag
+                ), f"Module {module_name} has magnitude_param list with all None values"
             else:
                 # If it's a tensor, verify it's a valid tensor
                 assert isinstance(lora_weights.magnitude_param, torch.Tensor)
 
             # Also verify that magnitude is related to lora_b output dimension
             if isinstance(lora_weights.magnitude_param, torch.Tensor):
-                assert (
-                    lora_weights.magnitude_param.shape[0]
-                    == lora_weights.lora_b.shape[1]
-                )
+                assert (lora_weights.magnitude_param.shape[0] ==
+                        lora_weights.lora_b.shape[1])
             elif isinstance(lora_weights.magnitude_param, list):
                 for i, mag in enumerate(lora_weights.magnitude_param):
                     if mag is not None:
@@ -231,8 +217,7 @@ def test_worker_apply_dora(dora_files):
     if hasattr(worker.model_runner.lora_manager, "remove_adapter"):
         # If the method exists, use it directly
         worker.model_runner.lora_manager.remove_adapter(
-            dora_request.lora_int_id
-        )
+            dora_request.lora_int_id)
 
     # Verify the adapter is no longer active
     # Note: Due to how LRUCacheLoRAModelManager works, the adapter might still be
@@ -265,9 +250,8 @@ def test_worker_multiple_dora_adapters(dora_files, tmp_path):
             load_format="dummy",
         ),
         parallel_config=ParallelConfig(1, 1, False),
-        scheduler_config=SchedulerConfig(
-            "generate", 16, 16, 16
-        ),  # Reduced to save memory
+        scheduler_config=SchedulerConfig("generate", 16, 16,
+                                         16),  # Reduced to save memory
         device_config=DeviceConfig("cuda"),
         cache_config=CacheConfig(
             block_size=16,
@@ -306,9 +290,8 @@ def test_worker_multiple_dora_adapters(dora_files, tmp_path):
         adapter_config = json.load(f)
 
     # Save the config to the new location
-    with open(
-        os.path.join(modified_dora_path, "adapter_config.json"), "w"
-    ) as f:
+    with open(os.path.join(modified_dora_path, "adapter_config.json"),
+              "w") as f:
         json.dump(adapter_config, f)
 
     # Load the adapter weights
@@ -318,8 +301,7 @@ def test_worker_multiple_dora_adapters(dora_files, tmp_path):
     # Save them to the new location (we're not modifying the weights for this test,
     # just using a copy to simulate a second adapter)
     safetensors.torch.save_file(
-        tensors, os.path.join(modified_dora_path, "adapter_model.safetensors")
-    )
+        tensors, os.path.join(modified_dora_path, "adapter_model.safetensors"))
 
     # Create DoRA requests for both adapters
     dora_request_1 = LoRARequest("dora_adapter_1", 1, dora_files)
@@ -338,9 +320,8 @@ def test_worker_multiple_dora_adapters(dora_files, tmp_path):
     # Finally, test with both adapters active
     # Note: In a real scenario, you'd need appropriate indices in the LoRAMapping,
     # but for this test we're just checking that the adapters are loaded
-    worker.model_runner.set_active_loras(
-        [dora_request_1, dora_request_2], LoRAMapping([], [])
-    )
+    worker.model_runner.set_active_loras([dora_request_1, dora_request_2],
+                                         LoRAMapping([], []))
     # Check both adapters are in the list, regardless of what else might be there
     assert dora_request_1.lora_int_id in worker.list_loras()
     assert dora_request_2.lora_int_id in worker.list_loras()
@@ -352,16 +333,12 @@ def test_worker_multiple_dora_adapters(dora_files, tmp_path):
     # Verify the DoRA adapter has magnitude parameters
     has_magnitude_params = False
     for module_name, lora_weights in dora_model.loras.items():
-        if (
-            hasattr(lora_weights, "magnitude_param")
-            and lora_weights.magnitude_param is not None
-        ):
+        if (hasattr(lora_weights, "magnitude_param")
+                and lora_weights.magnitude_param is not None):
             has_magnitude_params = True
             break
 
-    assert has_magnitude_params, (
-        "Second DoRA adapter should have magnitude parameters"
-    )
+    assert has_magnitude_params, "Second DoRA adapter should have magnitude parameters"
 
     # Cleanup - use a direct approach
     worker.model_runner.set_active_loras([], LoRAMapping([], []))
@@ -370,11 +347,9 @@ def test_worker_multiple_dora_adapters(dora_files, tmp_path):
     if hasattr(worker.model_runner.lora_manager, "remove_adapter"):
         # If the method exists, use it directly
         worker.model_runner.lora_manager.remove_adapter(
-            dora_request_1.lora_int_id
-        )
+            dora_request_1.lora_int_id)
         worker.model_runner.lora_manager.remove_adapter(
-            dora_request_2.lora_int_id
-        )
+            dora_request_2.lora_int_id)
 
     # Verify the adapters are no longer active
     # Note: Due to how LRUCacheLoRAModelManager works, adapters might still be

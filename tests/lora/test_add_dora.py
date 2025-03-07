@@ -46,18 +46,22 @@ def v1(run_with_both_engines_lora):
 
 def get_dora_requests() -> List[LoRARequest]:
     dora_requests: List[LoRARequest] = [
-        LoRARequest(lora_name=f"{i}", lora_int_id=i, lora_path=DORA_MODULE_PATH)
+        LoRARequest(lora_name=f"{i}",
+                    lora_int_id=i,
+                    lora_path=DORA_MODULE_PATH)
         for i in range(1, DEFAULT_MAX_LORAS + 1)
     ]
     return dora_requests
 
 
-async def requests_processing_time(
-    llm, dora_requests: List[LoRARequest]
-) -> float:
-    sampling_params = SamplingParams(
-        n=1, temperature=0.0, top_p=1.0, ignore_eos=True, max_tokens=1
-    )
+async def requests_processing_time(llm,
+                                   dora_requests: List[LoRARequest]) -> float:
+
+    sampling_params = SamplingParams(n=1,
+                                     temperature=0.0,
+                                     top_p=1.0,
+                                     ignore_eos=True,
+                                     max_tokens=1)
 
     generators = []
     start = time.perf_counter()
@@ -65,9 +69,8 @@ async def requests_processing_time(
     for dora_request in dora_requests:
         dora_int_id = dora_request.lora_int_id
         generator = llm.generate(
-            prompt=TextPrompt(
-                prompt=f"hello {dora_int_id}", multi_modal_data=None
-            ),  # type: ignore
+            prompt=TextPrompt(prompt=f"hello {dora_int_id}",
+                              multi_modal_data=None),  # type: ignore
             sampling_params=sampling_params,
             lora_request=dora_request,
             request_id=f"test{dora_int_id}",
@@ -123,16 +126,16 @@ async def test_add_dora():
 
     importlib.reload(vllm.engine.async_llm_engine)
     from vllm.entrypoints.openai.api_server import (
-        build_async_engine_client_from_engine_args,
-    )
+        build_async_engine_client_from_engine_args)
 
     # split dora_requests into 3 parts
     part_size = len(dora_requests) // 3
     dummy_run_requests = dora_requests[:part_size]
-    warmup_run_requests = dora_requests[part_size : part_size * 2]
-    cold_run_requests = dora_requests[part_size * 2 :]
+    warmup_run_requests = dora_requests[part_size:part_size * 2]
+    cold_run_requests = dora_requests[part_size * 2:]
 
     async with build_async_engine_client_from_engine_args(engine_args) as llm:
+
         # Dummy run - So any 1-time functionality like triton kernel compilation
         # is complete here.
         await requests_processing_time(llm, dummy_run_requests)
@@ -143,23 +146,20 @@ async def test_add_dora():
         # Wait for the add_lora function to complete on the server side.
         await asyncio.sleep(30)
         time_with_add_dora = await requests_processing_time(
-            llm, warmup_run_requests
-        )
+            llm, warmup_run_requests)
 
         # Run without any warmup
-        time_cold_start = await requests_processing_time(llm, cold_run_requests)
+        time_cold_start = await requests_processing_time(
+            llm, cold_run_requests)
 
-    print(
-        f"time hot-start {time_with_add_dora} vs "
-        f"time cold-start {time_cold_start} "
-    )
+    print(f"time hot-start {time_with_add_dora} vs "
+          f"time cold-start {time_cold_start} ")
 
     assert time_with_add_dora < time_cold_start, (
         f"time_with_add_dora={time_with_add_dora}, "
         f"time_cold_start={time_cold_start}"
         "The engine request processing time with DoRA pre-loading "
-        "must be less than the version that does on-demand DoRA loading."
-    )
+        "must be less than the version that does on-demand DoRA loading.")
 
 
 def test_dora_validation():
@@ -177,7 +177,7 @@ def test_dora_validation():
     # Create random tensors with proper dimensions
     lora_a = torch.rand((input_dim, rank), device="cpu")
     lora_b = torch.rand((rank, output_dim), device="cpu")
-    magnitude_param = torch.rand((output_dim,), device="cpu")
+    magnitude_param = torch.rand((output_dim, ), device="cpu")
 
     # Create a LoRALayerWeights object with DoRA parameters
     layer_weights = LoRALayerWeights(
@@ -192,9 +192,8 @@ def test_dora_validation():
     # Validate the dimensions
     assert layer_weights.lora_a.shape[1] == rank, "lora_a shape mismatch"
     assert layer_weights.lora_b.shape[0] == rank, "lora_b shape mismatch"
-    assert layer_weights.magnitude_param is not None, (
-        "magnitude_param should not be None for DoRA"
-    )
+    assert (layer_weights.magnitude_param
+            is not None), "magnitude_param should not be None for DoRA"
 
     # Validate that magnitude_param matches the output dimension
     assert (
@@ -204,7 +203,7 @@ def test_dora_validation():
     # Test with incorrect magnitude dimension to verify validation would fail
     with pytest.raises(AssertionError):
         # Create incorrect magnitude parameter (wrong size)
-        wrong_magnitude = torch.rand((output_dim + 10,), device="cpu")
+        wrong_magnitude = torch.rand((output_dim + 10, ), device="cpu")
 
         # These dimensions are mismatched and should fail validation
         layer_weights_wrong = LoRALayerWeights(
@@ -217,10 +216,8 @@ def test_dora_validation():
         )
 
         # Manual validation would fail
-        assert (
-            layer_weights_wrong.magnitude_param.shape[0]
-            == layer_weights_wrong.lora_b.shape[1]
-        )
+        assert (layer_weights_wrong.magnitude_param.shape[0] ==
+                layer_weights_wrong.lora_b.shape[1])
 
 
 def test_dora_missing_magnitude_validation():
@@ -257,12 +254,12 @@ def test_dora_missing_magnitude_validation():
         return weights.magnitude_param is not None
 
     # Should identify as regular LoRA, not DoRA since magnitude_param is None
-    assert not is_dora_adapter(layer_weights), (
-        "Should not identify as DoRA without magnitude parameters"
-    )
+    assert not is_dora_adapter(
+        layer_weights
+    ), "Should not identify as DoRA without magnitude parameters"
 
     # Now add the magnitude parameter and verify it's detected as DoRA
-    magnitude_param = torch.rand((output_dim,), device="cpu")
+    magnitude_param = torch.rand((output_dim, ), device="cpu")
     dora_weights = LoRALayerWeights(
         module_name="test_layer",
         rank=rank,
@@ -273,9 +270,8 @@ def test_dora_missing_magnitude_validation():
     )
 
     # Should identify as DoRA
-    assert is_dora_adapter(dora_weights), (
-        "Should identify as DoRA with magnitude parameters"
-    )
+    assert is_dora_adapter(
+        dora_weights), "Should identify as DoRA with magnitude parameters"
 
 
 def test_dora_weight_application():
@@ -297,7 +293,7 @@ def test_dora_weight_application():
     # Create random tensors with proper dimensions
     lora_a = torch.rand((input_dim, rank), device="cpu")
     lora_b = torch.rand((rank, output_dim), device="cpu")
-    magnitude_param = torch.rand((output_dim,), device="cpu")
+    magnitude_param = torch.rand((output_dim, ), device="cpu")
 
     # Create a sample input
     input_tensor = torch.rand((batch_size, input_dim), device="cpu")
@@ -342,7 +338,8 @@ def test_dora_weight_application():
             # DoRA approach with normalization and magnitude scaling
             norm = torch.norm(product, dim=0, keepdim=True)
             normalized_product = product / (norm + 1e-5)
-            effective_weights = normalized_product * magnitude_param.view(1, -1)
+            effective_weights = normalized_product * magnitude_param.view(
+                1, -1)
         else:
             # Regular LoRA approach
             effective_weights = product

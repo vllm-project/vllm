@@ -6,29 +6,19 @@ import pytest
 import torch
 
 from vllm.config import LoRAConfig
-from vllm.lora.layers import (
-    BaseLayerWithLoRA,
-    ColumnParallelLinearWithLoRA,
-    ReplicatedLinearWithLoRA,
-    RowParallelLinearWithLoRA,
-)
+from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              ReplicatedLinearWithLoRA,
+                              RowParallelLinearWithLoRA)
 from vllm.lora.models import LoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
 
-from .test_layers import (
-    TOLERANCES,
-    LoRAMapping,
-    check_punica_wrapper,
-    create_random_inputs,
-    get_random_id_to_index,
-)
+from .test_layers import (TOLERANCES, LoRAMapping, check_punica_wrapper,
+                          create_random_inputs, get_random_id_to_index)
 from .utils import DummyLoRAManager
 
 pytestmark = pytest.mark.skipif(
@@ -36,11 +26,9 @@ pytestmark = pytest.mark.skipif(
     reason="Backend not supported",
 )
 
-DEVICES = (
-    [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
-    if current_platform.is_cuda_alike()
-    else ["cpu"]
-)
+DEVICES = ([
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+] if current_platform.is_cuda_alike() else ["cpu"])
 
 # For GPU, we will launch different triton kernels between the prefill and decode
 # stages, so we need to verify this. prefill stage(True) or decode stage(False)
@@ -84,31 +72,25 @@ def populate_dora_loras(
             for i in range(repeats):
                 # Initialize with DoRA adapters (use_dora=True)
                 sublora = DummyLoRAManager(
-                    layer_weights.device
-                ).init_random_lora(
-                    module_name=f"fake_{i}",
-                    weight=layer_weights,
-                    generate_embeddings_tensor=generate_embeddings_tensor,
-                    use_dora=True,
-                )
-                sublora.lora_b = sublora.lora_b[
-                    :, (sublora_len * i) : (sublora_len * (i + 1))
-                ]
+                    layer_weights.device).init_random_lora(
+                        module_name=f"fake_{i}",
+                        weight=layer_weights,
+                        generate_embeddings_tensor=generate_embeddings_tensor,
+                        use_dora=True,
+                    )
+                sublora.lora_b = sublora.lora_b[:, (sublora_len *
+                                                    i):(sublora_len * (i + 1))]
                 # Create magnitude parameter for subset of output dimensions
                 if sublora.magnitude_param is not None:
-                    sublora.magnitude_param = sublora.magnitude_param[
-                        (sublora_len * i) : (sublora_len * (i + 1))
-                    ]
+                    sublora.magnitude_param = sublora.magnitude_param[(
+                        sublora_len * i):(sublora_len * (i + 1))]
                 sublora.optimize()
                 subloras.append(sublora)
 
             from vllm.lora.lora import PackedLoRALayerWeights
 
-            lora = (
-                PackedLoRALayerWeights.pack(subloras)
-                if repeats > 1
-                else subloras[0]
-            )
+            lora = PackedLoRALayerWeights.pack(
+                subloras) if repeats > 1 else subloras[0]
 
             # Set the LoRA weights in the layer
             # Note: Some layer implementations may not support lora_magnitudes in set_lora
@@ -135,13 +117,11 @@ def populate_dora_loras(
 
                 # For testing, directly set the magnitude_param in the layers
                 # This wouldn't be needed in a full implementation where set_lora accepts magnitude_param
-                if (
-                    hasattr(layer, "lora_magnitudes_stacked")
-                    and lora.magnitude_param is not None
-                ):
+                if hasattr(layer, "lora_magnitudes_stacked"
+                           ) and lora.magnitude_param is not None:
                     layer.lora_magnitudes_stacked[0][
-                        slot_idx, 0, : lora.magnitude_param.shape[0]
-                    ].copy_(lora.magnitude_param, non_blocking=True)
+                        slot_idx, 0, :lora.magnitude_param.shape[0]].copy_(
+                            lora.magnitude_param, non_blocking=True)
 
             lora_dict[lora_id] = lora
             sublora_dict[lora_id] = subloras
@@ -161,15 +141,15 @@ def apply_dora_transformation(
     DoRA differs from LoRA by normalizing the product of lora_a and lora_b
     column-wise and then scaling each column by a learned magnitude parameter.
 
-    Previously, there was a bug in the vLLM implementation where the _apply_magnitude method
+    Previously, there was a bug in the vLLM implementation where the _apply_magnitude method 
     in punica_base.py REPLACED the output with the normalized and scaled values
     instead of ADDING the DoRA contribution to the base output. This bug has been fixed.
-
+    
     The correct DoRA behavior now implemented:
     1. Compute the standard LoRA output: output = base_output + input @ (A @ B) * scaling
     2. For DoRA, we compute: output = base_output + (input @ (A @ B) * scaling) + (norm(input @ (A @ B)) * magnitude)
        where norm() normalizes each column to unit length
-
+    
     This implementation follows the fixed behavior.
 
     Args:
@@ -210,12 +190,10 @@ def apply_dora_transformation(
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
-@pytest.mark.parametrize(
-    "bias_enabled", [False]
-)  # DoRA typically doesn't use bias
-def test_dora_linear_replicated(
-    dist_init, num_loras, device, stage, bias_enabled
-) -> None:
+@pytest.mark.parametrize("bias_enabled",
+                         [False])  # DoRA typically doesn't use bias
+def test_dora_linear_replicated(dist_init, num_loras, device, stage,
+                                bias_enabled) -> None:
     """Test DoRA with replicated linear layers."""
 
     if current_platform.is_cuda_alike():
@@ -234,19 +212,16 @@ def test_dora_linear_replicated(
     )
 
     def create_random_linear_replicated_layer():
-        linear = ReplicatedLinear(
-            4096, 4096, bias=False, params_dtype=torch.float16
-        )
+        linear = ReplicatedLinear(4096,
+                                  4096,
+                                  bias=False,
+                                  params_dtype=torch.float16)
         linear.weight.data = torch.rand_like(linear.weight.data)
         lora_linear = ReplicatedLinearWithLoRA(linear)
 
         lora_linear.create_lora_weights(max_loras, lora_config)
-        assert (
-            lora_linear.n_slices
-            == len(lora_linear.lora_a_stacked)
-            == len(lora_linear.lora_b_stacked)
-            == 1
-        )
+        assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
+            lora_linear.lora_b_stacked) == 1)
         if bias_enabled:
             assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
         else:
@@ -281,9 +256,9 @@ def test_dora_linear_replicated(
             input_type=torch.float16,
             device=device,
         )
-        lora_mapping = LoRAMapping(
-            index_mapping, prompt_mapping, is_prefill=stage
-        )
+        lora_mapping = LoRAMapping(index_mapping,
+                                   prompt_mapping,
+                                   is_prefill=stage)
         punica_wrapper.update_metadata(
             lora_mapping,
             id_to_index,
@@ -311,8 +286,7 @@ def test_dora_linear_replicated(
                 print(
                     f"  Magnitude stats: min={test_lora.magnitude_param.min().item()}, "
                     f"max={test_lora.magnitude_param.max().item()}, "
-                    f"mean={test_lora.magnitude_param.mean().item()}"
-                )
+                    f"mean={test_lora.magnitude_param.mean().item()}")
 
             # Check what happens with the real layer without LoRA adapters
             single_input = test_input.clone()
@@ -337,12 +311,8 @@ def test_dora_linear_replicated(
             # Now add the DoRA contribution
             if test_lora.magnitude_param is not None:
                 dora_output = apply_dora_transformation(
-                    single_input,
-                    test_lora.lora_a,
-                    test_lora.lora_b,
-                    test_lora.magnitude_param,
-                    test_lora.scaling,
-                )
+                    single_input, test_lora.lora_a, test_lora.lora_b,
+                    test_lora.magnitude_param, test_lora.scaling)
                 manual_result += dora_output
 
                 # Print differences
@@ -376,31 +346,27 @@ def test_dora_linear_replicated(
                 # DoRA output shouldn't be all ones (the previous bug)
                 print("\n  Checking for the old all-ones bug:")
                 all_ones = torch.ones_like(test_result)
-                is_all_ones = torch.allclose(
-                    test_result, all_ones, rtol=0.1, atol=0.1
-                )
+                is_all_ones = torch.allclose(test_result,
+                                             all_ones,
+                                             rtol=0.1,
+                                             atol=0.1)
                 print(f"  Is output all ones? {is_all_ones}")
-                assert not is_all_ones, (
-                    "DoRA is still producing all-ones output, fix was not applied correctly!"
-                )
+                assert not is_all_ones, "DoRA is still producing all-ones output, fix was not applied correctly!"
 
                 # Check if DoRA output is different from base output
                 base_diff = (test_result - base_result).abs().mean().item()
                 print(
                     f"  Average difference between base and DoRA outputs: {base_diff}"
                 )
-                assert base_diff > 0.01, (
-                    "DoRA output should be different from base output"
-                )
+                assert base_diff > 0.01, "DoRA output should be different from base output"
 
                 # Check if magnitudes in the layer match our expectations
                 has_nonzero_magnitudes = False
                 if hasattr(lora_linear, "lora_magnitudes_stacked"):
                     for slot_idx, lora_id_to_check in enumerate(id_to_index):
                         if lora_id_to_check == test_lora_id:
-                            magnitudes = lora_linear.lora_magnitudes_stacked[0][
-                                slot_idx
-                            ]
+                            magnitudes = lora_linear.lora_magnitudes_stacked[
+                                0][slot_idx]
                             if magnitudes.abs().sum().item() > 0:
                                 has_nonzero_magnitudes = True
                                 print(
@@ -431,20 +397,13 @@ def test_dora_linear_replicated(
 
             # Apply standard LoRA
             standard_lora_output = base_output + (
-                test_input
-                @ test_lora.lora_a
-                @ test_lora.lora_b
-                * test_lora.scaling
-            )
+                test_input @ test_lora.lora_a @ test_lora.lora_b *
+                test_lora.scaling)
 
             # Apply DoRA
             dora_contribution = apply_dora_transformation(
-                test_input,
-                test_lora.lora_a,
-                test_lora.lora_b,
-                test_lora.magnitude_param,
-                test_lora.scaling,
-            )
+                test_input, test_lora.lora_a, test_lora.lora_b,
+                test_lora.magnitude_param, test_lora.scaling)
             dora_output = base_output + dora_contribution
 
             # Create isolated mapping for just this one input to test actual layer output
@@ -462,21 +421,18 @@ def test_dora_linear_replicated(
 
             # Check for all-ones output (the bug we fixed)
             all_ones = torch.ones_like(layer_output)
-            is_all_ones = torch.allclose(
-                layer_output, all_ones, rtol=0.1, atol=0.1
-            )
-            assert not is_all_ones, (
-                "DoRA is still producing all-ones output, fix was not applied correctly!"
-            )
+            is_all_ones = torch.allclose(layer_output,
+                                         all_ones,
+                                         rtol=0.1,
+                                         atol=0.1)
+            assert not is_all_ones, "DoRA is still producing all-ones output, fix was not applied correctly!"
 
             # Check for difference from base output
             base_diff = (layer_output - base_output).abs().mean().item()
             print(
                 f"  Average difference between base and DoRA outputs: {base_diff}"
             )
-            assert base_diff > 0.01, (
-                "DoRA output should be different from base output"
-            )
+            assert base_diff > 0.01, "DoRA output should be different from base output"
 
             # Verify DoRA and standard LoRA outputs are different
             rtol, atol = TOLERANCES[standard_lora_output.dtype]
@@ -504,25 +460,21 @@ def test_dora_linear_replicated(
             input_type=torch.float16,
             device=device,
         )
-        lora_mapping = LoRAMapping(
-            index_mapping, prompt_mapping, is_prefill=stage
-        )
+        lora_mapping = LoRAMapping(index_mapping,
+                                   prompt_mapping,
+                                   is_prefill=stage)
 
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            512,
-            lora_config.lora_extra_vocab_size,
-        )
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
+                                       512, lora_config.lora_extra_vocab_size)
 
         lora_result = lora_linear(torch.cat(inputs))[0]
         expected_result = linear(torch.cat(inputs))[0]
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(
-            lora_result, expected_result, rtol=rtol, atol=atol
-        )
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
 
 @torch.inference_mode()
@@ -531,12 +483,10 @@ def test_dora_linear_replicated(
 @pytest.mark.parametrize("fully_shard", [False])  # Focus on non-sharded first
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
-@pytest.mark.parametrize(
-    "bias_enabled", [False]
-)  # DoRA typically doesn't use bias
-def test_dora_linear_parallel(
-    dist_init, num_loras, orientation, fully_shard, device, stage, bias_enabled
-) -> None:
+@pytest.mark.parametrize("bias_enabled",
+                         [False])  # DoRA typically doesn't use bias
+def test_dora_linear_parallel(dist_init, num_loras, orientation, fully_shard,
+                              device, stage, bias_enabled) -> None:
     """Test DoRA with parallel linear layers."""
 
     if current_platform.is_cuda_alike():
@@ -557,25 +507,23 @@ def test_dora_linear_parallel(
 
     def create_random_linear_parallel_layer():
         if orientation == "row":
-            linear = RowParallelLinear(
-                4096, 4096, bias=False, params_dtype=torch.float16
-            )
+            linear = RowParallelLinear(4096,
+                                       4096,
+                                       bias=False,
+                                       params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = RowParallelLinearWithLoRA(linear)
         else:
-            linear = ColumnParallelLinear(
-                4096, 4096, bias=False, params_dtype=torch.float16
-            )
+            linear = ColumnParallelLinear(4096,
+                                          4096,
+                                          bias=False,
+                                          params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = ColumnParallelLinearWithLoRA(linear)
 
         lora_linear.create_lora_weights(max_loras, lora_config)
-        assert (
-            lora_linear.n_slices
-            == len(lora_linear.lora_a_stacked)
-            == len(lora_linear.lora_b_stacked)
-            == 1
-        )
+        assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
+            lora_linear.lora_b_stacked) == 1)
         if bias_enabled:
             assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
         else:
@@ -610,9 +558,9 @@ def test_dora_linear_parallel(
             input_type=torch.float16,
             device=device,
         )
-        lora_mapping = LoRAMapping(
-            index_mapping, prompt_mapping, is_prefill=stage
-        )
+        lora_mapping = LoRAMapping(index_mapping,
+                                   prompt_mapping,
+                                   is_prefill=stage)
         punica_wrapper.update_metadata(
             lora_mapping,
             id_to_index,
@@ -641,20 +589,13 @@ def test_dora_linear_parallel(
 
             # Apply standard LoRA
             standard_lora_output = base_output + (
-                test_input
-                @ test_lora.lora_a
-                @ test_lora.lora_b
-                * test_lora.scaling
-            )
+                test_input @ test_lora.lora_a @ test_lora.lora_b *
+                test_lora.scaling)
 
             # Apply DoRA
             dora_contribution = apply_dora_transformation(
-                test_input,
-                test_lora.lora_a,
-                test_lora.lora_b,
-                test_lora.magnitude_param,
-                test_lora.scaling,
-            )
+                test_input, test_lora.lora_a, test_lora.lora_b,
+                test_lora.magnitude_param, test_lora.scaling)
             dora_output = base_output + dora_contribution
 
             # Create isolated mapping for just this one input to test actual layer output
@@ -672,21 +613,18 @@ def test_dora_linear_parallel(
 
             # Check for all-ones output (the bug we fixed)
             all_ones = torch.ones_like(layer_output)
-            is_all_ones = torch.allclose(
-                layer_output, all_ones, rtol=0.1, atol=0.1
-            )
-            assert not is_all_ones, (
-                "DoRA is still producing all-ones output, fix was not applied correctly!"
-            )
+            is_all_ones = torch.allclose(layer_output,
+                                         all_ones,
+                                         rtol=0.1,
+                                         atol=0.1)
+            assert not is_all_ones, "DoRA is still producing all-ones output, fix was not applied correctly!"
 
             # Check for difference from base output
             base_diff = (layer_output - base_output).abs().mean().item()
             print(
                 f"  Average difference between base and DoRA outputs (parallel): {base_diff}"
             )
-            assert base_diff > 0.01, (
-                "DoRA output should be different from base output"
-            )
+            assert base_diff > 0.01, "DoRA output should be different from base output"
 
             # Verify DoRA and standard LoRA outputs are different
             rtol, atol = TOLERANCES[standard_lora_output.dtype]
@@ -714,30 +652,25 @@ def test_dora_linear_parallel(
             input_type=torch.float16,
             device=device,
         )
-        lora_mapping = LoRAMapping(
-            index_mapping, prompt_mapping, is_prefill=stage
-        )
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            512,
-            lora_config.lora_extra_vocab_size,
-        )
+        lora_mapping = LoRAMapping(index_mapping,
+                                   prompt_mapping,
+                                   is_prefill=stage)
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
+                                       512, lora_config.lora_extra_vocab_size)
 
         lora_result = lora_linear(torch.cat(inputs))[0]
         expected_result = linear(torch.cat(inputs))[0]
 
         rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(
-            lora_result, expected_result, rtol=rtol, atol=atol
-        )
+        torch.testing.assert_close(lora_result,
+                                   expected_result,
+                                   rtol=rtol,
+                                   atol=atol)
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize(
-    "device", ["cuda"] if torch.cuda.is_available() else ["cpu"]
-)
+@pytest.mark.parametrize("device",
+                         ["cuda"] if torch.cuda.is_available() else ["cpu"])
 def test_dora_vs_lora_functionality(device):
     """
     Test that DoRA and LoRA differ in their outputs due to the
@@ -775,17 +708,15 @@ def test_dora_vs_lora_functionality(device):
     lora_output = base_output + lora_contribution
 
     # 2. DoRA output using our apply_dora_transformation function
-    dora_contribution = apply_dora_transformation(
-        input_tensor, lora_a, lora_b, magnitude_param, lora_scaling
-    )
+    dora_contribution = apply_dora_transformation(input_tensor, lora_a, lora_b,
+                                                  magnitude_param,
+                                                  lora_scaling)
     dora_output = base_output + dora_contribution
 
     # Check if DoRA output is all ones - which would indicate the bug is still present
     all_ones = torch.ones_like(dora_output)
     is_all_ones = torch.allclose(dora_output, all_ones, rtol=0.1, atol=0.1)
-    assert not is_all_ones, (
-        "DoRA output should not be all ones in the fixed implementation"
-    )
+    assert not is_all_ones, "DoRA output should not be all ones in the fixed implementation"
 
     # 3. Verify the difference between LoRA and DoRA outputs
     # The outputs should be different
@@ -815,9 +746,7 @@ def test_dora_vs_lora_functionality(device):
     print(f"DoRA magnitude params mean: {magnitude_param.mean().item()}")
 
     # DoRA contribution should be larger than just LoRA contribution
-    assert dora_contrib_norm > lora_contrib_norm, (
-        "DoRA contribution should be larger than LoRA contribution"
-    )
+    assert dora_contrib_norm > lora_contrib_norm, "DoRA contribution should be larger than LoRA contribution"
 
     # 6. Print sample values to help with debugging
     print(f"Base output (first 2 cols): {base_output[0, :2]}")
@@ -829,15 +758,12 @@ def test_dora_vs_lora_functionality(device):
     # If the magnitude parameters are all set to 1.0, DoRA should behave similarly to LoRA
     # (with the addition of the normalized contribution)
     magnitude_ones = torch.ones_like(magnitude_param)
-    dora_ones_contrib = apply_dora_transformation(
-        input_tensor, lora_a, lora_b, magnitude_ones, lora_scaling
-    )
+    dora_ones_contrib = apply_dora_transformation(input_tensor, lora_a, lora_b,
+                                                  magnitude_ones, lora_scaling)
     dora_ones_output = base_output + dora_ones_contrib
 
     # Check that with magnitude=1.0, we get a predictable behavior
     ones_diff = (dora_ones_output - lora_output).abs().mean().item()
     print(f"Difference between LoRA and DoRA with magnitude=1.0: {ones_diff}")
     # This should be larger than zero but still relatively small
-    assert ones_diff > 0, (
-        "DoRA with magnitude=1.0 should still differ from LoRA"
-    )
+    assert ones_diff > 0, "DoRA with magnitude=1.0 should still differ from LoRA"

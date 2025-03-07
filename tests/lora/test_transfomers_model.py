@@ -23,10 +23,12 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     prompts = [
         PROMPT_TEMPLATE.format(query="How many singers do we have?"),
         PROMPT_TEMPLATE.format(
-            query="What is the average, minimum, and maximum age of all singers from France?"  # noqa: E501
+            query=
+            "What is the average, minimum, and maximum age of all singers from France?"  # noqa: E501
         ),
         PROMPT_TEMPLATE.format(
-            query="What are all distinct countries where singers above age 20 are from?"  # noqa: E501
+            query=
+            "What are all distinct countries where singers above age 20 are from?"  # noqa: E501
         ),
     ]
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=32)
@@ -34,9 +36,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         prompts,
         sampling_params,
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id
-        else None,
-    )
+        if lora_id else None)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -58,16 +58,14 @@ def v1(run_with_both_engines_lora):
 @pytest.mark.skip_v1
 @fork_new_process_for_each_test
 def test_ilama_lora(ilama_lora_files):
-    llm = vllm.LLM(
-        MODEL_PATH,
-        max_model_len=1024,
-        enable_lora=True,
-        max_loras=4,
-        max_lora_rank=16,
-        tensor_parallel_size=1,
-        trust_remote_code=True,
-        enable_chunked_prefill=True,
-    )
+    llm = vllm.LLM(MODEL_PATH,
+                   max_model_len=1024,
+                   enable_lora=True,
+                   max_loras=4,
+                   max_lora_rank=16,
+                   tensor_parallel_size=1,
+                   trust_remote_code=True,
+                   enable_chunked_prefill=True)
 
     output1 = do_sample(llm, ilama_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
@@ -81,17 +79,15 @@ def test_ilama_lora(ilama_lora_files):
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_ilama_lora_tp4(ilama_lora_files):
-    llm = vllm.LLM(
-        MODEL_PATH,
-        max_model_len=1024,
-        enable_lora=True,
-        max_loras=4,
-        max_lora_rank=16,
-        tensor_parallel_size=4,
-        trust_remote_code=True,
-        fully_sharded_loras=False,
-        enable_chunked_prefill=True,
-    )
+    llm = vllm.LLM(MODEL_PATH,
+                   max_model_len=1024,
+                   enable_lora=True,
+                   max_loras=4,
+                   max_lora_rank=16,
+                   tensor_parallel_size=4,
+                   trust_remote_code=True,
+                   fully_sharded_loras=False,
+                   enable_chunked_prefill=True)
 
     output1 = do_sample(llm, ilama_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
@@ -105,17 +101,15 @@ def test_ilama_lora_tp4(ilama_lora_files):
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
-    llm = vllm.LLM(
-        MODEL_PATH,
-        max_model_len=1024,
-        enable_lora=True,
-        max_loras=4,
-        max_lora_rank=16,
-        tensor_parallel_size=4,
-        trust_remote_code=True,
-        fully_sharded_loras=True,
-        enable_chunked_prefill=True,
-    )
+    llm = vllm.LLM(MODEL_PATH,
+                   max_model_len=1024,
+                   enable_lora=True,
+                   max_loras=4,
+                   max_lora_rank=16,
+                   tensor_parallel_size=4,
+                   trust_remote_code=True,
+                   fully_sharded_loras=True,
+                   enable_chunked_prefill=True)
     output1 = do_sample(llm, ilama_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output1[i] == EXPECTED_LORA_OUTPUT[i]

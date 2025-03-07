@@ -13,10 +13,7 @@ from vllm.model_executor.models.baichuan import BaiChuanBaseForCausalLM
 from vllm.model_executor.models.utils import WeightsMapper
 
 lora_lst = [
-    "baichuan7B",
-    "baichuan7B-zero",
-    "baichuan7B-zero-regex",
-    "chatglm3-6b",
+    "baichuan7B", "baichuan7B-zero", "baichuan7B-zero-regex", "chatglm3-6b"
 ]
 BAICHUAN_LORA_MODULES = [
     "W_pack",
@@ -44,9 +41,8 @@ def test_load_checkpoints(
         else:
             expected_lora_modules.append(module)
     if lora_name == "baichuan7B":
-        peft_helper = PEFTHelper.from_local_dir(
-            baichuan_lora_files, max_position_embeddings=4096
-        )
+        peft_helper = PEFTHelper.from_local_dir(baichuan_lora_files,
+                                                max_position_embeddings=4096)
         # For the baichuan7B model, load it's LoRA,
         # and the test should pass.
         LoRAModel.from_local_checkpoint(
@@ -56,15 +52,13 @@ def test_load_checkpoints(
             lora_model_id=1,
             device="cpu",
             embedding_modules=embedding_modules,
-            embedding_padding_modules=embed_padding_modules,
-        )
+            embedding_padding_modules=embed_padding_modules)
     elif lora_name == "baichuan7B-zero":
         # Test that the target_modules contain prefix
         # such as "model.layers.0.self_atten.W_pack", and
         # the test should pass.
-        peft_helper = PEFTHelper.from_local_dir(
-            baichuan_zero_lora_files, max_position_embeddings=4096
-        )
+        peft_helper = PEFTHelper.from_local_dir(baichuan_zero_lora_files,
+                                                max_position_embeddings=4096)
         LoRAModel.from_local_checkpoint(
             baichuan_zero_lora_files,
             expected_lora_modules,
@@ -72,14 +66,12 @@ def test_load_checkpoints(
             lora_model_id=1,
             device="cpu",
             embedding_modules=embedding_modules,
-            embedding_padding_modules=embed_padding_modules,
-        )
+            embedding_padding_modules=embed_padding_modules)
     elif lora_name == "baichuan7B-zero-regex":
         # Test that the `target_modules` in the form of regular expressions,
         # such as `model\\..*(W_pack|o_proj)`, and the test should pass.
-        peft_helper = PEFTHelper.from_local_dir(
-            baichuan_regex_lora_files, max_position_embeddings=4096
-        )
+        peft_helper = PEFTHelper.from_local_dir(baichuan_regex_lora_files,
+                                                max_position_embeddings=4096)
         LoRAModel.from_local_checkpoint(
             baichuan_regex_lora_files,
             expected_lora_modules,
@@ -87,15 +79,13 @@ def test_load_checkpoints(
             lora_model_id=1,
             device="cpu",
             embedding_modules=embedding_modules,
-            embedding_padding_modules=embed_padding_modules,
-        )
+            embedding_padding_modules=embed_padding_modules)
     else:
         # For the baichuan7B model, load chatglm3-6b's LoRA,
         # and the test should raise the following error.
         expected_error = "Please verify that the loaded LoRA module is correct"  # noqa: E501
-        peft_helper = PEFTHelper.from_local_dir(
-            chatglm3_lora_files, max_position_embeddings=4096
-        )
+        peft_helper = PEFTHelper.from_local_dir(chatglm3_lora_files,
+                                                max_position_embeddings=4096)
         with pytest.raises(ValueError, match=expected_error):
             LoRAModel.from_local_checkpoint(
                 chatglm3_lora_files,
@@ -104,11 +94,11 @@ def test_load_checkpoints(
                 lora_model_id=1,
                 device="cpu",
                 embedding_modules=embedding_modules,
-                embedding_padding_modules=embed_padding_modules,
-            )
+                embedding_padding_modules=embed_padding_modules)
 
 
 def test_lora_weights_mapping(baichuan_lora_files):
+
     packed_modules_mapping = BaiChuanBaseForCausalLM.packed_modules_mapping
     embedding_modules = BaiChuanBaseForCausalLM.embedding_modules
     embed_padding_modules = BaiChuanBaseForCausalLM.embedding_padding_modules
@@ -127,9 +117,8 @@ def test_lora_weights_mapping(baichuan_lora_files):
             ".layers.": ".baichuan_layers.",
         },
     )
-    peft_helper = PEFTHelper.from_local_dir(
-        baichuan_lora_files, max_position_embeddings=4096
-    )
+    peft_helper = PEFTHelper.from_local_dir(baichuan_lora_files,
+                                            max_position_embeddings=4096)
     lora_model = LoRAModel.from_local_checkpoint(
         baichuan_lora_files,
         expected_lora_modules,
@@ -153,9 +142,8 @@ def test_dora_load_checkpoint(dora_files):
     embed_padding_modules = []
 
     # Load DoRA from the test files
-    peft_helper = PEFTHelper.from_local_dir(
-        dora_files, max_position_embeddings=4096
-    )
+    peft_helper = PEFTHelper.from_local_dir(dora_files,
+                                            max_position_embeddings=4096)
 
     # Check that use_dora flag is set correctly in the peft_helper
     assert peft_helper.use_dora is True
@@ -182,10 +170,8 @@ def test_dora_load_checkpoint(dora_files):
         # Check that magnitude parameter has the expected shape
         assert lora_weights.magnitude_param.dim() == 1
         # Shape should match output dimension of the layer
-        assert (
-            lora_weights.magnitude_param.shape[0]
-            == lora_weights.lora_b.shape[1]
-        )
+        assert lora_weights.magnitude_param.shape[
+            0] == lora_weights.lora_b.shape[1]
 
 
 def test_dora_magnitude_application():
@@ -231,8 +217,8 @@ def test_dora_magnitude_application():
 
     # Set up everything as it would be in the real implementation
     indices = torch.zeros(1, dtype=torch.long)  # Valid adapter index
-    output_slices = (output_dim,)
-    magnitudes_stacked = (magnitudes,)
+    output_slices = (output_dim, )
+    magnitudes_stacked = (magnitudes, )
 
     # Simulate the LoRA calculation
     lora_output = lora_contribution.clone()
@@ -255,8 +241,7 @@ def test_dora_magnitude_application():
     # Make sure magnitudes had an effect (not just normalized contribution)
     test_without_magnitudes = base_output + normalized
     assert not torch.allclose(
-        test_output, test_without_magnitudes, rtol=1e-3, atol=1e-3
-    )
+        test_output, test_without_magnitudes, rtol=1e-3, atol=1e-3)
 
 
 def test_dora_from_synthetic_checkpoint(tmp_path):
@@ -304,14 +289,12 @@ def test_dora_from_synthetic_checkpoint(tmp_path):
         tensors[mag_name] = torch.abs(torch.randn(output_dim))
 
     # Save the tensors
-    safetensors.torch.save_file(
-        tensors, str(adapter_dir / "adapter_model.safetensors")
-    )
+    safetensors.torch.save_file(tensors,
+                                str(adapter_dir / "adapter_model.safetensors"))
 
     # Load the synthetic DoRA adapter
-    peft_helper = PEFTHelper.from_local_dir(
-        str(adapter_dir), max_position_embeddings=4096
-    )
+    peft_helper = PEFTHelper.from_local_dir(str(adapter_dir),
+                                            max_position_embeddings=4096)
 
     # Verify DoRA flag is set
     assert peft_helper.use_dora is True
@@ -327,8 +310,7 @@ def test_dora_from_synthetic_checkpoint(tmp_path):
         lora_model_id=1,
         device="cpu",
         embedding_modules=embedding_modules,
-        embedding_padding_modules=embedding_padding_modules,
-    )
+        embedding_padding_modules=embedding_padding_modules)
 
     # Verify all modules have magnitude parameters
     for module_name, lora_weights in lora_model.loras.items():
@@ -349,8 +331,7 @@ def test_dora_missing_magnitude_error(dora_files, tmp_path):
     # Remove magnitude vectors
     filtered_tensors = {
         k: v
-        for k, v in tensors.items()
-        if not k.endswith("lora_magnitude_vector")
+        for k, v in tensors.items() if not k.endswith("lora_magnitude_vector")
     }
 
     # Save the modified tensor file
@@ -363,9 +344,8 @@ def test_dora_missing_magnitude_error(dora_files, tmp_path):
 
     # Try to load the model - should fail
     expected_modules = ["q_proj", "v_proj"]
-    peft_helper = PEFTHelper.from_local_dir(
-        str(test_dir), max_position_embeddings=4096
-    )
+    peft_helper = PEFTHelper.from_local_dir(str(test_dir),
+                                            max_position_embeddings=4096)
 
     # Set up required parameters
     embedding_modules = {}
@@ -379,8 +359,7 @@ def test_dora_missing_magnitude_error(dora_files, tmp_path):
             lora_model_id=1,
             device="cpu",
             embedding_modules=embedding_modules,
-            embedding_padding_modules=embedding_padding_modules,
-        )
+            embedding_padding_modules=embedding_padding_modules)
 
 
 def test_dora_magnitudes_normalization():
@@ -408,9 +387,9 @@ def test_dora_magnitudes_normalization():
 
     # Check that normalized columns have unit norm
     normalized_norms = torch.norm(normalized, dim=0)
-    assert torch.allclose(
-        normalized_norms, torch.ones_like(normalized_norms), rtol=1e-5
-    )
+    assert torch.allclose(normalized_norms,
+                          torch.ones_like(normalized_norms),
+                          rtol=1e-5)
 
     # Apply magnitudes
     dora_contribution = normalized * magnitudes

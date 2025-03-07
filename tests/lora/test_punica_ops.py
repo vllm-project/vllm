@@ -5,38 +5,28 @@ import pytest
 import torch
 
 import vllm.lora.ops.triton_ops  # noqa: F401
-from vllm.lora.ops.torch_ops import (
-    bgmv_expand,
-    bgmv_expand_slice,
-    bgmv_shrink,
-    sgmv_expand,
-    sgmv_expand_slice,
-    sgmv_shrink,
-)
+from vllm.lora.ops.torch_ops import (bgmv_expand, bgmv_expand_slice,
+                                     bgmv_shrink, sgmv_expand,
+                                     sgmv_expand_slice, sgmv_shrink)
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
 
-from .utils import (
-    PunicaTensors,
-    assert_close,
-    generate_data,
-    generate_data_for_expand_nslices,
-    generate_data_for_nslices,
-)
+from .utils import (PunicaTensors, assert_close, generate_data,
+                    generate_data_for_expand_nslices,
+                    generate_data_for_nslices)
 
 
 # Utility reference implementations for DoRA operations
-def apply_dora_norm_magnitudes(
-    lora_a: torch.Tensor, lora_b: torch.Tensor, magnitude_param: torch.Tensor
-) -> torch.Tensor:
+def apply_dora_norm_magnitudes(lora_a: torch.Tensor, lora_b: torch.Tensor,
+                               magnitude_param: torch.Tensor) -> torch.Tensor:
     """
     Apply DoRA normalization and magnitude scaling to LoRA weights.
-
+    
     Args:
         lora_a: The LoRA A weights [input_dim, rank]
         lora_b: The LoRA B weights [rank, output_dim]
         magnitude_param: The DoRA magnitude parameters [output_dim]
-
+        
     Returns:
         The result after applying DoRA transformation
     """
@@ -50,8 +40,7 @@ def apply_dora_norm_magnitudes(
     # For each output dimension, we normalize the weights coming from each rank
     norm = torch.norm(lora_product, dim=0, keepdim=True)
     normalized_product = lora_product / (
-        norm + 1e-5
-    )  # Add epsilon for numerical stability
+        norm + 1e-5)  # Add epsilon for numerical stability
 
     # Scale each column by the corresponding magnitude parameter
     magnitude_scaled = normalized_product * magnitude_param.view(1, -1)
@@ -61,18 +50,11 @@ def apply_dora_norm_magnitudes(
 
 # Utility shrink and expand operations used as reference implementations.
 def sgmv_shrink_for_nslices(
-    nslices: int,
-    inputs_tensor: torch.Tensor,
-    lora_weights_lst: list[torch.Tensor],
-    out_tensor: torch.Tensor,
-    b_seq_start_loc: torch.Tensor,
-    seq_len_tensor: torch.Tensor,
-    prompt_lora_mapping: torch.Tensor,
-    batches: int,
-    max_seq_length: int,
-    num_tokens: int,
-    scaling: float,
-):
+        nslices: int, inputs_tensor: torch.Tensor,
+        lora_weights_lst: list[torch.Tensor], out_tensor: torch.Tensor,
+        b_seq_start_loc: torch.Tensor, seq_len_tensor: torch.Tensor,
+        prompt_lora_mapping: torch.Tensor, batches: int, max_seq_length: int,
+        num_tokens: int, scaling: float):
     """
     Wrapper around sgmv_shrink that handles any nslices.
     """
@@ -91,20 +73,15 @@ def sgmv_shrink_for_nslices(
         )
 
 
-def sgmv_expand_for_nslices(
-    nslices: int,
-    hidden_size: int,
-    inputs_tensor: torch.Tensor,
-    lora_weights_lst: list[torch.Tensor],
-    out_tensor: torch.Tensor,
-    b_seq_start_loc: torch.Tensor,
-    seq_len_tensor: torch.Tensor,
-    prompt_lora_mapping: torch.Tensor,
-    batches: int,
-    max_seq_length: int,
-    num_tokens: int,
-    add_inputs: bool,
-) -> None:
+def sgmv_expand_for_nslices(nslices: int, hidden_size: int,
+                            inputs_tensor: torch.Tensor,
+                            lora_weights_lst: list[torch.Tensor],
+                            out_tensor: torch.Tensor,
+                            b_seq_start_loc: torch.Tensor,
+                            seq_len_tensor: torch.Tensor,
+                            prompt_lora_mapping: torch.Tensor, batches: int,
+                            max_seq_length: int, num_tokens: int,
+                            add_inputs: bool) -> None:
     """
     Wrapper around sgmv_expand that handles any nslices.
     """
@@ -146,17 +123,9 @@ def sgmv_expand_for_nslices(
 _dict_lock = Lock()
 
 
-def check_sgmv_shrink(
-    batches: int,
-    num_loras: int,
-    rank: int,
-    hidden_size: int,
-    nslices: int,
-    dtype: torch.dtype,
-    device: str,
-    seq_length: int,
-    scaling: float,
-):
+def check_sgmv_shrink(batches: int, num_loras: int, rank: int,
+                      hidden_size: int, nslices: int, dtype: torch.dtype,
+                      device: str, seq_length: int, scaling: float):
     """
     Compare outputs of vllm.sgmv_shrink kernel against a reference
     implementation.
@@ -206,17 +175,9 @@ def check_sgmv_shrink(
     assert_close(data.our_out_tensor, data.ref_out_tensor)
 
 
-def check_sgmv_expand(
-    batches: int,
-    num_loras: int,
-    rank: int,
-    hidden_size: int,
-    nslices: int,
-    dtype: torch.dtype,
-    device: str,
-    seq_length: int,
-    add_inputs: bool,
-):
+def check_sgmv_expand(batches: int, num_loras: int, rank: int,
+                      hidden_size: int, nslices: int, dtype: torch.dtype,
+                      device: str, seq_length: int, add_inputs: bool):
     """
     Compare outputs of vllm.sgmv_expand kernel against a reference
     implementation.
@@ -251,33 +212,25 @@ def check_sgmv_expand(
             add_inputs=add_inputs,
         )
 
-    sgmv_expand_for_nslices(
-        nslices,
-        hidden_size,
-        data.inputs_tensor,
-        data.lora_weights,
-        data.ref_out_tensor,
-        data.b_seq_start_loc,
-        data.seq_len_tensor,
-        data.prompt_lora_mapping,
-        batches,
-        max_seq_length,
-        token_nums,
-        add_inputs=add_inputs,
-    )
+    sgmv_expand_for_nslices(nslices,
+                            hidden_size,
+                            data.inputs_tensor,
+                            data.lora_weights,
+                            data.ref_out_tensor,
+                            data.b_seq_start_loc,
+                            data.seq_len_tensor,
+                            data.prompt_lora_mapping,
+                            batches,
+                            max_seq_length,
+                            token_nums,
+                            add_inputs=add_inputs)
 
     assert_close(data.our_out_tensor, data.ref_out_tensor)
 
 
-def check_bgmv_shrink(
-    batches: int,
-    num_loras: int,
-    rank: int,
-    hidden_size: int,
-    dtype: torch.dtype,
-    device: str,
-    scaling: float,
-):
+def check_bgmv_shrink(batches: int, num_loras: int, rank: int,
+                      hidden_size: int, dtype: torch.dtype, device: str,
+                      scaling: float):
     """
     Compare vllm.bgmv_shrink against a reference implementation.
     """
@@ -313,15 +266,9 @@ def check_bgmv_shrink(
     assert_close(data.our_out_tensor, data.ref_out_tensor)
 
 
-def check_bgmv_expand(
-    batches: int,
-    num_loras: int,
-    rank: int,
-    hidden_size: int,
-    dtype: torch.dtype,
-    device: str,
-    add_inputs: bool,
-):
+def check_bgmv_expand(batches: int, num_loras: int, rank: int,
+                      hidden_size: int, dtype: torch.dtype, device: str,
+                      add_inputs: bool):
     """
     Compare vllm.bgmv_expand against a reference implementation.
     """
@@ -354,16 +301,9 @@ def check_bgmv_expand(
     assert_close(data.our_out_tensor, data.ref_out_tensor)
 
 
-def check_bgmv_expand_slice(
-    batches: int,
-    num_loras: int,
-    rank: int,
-    hidden_size: int,
-    nslices: int,
-    dtype: torch.dtype,
-    device: str,
-    add_inputs: bool,
-):
+def check_bgmv_expand_slice(batches: int, num_loras: int, rank: int,
+                            hidden_size: int, nslices: int, dtype: torch.dtype,
+                            device: str, add_inputs: bool):
     """
     Compare vllm.bgmv_expand_slice against a reference implementation.
     """
@@ -490,7 +430,7 @@ HIDDEN_SIZES = [
     128000,
     128256,
 ]
-# The size of TP
+#The size of TP
 divisibility = [1, 2, 8, 16, 64]
 
 all_hidden_size = []
@@ -522,10 +462,10 @@ DEVICES = [f"cuda:{0}"]
 SEED = [0]
 
 
-@pytest.mark.parametrize("batches", test_params["batches"])
-@pytest.mark.parametrize("num_loras", test_params["num_loras"])
-@pytest.mark.parametrize("rank", test_params["max_ranks"])
-@pytest.mark.parametrize("hidden_size", test_params["hidden_sizes"])
+@pytest.mark.parametrize("batches", test_params['batches'])
+@pytest.mark.parametrize("num_loras", test_params['num_loras'])
+@pytest.mark.parametrize("rank", test_params['max_ranks'])
+@pytest.mark.parametrize("hidden_size", test_params['hidden_sizes'])
 @pytest.mark.parametrize("nslices", [1, 2, 3])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
@@ -546,35 +486,31 @@ def test_punica_sgmv(
     current_platform.seed_everything(seed)
 
     if op_type == "shrink":
-        check_sgmv_shrink(
-            batches=batches,
-            num_loras=num_loras,
-            rank=rank,
-            hidden_size=hidden_size,
-            nslices=nslices,
-            dtype=dtype,
-            device=device,
-            seq_length=128,
-            scaling=0.5,
-        )
+        check_sgmv_shrink(batches=batches,
+                          num_loras=num_loras,
+                          rank=rank,
+                          hidden_size=hidden_size,
+                          nslices=nslices,
+                          dtype=dtype,
+                          device=device,
+                          seq_length=128,
+                          scaling=0.5)
     else:
-        check_sgmv_expand(
-            batches=batches,
-            num_loras=num_loras,
-            rank=rank,
-            hidden_size=hidden_size,
-            nslices=nslices,
-            dtype=dtype,
-            device=device,
-            seq_length=128,
-            add_inputs=True,
-        )
+        check_sgmv_expand(batches=batches,
+                          num_loras=num_loras,
+                          rank=rank,
+                          hidden_size=hidden_size,
+                          nslices=nslices,
+                          dtype=dtype,
+                          device=device,
+                          seq_length=128,
+                          add_inputs=True)
 
 
-@pytest.mark.parametrize("batches", hs_test_params["batches"])
-@pytest.mark.parametrize("num_loras", hs_test_params["num_loras"])
-@pytest.mark.parametrize("rank", hs_test_params["max_ranks"])
-@pytest.mark.parametrize("hidden_size", hs_test_params["hidden_sizes"])
+@pytest.mark.parametrize("batches", hs_test_params['batches'])
+@pytest.mark.parametrize("num_loras", hs_test_params['num_loras'])
+@pytest.mark.parametrize("rank", hs_test_params['max_ranks'])
+@pytest.mark.parametrize("hidden_size", hs_test_params['hidden_sizes'])
 @pytest.mark.parametrize("nslices", [1, 2, 3])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
@@ -595,35 +531,31 @@ def test_punica_sgmv_hidden_size(
     current_platform.seed_everything(seed)
 
     if op_type == "shrink":
-        check_sgmv_shrink(
-            batches=batches,
-            num_loras=num_loras,
-            rank=rank,
-            hidden_size=hidden_size,
-            nslices=nslices,
-            dtype=dtype,
-            device=device,
-            seq_length=128,
-            scaling=0.5,
-        )
+        check_sgmv_shrink(batches=batches,
+                          num_loras=num_loras,
+                          rank=rank,
+                          hidden_size=hidden_size,
+                          nslices=nslices,
+                          dtype=dtype,
+                          device=device,
+                          seq_length=128,
+                          scaling=0.5)
     else:
-        check_sgmv_expand(
-            batches=batches,
-            num_loras=num_loras,
-            rank=rank,
-            hidden_size=hidden_size,
-            nslices=nslices,
-            dtype=dtype,
-            device=device,
-            seq_length=128,
-            add_inputs=True,
-        )
+        check_sgmv_expand(batches=batches,
+                          num_loras=num_loras,
+                          rank=rank,
+                          hidden_size=hidden_size,
+                          nslices=nslices,
+                          dtype=dtype,
+                          device=device,
+                          seq_length=128,
+                          add_inputs=True)
 
 
-@pytest.mark.parametrize("batches", test_params["batches"])
-@pytest.mark.parametrize("num_loras", test_params["num_loras"])
-@pytest.mark.parametrize("rank", test_params["max_ranks"])
-@pytest.mark.parametrize("hidden_size", test_params["hidden_sizes"])
+@pytest.mark.parametrize("batches", test_params['batches'])
+@pytest.mark.parametrize("num_loras", test_params['num_loras'])
+@pytest.mark.parametrize("rank", test_params['max_ranks'])
+@pytest.mark.parametrize("hidden_size", test_params['hidden_sizes'])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
@@ -642,31 +574,27 @@ def test_punica_bgmv(
     current_platform.seed_everything(seed)
 
     if op_type == "shrink":
-        check_bgmv_shrink(
-            batches=batches,
-            num_loras=num_loras,
-            rank=rank,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            device=device,
-            scaling=0.5,
-        )
+        check_bgmv_shrink(batches=batches,
+                          num_loras=num_loras,
+                          rank=rank,
+                          hidden_size=hidden_size,
+                          dtype=dtype,
+                          device=device,
+                          scaling=0.5)
     else:
-        check_bgmv_expand(
-            batches=batches,
-            num_loras=num_loras,
-            rank=rank,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            device=device,
-            add_inputs=True,
-        )
+        check_bgmv_expand(batches=batches,
+                          num_loras=num_loras,
+                          rank=rank,
+                          hidden_size=hidden_size,
+                          dtype=dtype,
+                          device=device,
+                          add_inputs=True)
 
 
-@pytest.mark.parametrize("batches", hs_test_params["batches"])
-@pytest.mark.parametrize("num_loras", hs_test_params["num_loras"])
-@pytest.mark.parametrize("rank", hs_test_params["max_ranks"])
-@pytest.mark.parametrize("hidden_size", hs_test_params["hidden_sizes"])
+@pytest.mark.parametrize("batches", hs_test_params['batches'])
+@pytest.mark.parametrize("num_loras", hs_test_params['num_loras'])
+@pytest.mark.parametrize("rank", hs_test_params['max_ranks'])
+@pytest.mark.parametrize("hidden_size", hs_test_params['hidden_sizes'])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
@@ -685,91 +613,74 @@ def test_punica_bgmv_hidden_size(
     current_platform.seed_everything(seed)
 
     if op_type == "shrink":
-        check_bgmv_shrink(
-            batches=batches,
-            num_loras=num_loras,
-            rank=rank,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            device=device,
-            scaling=0.5,
-        )
+        check_bgmv_shrink(batches=batches,
+                          num_loras=num_loras,
+                          rank=rank,
+                          hidden_size=hidden_size,
+                          dtype=dtype,
+                          device=device,
+                          scaling=0.5)
     else:
-        check_bgmv_expand(
-            batches=batches,
-            num_loras=num_loras,
-            rank=rank,
-            hidden_size=hidden_size,
-            dtype=dtype,
-            device=device,
-            add_inputs=True,
-        )
+        check_bgmv_expand(batches=batches,
+                          num_loras=num_loras,
+                          rank=rank,
+                          hidden_size=hidden_size,
+                          dtype=dtype,
+                          device=device,
+                          add_inputs=True)
 
 
-@pytest.mark.parametrize("batches", test_params["batches"])
-@pytest.mark.parametrize("num_loras", test_params["num_loras"])
-@pytest.mark.parametrize("rank", test_params["max_ranks"])
-@pytest.mark.parametrize("hidden_size", test_params["hidden_sizes"])
+@pytest.mark.parametrize("batches", test_params['batches'])
+@pytest.mark.parametrize("num_loras", test_params['num_loras'])
+@pytest.mark.parametrize("rank", test_params['max_ranks'])
+@pytest.mark.parametrize("hidden_size", test_params['hidden_sizes'])
 @pytest.mark.parametrize("nslices", [2, 3])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
-def test_punica_bgmv_expand_nslices(
-    batches: int,
-    num_loras: int,
-    rank: int,
-    hidden_size: int,
-    nslices: int,
-    dtype: torch.dtype,
-    device: str,
-    seed: int,
-):
+def test_punica_bgmv_expand_nslices(batches: int, num_loras: int, rank: int,
+                                    hidden_size: int, nslices: int,
+                                    dtype: torch.dtype, device: str,
+                                    seed: int):
+
     torch.set_default_device(device)
     current_platform.seed_everything(seed)
 
-    check_bgmv_expand_slice(
-        batches=batches,
-        num_loras=num_loras,
-        rank=rank,
-        hidden_size=hidden_size,
-        nslices=nslices,
-        dtype=dtype,
-        device=device,
-        add_inputs=True,
-    )
+    check_bgmv_expand_slice(batches=batches,
+                            num_loras=num_loras,
+                            rank=rank,
+                            hidden_size=hidden_size,
+                            nslices=nslices,
+                            dtype=dtype,
+                            device=device,
+                            add_inputs=True)
 
 
-@pytest.mark.parametrize("batches", hs_test_params["batches"])
-@pytest.mark.parametrize("num_loras", hs_test_params["num_loras"])
-@pytest.mark.parametrize("rank", hs_test_params["max_ranks"])
-@pytest.mark.parametrize("hidden_size", hs_test_params["hidden_sizes"])
+@pytest.mark.parametrize("batches", hs_test_params['batches'])
+@pytest.mark.parametrize("num_loras", hs_test_params['num_loras'])
+@pytest.mark.parametrize("rank", hs_test_params['max_ranks'])
+@pytest.mark.parametrize("hidden_size", hs_test_params['hidden_sizes'])
 @pytest.mark.parametrize("nslices", [2, 3])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
-def test_punica_bgmv_expand_nslices_hidden_size(
-    batches: int,
-    num_loras: int,
-    rank: int,
-    hidden_size: int,
-    nslices: int,
-    dtype: torch.dtype,
-    device: str,
-    seed: int,
-):
+def test_punica_bgmv_expand_nslices_hidden_size(batches: int, num_loras: int,
+                                                rank: int, hidden_size: int,
+                                                nslices: int,
+                                                dtype: torch.dtype,
+                                                device: str, seed: int):
+
     torch.set_default_device(device)
     current_platform.seed_everything(seed)
 
-    check_bgmv_expand_slice(
-        batches=batches,
-        num_loras=num_loras,
-        rank=rank,
-        hidden_size=hidden_size,
-        nslices=nslices,
-        dtype=dtype,
-        device=device,
-        add_inputs=True,
-    )
+    check_bgmv_expand_slice(batches=batches,
+                            num_loras=num_loras,
+                            rank=rank,
+                            hidden_size=hidden_size,
+                            nslices=nslices,
+                            dtype=dtype,
+                            device=device,
+                            add_inputs=True)
 
 
 ########################### DoRA specific tests ##########################
@@ -787,7 +698,7 @@ def test_dora_normalization():
     lora_a = torch.rand((input_dim, rank), device=device)
     lora_b = torch.rand((rank, output_dim), device=device)
     # Magnitude param should match output_dim, not rank
-    magnitude_param = torch.rand((output_dim,), device=device)
+    magnitude_param = torch.rand((output_dim, ), device=device)
 
     # Compute the DoRA transformation
     dora_output = apply_dora_norm_magnitudes(lora_a, lora_b, magnitude_param)
@@ -808,14 +719,14 @@ def test_dora_normalization():
 
     # Check that the column norms are approximately equal to the magnitude parameters
     actual_col_norms = torch.norm(dora_output, dim=0)
-    assert torch.allclose(
-        actual_col_norms, magnitude_param, rtol=1e-4, atol=1e-4
-    )
+    assert torch.allclose(actual_col_norms,
+                          magnitude_param,
+                          rtol=1e-4,
+                          atol=1e-4)
 
 
-@pytest.mark.parametrize(
-    "device", ["cuda"] if torch.cuda.is_available() else ["cpu"]
-)
+@pytest.mark.parametrize("device",
+                         ["cuda"] if torch.cuda.is_available() else ["cpu"])
 def test_dora_vs_lora_performance(device):
     """Compare the performance of DoRA vs regular LoRA."""
     # Set up dimensions
@@ -832,7 +743,7 @@ def test_dora_vs_lora_performance(device):
     lora_b = torch.rand((rank, output_dim), device=device)
 
     # Create DoRA magnitude parameters - should match output_dim
-    magnitude_param = torch.rand((output_dim,), device=device)
+    magnitude_param = torch.rand((output_dim, ), device=device)
 
     # Regular LoRA forward pass (no magnitude normalization)
     def lora_forward():
@@ -873,16 +784,15 @@ def test_dora_vs_lora_performance(device):
     # Print performance comparison
     print(f"Regular LoRA time: {lora_time:.6f} seconds for 100 iterations")
     print(f"DoRA time: {dora_time:.6f} seconds for 100 iterations")
-    print(f"Overhead: {(dora_time / lora_time - 1) * 100:.2f}%")
+    print(f"Overhead: {(dora_time/lora_time - 1)*100:.2f}%")
 
     # DoRA is expected to have some overhead (acceptable up to 200%)
     assert dora_time < lora_time * 3.0, "DoRA overhead too high"
 
 
 # Test implementing DoRA with packed lora weights
-@pytest.mark.parametrize(
-    "device", ["cuda"] if torch.cuda.is_available() else ["cpu"]
-)
+@pytest.mark.parametrize("device",
+                         ["cuda"] if torch.cuda.is_available() else ["cpu"])
 def test_dora_with_packed_weights(device):
     """Test DoRA with packed lora weights."""
     from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
@@ -899,9 +809,8 @@ def test_dora_with_packed_weights(device):
         lora_alpha=1,
         lora_a=torch.rand((input_dim, rank), device=device),
         lora_b=torch.rand((rank, output_dim), device=device),
-        magnitude_param=torch.rand(
-            (output_dim,), device=device
-        ),  # Should match output_dim
+        magnitude_param=torch.rand((output_dim, ),
+                                   device=device),  # Should match output_dim
     )
 
     lora2 = LoRALayerWeights(
@@ -910,9 +819,8 @@ def test_dora_with_packed_weights(device):
         lora_alpha=1,
         lora_a=torch.rand((input_dim, rank), device=device),
         lora_b=torch.rand((rank, output_dim), device=device),
-        magnitude_param=torch.rand(
-            (output_dim,), device=device
-        ),  # Should match output_dim
+        magnitude_param=torch.rand((output_dim, ),
+                                   device=device),  # Should match output_dim
     )
 
     # Pack the LoRA weights
@@ -925,23 +833,19 @@ def test_dora_with_packed_weights(device):
     assert isinstance(packed_lora.magnitude_param, list)
     assert len(packed_lora.magnitude_param) == 2
     assert packed_lora.magnitude_param[0].shape == (
-        output_dim,
-    )  # Should match output_dim
+        output_dim, )  # Should match output_dim
     assert packed_lora.magnitude_param[1].shape == (
-        output_dim,
-    )  # Should match output_dim
+        output_dim, )  # Should match output_dim
 
 
 @pytest.mark.parametrize("batches", [1, 2])
 @pytest.mark.parametrize("num_loras", [1, 2])
 @pytest.mark.parametrize("rank", [8])
 @pytest.mark.parametrize("hidden_size", [128])
-@pytest.mark.parametrize(
-    "device", ["cuda"] if torch.cuda.is_available() else ["cpu"]
-)
-def test_dora_in_lora_ops(
-    batches: int, num_loras: int, rank: int, hidden_size: int, device: str
-):
+@pytest.mark.parametrize("device",
+                         ["cuda"] if torch.cuda.is_available() else ["cpu"])
+def test_dora_in_lora_ops(batches: int, num_loras: int, rank: int,
+                          hidden_size: int, device: str):
     """Test how DoRA would be used in LoRA operations."""
     # Create test data like a regular LoRA test
     torch.set_default_device(device)
@@ -962,11 +866,9 @@ def test_dora_in_lora_ops(
     # Matrix A: [input_dim, rank]
     # Matrix B: [rank, output_dim]
     lora_a_weights = torch.rand(
-        (num_loras, hidden_size, rank)
-    )  # [hidden_size, rank] for each lora
+        (num_loras, hidden_size, rank))  # [hidden_size, rank] for each lora
     lora_b_weights = torch.rand(
-        (num_loras, rank, hidden_size)
-    )  # [rank, hidden_size] for each lora
+        (num_loras, rank, hidden_size))  # [rank, hidden_size] for each lora
 
     # DoRA magnitude parameters - should match output dimension (hidden_size)
     magnitude_params = torch.rand((num_loras, hidden_size))
@@ -976,12 +878,11 @@ def test_dora_in_lora_ops(
     ref_dora_out_tensor = torch.zeros((total_tokens, hidden_size))
 
     # Create lora indices tensor
-    lora_indices_tensor = torch.randint(0, num_loras, (batches,))
+    lora_indices_tensor = torch.randint(0, num_loras, (batches, ))
 
     # Expand indices to token level
-    exploded_indices = torch.repeat_interleave(
-        lora_indices_tensor, seq_len_tensor
-    )
+    exploded_indices = torch.repeat_interleave(lora_indices_tensor,
+                                               seq_len_tensor)
 
     # Implement regular LoRA for reference
     for i in range(total_tokens):
@@ -995,9 +896,8 @@ def test_dora_in_lora_ops(
 
         # Then apply to input: [1, hidden_size] @ [hidden_size, hidden_size] = [1, hidden_size]
         token_input = inputs_tensor[i].unsqueeze(0)  # [1, hidden_size]
-        lora_output = torch.matmul(
-            token_input, lora_product
-        )  # [1, hidden_size]
+        lora_output = torch.matmul(token_input,
+                                   lora_product)  # [1, hidden_size]
         ref_lora_out_tensor[i] = lora_output
 
     # Implement DoRA for reference
@@ -1008,9 +908,8 @@ def test_dora_in_lora_ops(
         magnitude = magnitude_params[lora_idx]  # [hidden_size]
 
         # For DoRA: x @ norm(A @ B) * magnitude
-        lora_product = torch.matmul(
-            lora_a, lora_b
-        )  # [hidden_size, hidden_size]
+        lora_product = torch.matmul(lora_a,
+                                    lora_b)  # [hidden_size, hidden_size]
 
         # Normalize column-wise
         norm = torch.norm(lora_product, dim=0, keepdim=True)
@@ -1021,9 +920,8 @@ def test_dora_in_lora_ops(
 
         # Apply to input
         token_input = inputs_tensor[i].unsqueeze(0)  # [1, hidden_size]
-        dora_output = torch.matmul(
-            token_input, magnitude_scaled
-        )  # [1, hidden_size]
+        dora_output = torch.matmul(token_input,
+                                   magnitude_scaled)  # [1, hidden_size]
         ref_dora_out_tensor[i] = dora_output
 
     # Compare the outputs - they should be different due to normalization
