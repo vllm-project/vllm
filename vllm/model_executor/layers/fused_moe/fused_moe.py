@@ -17,6 +17,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
+if current_platform.is_hpu():
+    import habana_frameworks.torch as htorch
+
 logger = init_logger(__name__)
 
 
@@ -1088,6 +1091,8 @@ def grouped_topk(hidden_states: torch.Tensor,
         scores = gating_output.sigmoid()
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
+    if current_platform.is_hpu():
+        htorch.core.mark_step()
 
     num_token = scores.shape[0]
     if e_score_correction_bias is not None:

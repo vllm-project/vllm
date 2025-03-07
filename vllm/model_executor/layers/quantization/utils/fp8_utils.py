@@ -155,6 +155,154 @@ class Fp8LinearGenericOp:
                                  (input_group_shape == (1, input.shape[1])))
 
 
+def pad_weight(weight, block_size):
+    """Pads a matrix to make its dimensions multiples of block_size."""
+    M, N = weight.shape[-2:]
+    block_size_m, block_size_n = block_size
+    pad_M = (block_size_m - M % block_size_m) % block_size_m
+    pad_N = (block_size_n - N % block_size_n) % block_size_n
+
+    if pad_M == 0 and pad_N == 0:
+        return weight, M, N  # No padding needed
+    padded_weight = torch.nn.functional.pad(weight, (0, pad_N, 0, pad_M),
+                                            mode='constant',
+                                            value=0)
+    return padded_weight, M, N  # Return original dimensions for unpadding
+
+
+def unpad_weight(weight, original_M, original_N, keep_first_dim=False):
+    """Removes padding from the matrix to restore its original shape."""
+    if (weight.shape[-2] == original_M) and (weight.shape[-1] == original_N):
+        return weight
+    if keep_first_dim:
+        return weight[:, :original_M, :original_N]
+    else:
+        return weight[:original_M, :original_N]
+
+
+def pad_block_fp8_weight_naive(weight, weight_scale, block_size):
+
+    assert len(block_size) == 2
+
+    block_size_m, block_size_n = block_size
+    weight_scale_m, weight_scale_n = weight_scale.shape[-2:]
+
+    weight, orig_M, orig_N = pad_weight(weight, block_size)
+    M, N = weight.shape[-2:]
+
+    assert weight_scale_m == M // block_size_m
+    assert weight_scale_n == N // block_size_n
+
+    return weight, orig_M, orig_N
+
+
+def dynamic_quant(data, single_scale=False):
+    #FULL_RANGE = 240.0
+    FULL_RANGE = 448.0
+    if single_scale:
+        scale = ((torch.abs(data)).max() + 1e-8) / FULL_RANGE
+    else:
+        scale = ((torch.abs(data)).max(dim=-1).values +
+                 1e-8) / FULL_RANGE  #torch.finfo(torch.float8_e4m3fn).max
+        scale = scale.unsqueeze(-1)
+    data_fp8 = torch.ops.hpu.cast_to_fp8_v2(data, 1.0 / scale, False, False,
+                                            torch.float8_e4m3fn)[0]
+    return data_fp8, scale.float()
+
+
+def dequant_block_fp8_weight_naive(weight,
+                                   weight_scale,
+                                   block_size,
+                                   dtype=torch.bfloat16,
+                                   original_M=None,
+                                   original_N=None,
+                                   do_unpad=False):
+    if weight_scale is None:
+        return weight
+    assert len(block_size) == 2
+
+    weight_shape_len = len(weight.shape)
+
+    block_size_m, block_size_n = block_size
+
+    # mul scale
+    if weight_shape_len == 2:
+        weight_scale_m, weight_scale_n = weight_scale.shape
+        weight_scale = weight_scale.view(weight_scale_m, 1, weight_scale_n, 1)
+        weight = weight.view(weight_scale_m, block_size_m, weight_scale_n,
+                             block_size_n)
+        dequant_weight = weight.to(dtype) * weight_scale.to(dtype)
+        dequant_weight = dequant_weight.view(weight_scale_m * block_size_m,
+                                             weight_scale_n * block_size_n)
+        keep_first_dim = False
+    elif weight_shape_len == 3:
+        fd, weight_scale_m, weight_scale_n = weight_scale.shape
+        weight_scale = weight_scale.view(fd, weight_scale_m, 1, weight_scale_n,
+                                         1)
+        weight = weight.view(fd, weight_scale_m, block_size_m, weight_scale_n,
+                             block_size_n)
+        dequant_weight = weight.to(dtype) * weight_scale.to(dtype)
+        dequant_weight = dequant_weight.view(fd, weight_scale_m * block_size_m,
+                                             weight_scale_n * block_size_n)
+        keep_first_dim = True
+    else:
+        raise ValueError("Only support original weight shape is either 2 or 3")
+
+    if do_unpad:
+        dequant_weight = unpad_weight(dequant_weight,
+                                      original_M,
+                                      original_N,
+                                      keep_first_dim=keep_first_dim)
+
+    return dequant_weight
+
+
+def apply_block_fp8_linear_hpu_dynamic(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    # View input as 2D matrix for fp8 methods
+    input_2d = input.view(-1, input.shape[-1])
+    output_shape = [*input.shape[:-1], weight.shape[0]]
+
+    x_fp8, x_scale = dynamic_quant(input_2d)
+
+    output = torch.ops.hpu.fp8_gemm_v2(x_fp8, False, weight, True, None,
+                                       torch.bfloat16, x_scale, weight_scale,
+                                       None, False)
+    if bias is not None:
+        output = output + bias
+    return output.to(dtype=input.dtype).view(*output_shape)
+
+
+def apply_block_fp8_linear_hpu_dequant(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    block_size: List[int],
+    weight_scale: torch.Tensor,
+    input_scale: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    original_M: torch.Tensor,
+    original_N: torch.Tensor,
+    do_unpad: bool = False,
+) -> torch.Tensor:
+    assert input_scale is None
+    # View input as 2D matrix for fp8 methods
+    input_2d = input.view(-1, input.shape[-1])
+    original_M = original_M.data.item()
+    original_N = original_N.data.item()
+    weight = dequant_block_fp8_weight_naive(weight, weight_scale, block_size,
+                                            input.dtype, original_M,
+                                            original_N, do_unpad)
+    output = torch.nn.functional.linear(input_2d, weight, bias=None)
+    if bias is not None:
+        output = output + bias
+    return output.to(dtype=input.dtype).view(*input.shape[:-1], -1)
+
+
 def input_to_float8(
         x: torch.Tensor,
         dtype: Optional[torch.dtype] = None
