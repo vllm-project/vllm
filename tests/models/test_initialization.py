@@ -6,6 +6,7 @@ import pytest
 from transformers import PretrainedConfig
 
 from vllm import LLM
+from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 
 from .registry import HF_EXAMPLE_MODELS
 
@@ -40,8 +41,10 @@ def test_can_initialize(model_arch):
         self.cache_config.num_gpu_blocks = 0
         self.cache_config.num_cpu_blocks = 0
 
-    with patch.object(LLM.get_engine_class(), "_initialize_kv_caches",
-                      _initialize_kv_caches):
+    # FIXME: when we turn V1 on by default, we will need to patch
+    # the corresponding method for V1 else the CI run will be long.
+    with (patch.object(V0LLMEngine, "_initialize_kv_caches",
+                       _initialize_kv_caches)):
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
