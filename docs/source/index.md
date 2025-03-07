@@ -159,6 +159,7 @@ design/multiprocessing
 
 design/v1/prefix_caching
 design/v1/metrics
+design/v1/lora
 :::
 
 % How to contribute to the vLLM project
