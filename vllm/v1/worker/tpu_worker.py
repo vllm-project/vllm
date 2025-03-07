@@ -75,6 +75,9 @@ class TPUWorker:
                         self.profile_dir)
             self.profiler = xp.start_server(9012)
 
+        if self.model_config.seed is None:
+            self.model_config.seed = 0
+
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
         torch.set_grad_enabled(False)
