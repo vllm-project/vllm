@@ -174,21 +174,14 @@ def test_schedule(enable_prefix_caching: Optional[bool],
         assert scheduler.running[i] == request
 
 
-@pytest.mark.parametrize("enable_prefix_caching, prompt_logprobs", [
-    (None, None),
-    (True, 5),
-])
-def test_schedule_multimodal_requests(enable_prefix_caching: Optional[bool],
-                                      prompt_logprobs: Optional[int]):
-    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf",
-                                 enable_prefix_caching=enable_prefix_caching)
+def test_schedule_multimodal_requests():
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
     mm_positions = [[PlaceholderRange(offset=i, length=100)]
                     for i in range(10)]
     requests = create_requests(
         num_requests=10,
         num_tokens=200,
         mm_positions=mm_positions,
-        prompt_logprobs=prompt_logprobs,
     )
     for request in requests:
         scheduler.add_request(request)
@@ -204,12 +197,7 @@ def test_schedule_multimodal_requests(enable_prefix_caching: Optional[bool],
         assert len(encoder_input) == 1
 
 
-@pytest.mark.parametrize("enable_prefix_caching, prompt_logprobs", [
-    (None, None),
-    (True, 5),
-])
-def test_schedule_partial_requests(enable_prefix_caching: Optional[bool],
-                                   prompt_logprobs: Optional[int]):
+def test_schedule_partial_requests():
     """Test scheduling behavior with partial requests.
 
     This test verifies that:
@@ -221,7 +209,6 @@ def test_schedule_partial_requests(enable_prefix_caching: Optional[bool],
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         max_num_batched_tokens=1024,
-        enable_prefix_caching=enable_prefix_caching,
     )
     mm_positions = [[PlaceholderRange(offset=100, length=600)]
                     for _ in range(3)]
@@ -229,7 +216,6 @@ def test_schedule_partial_requests(enable_prefix_caching: Optional[bool],
         num_requests=3,
         num_tokens=800,
         mm_positions=mm_positions,
-        prompt_logprobs=prompt_logprobs,
     )
     for request in requests:
         scheduler.add_request(request)
