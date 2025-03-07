@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import concurrent
@@ -8,6 +10,7 @@ import datetime
 import enum
 import gc
 import getpass
+import importlib
 import importlib.metadata
 import importlib.util
 import inspect
@@ -23,6 +26,7 @@ import tempfile
 import threading
 import time
 import traceback
+import types
 import uuid
 import warnings
 import weakref
@@ -500,6 +504,10 @@ def get_open_zmq_ipc_path() -> str:
     return f"ipc://{base_rpc_path}/{uuid4()}"
 
 
+def get_open_zmq_inproc_path() -> str:
+    return f"inproc://{uuid4()}"
+
+
 def get_open_port() -> int:
     """
     Get an open port for the vLLM process to listen on.
@@ -640,7 +648,7 @@ def create_kv_caches_with_random_flash(
     head_size: int,
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: int = 0,
+    seed: Optional[int] = None,
     device: Optional[str] = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
@@ -677,7 +685,7 @@ def create_kv_caches_with_random(
     head_size: int,
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: int = 0,
+    seed: Optional[int] = None,
     device: Optional[str] = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
 
@@ -978,7 +986,7 @@ def current_stream() -> torch.cuda.Stream:
     return _current_stream
 
 
-def enable_trace_function_call_for_thread(vllm_config: "VllmConfig") -> None:
+def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
     """Set up function tracing for the current thread,
     if enabled via the VLLM_TRACE_FUNCTION environment variable
     """
@@ -1973,7 +1981,7 @@ class MemorySnapshot:
         self.non_torch_memory = self.cuda_memory - self.torch_memory
         self.timestamp = time.time()
 
-    def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
+    def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
             cuda_memory=self.cuda_memory - other.cuda_memory,
@@ -2108,12 +2116,12 @@ def get_exception_traceback():
 def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
     path: str,
-    type: Any,
+    socket_type: Any,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
     mem = psutil.virtual_memory()
-    socket = ctx.socket(type)
+    socket = ctx.socket(socket_type)
 
     # Calculate buffer size based on system memory
     total_mem = mem.total / 1024**3
@@ -2127,29 +2135,27 @@ def make_zmq_socket(
     else:
         buf_size = -1  # Use system default buffer size
 
-    if type == zmq.constants.PULL:
+    if socket_type == zmq.constants.PULL:
         socket.setsockopt(zmq.constants.RCVHWM, 0)
         socket.setsockopt(zmq.constants.RCVBUF, buf_size)
         socket.connect(path)
-    elif type == zmq.constants.PUSH:
+    elif socket_type == zmq.constants.PUSH:
         socket.setsockopt(zmq.constants.SNDHWM, 0)
         socket.setsockopt(zmq.constants.SNDBUF, buf_size)
         socket.bind(path)
     else:
-        raise ValueError(f"Unknown Socket Type: {type}")
+        raise ValueError(f"Unknown Socket Type: {socket_type}")
 
     return socket
 
 
 @contextlib.contextmanager
-def zmq_socket_ctx(
-        path: str,
-        type: Any) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
+def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
-    ctx = zmq.Context(io_threads=2)  # type: ignore[attr-defined]
+    ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
-        yield make_zmq_socket(ctx, path, type)
+        yield make_zmq_socket(ctx, path, socket_type)
 
     except KeyboardInterrupt:
         logger.debug("Got Keyboard Interrupt.")
@@ -2194,8 +2200,8 @@ def bind_kv_cache(
     from vllm.model_executor.models.utils import extract_layer_index
     layer_need_kv_cache = [
         layer_name for layer_name in ctx
-        if ctx[layer_name].attn_type in (AttentionType.DECODER,
-                                         AttentionType.ENCODER_DECODER)
+        if (hasattr(ctx[layer_name], 'attn_type') and ctx[layer_name].attn_type
+            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER))
     ]
     layer_index_sorted = sorted(
         set(
@@ -2304,3 +2310,54 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
 
     type.__setattr__(cls, '__init__', wrapped_init)
     return cls
+
+
+class LazyLoader(types.ModuleType):
+    """
+    LazyLoader module borrowed from Tensorflow
+    https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
+    with a addition of "module caching".
+
+    Lazily import a module, mainly to avoid pulling in large dependencies.
+    Modules such as `xgrammar` might do additional side effects, so we
+    only want to use this when it is needed, delaying all eager effects
+    """
+
+    def __init__(
+        self,
+        local_name: str,
+        parent_module_globals: dict[str, Any],
+        name: str,
+    ):
+        self._local_name = local_name
+        self._parent_module_globals = parent_module_globals
+        self._module: types.ModuleType | None = None
+
+        super().__init__(str(name))
+
+    def _load(self) -> types.ModuleType:
+        # Import the target module and insert it into the parent's namespace
+        try:
+            module = importlib.import_module(self.__name__)
+            self._parent_module_globals[self._local_name] = module
+            # The additional add to sys.modules
+            # ensures library is actually loaded.
+            sys.modules[self._local_name] = module
+        except ModuleNotFoundError as err:
+            raise err from None
+
+        # Update this object's dict so that if someone keeps a
+        # reference to the LazyLoader, lookups are efficient
+        # (__getattr__ is only called on lookups that fail).
+        self.__dict__.update(module.__dict__)
+        return module
+
+    def __getattr__(self, item: Any) -> Any:
+        if self._module is None:
+            self._module = self._load()
+        return getattr(self._module, item)
+
+    def __dir__(self) -> list[str]:
+        if self._module is None:
+            self._module = self._load()
+        return dir(self._module)

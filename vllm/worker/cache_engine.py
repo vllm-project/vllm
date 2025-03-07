@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """CacheEngine class for managing the KV cache."""
+from math import prod
 from typing import List
 
-import numpy as np
 import torch
 
 from vllm import envs
@@ -90,7 +90,7 @@ class CacheEngine:
             # NOTE this assumption currently only holds for MLA so we only apply
             # this optimization when `use_mla` is true
             entry_shape = kv_cache_shape[2:]
-            entry_size = np.prod(entry_shape)
+            entry_size = prod(entry_shape)
             alloc_entry_size = align_to_256bytes(entry_size, self.dtype)
             alloc_shape = (*kv_cache_shape[:2], alloc_entry_size)
         else:

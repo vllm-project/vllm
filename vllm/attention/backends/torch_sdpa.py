@@ -7,11 +7,15 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 from torch.nn.functional import scaled_dot_product_attention
 
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
-                                              AttentionType)
+                                              AttentionType,
+                                              is_quantized_kv_cache)
+# yapf: enable
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.ipex_attn import PagedAttention
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
@@ -427,7 +431,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {supported_head_sizes}.")
-        if kv_cache_dtype != "auto":
+        if is_quantized_kv_cache(kv_cache_dtype):
             raise NotImplementedError(
                 "Torch SDPA backend does not support FP8 KV cache. "
                 "Please use xFormers backend instead.")

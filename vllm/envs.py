@@ -86,7 +86,6 @@ if TYPE_CHECKING:
     VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
     VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
     VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
-    VLLM_TEST_ENABLE_EP: bool = False
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -96,6 +95,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
+    VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
 
 
 def get_default_cache_root():
@@ -321,6 +321,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "XFORMERS": use XFormers
     # - "ROCM_FLASH": use ROCmFlashAttention
     # - "FLASHINFER": use flashinfer
+    # - "FLASHMLA": use FlashMLA
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
@@ -578,12 +579,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
                  ),
 
-    # If set, vLLM will use the experimental expert parallel implementation on
-    # the FusedMoE layer, using tensor parallelism size as expert parallelism
-    # size.
-    "VLLM_TEST_ENABLE_EP":
-    lambda: bool(int(os.getenv("VLLM_TEST_ENABLE_EP", "0"))),
-
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
     # so that users can colocate other actors on the same GPUs as vLLM.
@@ -636,6 +631,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
+
+    # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
+    "VLLM_MARLIN_USE_ATOMIC_ADD":
+    lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
 }
 
 # end-env-vars-definition

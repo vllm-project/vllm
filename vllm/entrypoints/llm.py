@@ -100,7 +100,8 @@ class LLM:
             This can be used for temporarily storing the states of the requests
             when their `best_of` sampling parameters are larger than 1. If all
             requests will have `best_of=1`, you can safely set this to 0.
-            Otherwise, too small values may cause out-of-memory (OOM) errors.
+            Noting that `best_of` is only supported in V0. Otherwise, too small
+            values may cause out-of-memory (OOM) errors.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
@@ -168,7 +169,7 @@ class LLM:
         quantization: Optional[str] = None,
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
-        seed: int = 0,
+        seed: Optional[int] = None,
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
@@ -244,6 +245,7 @@ class LLM:
             engine_args, usage_context=UsageContext.LLM_CLASS)
 
         self.request_counter = Counter()
+        self.default_sampling_params: Union[dict[str, Any], None] = None
 
     @staticmethod
     def get_engine_class() -> type[LLMEngine]:
@@ -268,10 +270,11 @@ class LLM:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
     def get_default_sampling_params(self) -> SamplingParams:
-        diff_sampling_param = (
-            self.llm_engine.model_config.get_diff_sampling_param())
-        if diff_sampling_param:
-            return SamplingParams.from_optional(**diff_sampling_param)
+        if self.default_sampling_params is None:
+            self.default_sampling_params = (
+                self.llm_engine.model_config.get_diff_sampling_param())
+        if self.default_sampling_params:
+            return SamplingParams.from_optional(**self.default_sampling_params)
         return SamplingParams()
 
     @overload
