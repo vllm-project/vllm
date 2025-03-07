@@ -5,21 +5,15 @@ from typing import Any, Dict, List, Literal, Optional, Set, Type, Union
 
 import torch
 
-from vllm.adapter_commons.utils import (
-    add_adapter_worker,
-    apply_adapters_worker,
-    list_adapters_worker,
-    set_active_adapters_worker,
-)
+from vllm.adapter_commons.utils import (add_adapter_worker,
+                                        apply_adapters_worker,
+                                        list_adapters_worker,
+                                        set_active_adapters_worker)
 from vllm.adapter_commons.worker_manager import AbstractWorkerManager
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.models import (
-    LoRAModel,
-    LoRAModelManager,
-    LRUCacheLoRAModelManager,
-    create_lora_manager,
-)
+from vllm.lora.models import (LoRAModel, LoRAModelManager,
+                              LRUCacheLoRAModelManager, create_lora_manager)
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
@@ -91,15 +85,14 @@ class WorkerLoRAManager(AbstractWorkerManager):
     def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
         try:
             supported_lora_modules = (
-                self._adapter_manager.supported_lora_modules
-            )
+                self._adapter_manager.supported_lora_modules)
             packed_modules_mapping = (
-                self._adapter_manager.packed_modules_mapping
-            )
+                self._adapter_manager.packed_modules_mapping)
             expected_lora_modules: List[str] = []
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
-                    expected_lora_modules.extend(packed_modules_mapping[module])
+                    expected_lora_modules.extend(
+                        packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
 
@@ -107,8 +100,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 
             peft_helper = PEFTHelper.from_local_dir(
-                lora_path, self.max_position_embeddings
-            )
+                lora_path, self.max_position_embeddings)
 
             # Validates the LoRA configuration against requirements before
             # loading weights, throwing an exception if validation fails.
@@ -118,10 +110,8 @@ class WorkerLoRAManager(AbstractWorkerManager):
             # to ensure correct loading of lora weights.
             model = self._adapter_manager.model
             hf_to_vllm_mapper = None
-            if (
-                hasattr(model, "hf_to_vllm_mapper")
-                and model.hf_to_vllm_mapper is not None
-            ):
+            if (hasattr(model, "hf_to_vllm_mapper")
+                    and model.hf_to_vllm_mapper is not None):
                 hf_to_vllm_mapper = model.hf_to_vllm_mapper
 
             lora = self._lora_model_cls.from_local_checkpoint(
@@ -131,12 +121,11 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
                 dtype=self.lora_config.lora_dtype,
-                target_embedding_padding=self.vocab_size
-                + self.lora_config.lora_extra_vocab_size,
+                target_embedding_padding=self.vocab_size +
+                self.lora_config.lora_extra_vocab_size,
                 embedding_modules=self.embedding_modules,
                 embedding_padding_modules=self.embedding_padding_modules,
-                weights_mapper=hf_to_vllm_mapper,
-            )
+                weights_mapper=hf_to_vllm_mapper)
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
@@ -146,29 +135,26 @@ class WorkerLoRAManager(AbstractWorkerManager):
             # For NotFoundError
             raise ValueError(
                 f"Loading lora {lora_request.lora_name} failed: No adapter "
-                f"found for {lora_request.lora_path}"
-            ) from e
+                f"found for {lora_request.lora_path}") from e
         except Exception as e:
             # For BadRequestError
             raise e
 
         if lora.extra_vocab_size > self.lora_config.lora_extra_vocab_size:
-            raise ValueError(
-                f"LoRA added vocab size {lora.extra_vocab_size} "
-                f"is greater than lora_extra_vocab_size "
-                f"{self.lora_config.lora_extra_vocab_size}."
-            )
+            raise ValueError(f"LoRA added vocab size {lora.extra_vocab_size} "
+                             f"is greater than lora_extra_vocab_size "
+                             f"{self.lora_config.lora_extra_vocab_size}.")
         return lora
 
     def add_dummy_lora(self, lora_request: LoRARequest, rank: int) -> bool:
         if lora_request.lora_int_id in self.list_adapters():
             return False
         if isinstance(self._cached_dummy_lora, LoRAModel):
-            dummy_lora = self._cached_dummy_lora.clone(lora_request.lora_int_id)
+            dummy_lora = self._cached_dummy_lora.clone(
+                lora_request.lora_int_id)
         else:
             dummy_lora = self._adapter_manager.create_dummy_lora(
-                lora_request.lora_int_id, rank, 1, self.embedding_modules
-            )
+                lora_request.lora_int_id, rank, 1, self.embedding_modules)
             if self._cached_dummy_lora is None:
                 self._cached_dummy_lora = dummy_lora
         return self._adapter_manager.add_adapter(dummy_lora)
@@ -176,33 +162,21 @@ class WorkerLoRAManager(AbstractWorkerManager):
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)
 
-    def set_active_adapters(
-        self, requests: Set[Any], mapping: Optional[Any]
-    ) -> None:
-        set_active_adapters_worker(
-            requests,
-            mapping,
-            self._apply_adapters,
-            self._adapter_manager.set_adapter_mapping,
-        )
+    def set_active_adapters(self, requests: Set[Any],
+                            mapping: Optional[Any]) -> None:
+        set_active_adapters_worker(requests, mapping, self._apply_adapters,
+                                   self._adapter_manager.set_adapter_mapping)
 
     def _apply_adapters(self, adapter_requests: Set[Any]) -> None:
-        apply_adapters_worker(
-            adapter_requests,
-            self.list_adapters,
-            self._adapter_manager.adapter_slots,
-            self.remove_adapter,
-            self.add_adapter,
-        )
+        apply_adapters_worker(adapter_requests, self.list_adapters,
+                              self._adapter_manager.adapter_slots,
+                              self.remove_adapter, self.add_adapter)
 
     def add_adapter(self, adapter_request: Any) -> bool:
-        return add_adapter_worker(
-            adapter_request,
-            self.list_adapters,
-            self._load_adapter,
-            self._adapter_manager.add_adapter,
-            self._adapter_manager.activate_adapter,
-        )
+        return add_adapter_worker(adapter_request, self.list_adapters,
+                                  self._load_adapter,
+                                  self._adapter_manager.add_adapter,
+                                  self._adapter_manager.activate_adapter)
 
     def remove_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.remove_adapter(adapter_id)
@@ -242,15 +216,13 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def _apply_adapters(self, lora_requests: Set[LoRARequest]) -> None:
         loras_map = {
             lora_request.lora_int_id: lora_request
-            for lora_request in lora_requests
-            if lora_request
+            for lora_request in lora_requests if lora_request
         }
         if len(loras_map) > self._adapter_manager.lora_slots:
             raise RuntimeError(
                 f"Number of requested LoRAs ({len(loras_map)}) is greater "
                 "than the number of GPU LoRA slots "
-                f"({self._adapter_manager.lora_slots})."
-            )
+                f"({self._adapter_manager.lora_slots}).")
         for lora in loras_map.values():
             self.add_adapter(lora)
 
@@ -265,18 +237,15 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             # Loading succeeded, now check if we will exceed cache capacity and
             # evict if the oldest adapter if so
             if len(self._adapter_manager) + 1 > self._adapter_manager.capacity:
-                assert isinstance(
-                    self._adapter_manager, LRUCacheLoRAModelManager
-                )
+                assert isinstance(self._adapter_manager,
+                                  LRUCacheLoRAModelManager)
                 self._adapter_manager.remove_oldest_adapter()
             # Then add the new adapter to the cache
             loaded = self._adapter_manager.add_adapter(lora)
         else:
             # If the lora is already loaded, just touch it to
             # update its position in the caches
-            loaded = (
-                self._adapter_manager.get_adapter(lora_request.lora_int_id)
-                is not None
-            )
+            loaded = self._adapter_manager.get_adapter(
+                lora_request.lora_int_id) is not None
         self._adapter_manager.activate_adapter(lora_request.lora_int_id)
         return loaded

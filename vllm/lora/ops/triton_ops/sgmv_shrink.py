@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Based on:
-Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
-Punica: Multi-Tenant LoRA Serving.
+Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
+Punica: Multi-Tenant LoRA Serving. 
 https://arxiv.org/abs/2310.18547
 """
 
@@ -20,30 +20,29 @@ from .utils import _get_lora_a_ptr
 
 @triton.jit
 def _sgmv_shrink_kernel(
-    input_ptr,
-    lora_ptr,  # 1-3
-    out_ptr,
-    N,
-    K,
-    b_seq_start_loc,
-    seq_lens,
-    lora_indices,
-    scaling,
-    input_d0_stride,
-    input_d1_stride,  # 1
-    lora_d0_stride,
-    lora_d1_stride,
-    lora_d2_stride,  # 1
-    output_d0_stride,
-    output_d1_stride,
-    output_d2_stride,  # 1
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    EVEN_K: tl.constexpr,
-    SPLIT_K: tl.constexpr,
-    SLICE_NUM: tl.constexpr,
-):
+        input_ptr,
+        lora_ptr,  #1-3
+        out_ptr,
+        N,
+        K,
+        b_seq_start_loc,
+        seq_lens,
+        lora_indices,
+        scaling,
+        input_d0_stride,
+        input_d1_stride,  # 1
+        lora_d0_stride,
+        lora_d1_stride,
+        lora_d2_stride,  # 1
+        output_d0_stride,
+        output_d1_stride,
+        output_d2_stride,  # 1 
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        EVEN_K: tl.constexpr,
+        SPLIT_K: tl.constexpr,
+        SLICE_NUM: tl.constexpr):
     """
     The sgmv's shrink triton kernel is based on GroupGEMM+SPLIT-K.
     The GEMM of Multi-LoRA can be considered as GroupGEMM. Additionally,
@@ -76,8 +75,7 @@ def _sgmv_shrink_kernel(
     cta_m_offset = m_offset + (pid_m * BLOCK_M)
     offset_m = tl.arange(0, BLOCK_M)
     ram = cta_m_offset + tl.max_contiguous(
-        tl.multiple_of(offset_m % cta_m_len, BLOCK_M), BLOCK_M
-    )
+        tl.multiple_of(offset_m % cta_m_len, BLOCK_M), BLOCK_M)
 
     do_shrink_kernel(
         pid_n,
@@ -108,8 +106,7 @@ def _sgmv_shrink_kernel(
         BLOCK_K,
         EVEN_K,
         SPLIT_K,
-        SLICE_NUM,
-    )
+        SLICE_NUM)
 
 
 @torch.inference_mode()
@@ -140,9 +137,9 @@ def _sgmv_shrink(
             corresponding to each batch. An index of -1 means no lora should be
             applied.
         batches (int): batch size
-        max_seq_length (int): The max sequence lengths of the sequences in the
+        max_seq_length (int): The max sequence lengths of the sequences in the 
             batch.
-        token_nums (int): The token numbers in the batch. Used to verify if the
+        token_nums (int): The token numbers in the batch. Used to verify if the 
             token numbers in the inputs matches the one in the metadata.
         scaling (float): Scaling factor.
     """
@@ -157,9 +154,8 @@ def _sgmv_shrink(
     assert lora_indices_tensor.size(0) == batches
     assert inputs.is_contiguous()
     assert output_tensor.is_contiguous()
-    (lora_ptr_tensor, lora_strides_d0, lora_strides_d1, lora_strides_d2) = (
-        _get_lora_a_ptr(lora_a_weights, b_seq_start_loc.device)
-    )
+    (lora_ptr_tensor, lora_strides_d0, lora_strides_d1,
+     lora_strides_d2) = _get_lora_a_ptr(lora_a_weights, b_seq_start_loc.device)
     # TODO tuning this config
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
     BLOCK_M = 32

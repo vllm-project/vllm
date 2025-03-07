@@ -60,11 +60,8 @@ class LoRALayerWeights:
 
     @property
     def extra_vocab_size(self) -> int:
-        return (
-            self.embeddings_tensor.shape[0]
-            if self.embeddings_tensor is not None
-            else 0
-        )
+        return (self.embeddings_tensor.shape[0]
+                if self.embeddings_tensor is not None else 0)
 
     @classmethod
     def from_config(
@@ -99,39 +96,36 @@ class LoRALayerWeights:
         dora_enabled: Optional[bool] = False,
     ) -> "LoRALayerWeights":
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
-        lora_a = torch.zeros(
-            [input_dim, rank], dtype=dtype, device=device, pin_memory=pin_memory
-        )
-        lora_b = torch.zeros(
-            [rank, output_dim],
-            dtype=dtype,
-            device=device,
-            pin_memory=pin_memory,
-        )
+        lora_a = torch.zeros([input_dim, rank],
+                             dtype=dtype,
+                             device=device,
+                             pin_memory=pin_memory)
+        lora_b = torch.zeros([rank, output_dim],
+                             dtype=dtype,
+                             device=device,
+                             pin_memory=pin_memory)
         if bias_enabled:
-            bias = torch.zeros(
-                [output_dim], dtype=dtype, device=device, pin_memory=pin_memory
-            )
+            bias = torch.zeros([output_dim],
+                               dtype=dtype,
+                               device=device,
+                               pin_memory=pin_memory)
         else:
             bias = None
         if dora_enabled:
-            magnitude_param = torch.zeros(
-                [output_dim], dtype=dtype, device=device, pin_memory=pin_memory
-            )
+            magnitude_param = torch.zeros([output_dim],
+                                          dtype=dtype,
+                                          device=device,
+                                          pin_memory=pin_memory)
         else:
             magnitude_param = None
 
-        embeddings_tensor = (
-            torch.rand(
-                10,
-                embeddings_tensor_dim,
-                dtype=dtype,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            if embeddings_tensor_dim
-            else None
-        )
+        embeddings_tensor = (torch.rand(
+            10,
+            embeddings_tensor_dim,
+            dtype=dtype,
+            device=device,
+            pin_memory=pin_memory,
+        ) if embeddings_tensor_dim else None)
         return cls(
             module_name,
             rank=rank,
@@ -202,7 +196,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
                 lora.magnitude_param if lora is not None else None
                 for lora in loras
             ],
-            scaling=[1 if lora is not None else None for lora in loras],  # type: ignore
+            scaling=[1 if lora is not None else None
+                     for lora in loras],  # type: ignore
         )
         return obj
 
