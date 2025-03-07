@@ -865,7 +865,7 @@ class ModelWrapperV1(nn.Module):
         kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Executes the forward pass of the model and samples the next token.
+        """Executes the forward pass of the model.
 
         Args:
             input_ids: The input token IDs of shape [num_tokens].

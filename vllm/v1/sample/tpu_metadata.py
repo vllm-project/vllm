@@ -118,7 +118,7 @@ class TPUSupportedSamplingMetadata:
             device: torch.device,
             indices_do_sample=None,
             do_argmax=None) -> "TPUSupportedSamplingMetadata":
-        # As sampling happens on a single traced function, options
+        # As sampling happens on a single traced graph, options
         # are "disabled" by having them evaluate to an Identity op.
         # Note that initialization is dependent on num_samples.
         sampling_metadata_disable_value = \
