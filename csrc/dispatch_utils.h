@@ -6,7 +6,8 @@
 
 #include <torch/all.h>
 
-// need a special dispatch case macro since we will nest the FP8 dispatch
+// Need a special dispatch case macro since we will nest the FP8 dispatch.
+// Instead of the usual 'scalar_t', this names the dispatched type 'fp8_t'.
 #define AT_DISPATCH_FP8_CASE(enum_type, ...) \
   AT_PRIVATE_CASE_TYPE_USING_HINT(enum_type, fp8_t, __VA_ARGS__)
 
@@ -39,6 +40,8 @@
     AT_DISPATCH_CASE(at::ScalarType::Char, __VA_ARGS__)
 #endif
 
+// When using this dispatch macro, the type is 'fp8_t' not 'scalar_t'.
+// See AT_DISPATCH_FP8_CASE above.
 #define VLLM_DISPATCH_FP8_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FP8_TYPES(__VA_ARGS__))
 

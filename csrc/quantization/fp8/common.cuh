@@ -39,7 +39,7 @@ struct fp8_e4m3_adjusted_max<c10::Float8_e4m3fn> {
 };
 
 // Using the default max value from pytorch (240.0 0x7F) will cause accuracy
-// issue when running dynamic quantization. Here use 224.0 0x7E for rocm.
+// issues when running dynamic quantization. Here use 224.0 0x7E for rocm.
 template <>
 struct fp8_e4m3_adjusted_max<c10::Float8_e4m3fnuz> {
   static constexpr c10::Float8_e4m3fnuz val() {
