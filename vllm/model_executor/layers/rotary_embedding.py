@@ -165,8 +165,8 @@ class RotaryEmbedding(CustomOp):
         # is expensive, so avoid calling it if possible
         if self.cos_sin_cache.device != query.device or \
             self.cos_sin_cache.dtype != query.dtype:
-            self.cos_sin_cache = self.cos_sin_cache\
-                .to(query.device, dtype=query.dtype)
+            self.cos_sin_cache = self.cos_sin_cache.to(query.device,
+                                                       dtype=query.dtype)
 
         # ops.rotary_embedding()/batched_rotary_embedding()
         # are in-place operations that update the query and key tensors.
