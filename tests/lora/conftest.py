@@ -328,7 +328,12 @@ def llama_2_7b_engine_extra_embeddings():
         return get_model_old(**kwargs)
 
     with patch("vllm.worker.model_runner.get_model", get_model_patched):
-        engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
+        # Reduce memory usage to avoid OOM errors
+        engine = vllm.LLM(
+            "meta-llama/Llama-2-7b-hf",
+            enable_lora=False,
+            gpu_memory_utilization=0.5,  # Lower memory usage
+            max_model_len=128)  # Reduce context size to save memory
     yield engine.llm_engine
     del engine
     cleanup_dist_env_and_memory(shutdown_ray=True)
