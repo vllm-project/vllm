@@ -69,6 +69,18 @@ def is_ninja_available() -> bool:
     return which("ninja") is not None
 
 
+def is_url_available(url: str) -> bool:
+    from urllib.request import urlopen
+
+    status = None
+    try:
+        with urlopen(url) as f:
+            status = f.status
+    except Exception:
+        return False
+    return status == 200
+
+
 class CMakeExtension(Extension):
 
     def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
@@ -320,6 +332,10 @@ class repackage_wheel(build_ext):
         if wheel_location is None:
             base_commit = self.get_base_commit_in_main_branch()
             wheel_location = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+            # Fallback to nightly wheel if latest commit wheel is unavailable,
+            # in this rare case, the nightly release CI hasn't finished on main.
+            if not is_url_available(wheel_location):
+                wheel_location = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
 
         import zipfile
 
