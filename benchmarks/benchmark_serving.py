@@ -33,9 +33,10 @@ import os
 import random
 import time
 import warnings
+from collections.abc import AsyncGenerator, Collection
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, AsyncGenerator, Collection, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -56,7 +57,7 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from benchmark_utils import convert_to_pytorch_benchmark_format
+from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -73,22 +74,22 @@ class BenchmarkMetrics:
     mean_ttft_ms: float
     median_ttft_ms: float
     std_ttft_ms: float
-    percentiles_ttft_ms: List[Tuple[float, float]]
+    percentiles_ttft_ms: list[tuple[float, float]]
     mean_tpot_ms: float
     median_tpot_ms: float
     std_tpot_ms: float
-    percentiles_tpot_ms: List[Tuple[float, float]]
+    percentiles_tpot_ms: list[tuple[float, float]]
     mean_itl_ms: float
     median_itl_ms: float
     std_itl_ms: float
-    percentiles_itl_ms: List[Tuple[float, float]]
+    percentiles_itl_ms: list[tuple[float, float]]
     # E2EL stands for end-to-end latency per request.
     # It is the time taken on the client side from sending
     # a request to receiving a complete response.
     mean_e2el_ms: float
     median_e2el_ms: float
     std_e2el_ms: float
-    percentiles_e2el_ms: List[Tuple[float, float]]
+    percentiles_e2el_ms: list[tuple[float, float]]
 
 
 def sample_sharegpt_requests(
@@ -96,7 +97,7 @@ def sample_sharegpt_requests(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
-) -> List[Tuple[str, int, int, None]]:
+) -> list[tuple[str, int, int, None]]:
     # Load the dataset.
     with open(dataset_path, encoding='utf-8') as f:
         dataset = json.load(f)
@@ -110,7 +111,7 @@ def sample_sharegpt_requests(
     random.shuffle(dataset)
 
     # Filter out sequences that are too long or too short
-    filtered_dataset: List[Tuple[str, int, int]] = []
+    filtered_dataset: list[tuple[str, int, int]] = []
     for i in range(len(dataset)):
         if len(filtered_dataset) == num_requests:
             break
@@ -139,7 +140,7 @@ def sample_burstgpt_requests(
     num_requests: int,
     random_seed: int,
     tokenizer: PreTrainedTokenizerBase,
-) -> List[Tuple[str, int, int, None]]:
+) -> list[tuple[str, int, int, None]]:
     df = pd.read_csv(dataset_path)
     gpt4_df = df[df["Model"] == "GPT-4"]
     # Remove the failed requests (i.e., response length is 0)
@@ -170,10 +171,10 @@ def sample_sonnet_requests(
     output_len: int,
     prefix_len: int,
     tokenizer: PreTrainedTokenizerBase,
-) -> List[Tuple[str, str, int, int, None]]:
+) -> list[tuple[str, str, int, int, None]]:
     assert (
         input_len > prefix_len
-    ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
+    ), "'args.sonnet-input-len' must be greater than 'args.sonnet-prefix-len'."
 
     # Load the dataset.
     with open(dataset_path, encoding='utf-8') as f:
@@ -211,7 +212,7 @@ def sample_sonnet_requests(
     prefix_lines = poem_lines[:num_prefix_lines]
 
     # Sample the rest of lines per request.
-    sampled_requests: List[Tuple[str, int, int]] = []
+    sampled_requests: list[tuple[str, int, int]] = []
     for _ in range(num_requests):
         num_lines_needed = num_input_lines - num_prefix_lines
         sampled_lines = "".join(prefix_lines +
@@ -238,8 +239,8 @@ def sample_vision_arena_requests(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
-) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
-    sampled_requests: List[Tuple[str, int, int, Dict[str,
+) -> list[tuple[str, str, int, Optional[dict[str, Collection[str]]]]]:
+    sampled_requests: list[tuple[str, int, int, dict[str,
                                                      Collection[str]]]] = []
     for data in dataset:
         if len(sampled_requests) == num_requests:
@@ -285,7 +286,7 @@ def sample_hf_requests(
     tokenizer: PreTrainedTokenizerBase,
     random_seed: int,
     fixed_output_len: Optional[int] = None,
-) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
+) -> list[tuple[str, str, int, Optional[dict[str, Collection[str]]]]]:
 
     # Special case for vision_arena dataset
     if dataset_path == 'lmarena-ai/vision-arena-bench-v0.1' \
@@ -307,7 +308,7 @@ def sample_hf_requests(
         "HF Dataset must have 'conversations' column.")
     filter_func = lambda x: len(x["conversations"]) >= 2
     filtered_dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
-    sampled_requests: List[Tuple[str, int, int, Dict[str,
+    sampled_requests: list[tuple[str, int, int, dict[str,
                                                      Collection[str]]]] = []
     for data in filtered_dataset:
         if len(sampled_requests) == num_requests:
@@ -370,7 +371,7 @@ def sample_random_requests(
     num_prompts: int,
     range_ratio: float,
     tokenizer: PreTrainedTokenizerBase,
-) -> List[Tuple[str, int, int]]:
+) -> list[tuple[str, int, int]]:
     prefix_token_ids = np.random.randint(0,
                                          tokenizer.vocab_size,
                                          size=prefix_len).tolist()
@@ -399,10 +400,10 @@ def sample_random_requests(
 
 
 async def get_request(
-    input_requests: List[Tuple[str, int, int]],
+    input_requests: list[tuple[str, int, int]],
     request_rate: float,
     burstiness: float = 1.0,
-) -> AsyncGenerator[Tuple[str, int, int], None]:
+) -> AsyncGenerator[tuple[str, int, int], None]:
     """
     Asynchronously generates requests at a specified rate
     with OPTIONAL burstiness.
@@ -443,23 +444,23 @@ async def get_request(
 
 
 def calculate_metrics(
-    input_requests: List[Tuple[str, int, int]],
-    outputs: List[RequestFuncOutput],
+    input_requests: list[tuple[str, int, int]],
+    outputs: list[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
-    selected_percentile_metrics: List[str],
-    selected_percentiles: List[float],
-    goodput_config_dict: Dict[str, float],
-) -> Tuple[BenchmarkMetrics, List[int]]:
-    actual_output_lens: List[int] = []
+    selected_percentile_metrics: list[str],
+    selected_percentiles: list[float],
+    goodput_config_dict: dict[str, float],
+) -> tuple[BenchmarkMetrics, list[int]]:
+    actual_output_lens: list[int] = []
     total_input = 0
     completed = 0
     good_completed = 0
-    itls: List[float] = []
-    tpots: List[float] = []
-    all_tpots: List[float] = []
-    ttfts: List[float] = []
-    e2els: List[float] = []
+    itls: list[float] = []
+    tpots: list[float] = []
+    all_tpots: list[float] = []
+    ttfts: list[float] = []
+    e2els: list[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
@@ -557,19 +558,18 @@ async def benchmark(
     model_id: str,
     model_name: str,
     tokenizer: PreTrainedTokenizerBase,
-    input_requests: List[Tuple[str, int, int]],
+    input_requests: list[tuple[str, int, int]],
     logprobs: Optional[int],
-    best_of: int,
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
     profile: bool,
-    selected_percentile_metrics: List[str],
-    selected_percentiles: List[str],
+    selected_percentile_metrics: list[str],
+    selected_percentiles: list[str],
     ignore_eos: bool,
-    goodput_config_dict: Dict[str, float],
+    goodput_config_dict: dict[str, float],
     max_concurrency: Optional[int],
-    lora_modules: Optional[List[str]],
+    lora_modules: Optional[list[str]],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -591,7 +591,6 @@ async def benchmark(
         prompt_len=test_prompt_len,
         output_len=test_output_len,
         logprobs=logprobs,
-        best_of=best_of,
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
     )
@@ -618,7 +617,6 @@ async def benchmark(
                                          prompt_len=test_prompt_len,
                                          output_len=test_output_len,
                                          logprobs=logprobs,
-                                         best_of=best_of,
                                          multi_modal_content=test_mm_content,
                                          ignore_eos=ignore_eos)
         profile_output = await request_func(request_func_input=profile_input)
@@ -652,7 +650,7 @@ async def benchmark(
                                       pbar=pbar)
 
     benchmark_start_time = time.perf_counter()
-    tasks: List[asyncio.Task] = []
+    tasks: list[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate, burstiness):
         prompt, prompt_len, output_len, mm_content = request
         req_model_id, req_model_name = model_id, model_name
@@ -667,14 +665,13 @@ async def benchmark(
                                               prompt_len=prompt_len,
                                               output_len=output_len,
                                               logprobs=logprobs,
-                                              best_of=best_of,
                                               multi_modal_content=mm_content,
                                               ignore_eos=ignore_eos)
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
                                      pbar=pbar)))
-    outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
+    outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if profile:
         print("Stopping profiler...")
@@ -685,7 +682,6 @@ async def benchmark(
             prompt_len=test_prompt_len,
             output_len=test_output_len,
             logprobs=logprobs,
-            best_of=best_of,
         )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
@@ -820,7 +816,7 @@ def parse_goodput(slo_pairs):
 
 
 def save_to_pytorch_benchmark_format(args: argparse.Namespace,
-                                     results: Dict[str, Any],
+                                     results: dict[str, Any],
                                      file_name: str) -> None:
     metrics = [
         "median_ttft_ms", "mean_ttft_ms", "std_ttft_ms", "p99_ttft_ms",
@@ -841,8 +837,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
     if pt_records:
         # Don't use json suffix here as we don't want CI to pick it up
         pt_file = f"{os.path.splitext(file_name)[0]}.pytorch.json"
-        with open(pt_file, "w") as f:
-            json.dump(pt_records, f)
+        write_to_json(pt_file, pt_records)
 
 
 def main(args: argparse.Namespace):
@@ -867,18 +862,10 @@ def main(args: argparse.Namespace):
                               tokenizer_mode=tokenizer_mode,
                               trust_remote_code=args.trust_remote_code)
 
-    if args.dataset is not None:
-        warnings.warn(
-            "The '--dataset' argument will be deprecated in the next "
-            "release. Please use '--dataset-name' and "
-            "'--dataset-path' in the future runs.",
-            stacklevel=2)
-        input_requests = sample_sharegpt_requests(
-            dataset_path=args.dataset,
-            num_requests=args.num_prompts,
-            tokenizer=tokenizer,
-            fixed_output_len=args.sharegpt_output_len,
-        )
+    if args.dataset_name is None:
+        raise ValueError(
+            "Please specify '--dataset-name' and the corresponding "
+            "'--dataset-path' if required.")
 
     elif args.dataset_name == "sharegpt":
         input_requests = sample_sharegpt_requests(
@@ -966,7 +953,6 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer,
             input_requests=input_requests,
             logprobs=args.logprobs,
-            best_of=args.best_of,
             request_rate=args.request_rate,
             burstiness=args.burstiness,
             disable_tqdm=args.disable_tqdm,
@@ -983,7 +969,7 @@ def main(args: argparse.Namespace):
 
     # Save config and results to json
     if args.save_result:
-        result_json: Dict[str, Any] = {}
+        result_json: dict[str, Any] = {}
 
         # Setup
         current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -991,7 +977,6 @@ def main(args: argparse.Namespace):
         result_json["backend"] = backend
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
-        result_json["best_of"] = args.best_of
         result_json["num_prompts"] = args.num_prompts
 
         # Metadata
@@ -1053,13 +1038,6 @@ if __name__ == "__main__":
         help="API endpoint.",
     )
     parser.add_argument(
-        "--dataset",
-        type=str,
-        default=None,
-        help="Path to the ShareGPT dataset, will be deprecated in the "
-        "next release.",
-    )
-    parser.add_argument(
         "--dataset-name",
         type=str,
         default="sharegpt",
@@ -1095,13 +1073,6 @@ if __name__ == "__main__":
         type=str,
         help=
         "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
-    )
-    parser.add_argument(
-        "--best-of",
-        type=int,
-        default=1,
-        help="Generates `best_of` sequences per prompt and "
-        "returns the best one.",
     )
     parser.add_argument("--use-beam-search", action="store_true")
     parser.add_argument(

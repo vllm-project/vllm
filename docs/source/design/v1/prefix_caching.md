@@ -183,7 +183,7 @@ When a request is finished, we free all its blocks if no other requests are usin
 
 When the head block (least recently used block) of the free queue is cached, we have to evict the block to prevent it from being used by other requests. Specifically, eviction involves the following steps:
 
-1. Pop the block from the head of the free queue. This is the LRU black to be evicted.  
+1. Pop the block from the head of the free queue. This is the LRU block to be evicted.  
 2. Remove the block ID from the Cache Block.  
 3. Remove the block hash.
 

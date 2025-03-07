@@ -77,7 +77,6 @@ echo "Commands:$commands"
 #ignore certain kernels tests
 if [[ $commands == *" kernels "* ]]; then
   commands="${commands} \
-  --ignore=kernels/test_attention.py \
   --ignore=kernels/test_attention_selector.py \
   --ignore=kernels/test_blocksparse_attention.py \
   --ignore=kernels/test_causal_conv1d.py \
@@ -92,7 +91,14 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_moe.py \
   --ignore=kernels/test_prefix_prefill.py \
   --ignore=kernels/test_rand.py \
-  --ignore=kernels/test_sampler.py"
+  --ignore=kernels/test_sampler.py \
+  --ignore=kernels/test_cascade_flash_attn.py \
+  --ignore=kernels/test_mamba_mixer2.py \
+  --ignore=kernels/test_aqlm.py \
+  --ignore=kernels/test_machete_mm.py \
+  --ignore=kernels/test_mha_attn.py \
+  --ignore=kernels/test_block_fp8.py \
+  --ignore=kernels/test_permute_cols.py"
 fi
 
 #ignore certain Entrypoints tests

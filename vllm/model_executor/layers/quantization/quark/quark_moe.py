@@ -55,7 +55,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         if not (weight_qscheme == "per_tensor"
                 and input_qscheme == "per_tensor"):
             raise ValueError(
-                "For FP8 Fused MoE layers, only per-tensor scales"
+                "For FP8 Fused MoE layers, only per-tensor scales "
                 "for weights and activations are supported. Found "
                 f"{weight_qscheme}, {input_qscheme}")  # noqa E501
 
@@ -174,7 +174,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         assert layer.w13_weight_scale is not None
         shard_size = layer.intermediate_size_per_partition
         max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-        for expert_id in range(layer.num_experts):
+        for expert_id in range(layer.local_num_experts):
             start = 0
             for shard_id in range(2):
                 dq_weight = per_tensor_dequantize(
@@ -198,6 +198,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
@@ -223,6 +225,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                              topk_ids=topk_ids,
                              inplace=True,
                              use_fp8_w8a8=True,
+                             global_num_experts=global_num_experts,
+                             expert_map=expert_map,
                              w1_scale=layer.w13_weight_scale,
                              w2_scale=layer.w2_weight_scale,
                              a1_scale=layer.w13_input_scale,
