@@ -7,11 +7,14 @@
 
 #ifndef USE_ROCM
   #include <c10/util/Float8_e4m3fn.h>
+  #define MAYBE_HOST_DEVICE C10_HOST_DEVICE
 #else
   #include <ATen/hip/HIPContext.h>
   #include <c10/util/Float8_e4m3fn.h>
   #include <c10/util/Float8_e4m3fnuz.h>
   #include "amd/quant_utils.cuh"
+  // ROCm doesn't seem to need C10_HOST_DEVICE for static constexpr
+  #define MAYBE_HOST_DEVICE
 #endif
 
 // Determines the preferred FP8 type for the current platform.
@@ -48,7 +51,8 @@ struct fp8_e4m3_adjusted_max<c10::Float8_e4m3fnuz> {
 };
 
 template <typename T>
-static constexpr T fp8_e4m3_adjusted_max_v = fp8_e4m3_adjusted_max<T>::val();
+MAYBE_HOST_DEVICE static constexpr T fp8_e4m3_adjusted_max_v =
+    fp8_e4m3_adjusted_max<T>::val();
 
 namespace vllm {
 
