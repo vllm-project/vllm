@@ -245,7 +245,7 @@ class RocmPlatform(Platform):
         return envs.VLLM_ROCM_USE_AITER_RMSNORM
 
     def is_rocm_aiter_fp8_block_scaled_moe_enabled(self) -> bool:
-        return self.rocm_aiter_moe_enabled(
+        return self.is_rocm_aiter_moe_enabled(
         ) and envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
 
     def is_rocm_aiter_w8a8_block_gemm_enabled(self) -> bool:
