@@ -149,7 +149,8 @@ def test_prefill():
 
 
 def test_prefill_plp():
-    '''Test prefill with APC+prompt logprobs'''
+    '''Test prefill with APC & some prompt logprobs requests.
+    '''
     manager = KVCacheManager(
         block_size=16,
         num_gpu_blocks=10,
@@ -162,7 +163,7 @@ def test_prefill_plp():
     # Complete 3 blocks (48 tokens)
     common_token_ids = [i for i in range(3) for _ in range(16)]
 
-    # Initial prompt logprobs request
+    # Request #0 is a prompt logprobs request
     # Fully cache miss
     # Incomplete 1 block (7 tokens)
     unique_token_ids = [3] * 7
@@ -174,6 +175,7 @@ def test_prefill_plp():
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(req0, 55, computed_blocks)
     assert [b.block_id for b in blocks] == [0, 1, 2, 3, 4]
+    req0_block_hashes = [b.block_hash for b in blocks]
 
     # Check full block metadata
     parent_block_hash = None
@@ -189,7 +191,7 @@ def test_prefill_plp():
         assert manager.block_pool.blocks[block_id].block_hash is None
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
 
-    # Subsequent non-prompt-logprobs request:
+    # Request #1 is a non-prompt-logprobs request:
     # Cache hit in the common prefix when the original block is still in use.
     # Incomplete 1 block (5 tokens)
     unique_token_ids = [3] * 5
@@ -222,6 +224,7 @@ def test_prefill_plp():
         for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ] == [7, 8, 9, 4, 3, 6, 5, 2, 1, 0]
 
+    # Request #2 is a non-prompt-logprobs request:
     # Cache hit in the common prefix when the original block is already free.
     # Incomplete 1 block (6 tokens)
     unique_token_ids = [3] * 6
@@ -247,17 +250,28 @@ def test_prefill_plp():
 
     manager.free(req2)
 
-    # Cache miss and eviction.
-    req3 = make_request("3", [99] * (16 * 9))
+    # Request #3 is a prompt-logprobs request:
+    # NO cache hit in the common prefix; duplicates request #0 cached blocks
+    unique_token_ids = [3] * 6
+    req3 = make_request("3",
+                        common_token_ids + unique_token_ids,
+                        prompt_logprobs=5)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
+    assert len(manager.req_to_block_hashes[req3.request_id]) == 3
     assert not computed_blocks
     assert num_computed_tokens == 0
-    blocks = manager.allocate_slots(req3, 16 * 9, computed_blocks)
-    # This block ID order also checks the eviction order.
-    assert [b.block_id for b in blocks] == [9, 4, 3, 6, 5, 8, 7, 2, 1, 0]
-    assert manager.block_pool.free_block_queue.num_free_blocks == 0
-    assert manager.block_pool.free_block_queue.free_list_head is None
-    assert manager.block_pool.free_block_queue.free_list_tail is None
+    blocks = manager.allocate_slots(req3, 55, computed_blocks)
+    block_ids = [b.block_id for b in blocks]
+    # Duplicate cached blocks have different ids but same hashes vs request #0
+    assert [b.block_hash for b in blocks] == req0_block_hashes
+    assert block_ids != [0, 1, 2, 3, 4]
+
+    # Request #3 block hashes are valid since request #0 hashes are.
+    # Check block reference counts.
+    for block_id in block_ids:
+        assert manager.block_pool.blocks[block_id].ref_cnt == 1
+
+    manager.free(req3)
 
 
 def test_decode():
