@@ -295,10 +295,12 @@ class DeepseekVL2MultiModalProcessor(
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> tuple[list[int], MultiModalKwargs, bool]:
-        if mm_data_items.get_count("image") > 2:
-            # The processor output depends on the number of images passed,
-            # making it incompatible with processing cache which is supposed
-            # to be invariant of how many images are passed per prompt
+        # The processor logic is different for len(images) <= 2 vs > 2
+        # Since the processing cache assumes that the processor output is
+        # invariant of how many images are passed per prompt, we only
+        # perform caching for the most common case
+        if mm_data_items.get_count("image", strict=False) > 2:
+            # This code path corresponds to the cache being disabled
             return self._apply_hf_processor_main(
                 prompt=prompt,
                 mm_items=mm_data_items,
