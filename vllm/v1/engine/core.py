@@ -349,7 +349,8 @@ class EngineCoreProc(EngineCore):
 
         while not self.global_unfinished_reqs and not (
                 self.scheduler.has_requests()):
-            logger.info("EngineCore waiting for work.")
+            if self.input_queue.empty():
+                logger.info("EngineCore waiting for work.")
             req = self.input_queue.get()
             self._handle_client_request(*req)
 

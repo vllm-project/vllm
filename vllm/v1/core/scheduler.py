@@ -649,7 +649,7 @@ class Scheduler:
         if self.include_finished_set:
             #TODO currently sending duplicates here, fix this
             engine_core_outputs.finished_requests = (
-                scheduler_output.finished_req_ids | self.scheduled_req_ids)
+                scheduler_output.finished_req_ids | self.finished_req_ids)
 
         return engine_core_outputs
 
