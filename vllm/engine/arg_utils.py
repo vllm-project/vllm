@@ -1440,7 +1440,8 @@ class EngineArgs:
             from vllm.platforms import current_platform
             device_name = current_platform.get_device_name().lower()
         except Exception:
-            device_name = "cpu"
+            # This is only used to set default_max_num_batched_tokens 
+            device_name = "no-device"
 
         if "h100" in device_name or "h200" in device_name:
             # For H100 and H200, we use larger default values.
