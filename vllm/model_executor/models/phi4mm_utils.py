@@ -5,14 +5,11 @@
 # but implemented by the Phi-Speech team
 #!/usr/bin/env python3
 import math
-from functools import partial
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    CheckpointImpl, checkpoint_wrapper, offload_wrapper)
 
 
 class Block(nn.Module):
@@ -1836,51 +1833,6 @@ class MultiHeadedAttention(nn.Module):
              )  # (batch, time1, d_model)
 
         return self.linear_out(x)  # (batch, time1, d_model)
-
-
-def validate_checkpointing_config(activation_checkpointing):
-    """validate activation checkpointing configuration"""
-    if isinstance(activation_checkpointing, str):
-        assert activation_checkpointing in (
-            "",
-            "checkpoint",
-            "offload",
-        ), "activation_checkpointing has to be a dict or a str in "\
-            "('', 'checkpoint', 'offload')."
-    elif isinstance(activation_checkpointing, dict):
-        assert activation_checkpointing.get("module", "transformer") in (
-            "transformer",
-            "attention",
-        ), "module in activation_checkpointing has to be in "\
-            "('transformer', 'attention')."
-    else:
-        raise ValueError("activation_checkpointing has to be a str"\
-                         " or dict.")
-
-
-def embedding_checkpoint_wrapper(
-    activation_checkpointing: Union[str, Dict], ) -> Callable:
-    """return encoder embedding activation checkpoint wrapper"""
-    validate_checkpointing_config(activation_checkpointing)
-
-    if isinstance(activation_checkpointing, str):
-        if activation_checkpointing:
-            if activation_checkpointing == "offload":
-                return offload_wrapper
-            return partial(checkpoint_wrapper)
-        return lambda x: x
-
-    if isinstance(activation_checkpointing, dict):
-        enabled = activation_checkpointing.get("embed", False)
-        if enabled:
-            offloading = activation_checkpointing.get("offload", False)
-            if offloading:
-                return offload_wrapper
-            impl = (CheckpointImpl.REENTRANT if activation_checkpointing.get(
-                "reentrant", False) else CheckpointImpl.NO_REENTRANT)
-            return partial(checkpoint_wrapper, checkpoint_impl=impl)
-        return lambda x: x
-    raise ValueError("Invalid activation_checkpointing config")
 
 
 class MultiSequential(torch.nn.Sequential):

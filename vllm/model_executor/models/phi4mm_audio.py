@@ -6,15 +6,14 @@
 #!/usr/bin/env python3
 import abc
 import math
-from functools import partial
-from typing import Callable, Dict, List, Literal, Optional, Union
+from typing import List, Literal, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    CheckpointImpl, CheckpointWrapper, checkpoint_wrapper, offload_wrapper)
+    CheckpointWrapper)
 from torch.distributed.fsdp.fully_sharded_data_parallel import (
     FullyShardedDataParallel)
 from torch.utils.checkpoint import checkpoint
@@ -22,51 +21,10 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.models.phi4mm_utils import (
     AbsolutePositionalEncoding, ConvModule, FeedForward, MeanVarianceNormLayer,
-    MultiHeadedAttention, NemoConvSubsampling, T5RelativeAttentionLogitBias,
-    adaptive_enc_mask, MultiSequential,
-    get_offset, unfold_tensor, validate_checkpointing_config)
+    MultiHeadedAttention, MultiSequential, NemoConvSubsampling,
+    T5RelativeAttentionLogitBias, adaptive_enc_mask, get_offset, unfold_tensor)
 
 _AUDIO_PLACEHOLDER_TOKEN_ID = 200011  # <|endoftext11|>
-
-
-def encoder_checkpoint_wrapper(
-    activation_checkpointing: Union[str, Dict],
-    layer_cls: type,
-    idx: int = 0,
-) -> Callable:
-    """return encoder activation checkpoint wrapper"""
-    validate_checkpointing_config(activation_checkpointing)
-
-    if isinstance(activation_checkpointing, str):
-        if activation_checkpointing:
-            if activation_checkpointing == "offload":
-                return offload_wrapper
-            return partial(checkpoint_wrapper)
-        return lambda x: x
-
-    if isinstance(activation_checkpointing, dict):
-        target_layer_cls = activation_checkpointing.get(
-            "module", "transformer")
-        if target_layer_cls.lower() == "transformer":
-            target_layer_cls = (
-                "EncoderLayer",
-                "ConformerEncoderLayer",
-            )
-        elif target_layer_cls.lower() == "attention":
-            target_layer_cls = ("MultiHeadedAttention", "MultiHeadAttention")
-        checkpointing_interval = activation_checkpointing.get("interval", 1)
-        offloading = activation_checkpointing.get("offload", False)
-        impl = (CheckpointImpl.REENTRANT if activation_checkpointing.get(
-            "reentrant", True) else CheckpointImpl.NO_REENTRANT)
-
-        if (idx % checkpointing_interval == 0
-                and layer_cls.__name__ in target_layer_cls):
-            if offloading:
-                return offload_wrapper
-            return partial(checkpoint_wrapper, checkpoint_impl=impl)
-        return lambda x: x
-
-    raise ValueError("Invalid activation_checkpointing config")
 
 
 class ConformerEncoderLayer(nn.Module):
@@ -886,12 +844,11 @@ class ConformerEncoder(TransformerEncoderBase):
                 ), "attention_group_size must divide n_head"
         self.num_heads_k = self.num_heads // attention_group_size
 
-        self.encoders = MultiSequential(
-            *[ConformerEncoderLayer(
+        self.encoders = MultiSequential(*[
+            ConformerEncoderLayer(
                 d_model=attention_dim,
                 ext_pw_out_channel=ext_pw_out_channel,
-                depthwise_seperable_out_channel=
-                depthwise_seperable_out_channel,
+                depthwise_seperable_out_channel=depthwise_seperable_out_channel,
                 depthwise_multiplier=depthwise_multiplier,
                 n_head=attention_heads,
                 d_ffn=linear_units,
@@ -913,8 +870,8 @@ class ConformerEncoder(TransformerEncoderBase):
                 use_pt_scaled_dot_product_attention=
                 use_pt_scaled_dot_product_attention,
                 attn_group_sizes=attention_group_size,
-             ) for _ in range(num_blocks)]
-        )
+            ) for _ in range(num_blocks)
+        ])
         self.extra_layer_output_idx = extra_layer_output_idx
         self.extra_multi_layer_output_idxs = extra_multi_layer_output_idxs
         # Make a zeros scalar we can use in get_initial_state to determine
