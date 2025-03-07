@@ -47,8 +47,11 @@ class EngineCore:
     ):
         assert vllm_config.model_config.runner_type != "pooling"
 
-        logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
-                    VLLM_VERSION, vllm_config)
+        logger.info(
+            "Initializing a V1 LLM engine (v%s) with config: %s",
+            VLLM_VERSION,
+            vllm_config,
+        )
 
         self.log_stats = log_stats
 
@@ -113,8 +116,11 @@ class EngineCore:
         self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
-        logger.info(("init engine (profile, create kv cache, "
-                     "warmup model) took %.2f seconds"), elapsed)
+        logger.info(
+            ("init engine (profile, create kv cache, "
+             "warmup model) took %.2f seconds"),
+            elapsed,
+        )
         return num_gpu_blocks, num_cpu_blocks
 
     def add_request(self, request: EngineCoreRequest):
@@ -185,8 +191,7 @@ class EngineCore:
 
         # If all requests are scheduled or the job queue is full,
         # block until the first batch in the job queue is finished.
-        if (scheduler_output is None
-                or scheduler_output.total_num_scheduled_tokens == 0):
+        if scheduler_output is None or scheduler_output.total_num_scheduled_tokens == 0:
             try:
                 future, scheduler_output = self.batch_queue.get(
                     timeout=POLLING_TIMEOUT_S)
@@ -309,8 +314,7 @@ class EngineCoreProc(EngineCore):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
-        step_fn = (self.step
-                   if self.batch_queue is None else self.step_with_batch_queue)
+        step_fn = self.step if self.batch_queue is None else self.step_with_batch_queue
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
@@ -349,23 +353,23 @@ class EngineCoreProc(EngineCore):
                     *self._convert_msgspec_args(method, args))
             except BaseException as e:
                 logger.exception("Invocation of %s method failed", method_name)
-                output.failure_message = (f"Call to {method_name} method"
-                                          f" failed: {str(e)}")
+                output.failure_message = (
+                    f"Call to {method_name} method failed: {str(e)}")
             self.output_queue.put_nowait(
                 EngineCoreOutputs(utility_output=output))
 
     @staticmethod
     def _convert_msgspec_args(method, args):
         """If a provided arg type doesn't match corresponding target method
-         arg type, try converting to msgspec object."""
+        arg type, try converting to msgspec object."""
         if not args:
             return args
         arg_types = signature(method).parameters.values()
         assert len(args) <= len(arg_types)
         return tuple(
-            msgspec.convert(v, type=p.annotation) if isclass(p.annotation)
-            and issubclass(p.annotation, msgspec.Struct)
-            and not isinstance(v, p.annotation) else v
+            (msgspec.convert(v, type=p.annotation) if isclass(p.annotation)
+             and issubclass(p.annotation, msgspec.Struct)
+             and not isinstance(v, p.annotation) else v)
             for v, p in zip(args, arg_types))
 
     def process_input_socket(self, input_path: str):
@@ -382,9 +386,9 @@ class EngineCoreProc(EngineCore):
                 request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                 # Deserialize the request data.
-                decoder = add_request_decoder if (
-                    request_type
-                    == EngineCoreRequestType.ADD) else generic_decoder
+                decoder = (add_request_decoder if
+                           (request_type
+                            == EngineCoreRequestType.ADD) else generic_decoder)
                 request = decoder.decode(data_frame.buffer)
 
                 # Push to input queue for core busy loop.

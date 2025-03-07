@@ -35,9 +35,12 @@ def test_auto_task(model_id, expected_runner_type, expected_task):
     assert config.task == expected_task
 
 
-@pytest.mark.parametrize(("model_id", "bad_task"), [
-    ("Qwen/Qwen2.5-Math-RM-72B", "generate"),
-])
+@pytest.mark.parametrize(
+    ("model_id", "bad_task"),
+    [
+        ("Qwen/Qwen2.5-Math-RM-72B", "generate"),
+    ],
+)
 def test_incorrect_task(model_id, bad_task):
     with pytest.raises(ValueError, match=r"does not support the .* task"):
         ModelConfig(
@@ -115,8 +118,10 @@ def test_get_sliding_window():
     assert mistral_model_config.get_sliding_window() == TEST_SLIDING_WINDOW
 
 
-@pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="Xformers backend is not supported on ROCm.")
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Xformers backend is not supported on ROCm.",
+)
 def test_get_pooling_config():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
     model_config = ModelConfig(
@@ -137,28 +142,34 @@ def test_get_pooling_config():
     assert pooling_config.pooling_type == PoolingType.MEAN.name
 
 
-@pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="Xformers backend is not supported on ROCm.")
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Xformers backend is not supported on ROCm.",
+)
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    model_config = ModelConfig(model_id,
-                               task="auto",
-                               tokenizer=model_id,
-                               tokenizer_mode="auto",
-                               trust_remote_code=False,
-                               seed=0,
-                               dtype="float16",
-                               revision=None)
+    model_config = ModelConfig(
+        model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        revision=None,
+    )
 
-    override_config = PoolerConfig(pooling_type='CLS', normalize=True)
+    override_config = PoolerConfig(pooling_type="CLS", normalize=True)
 
     pooling_config = model_config._init_pooler_config(override_config)
     assert pooling_config is not None
     assert asdict(pooling_config) == asdict(override_config)
 
 
-@pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="Xformers backend is not supported on ROCm.")
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Xformers backend is not supported on ROCm.",
+)
 def test_get_bert_tokenization_sentence_transformer_config():
     bge_model_config = ModelConfig(
         model="BAAI/bge-base-en-v1.5",
@@ -208,8 +219,8 @@ def test_rope_customization():
             "rope_theta": TEST_ROPE_THETA,
         },
     )
-    assert getattr(llama_model_config.hf_config, "rope_scaling",
-                   None) == TEST_ROPE_SCALING
+    assert (getattr(llama_model_config.hf_config, "rope_scaling",
+                    None) == TEST_ROPE_SCALING)
     assert getattr(llama_model_config.hf_config, "rope_theta",
                    None) == TEST_ROPE_THETA
     assert llama_model_config.max_model_len == 16384
@@ -241,19 +252,24 @@ def test_rope_customization():
             "rope_scaling": TEST_ROPE_SCALING,
         },
     )
-    assert getattr(longchat_model_config.hf_config, "rope_scaling",
-                   None) == TEST_ROPE_SCALING
+    assert (getattr(longchat_model_config.hf_config, "rope_scaling",
+                    None) == TEST_ROPE_SCALING)
     assert longchat_model_config.max_model_len == 4096
 
 
-@pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="Encoder Decoder models not supported on ROCm.")
-@pytest.mark.parametrize(("model_id", "is_encoder_decoder"), [
-    ("facebook/opt-125m", False),
-    ("facebook/bart-base", True),
-    ("meta-llama/Llama-3.2-1B-Instruct", False),
-    ("meta-llama/Llama-3.2-11B-Vision", True),
-])
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Encoder Decoder models not supported on ROCm.",
+)
+@pytest.mark.parametrize(
+    ("model_id", "is_encoder_decoder"),
+    [
+        ("facebook/opt-125m", False),
+        ("facebook/bart-base", True),
+        ("meta-llama/Llama-3.2-1B-Instruct", False),
+        ("meta-llama/Llama-3.2-11B-Vision", True),
+    ],
+)
 def test_is_encoder_decoder(model_id, is_encoder_decoder):
     config = ModelConfig(
         model_id,
@@ -268,10 +284,13 @@ def test_is_encoder_decoder(model_id, is_encoder_decoder):
     assert config.is_encoder_decoder == is_encoder_decoder
 
 
-@pytest.mark.parametrize(("model_id", "uses_mrope"), [
-    ("facebook/opt-125m", False),
-    ("Qwen/Qwen2-VL-2B-Instruct", True),
-])
+@pytest.mark.parametrize(
+    ("model_id", "uses_mrope"),
+    [
+        ("facebook/opt-125m", False),
+        ("Qwen/Qwen2-VL-2B-Instruct", True),
+    ],
+)
 def test_uses_mrope(model_id, uses_mrope):
     config = ModelConfig(
         model_id,
@@ -291,26 +310,30 @@ def test_generation_config_loading():
 
     # When set generation_config to None, the default generation config
     # will not be loaded.
-    model_config = ModelConfig(model_id,
-                               task="auto",
-                               tokenizer=model_id,
-                               tokenizer_mode="auto",
-                               trust_remote_code=False,
-                               seed=0,
-                               dtype="float16",
-                               generation_config=None)
+    model_config = ModelConfig(
+        model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        generation_config=None,
+    )
     assert model_config.get_diff_sampling_param() == {}
 
     # When set generation_config to "auto", the default generation config
     # should be loaded.
-    model_config = ModelConfig(model_id,
-                               task="auto",
-                               tokenizer=model_id,
-                               tokenizer_mode="auto",
-                               trust_remote_code=False,
-                               seed=0,
-                               dtype="float16",
-                               generation_config="auto")
+    model_config = ModelConfig(
+        model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        generation_config="auto",
+    )
 
     correct_generation_config = {
         "repetition_penalty": 1.1,
@@ -333,7 +356,8 @@ def test_generation_config_loading():
         seed=0,
         dtype="float16",
         generation_config="auto",
-        override_generation_config=override_generation_config)
+        override_generation_config=override_generation_config,
+    )
 
     override_result = correct_generation_config.copy()
     override_result.update(override_generation_config)
@@ -351,6 +375,7 @@ def test_generation_config_loading():
         seed=0,
         dtype="float16",
         generation_config=None,
-        override_generation_config=override_generation_config)
+        override_generation_config=override_generation_config,
+    )
 
     assert model_config.get_diff_sampling_param() == override_generation_config

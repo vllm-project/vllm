@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """vLLM: a high-throughput and memory-efficient inference engine for LLMs"""
+
 # The version.py should be independent library, and we always import the
 # version library first.  Such assumption is critical for some customization.
 from .version import __version__, __version_tuple__  # isort:skip
@@ -29,10 +30,10 @@ from vllm.sampling_params import SamplingParams
 # they are executed whenever `import vllm` is called.
 
 # see https://github.com/NVIDIA/nccl/issues/1234
-os.environ['NCCL_CUMEM_ENABLE'] = '0'
+os.environ["NCCL_CUMEM_ENABLE"] = "0"
 
 # see https://github.com/vllm-project/vllm/issues/10480
-os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
+os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 # see https://github.com/vllm-project/vllm/issues/10619
 torch._inductor.config.compile_threads = 1
 

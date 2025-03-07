@@ -44,14 +44,16 @@ def get_dtype(dtype: str):
 
 
 OutputLen_NumReqs_Map: TypeAlias = dict[int, int]
-def compute_request_output_lengths(batch_size: int, step_requests: list[int]) \
-      -> OutputLen_NumReqs_Map:
+
+
+def compute_request_output_lengths(
+        batch_size: int, step_requests: list[int]) -> OutputLen_NumReqs_Map:
     """
     Given the number of requests, batch_size, and the number of requests
     that each engine-step should process, step_requests, determine the
     output lengths of the requests such that step_request is honoured.
 
-    Example: 
+    Example:
     if batch size = 128 and step_request = [128, 128, 96, 64, 32, 1]
     then return,
     {2 : 32, 3 : 32, 4 : 32, 5 : 31, 6 : 1}, meaning,
@@ -100,17 +102,17 @@ def compute_request_output_lengths(batch_size: int, step_requests: list[int]) \
         output_length -= 1
 
     # sanity checks.
-    assert sum(ol_nr.values()) == batch_size, \
-            ("Number of requests in output-length assignment does not match "
-             f"batch-size.\n batch size {batch_size} - "
-             f"step requests {step_requests} - assignments {ol_nr}")
+    assert sum(ol_nr.values()) == batch_size, (
+        "Number of requests in output-length assignment does not match "
+        f"batch-size.\n batch size {batch_size} - "
+        f"step requests {step_requests} - assignments {ol_nr}")
 
     # Check that the output-length is in [1, num-steps]. Output length must be
     # at least 1 as all requests must participate in the prefill-step.
-    assert all(ol >= 1 and ol <= num_steps for ol in ol_nr), \
-            ("Output lengths of requests should be in range "
-             f"[1, num-engine-steps].\n batch size {batch_size} - "
-             f"step requests {step_requests} - assignments {ol_nr}")
+    assert all(ol >= 1 and ol <= num_steps for ol in ol_nr), (
+        "Output lengths of requests should be in range "
+        f"[1, num-engine-steps].\n batch size {batch_size} - "
+        f"step requests {step_requests} - assignments {ol_nr}")
 
     return ol_nr
 
@@ -131,7 +133,7 @@ def determine_requests_per_step(context: ProfileContext) -> list[int]:
         context: ProfileContext object.
 
     Returns:
-        list[int]: Number of requests to process for all engine-steps. 
+        list[int]: Number of requests to process for all engine-steps.
          output[i], contains the number of requests that the ith step
          should process.
     """
@@ -140,10 +142,10 @@ def determine_requests_per_step(context: ProfileContext) -> list[int]:
         # that their output lengths must be equal to num_engine_steps.
         return [context.batch_size] * context.num_steps
 
-    assert context.complete_num_requests_per_step and \
-                context.complete_num_requests_per_step > 0, \
-        (f"Expected a positive complete_num_requests_per_step argument."
-         f"Instead got {context.complete_num_requests_per_step}")
+    assert (context.complete_num_requests_per_step
+            and context.complete_num_requests_per_step > 0), (
+                f"Expected a positive complete_num_requests_per_step argument."
+                f"Instead got {context.complete_num_requests_per_step}")
 
     # We start dropping after the first decode step.
     step_requests = [
@@ -165,8 +167,11 @@ def determine_requests_per_step(context: ProfileContext) -> list[int]:
     return step_requests
 
 
-def run_profile(context: ProfileContext, csv_output: Optional[str],
-                json_output: Optional[str]):
+def run_profile(
+    context: ProfileContext,
+    csv_output: Optional[str],
+    json_output: Optional[str],
+):
     print("Run profile with:")
     for key, value in asdict(context).items():
         print(f"  {key} = {value}")
@@ -186,7 +191,8 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
         top_p=0.95,
         # max_tokens is set on a per-request basis.
         max_tokens=None,
-        ignore_eos=True)
+        ignore_eos=True,
+    )
 
     # Create LLM
     llm = LLM(**asdict(context.engine_args))
@@ -212,8 +218,10 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
             f"max_num_seqs ({max_num_seqs}) and therefore cannot be run in a "
             f"single profile step, please choose a smaller batch size")
         sys.exit(-1)
-    print("llm.llm_engine.model_config.max_model_len: ",
-          llm.llm_engine.model_config.max_model_len)
+    print(
+        "llm.llm_engine.model_config.max_model_len: ",
+        llm.llm_engine.model_config.max_model_len,
+    )
     if prompt_len + max_output_len > llm.llm_engine.model_config.max_model_len:
         print(f"ERROR: chosen prompt_len + max_output_len ({prompt_len} + "
               f"{max_output_len} = {prompt_len + max_output_len}) is larger "
@@ -240,8 +248,9 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
 
             llm.llm_engine.add_request(
                 request_id=f"seq{i}",
-                prompt={'prompt_token_ids': prompt_token_ids},
-                params=sampling_params)
+                prompt={"prompt_token_ids": prompt_token_ids},
+                params=sampling_params,
+            )
 
     def abort_requests():
         for i in range(batch_size):
@@ -308,15 +317,15 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
         decode_results_list[0].print_summary_table()
 
     if csv_output:
-        csv_filename_base = csv_output[:-4] \
-                if csv_output.endswith('.csv') else csv_output
+        csv_filename_base = (csv_output[:-4]
+                             if csv_output.endswith(".csv") else csv_output)
         prefill_results.export_model_stats_table_csv(
             csv_filename_base + "_prefill_model_table.csv")
         prefill_results.export_summary_stats_table_csv(
             csv_filename_base + "_prefill_summary_table.csv")
 
         if has_decode:
-            decode_results_list[0].export_model_stats_table_csv(\
+            decode_results_list[0].export_model_stats_table_csv(
                 csv_filename_base + "_decode_model_table.csv")
             decode_results_list[0].export_summary_stats_table_csv(
                 csv_filename_base + "_decode_summary_table.csv")
@@ -333,7 +342,7 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
                 "torch_version": f"{torch.__version__}",
                 "torch_cuda_version": f"{torch.version.cuda}",
                 "cuda_devices": f"{cuda_devices}",
-                **asdict(context)
+                **asdict(context),
             },
             "prefill": prefill_results.convert_stats_to_dict(),
         }
@@ -343,8 +352,8 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
                 json_dict[f"decode_{idx + 1}"] = dr.convert_stats_to_dict()
 
         # Add .json to json_output filename if it doesn't exist already.
-        json_output_file = json_output if json_output.endswith(
-            '.json') else json_output + '.json'
+        json_output_file = (json_output if json_output.endswith(".json") else
+                            json_output + ".json")
         with open(json_output_file, "w+") as f:
             json.dump(json_dict, f, indent=2)
         pass
@@ -361,7 +370,8 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser(description="""
+    parser = FlexibleArgumentParser(
+        description="""
 Profile a model
 
     example:
@@ -385,7 +395,8 @@ Profile a model
             --output-directory profile_breakdown --plot-metric pct_cuda_time
         ```
 """,
-                                    formatter_class=RawTextHelpFormatter)
+        formatter_class=RawTextHelpFormatter,
+    )
     parser.add_argument(
         "--csv",
         type=str,
@@ -394,51 +405,61 @@ Profile a model
         "filename, will create <filename>_prefill_model_table.csv, "
         "<filename>_prefill_summary_table.csv, "
         "<filename>_decode_model_table.csv, and "
-        "<filename>_decode_summary_table.csv")
+        "<filename>_decode_summary_table.csv",
+    )
     parser.add_argument(
         "--json",
         type=str,
         default=None,
-        help="Export the results as a json file. This should be the filename")
-    parser.add_argument("--save-chrome-traces-folder",
-                        type=str,
-                        help="Save chrome traces for the prefill and decode "
-                        "will save traces as prefill.json and decode_1.json, "
-                        "etc. inside this folder")
+        help="Export the results as a json file. This should be the filename",
+    )
+    parser.add_argument(
+        "--save-chrome-traces-folder",
+        type=str,
+        help="Save chrome traces for the prefill and decode "
+        "will save traces as prefill.json and decode_1.json, "
+        "etc. inside this folder",
+    )
     parser.add_argument(
         "--prompt-len",
         type=int,
         default=PROMPT_LEN_DEFAULT,
         help=f"Length of the random prompt to use when profiling, all batched "
-        f"requests use the same prompt_len, default={PROMPT_LEN_DEFAULT}")
-    parser.add_argument("--batch-size",
-                        type=int,
-                        default=BATCH_SIZE_DEFAULT,
-                        help=f"Number of requests to run as a single batch, "
-                        f"default={BATCH_SIZE_DEFAULT}")
+        f"requests use the same prompt_len, default={PROMPT_LEN_DEFAULT}",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=BATCH_SIZE_DEFAULT,
+        help=f"Number of requests to run as a single batch, "
+        f"default={BATCH_SIZE_DEFAULT}",
+    )
 
     subparsers = parser.add_subparsers(dest="cmd")
 
     run_num_steps_parser = subparsers.add_parser(
         "run_num_steps",
-        help="This variation profiles n engine.step() invocations.")
+        help="This variation profiles n engine.step() invocations.",
+    )
     run_num_steps_parser.add_argument(
-        '-n',
-        '--num-steps',
+        "-n",
+        "--num-steps",
         type=int,
         help="Number of engine steps to profile.\n"
         "Setting it to 1, profiles only the prefill step.\n"
         "Setting it to 2, profiles the prefill and first decode step\n"
         "Setting it to 3, profiles the prefill, 1st and 2nd decode steps\n"
-        "and so on ...")
+        "and so on ...",
+    )
 
     run_to_completion_parser = subparsers.add_parser(
         "run_to_completion",
         help="This variation profiles all the engine.step() invocations"
-        "until the engine exhausts all submitted requests.")
+        "until the engine exhausts all submitted requests.",
+    )
     run_to_completion_parser.add_argument(
-        '-n',
-        '--complete-num-requests-per-step',
+        "-n",
+        "--complete-num-requests-per-step",
         type=int,
         help=
         "Complete complete_num_requests_per_step requests every decode step."
@@ -446,7 +467,8 @@ Profile a model
         "the profiler is run for 6 engine steps, with the steps processing, "
         "128, 128, 96, 64, 32, 1 requests respectively.\n"
         "Note that we tack-on a one-request step at the end as it is often "
-        "useful.")
+        "useful.",
+    )
 
     EngineArgs.add_cli_args(parser)
 
@@ -457,5 +479,6 @@ Profile a model
             k: v
             for k, v in vars(args).items()
             if k in inspect.signature(ProfileContext).parameters
-        })
+        },
+    )
     run_profile(context, csv_output=args.csv, json_output=args.json)

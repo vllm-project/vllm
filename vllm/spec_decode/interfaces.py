@@ -81,8 +81,12 @@ class SpeculativeProposer(ABC):
 
 class SpeculativeScorer(ABC):
 
-    def __init__(self, scorer_worker: WorkerBase,
-                 device: Union[torch.device, str], vocab_size: int):
+    def __init__(
+        self,
+        scorer_worker: WorkerBase,
+        device: Union[torch.device, str],
+        vocab_size: int,
+    ):
         self._scorer_worker = scorer_worker
         if isinstance(device, torch.device):
             device = device.type

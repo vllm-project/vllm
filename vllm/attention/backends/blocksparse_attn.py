@@ -146,6 +146,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
     dynamically, it should be stored in tensor. The tensor has to be
     updated from `CUDAGraphRunner.forward` API.
     """
+
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
     seq_lens: Optional[List[int]]
@@ -271,7 +272,6 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
 
 class BlocksparseFlashAttentionMetadataBuilder(
         CommonMetadataBuilder[BlocksparseFlashAttentionMetadata]):
-
     _metadata_cls = BlocksparseFlashAttentionMetadata
 
 
@@ -410,16 +410,14 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             )
 
         if prefill_meta := attn_metadata.prefill_metadata:
-
             # Prompt run.
             # normal attention
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
 
-            assert kv_cache.numel() == 0 \
-                    or prefill_meta.block_tables is None \
-                    or prefill_meta.block_tables.numel() == 0, \
-                "Does not support prefix-enabled attention."
+            assert (kv_cache.numel() == 0 or prefill_meta.block_tables is None
+                    or prefill_meta.block_tables.numel()
+                    == 0), "Does not support prefix-enabled attention."
 
             output = self.bs_attn(
                 q=query,

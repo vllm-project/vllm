@@ -21,17 +21,21 @@ class MockLogitsProcessor(LogitsProcessor):
         self.fake_logits = fake_logits.clone()
 
     def forward(self, *args, **kwargs):
-        with patch(
-                "vllm.model_executor.layers.logits_processor._prune_hidden_states",
-                lambda x, y: x
-        ), patch(
-                "vllm.model_executor.layers.logits_processor.LogitsProcessor._get_logits",
-                lambda *args, **kwargs: self.fake_logits):
+        with (
+                patch(
+                    "vllm.model_executor.layers.logits_processor._prune_hidden_states",
+                    lambda x, y: x,
+                ),
+                patch(
+                    "vllm.model_executor.layers.logits_processor.LogitsProcessor._get_logits",
+                    lambda *args, **kwargs: self.fake_logits,
+                ),
+        ):
             return super().forward(*args, **kwargs)
 
 
 def _prepare_test(
-        batch_size: int
+    batch_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, MockLogitsProcessor]:
     vocab_size = 32000
     input_tensor = torch.rand((batch_size, 1024), dtype=torch.float16)
@@ -81,11 +85,13 @@ def test_logits_processors(seed: int):
         seq_lens,
         query_lens=seq_lens,
         device=device,
-        pin_memory=is_pin_memory_available())
+        pin_memory=is_pin_memory_available(),
+    )
     logits_processor_output = logits_processor(
         lm_head=None,
         hidden_states=input_tensor,
-        sampling_metadata=sampling_metadata)
+        sampling_metadata=sampling_metadata,
+    )
 
     fake_logits *= logits_processor.scale
     torch.testing.assert_close(logits_processor_output[:, 1],

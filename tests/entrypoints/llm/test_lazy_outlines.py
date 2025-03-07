@@ -19,9 +19,11 @@ def run_normal_opt125m():
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     # Create an LLM without guided decoding as a baseline.
-    llm = LLM(model="facebook/opt-125m",
-              enforce_eager=True,
-              gpu_memory_utilization=0.3)
+    llm = LLM(
+        model="facebook/opt-125m",
+        enforce_eager=True,
+        gpu_memory_utilization=0.3,
+    )
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         prompt = output.prompt
@@ -43,9 +45,11 @@ def run_normal():
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
     # Create an LLM without guided decoding as a baseline.
-    llm = LLM(model="distilbert/distilgpt2",
-              enforce_eager=True,
-              gpu_memory_utilization=0.3)
+    llm = LLM(
+        model="distilbert/distilgpt2",
+        enforce_eager=True,
+        gpu_memory_utilization=0.3,
+    )
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         prompt = output.prompt
@@ -59,10 +63,12 @@ def run_normal():
 
 def run_lmfe(sample_regex):
     # Create an LLM with guided decoding enabled.
-    llm = LLM(model="distilbert/distilgpt2",
-              enforce_eager=True,
-              guided_decoding_backend="lm-format-enforcer",
-              gpu_memory_utilization=0.3)
+    llm = LLM(
+        model="distilbert/distilgpt2",
+        enforce_eager=True,
+        guided_decoding_backend="lm-format-enforcer",
+        gpu_memory_utilization=0.3,
+    )
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
     outputs = llm.generate(
         prompts=[
@@ -70,7 +76,8 @@ def run_lmfe(sample_regex):
         ] * 2,
         sampling_params=sampling_params,
         use_tqdm=True,
-        guided_options_request=dict(guided_regex=sample_regex))
+        guided_options_request=dict(guided_regex=sample_regex),
+    )
 
     for output in outputs:
         prompt = output.prompt
@@ -79,8 +86,7 @@ def run_lmfe(sample_regex):
 
 
 def test_lazy_outlines(sample_regex):
-    """If users don't use guided decoding, outlines should not be imported.
-    """
+    """If users don't use guided decoding, outlines should not be imported."""
     # make sure outlines is not imported
     module_name = "outlines"
     # In CI, we only check finally if the module is imported.

@@ -16,17 +16,20 @@ HF_TEXT_PROMPTS = [
     # T -> X
     (
         "Query: Find me an everyday image that matches the given caption: The label of the object is stop sign",  # noqa: E501,
-        Image.new("RGB", (56, 56))),
+        Image.new("RGB", (56, 56)),
+    ),
     # T -> X
-    ("Query: Retrieve an image of this caption: cherry blossom",
-     Image.new("RGB", (56, 56))),
+    (
+        "Query: Retrieve an image of this caption: cherry blossom",
+        Image.new("RGB", (56, 56)),
+    ),
 ]
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
     "What is shown in this image?",
     "cherry_blossom":
-    "What is shown in this image?"
+    "What is shown in this image?",
 })
 
 MODELS = ["MrLight/dse-qwen2-2b-mrl-v1"]
@@ -43,25 +46,28 @@ def get_messages(image: Image.Image, text: str, embed_text: bool):
                     "type": "image",
                     "image": Image.new("RGB", (56, 56)),
                     "resized_height": 1,
-                    "resized_width": 1
+                    "resized_width": 1,
                 },  # need a dummy image here for an easier process.
                 {
                     "type": "text",
                     "text": text
                 },
-            ]
+            ],
         }]
     else:
         messages = [{
             "role":
             "user",
-            "content": [{
-                "type": "image",
-                "image": image
-            }, {
-                "type": "text",
-                "text": text
-            }]
+            "content": [
+                {
+                    "type": "image",
+                    "image": image
+                },
+                {
+                    "type": "text",
+                    "text": text
+                },
+            ],
         }]
     return messages
 
@@ -70,8 +76,9 @@ def apply_chat_template_and_add_eos(
     messages: list[dict],
     apply_chat_template_fn: Callable,
 ):
-    prompt = apply_chat_template_fn(
-        messages, tokenize=False, add_generation_prompt=True) + "<|endoftext|>"
+    prompt = (apply_chat_template_fn(
+        messages, tokenize=False, add_generation_prompt=True) +
+              "<|endoftext|>")
     return prompt
 
 
@@ -89,7 +96,7 @@ def _run_test(
     *,
     dtype: str,
 ) -> None:
-    '''SET PYTHONPATH'''
+    """SET PYTHONPATH"""
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
@@ -124,8 +131,10 @@ def _run_test(
             cache_position=torch.arange(
                 0,
                 1,  # 1 for batch size
-                requires_grad=False),
-            use_cache=False)
+                requires_grad=False,
+            ),
+            use_cache=False,
+        )
         for text, image, embed_text in zip(input_texts, input_images,
                                            embed_texts):
             # dse requires non-standard input processing

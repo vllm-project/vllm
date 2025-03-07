@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Inference-only Jamba model."""
+
 from typing import Iterable, Optional, Set, Tuple
 
 import torch
@@ -41,14 +42,16 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 class JambaMoE(nn.Module):
 
-    def __init__(self,
-                 config: JambaConfig,
-                 num_experts: Optional[int] = None,
-                 top_k: Optional[int] = None,
-                 params_dtype: Optional[torch.dtype] = None,
-                 tp_size: Optional[int] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        config: JambaConfig,
+        num_experts: Optional[int] = None,
+        top_k: Optional[int] = None,
+        params_dtype: Optional[torch.dtype] = None,
+        tp_size: Optional[int] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.num_total_experts = num_experts or config.num_experts
         self.top_k = top_k or config.num_experts_per_tok
@@ -56,23 +59,27 @@ class JambaMoE(nn.Module):
         self.intermediate_size = config.intermediate_size
 
         if self.num_total_experts > 1:
-            self.router = ReplicatedLinear(self.hidden_size,
-                                           self.num_total_experts,
-                                           bias=False,
-                                           quant_config=None,
-                                           params_dtype=params_dtype)
+            self.router = ReplicatedLinear(
+                self.hidden_size,
+                self.num_total_experts,
+                bias=False,
+                quant_config=None,
+                params_dtype=params_dtype,
+            )
 
-        self.experts = FusedMoE(self.num_total_experts,
-                                self.top_k,
-                                self.hidden_size,
-                                self.intermediate_size,
-                                tp_size=tp_size,
-                                params_dtype=params_dtype,
-                                reduce_results=True,
-                                renormalize=False,
-                                use_grouped_topk=False,
-                                quant_config=quant_config,
-                                prefix=f"{prefix}.experts")
+        self.experts = FusedMoE(
+            self.num_total_experts,
+            self.top_k,
+            self.hidden_size,
+            self.intermediate_size,
+            tp_size=tp_size,
+            params_dtype=params_dtype,
+            reduce_results=True,
+            renormalize=False,
+            use_grouped_topk=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_shape = hidden_states.shape
@@ -81,56 +88,64 @@ class JambaMoE(nn.Module):
         if self.num_total_experts > 1:
             router_logits, _ = self.router(hidden_states)
         else:
-            router_logits = torch.ones((hidden_states.shape[0], 1),
-                                       device=hidden_states.device,
-                                       dtype=hidden_states.dtype)
+            router_logits = torch.ones(
+                (hidden_states.shape[0], 1),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            )
         hidden_states = self.experts(hidden_states, router_logits)
         return hidden_states.view(orig_shape)
 
 
 class JambaMLP(JambaMoE):
 
-    def __init__(self,
-                 config: JambaConfig,
-                 params_dtype: Optional[torch.dtype] = None,
-                 tp_size: Optional[int] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
-        super().__init__(config,
-                         num_experts=1,
-                         top_k=1,
-                         params_dtype=params_dtype,
-                         tp_size=tp_size,
-                         quant_config=quant_config,
-                         prefix=prefix)
+    def __init__(
+        self,
+        config: JambaConfig,
+        params_dtype: Optional[torch.dtype] = None,
+        tp_size: Optional[int] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        super().__init__(
+            config,
+            num_experts=1,
+            top_k=1,
+            params_dtype=params_dtype,
+            tp_size=tp_size,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
 
 
 class JambaMambaDecoderLayer(nn.Module):
 
-    def __init__(self,
-                 config: JambaConfig,
-                 layer_idx: int,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 is_lora_enabled: Optional[bool] = False,
-                 prefix: str = "",
-                 **kwargs) -> None:
+    def __init__(
+        self,
+        config: JambaConfig,
+        layer_idx: int,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        is_lora_enabled: Optional[bool] = False,
+        prefix: str = "",
+        **kwargs,
+    ) -> None:
         super().__init__()
         self.config = config
         self.is_lora_enabled = is_lora_enabled
-        self.mamba = MambaMixer(hidden_size= config.hidden_size,
-                                ssm_state_size = config.mamba_d_state,
-                                conv_kernel_size = config.mamba_d_conv,
-                                intermediate_size = config.mamba_expand *\
-                                                    config.hidden_size,
-                                time_step_rank = config.mamba_dt_rank,
-                                use_conv_bias = config.mamba_conv_bias,
-                                use_bias = config.mamba_proj_bias,
-                                use_rms_norm=True,
-                                rms_norm_eps=config.rms_norm_eps,
-                                activation=config.hidden_act,
-                                is_lora_enabled = self.is_lora_enabled
-                                )
+        self.mamba = MambaMixer(
+            hidden_size=config.hidden_size,
+            ssm_state_size=config.mamba_d_state,
+            conv_kernel_size=config.mamba_d_conv,
+            intermediate_size=config.mamba_expand * config.hidden_size,
+            time_step_rank=config.mamba_dt_rank,
+            use_conv_bias=config.mamba_conv_bias,
+            use_bias=config.mamba_proj_bias,
+            use_rms_norm=True,
+            rms_norm_eps=config.rms_norm_eps,
+            activation=config.hidden_act,
+            is_lora_enabled=self.is_lora_enabled,
+        )
 
         num_experts = config.layers_num_experts[layer_idx]
         ffn_layer_class = JambaMoE if num_experts > 1 else JambaMLP
@@ -166,13 +181,15 @@ class JambaMambaDecoderLayer(nn.Module):
 
 class JambaAttentionDecoderLayer(nn.Module):
 
-    def __init__(self,
-                 config: JambaConfig,
-                 layer_idx: int,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = "",
-                 **kwargs) -> None:
+    def __init__(
+        self,
+        config: JambaConfig,
+        layer_idx: int,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        **kwargs,
+    ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -202,10 +219,12 @@ class JambaAttentionDecoderLayer(nn.Module):
             bias=False,
             quant_config=quant_config,
         )
-        self.o_proj = RowParallelLinear(self.total_num_heads * self.head_dim,
-                                        config.hidden_size,
-                                        bias=False,
-                                        quant_config=quant_config)
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+        )
 
         self.attn = Attention(
             self.num_heads,
@@ -265,7 +284,7 @@ class JambaAttentionDecoderLayer(nn.Module):
 
 ALL_DECODER_LAYER_TYPES = {
     "attention": JambaAttentionDecoderLayer,
-    "mamba": JambaMambaDecoderLayer
+    "mamba": JambaMambaDecoderLayer,
 }
 
 
@@ -297,18 +316,19 @@ class JambaModel(nn.Module):
             layer_idx = int(prefix.rsplit(".", 1)[1])
             layer_class = ALL_DECODER_LAYER_TYPES[
                 config.layers_block_type[layer_idx]]
-            return layer_class(config,
-                               layer_idx,
-                               cache_config,
-                               quant_config=quant_config,
-                               prefix=prefix,
-                               **extra_kwargs)
+            return layer_class(
+                config,
+                layer_idx,
+                cache_config,
+                quant_config=quant_config,
+                prefix=prefix,
+                **extra_kwargs,
+            )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers")
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size)
 
         self.final_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -351,7 +371,8 @@ class JambaModel(nn.Module):
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
-                mamba_cache_params=layer_mamba_cache_params)
+                mamba_cache_params=layer_mamba_cache_params,
+            )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -384,8 +405,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, \
-            "Jamba currently does not support prefix caching"
+        assert (not cache_config.enable_prefix_caching
+                ), "Jamba currently does not support prefix caching"
 
         super().__init__()
         self.config = config
@@ -401,10 +422,11 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             self.unpadded_vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
+            padding_size=(
+                DEFAULT_VOCAB_PADDING_SIZE
+                # We need bigger padding if using lora for kernel
+                # compatibility
+                if not lora_config else lora_config.lora_vocab_padding_size),
         )
         # Used to track and store by the Mamba cache between steps.
         self.mamba_cache: Optional[MambaCacheManager] = None
@@ -419,23 +441,33 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                intermediate_tensors: Optional[IntermediateTensors] = None,
-                inputs_embeds: Optional[torch.Tensor] = None,
-                **kwargs):
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
+    ):
         if self.mamba_cache is None:
             num_mamba_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
             self.mamba_cache = MambaCacheManager(
-                self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
-                *self._get_mamba_cache_shape())
+                self.vllm_config,
+                self.lm_head.weight.dtype,
+                num_mamba_layers,
+                *self._get_mamba_cache_shape(),
+            )
 
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
-        hidden_states = self.model(input_ids, positions, mamba_cache_params,
-                                   intermediate_tensors, inputs_embeds)
+        hidden_states = self.model(
+            input_ids,
+            positions,
+            mamba_cache_params,
+            intermediate_tensors,
+            inputs_embeds,
+        )
         return hidden_states
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
@@ -491,7 +523,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts)
+            num_experts=self.config.num_experts,
+        )
 
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
@@ -512,7 +545,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                if 'experts' in name:
+                if "experts" in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
@@ -541,11 +574,13 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     name = name.replace(weight_name, param_name)
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(param,
-                                  loaded_weight,
-                                  name,
-                                  shard_id=shard_id,
-                                  expert_id=expert_id)
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
@@ -576,7 +611,7 @@ class JambaForSequenceClassification(JambaForCausalLM):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config
         num_labels: int = config.num_labels
-        score_bias: bool = getattr(config, 'score_bias', False)
+        score_bias: bool = getattr(config, "score_bias", False)
         self.score = nn.Linear(config.hidden_size, num_labels, bias=score_bias)
 
         pooler_config = vllm_config.model_config.pooler_config
@@ -584,7 +619,8 @@ class JambaForSequenceClassification(JambaForCausalLM):
             pooler_config,
             pooling_type=PoolingType.LAST,
             normalize=False,
-            softmax=False)
+            softmax=False,
+        )
 
     def pooler(
         self,

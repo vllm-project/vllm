@@ -18,8 +18,8 @@ def setup_servers():
         pytest.skip("Skipping test: fewer than 4 GPUs available")
 
     # Set up environment variables
-    VLLM_HOST_IP = subprocess.check_output("hostname -I | awk '{print $1}'",
-                                           shell=True).decode().strip()
+    VLLM_HOST_IP = (subprocess.check_output("hostname -I | awk '{print $1}'",
+                                            shell=True).decode().strip())
     os.environ["VLLM_HOST_IP"] = VLLM_HOST_IP
 
     # Start prefill instance
@@ -36,7 +36,7 @@ def setup_servers():
         "--max-model-len",
         "1000",
         "--kv-transfer-config",
-        '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer",'\
+        '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer",'
         '"kv_rank":0,"kv_parallel_size":2}',
     ]
     prefill_env = os.environ.copy()
@@ -57,7 +57,7 @@ def setup_servers():
         "--max-model-len",
         "1000",
         "--kv-transfer-config",
-        '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer",'\
+        '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer",'
         '"kv_rank":1,"kv_parallel_size":2}',
     ]
     decode_env = os.environ.copy()
@@ -97,23 +97,27 @@ def wait_for_server(port, timeout=240):
 @pytest.mark.parametrize("prompt", ["San Francisco is a", "Santa Clara is a"])
 def test_disaggregated_prefilling(prompt):
     # Send to prefill
-    response = requests.post("http://localhost:8100/v1/completions",
-                             headers={"Content-Type": "application/json"},
-                             json={
-                                 "model": "meta-llama/Llama-3.2-1B-Instruct",
-                                 "prompt": prompt,
-                                 "max_tokens": 1,
-                                 "temperature": 0
-                             })
+    response = requests.post(
+        "http://localhost:8100/v1/completions",
+        headers={"Content-Type": "application/json"},
+        json={
+            "model": "meta-llama/Llama-3.2-1B-Instruct",
+            "prompt": prompt,
+            "max_tokens": 1,
+            "temperature": 0,
+        },
+    )
     assert response.status_code == 200
 
     # Send to decode
-    response = requests.post("http://localhost:8200/v1/completions",
-                             headers={"Content-Type": "application/json"},
-                             json={
-                                 "model": "meta-llama/Llama-3.2-1B-Instruct",
-                                 "prompt": prompt,
-                                 "max_tokens": 10,
-                                 "temperature": 0
-                             })
+    response = requests.post(
+        "http://localhost:8200/v1/completions",
+        headers={"Content-Type": "application/json"},
+        json={
+            "model": "meta-llama/Llama-3.2-1B-Instruct",
+            "prompt": prompt,
+            "max_tokens": 10,
+            "temperature": 0,
+        },
+    )
     assert response.status_code == 200

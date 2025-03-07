@@ -51,7 +51,8 @@ def _run_incremental_decode(tokenizer, all_input_ids,
             prev_tokens,
             offset,
             token_offset,
-            skip_special_tokens=skip_special_tokens)
+            skip_special_tokens=skip_special_tokens,
+        )
         decoded_text += text
         if prev_tokens is None:
             prev_tokens = new_tokens
@@ -76,7 +77,8 @@ def tokenizer(tokenizer_name):
         "ပုံပြင်လေးပြောပြပါ",
         # Using "URGENCY" since "CY" has token id 130282
         "URGENCY🌶️",
-    ])
+    ],
+)
 def test_mistral_edge_case(tokenizer, truth):
     """Test for a specific edge cases with V3-Tekken MistralTokenizer.
 
@@ -85,10 +87,12 @@ def test_mistral_edge_case(tokenizer, truth):
     starting_index = 0
     all_input_ids = tokenizer(truth, add_special_tokens=False).input_ids
 
-    decoded_text = _run_incremental_decode(tokenizer,
-                                           all_input_ids,
-                                           skip_special_tokens=True,
-                                           starting_index=starting_index)
+    decoded_text = _run_incremental_decode(
+        tokenizer,
+        all_input_ids,
+        skip_special_tokens=True,
+        starting_index=starting_index,
+    )
     assert decoded_text == truth
 
 
@@ -130,16 +134,19 @@ def test_decode_streaming(tokenizer, truth, with_prompt, skip_special_tokens):
         tokenizer,
         all_input_ids,
         skip_special_tokens=skip_special_tokens,
-        starting_index=starting_index)
+        starting_index=starting_index,
+    )
 
     assert decoded_text == generated
 
     decoded_text = _run_incremental_decode(
-        tokenizer, [len(tokenizer)],
+        tokenizer,
+        [len(tokenizer)],
         skip_special_tokens=skip_special_tokens,
-        starting_index=starting_index)
+        starting_index=starting_index,
+    )
 
-    assert decoded_text == ''
+    assert decoded_text == ""
 
 
 @pytest.fixture
@@ -179,7 +186,7 @@ def create_sequence(prompt_token_ids=None):
 
 
 def create_dummy_logprobs(
-        complete_sequence_token_ids: list[int]) -> list[dict[int, Logprob]]:
+    complete_sequence_token_ids: list[int], ) -> list[dict[int, Logprob]]:
     return [{
         token_id: Logprob(logprob=0.0),
         token_id + 1: Logprob(logprob=0.1)
@@ -187,7 +194,7 @@ def create_dummy_logprobs(
 
 
 def create_dummy_prompt_logprobs(
-        complete_sequence_token_ids: list[int]
+    complete_sequence_token_ids: list[int],
 ) -> list[Optional[dict[int, Any]]]:
     # logprob for the first prompt token is None.
     logprobs: list[Optional[dict[int, Any]]] = [None]
@@ -198,10 +205,12 @@ def create_dummy_prompt_logprobs(
 @pytest.mark.parametrize("complete_sequence", TRUTH)
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
 @pytest.mark.parametrize("skip_special_tokens", [True, False], indirect=True)
-def test_decode_sequence_logprobs(complete_sequence: str,
-                                  complete_sequence_token_ids: list[int],
-                                  detokenizer: Detokenizer,
-                                  skip_special_tokens: bool):
+def test_decode_sequence_logprobs(
+    complete_sequence: str,
+    complete_sequence_token_ids: list[int],
+    detokenizer: Detokenizer,
+    skip_special_tokens: bool,
+):
     """Verify Detokenizer decodes logprobs correctly."""
     sampling_params = SamplingParams(skip_special_tokens=skip_special_tokens,
                                      logprobs=2)
@@ -241,10 +250,12 @@ def test_decode_prompt_logprobs(complete_sequence_token_ids: list[int],
 
     # Run sequentially.
     seq = create_sequence(complete_sequence_token_ids)
-    seq_group = SequenceGroup(request_id="1",
-                              seqs=[seq],
-                              sampling_params=sampling_params,
-                              arrival_time=0.0)
+    seq_group = SequenceGroup(
+        request_id="1",
+        seqs=[seq],
+        sampling_params=sampling_params,
+        arrival_time=0.0,
+    )
     dummy_logprobs = create_dummy_prompt_logprobs(complete_sequence_token_ids)
     detokenizer.decode_prompt_logprobs_inplace(seq_group,
                                                dummy_logprobs,
@@ -288,14 +299,15 @@ def test_decode_prompt_logprobs_chunked_prefill(
         max_num_seqs = min(chunked_prefill_token_size, max_num_seqs)
         max_num_batched_tokens = chunked_prefill_token_size
 
-    with vllm_runner(model,
-                     dtype="half",
-                     max_logprobs=5,
-                     gpu_memory_utilization=0.5,
-                     enable_chunked_prefill=enable_chunked_prefill,
-                     max_num_batched_tokens=max_num_batched_tokens,
-                     max_num_seqs=max_num_seqs) as vllm_model:
-
+    with vllm_runner(
+            model,
+            dtype="half",
+            max_logprobs=5,
+            gpu_memory_utilization=0.5,
+            enable_chunked_prefill=enable_chunked_prefill,
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_seqs=max_num_seqs,
+    ) as vllm_model:
         vllm_sampling_params = SamplingParams(max_tokens=10,
                                               logprobs=5,
                                               prompt_logprobs=5,
@@ -309,14 +321,14 @@ def test_decode_prompt_logprobs_chunked_prefill(
 
             # Compared detokenized prompts ids to original prompt.
             generated_string = ""
-            for (prompt_token,
-                 prompt_logprobs) in zip(result.prompt_token_ids[1:],
-                                         result.prompt_logprobs[1:]):
+            for prompt_token, prompt_logprobs in zip(
+                    result.prompt_token_ids[1:], result.prompt_logprobs[1:]):
                 # prompt_logprobs is a dict of the token_id: logprob
                 # We select the token_id corresponding to the actual prompt
                 # Decoded token in the detokenized string corresponding to this
                 # prompt token.
                 generated_string += prompt_logprobs[prompt_token].decoded_token
 
-            assert generated_string == example_prompts[idx], (
-                "Detokenized prompt logprobs do not match original prompt")
+            assert (
+                generated_string == example_prompts[idx]
+            ), "Detokenized prompt logprobs do not match original prompt"

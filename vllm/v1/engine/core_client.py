@@ -34,7 +34,7 @@ AnyFuture = Union[asyncio.Future[Any], Future[Any]]
 
 class EngineCoreClient(ABC):
     """
-    EngineCoreClient: subclasses handle different methods for pushing 
+    EngineCoreClient: subclasses handle different methods for pushing
         and pulling from the EngineCore for asyncio / multiprocessing.
 
     Subclasses:
@@ -51,7 +51,6 @@ class EngineCoreClient(ABC):
         executor_class: type[Executor],
         log_stats: bool,
     ) -> "EngineCoreClient":
-
         # TODO: support this for debugging purposes.
         if asyncio_mode and not multiprocess_mode:
             raise NotImplementedError(
@@ -145,7 +144,7 @@ class EngineCoreClient(ABC):
 
 class InprocClient(EngineCoreClient):
     """
-    InprocClient: client for in-process EngineCore. Intended 
+    InprocClient: client for in-process EngineCore. Intended
     for use in LLMEngine for V0-style add_request() and step()
         EngineCore setup in this process (no busy loop).
 
@@ -225,7 +224,7 @@ class BackgroundResources:
             with self.ctx.socket(zmq.PAIR) as shutdown_sender:
                 shutdown_sender.connect(self.shutdown_path)
                 # Send shutdown signal.
-                shutdown_sender.send(b'')
+                shutdown_sender.send(b"")
 
 
 class MPClient(EngineCoreClient):
@@ -236,7 +235,7 @@ class MPClient(EngineCoreClient):
 
         * pushes EngineCoreRequests via input_socket
         * pulls EngineCoreOutputs via output_socket
-    
+
         * AsyncMPClient subclass for AsyncLLM usage
         * SyncMPClient subclass for LLM usage
     """
@@ -290,7 +289,8 @@ class MPClient(EngineCoreClient):
                 "vllm_config": vllm_config,
                 "executor_class": executor_class,
                 "log_stats": log_stats,
-            })
+            },
+        )
 
         # Create input socket.
         self.resources.input_socket = make_zmq_socket(self.ctx, input_path,
@@ -315,8 +315,12 @@ def _process_utility_output(output: UtilityOutput,
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
-                 log_stats: bool):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool,
+    ):
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
@@ -366,9 +370,11 @@ class SyncMPClient(MPClient):
                 out_socket.close(linger=0)
 
         # Process outputs from engine in separate thread.
-        self.output_queue_thread = Thread(target=process_outputs_socket,
-                                          name="EngineCoreOutputQueueThread",
-                                          daemon=True)
+        self.output_queue_thread = Thread(
+            target=process_outputs_socket,
+            name="EngineCoreOutputQueueThread",
+            daemon=True,
+        )
         self.output_queue_thread.start()
 
     def get_output(self) -> EngineCoreOutputs:
@@ -376,7 +382,6 @@ class SyncMPClient(MPClient):
 
     def _send_input(self, request_type: EngineCoreRequestType,
                     request: Any) -> None:
-
         # (RequestType, SerializedRequest)
         msg = (request_type.value, self.encoder.encode(request))
         self.input_socket.send_multipart(msg, copy=False)
@@ -432,8 +437,12 @@ class SyncMPClient(MPClient):
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
-                 log_stats: bool):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool,
+    ):
         super().__init__(
             asyncio_mode=True,
             vllm_config=vllm_config,
@@ -477,7 +486,6 @@ class AsyncMPClient(MPClient):
 
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: Any) -> None:
-
         msg = (request_type.value, self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)
 

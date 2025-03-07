@@ -15,10 +15,10 @@ logger = init_logger(__name__)
 
 class BlockPool:
     """BlockPool that manages KVCacheBlocks.
-    It provides methods to allocate, free and cache the kv cache blocks. The 
-    free_block_queue stores the free blocks in eviction order to enable 
-    allocation, free, and cache eviction. The cached_block_hash_to_block 
-    maps between block hash and cached block to support finding cached blocks 
+    It provides methods to allocate, free and cache the kv cache blocks. The
+    free_block_queue stores the free blocks in eviction order to enable
+    allocation, free, and cache eviction. The cached_block_hash_to_block
+    maps between block hash and cached block to support finding cached blocks
     by their block hash.
 
     Args:
@@ -79,7 +79,7 @@ class BlockPool:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
         metadata to be updated and cached. Given a request, it computes the
-        block hashes for the blocks starting from `num_cached_blocks` to 
+        block hashes for the blocks starting from `num_cached_blocks` to
         `num_full_blocks`, updating the metadata for each block
         and caching them in the `cached_block_hash_to_block`.
 
@@ -87,10 +87,10 @@ class BlockPool:
             request: The request to cache the blocks.
             blocks: All blocks in the request.
             block_hashes: Block hashes of the blocks in the request. Note that
-            this list may be shorter than the blocks list. In this case the 
+            this list may be shorter than the blocks list. In this case the
             missed block hash will be computed in this function.
             num_cached_blocks: The number of blocks that are already cached.
-            num_full_blocks: The number of blocks that are full and should 
+            num_full_blocks: The number of blocks that are full and should
                 be cached after this function.
             block_size: Number of tokens in each block.
         """
@@ -238,11 +238,13 @@ class BlockPool:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        num_used_blocks = (self.num_gpu_blocks - self.get_num_free_blocks())
+        num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
         if num_used_blocks > 0:
             logger.warning(
                 "Failed to reset prefix cache because some "
-                "blocks (%d) are not freed yet", num_used_blocks)
+                "blocks (%d) are not freed yet",
+                num_used_blocks,
+            )
             return False
 
         # Remove all hashes so that no new blocks will hit.

@@ -117,12 +117,12 @@ def _get_sparse_attn_mask_homo_head(
         q_pos = torch.arange(num_blocks)[:, None]
         k_pos = torch.arange(num_blocks)[None]
         mask_vert_strided = (torch.arange(num_blocks) + 1) % vert_stride == 0
-        block_mask_dense = (((q_pos >= k_pos)
-                             & ((q_pos - k_pos < local_blocks)
-                                | mask_vert_strided)).to(device).to(dtype))
+        block_mask_dense = (((q_pos >= k_pos) &
+                             ((q_pos - k_pos < local_blocks)
+                              | mask_vert_strided)).to(device).to(dtype))
         num_blocks_q = triton.cdiv(q_len, block_size)
-        block_mask_dense_output = (dense_to_crow_col(
-            block_mask_dense[-num_blocks_q:].contiguous()))
+        block_mask_dense_output = dense_to_crow_col(
+            block_mask_dense[-num_blocks_q:].contiguous())
     if return_dense:
         mask_dense = torch.kron(
             block_mask_dense,
@@ -185,17 +185,17 @@ def get_sparse_attn_mask(
     assert dense_mask_type in ("binary", "bias")
     if homo_head:
         with torch.no_grad():
-            (crow, col), block_mask_dense, mask_dense = (
-                _get_sparse_attn_mask_homo_head(
-                    q_len,
-                    max_seqlen,
-                    dtype,
-                    device,
-                    block_size,
-                    local_blocks,
-                    vert_stride,
-                    return_dense,
-                ))
+            (crow, col
+             ), block_mask_dense, mask_dense = _get_sparse_attn_mask_homo_head(
+                 q_len,
+                 max_seqlen,
+                 dtype,
+                 device,
+                 block_size,
+                 local_blocks,
+                 vert_stride,
+                 return_dense,
+             )
             crow = crow[None].expand(n_heads, crow.shape[0])
             col = col[None].expand(n_heads, col.shape[0])
             if return_dense:
@@ -215,9 +215,9 @@ def get_sparse_attn_mask(
             vert_stride == 0 for h in range(n_heads)
         ]
         mask_vert_strided = torch.vstack(mask_vert_strided).unsqueeze(1)
-        block_mask_dense = (((q_pos >= k_pos)
-                             & ((q_pos - k_pos < local_blocks)
-                                | mask_vert_strided)).to(device).to(dtype))
+        block_mask_dense = (((q_pos >= k_pos) &
+                             ((q_pos - k_pos < local_blocks)
+                              | mask_vert_strided)).to(device).to(dtype))
         num_blocks_q = triton.cdiv(q_len, block_size)
         block_mask_dense_output = block_mask_dense[:, -num_blocks_q:]
     if return_dense:

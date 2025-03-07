@@ -15,7 +15,7 @@ import shutil
 
 from torch.utils.hipify.hipify_python import hipify
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # Project directory where all the source + include files live.
@@ -41,7 +41,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Limit include scope to project_dir only
-    includes = [os.path.join(args.project_dir, '*')]
+    includes = [os.path.join(args.project_dir, "*")]
 
     # Get absolute path for all source files.
     extra_files = [os.path.abspath(s) for s in args.sources]
@@ -50,14 +50,16 @@ if __name__ == '__main__':
     # The directory might already exist to hold object files so we ignore that.
     shutil.copytree(args.project_dir, args.output_dir, dirs_exist_ok=True)
 
-    hipify_result = hipify(project_directory=args.project_dir,
-                           output_directory=args.output_dir,
-                           header_include_dirs=[],
-                           includes=includes,
-                           extra_files=extra_files,
-                           show_detailed=True,
-                           is_pytorch_extension=True,
-                           hipify_extra_files_only=True)
+    hipify_result = hipify(
+        project_directory=args.project_dir,
+        output_directory=args.output_dir,
+        header_include_dirs=[],
+        includes=includes,
+        extra_files=extra_files,
+        show_detailed=True,
+        is_pytorch_extension=True,
+        hipify_extra_files_only=True,
+    )
 
     hipified_sources = []
     for source in args.sources:
@@ -68,7 +70,7 @@ if __name__ == '__main__':
                           else s_abs)
         hipified_sources.append(hipified_s_abs)
 
-    assert (len(hipified_sources) == len(args.sources))
+    assert len(hipified_sources) == len(args.sources)
 
     # Print hipified source files.
     print("\n".join(hipified_sources))

@@ -54,10 +54,12 @@ def get_forward_context() -> ForwardContext:
 
 
 @contextmanager
-def set_forward_context(attn_metadata: Any,
-                        vllm_config: VllmConfig,
-                        virtual_engine: int = 0,
-                        num_tokens: int = 0):
+def set_forward_context(
+    attn_metadata: Any,
+    vllm_config: VllmConfig,
+    virtual_engine: int = 0,
+    num_tokens: int = 0,
+):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -73,8 +75,8 @@ def set_forward_context(attn_metadata: Any,
         if attn_metadata is not None:
             if hasattr(attn_metadata, "num_prefill_tokens"):
                 # for v0 attention backends
-                batchsize = attn_metadata.num_prefill_tokens + \
-                    attn_metadata.num_decode_tokens
+                batchsize = (attn_metadata.num_prefill_tokens +
+                             attn_metadata.num_decode_tokens)
             else:
                 # for v1 attention backends
                 batchsize = attn_metadata.num_input_tokens
@@ -86,6 +88,7 @@ def set_forward_context(attn_metadata: Any,
                                          device="cpu",
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
+
         dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)
         dp_metadata = DPMetadata(cu_tokens_across_dp_cpu)
@@ -97,7 +100,8 @@ def set_forward_context(attn_metadata: Any,
         static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
-        dp_metadata=dp_metadata)
+        dp_metadata=dp_metadata,
+    )
     try:
         yield
     finally:
@@ -105,8 +109,8 @@ def set_forward_context(attn_metadata: Any,
         if need_to_track_batchsize:
             if hasattr(attn_metadata, "num_prefill_tokens"):
                 # for v0 attention backends
-                batchsize = attn_metadata.num_prefill_tokens + \
-                    attn_metadata.num_decode_tokens
+                batchsize = (attn_metadata.num_prefill_tokens +
+                             attn_metadata.num_decode_tokens)
             else:
                 # for v1 attention backends
                 batchsize = attn_metadata.num_input_tokens
@@ -130,7 +134,9 @@ def set_forward_context(attn_metadata: Any,
                     forward_stats.append((bs, len(times), medium))
                 forward_stats.sort(key=lambda x: x[1], reverse=True)
                 if forward_stats:
-                    logger.info(("Batchsize forward time stats "
-                                 "(batchsize, count, median_time(ms)): %s"),
-                                forward_stats)
+                    logger.info(
+                        ("Batchsize forward time stats "
+                         "(batchsize, count, median_time(ms)): %s"),
+                        forward_stats,
+                    )
         _forward_context = prev_context

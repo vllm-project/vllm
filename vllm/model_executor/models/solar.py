@@ -197,8 +197,8 @@ class SolarDecoderLayer(nn.Module):
 
         if rope_scaling is not None and getattr(
                 config, "original_max_position_embeddings", None):
-            rope_scaling["original_max_position_embeddings"] \
-                = config.original_max_position_embeddings
+            rope_scaling["original_max_position_embeddings"] = (
+                config.original_max_position_embeddings)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
@@ -297,9 +297,8 @@ class SolarModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -326,8 +325,8 @@ class SolarModel(nn.Module):
         bskcn_h_2 = None
         bskcn_r_1 = None
         bskcn_r_2 = None
-        bskcn_tv = (self.config.bskcn_tv[0]
-                    if self.training else self.config.bskcn_tv[1])
+        bskcn_tv = self.config.bskcn_tv[
+            0] if self.training else self.config.bskcn_tv[1]
 
         for i in range(self.start_layer, self.end_layer):
             if i in self.config.bskcn_1:
@@ -402,10 +401,12 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE
-                # We need bigger padding if using lora for kernel
-                # compatibility
-                if not lora_config else lora_config.lora_vocab_padding_size,
+                padding_size=(
+                    DEFAULT_VOCAB_PADDING_SIZE
+                    # We need bigger padding if using lora for kernel
+                    # compatibility
+                    if not lora_config else
+                    lora_config.lora_vocab_padding_size),
                 quant_config=quant_config,
             )
             if config.tie_word_embeddings:
@@ -463,13 +464,12 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
+            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if self.quant_config is not None and (
+                    scale_name := self.quant_config.get_cache_scale(name)):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",

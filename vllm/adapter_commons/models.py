@@ -23,7 +23,7 @@ class AdapterModel(ABC):
         raise NotImplementedError("Subclasses must implement this method.")
 
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -52,7 +52,7 @@ class AdapterModelManager(ABC):
         self._registered_adapters: Dict[int, Any] = {}
         # Dict instead of a Set for compatibility with LRUCache.
         self._active_adapters: Dict[int, None] = {}
-        self.adapter_type = 'Adapter'
+        self.adapter_type = "Adapter"
         self._last_mapping = None
 
     def __len__(self) -> int:

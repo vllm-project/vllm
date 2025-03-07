@@ -126,19 +126,20 @@ class CustomOp(nn.Module):
         Specifying 'all' or 'none' in custom_op takes precedence.
         """
         from vllm.config import CompilationLevel
+
         compilation_config = get_current_vllm_config().compilation_config
         custom_ops = compilation_config.custom_ops
         count_none = custom_ops.count("none")
         count_all = custom_ops.count("all")
-        return compilation_config.level < CompilationLevel.PIECEWISE and \
-            not count_none > 0 or count_all > 0
+        return (compilation_config.level < CompilationLevel.PIECEWISE
+                and not count_none > 0 or count_all > 0)
 
     # Dictionary of all custom ops (classes, indexed by registered name).
     # To check if an op with a name is enabled, call .enabled() on the class.
     # Examples:
     # - MyOp.enabled()
     # - op_registry["my_op"].enabled()
-    op_registry: Dict[str, Type['CustomOp']] = {}
+    op_registry: Dict[str, Type["CustomOp"]] = {}
 
     # Decorator to register custom ops.
     @classmethod

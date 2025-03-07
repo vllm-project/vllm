@@ -38,7 +38,8 @@ class ImagePlugin(MultiModalPlugin):
         return cached_get_image_processor(
             model_config.model,
             trust_remote_code=model_config.trust_remote_code,
-            **mm_processor_kwargs)
+            **mm_processor_kwargs,
+        )
 
     def _default_input_mapper(
         self,
@@ -64,16 +65,16 @@ class ImagePlugin(MultiModalPlugin):
                 # used for the initialization call though, just in case the
                 # signatures of the preprocessor initializer don't match
                 # preprocess()
-                batch_data = image_processor \
-                    .preprocess(data, return_tensors="pt") \
-                    .data
+                batch_data = image_processor.preprocess(
+                    data, return_tensors="pt").data
             except Exception:
                 logger.error(
                     "Failed to process image (%s) with the default mapper. "
                     "This is most likely an edge-case with this model's image "
                     "processor in transformers (type: %s), and not vLLM.",
                     data,
-                    type(image_processor).__name__)
+                    type(image_processor).__name__,
+                )
                 raise
 
             return MultiModalKwargs(batch_data)
@@ -133,4 +134,4 @@ class ImageMediaIO(MediaIO[Image.Image]):
             image.save(buffer, image_format)
             data = buffer.getvalue()
 
-        return base64.b64encode(data).decode('utf-8')
+        return base64.b64encode(data).decode("utf-8")

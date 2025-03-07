@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A CPU worker class."""
+
 from typing import Dict, List, Optional, Set, Tuple, Type
 
 import torch
@@ -33,9 +34,13 @@ class CPUCacheEngine:
     as copying.
     """
 
-    def __init__(self, cache_config: CacheConfig, model_config: ModelConfig,
-                 parallel_config: ParallelConfig,
-                 device_config: DeviceConfig) -> None:
+    def __init__(
+        self,
+        cache_config: CacheConfig,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        device_config: DeviceConfig,
+    ) -> None:
         assert device_config.device_type == "cpu"
         self.cache_config = cache_config
         self.model_config = model_config
@@ -115,8 +120,8 @@ class CPUCacheEngine:
 class CPUWorker(LocalOrDistributedWorkerBase):
     """A worker class that executes (a partition of) the model on a CPU socket.
 
-    Each worker is associated with a single CPU socket. The worker is 
-    responsible for maintaining the KV cache and executing the model on the 
+    Each worker is associated with a single CPU socket. The worker is
+    responsible for maintaining the KV cache and executing the model on the
     CPU. In case of distributed inference, each worker is assigned a partition
     of the model.
     """
@@ -144,6 +149,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
+
             init_cached_hf_modules()
 
         # Setup OpenMP threads affinity.
@@ -157,12 +163,13 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         # mlp_speculator
         speculative_config = self.speculative_config
         model_config = self.model_config
-        speculative_args = {} if speculative_config is None \
-            or (speculative_config.draft_model_config.model ==
-                model_config.model) \
+        speculative_args = (
+            {} if speculative_config is None or
+            (speculative_config.draft_model_config.model == model_config.model)
             or (speculative_config.draft_model_config.hf_config.model_type
-                not in ["medusa", "mlp_speculator", "eagle"]) \
-                    else {"return_hidden_states": True}
+                not in ["medusa", "mlp_speculator", "eagle"]) else {
+                    "return_hidden_states": True
+                })
         ModelRunnerClass: Type[CPUModelRunnerBase] = CPUModelRunner
         if self.model_config.runner_type == "pooling":
             ModelRunnerClass = CPUPoolingModelRunner
@@ -186,15 +193,18 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info("Profiling enabled. Traces will be saved to: %s",
-                        torch_profiler_trace_dir)
+            logger.info(
+                "Profiling enabled. Traces will be saved to: %s",
+                torch_profiler_trace_dir,
+            )
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
                 ],
                 with_stack=True,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir, use_gzip=True))
+                    torch_profiler_trace_dir, use_gzip=True),
+            )
         else:
             self.profiler = None
 
@@ -253,8 +263,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         Since this worker does not support GPUs, we use the num_gpu_blocks to
         determine how many non-swappable CPU blocks to allocate.
         """
-        assert (num_cpu_blocks == 0
-                ), f"{type(self)} does not support swappable cache"
+        assert num_cpu_blocks == 0, f"{type(self)} does not support swappable cache"
 
         # Note: To reuse the cache management procedure,
         # use cpu cache as 'gpu cache'.
@@ -280,8 +289,7 @@ class CPUWorker(LocalOrDistributedWorkerBase):
         return self.model_runner.list_loras()
 
     def _validate_num_cpu_blocks(self, num_cpu_blocks: int) -> None:
-        """Raise errors if the num_cpu_blocks is invalid.
-        """
+        """Raise errors if the num_cpu_blocks is invalid."""
         if num_cpu_blocks <= 0:
             raise ValueError("No available memory for the cache blocks. "
                              "Try increasing `VLLM_CPU_KVCACHE_SPACE` when "
@@ -298,9 +306,12 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
     def _init_cache_engine(self) -> None:
         self.cache_engine = [
-            CPUCacheEngine(self.cache_config, self.model_config,
-                           self.parallel_config, self.device_config)
-            for _ in range(self.parallel_config.pipeline_parallel_size)
+            CPUCacheEngine(
+                self.cache_config,
+                self.model_config,
+                self.parallel_config,
+                self.device_config,
+            ) for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.cpu_cache = [
             self.cache_engine[ve].cpu_cache
@@ -379,11 +390,14 @@ class CPUWorker(LocalOrDistributedWorkerBase):
 
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size)
+            parallel_config.pipeline_parallel_size,
+        )
 
     def get_cache_block_size_bytes(self) -> int:
-        """Return the size in bytes of a single KV cache block.
-        """
+        """Return the size in bytes of a single KV cache block."""
         return CPUCacheEngine.get_cache_block_size(
-            self.cache_config.block_size, self.cache_config.cache_dtype,
-            self.model_config, self.parallel_config)
+            self.cache_config.block_size,
+            self.cache_config.cache_dtype,
+            self.model_config,
+            self.parallel_config,
+        )

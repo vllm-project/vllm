@@ -17,11 +17,12 @@ from .quant_utils import (get_pack_factor, gptq_quantize_weights,
 class MarlinWorkspace:
 
     def __init__(self, out_features, min_thread_n, max_parallel):
-        assert (out_features % min_thread_n == 0), (
-            "out_features = {} is undivisible by min_thread_n = {}".format(
-                out_features, min_thread_n))
+        assert (
+            out_features % min_thread_n == 0
+        ), "out_features = {} is undivisible by min_thread_n = {}".format(
+            out_features, min_thread_n)
 
-        max_workspace_size = ((out_features // min_thread_n) * max_parallel)
+        max_workspace_size = (out_features // min_thread_n) * max_parallel
 
         self.scratch = torch.zeros(max_workspace_size,
                                    dtype=torch.int,
@@ -93,11 +94,13 @@ def get_weight_perm(num_bits: int):
     return perm
 
 
-def marlin_quantize(w: torch.Tensor,
-                    quant_type: ScalarType,
-                    group_size: int,
-                    act_order: bool,
-                    test_perm: Optional[torch.Tensor] = None):
+def marlin_quantize(
+    w: torch.Tensor,
+    quant_type: ScalarType,
+    group_size: int,
+    act_order: bool,
+    test_perm: Optional[torch.Tensor] = None,
+):
     size_k, size_n = w.shape
     num_bits = quant_type.size_bits
 

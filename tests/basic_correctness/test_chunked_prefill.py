@@ -7,6 +7,7 @@ prefill requests are chunked.
 
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
+
 import os
 
 import pytest
@@ -94,8 +95,8 @@ def test_models_distributed(
     if (model == "meta-llama/Llama-3.2-1B-Instruct"
             and distributed_executor_backend == "ray"):
         # test Ray Compiled Graph
-        os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
-        os.environ['VLLM_USE_RAY_COMPILED_DAG'] = "1"
+        os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
+        os.environ["VLLM_USE_RAY_COMPILED_DAG"] = "1"
 
     dtype = "half"
     max_tokens = 5
@@ -136,8 +137,11 @@ def test_models_distributed(
 
 @pytest.mark.parametrize(
     "kv_cache_dtype,model",
-    [("fp8_e4m3",
-      "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme")])
+    [(
+        "fp8_e4m3",
+        "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme",
+    )],
+)
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("chunked_prefill_token_size", [4, 16])

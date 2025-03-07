@@ -36,7 +36,7 @@ def load_peft_weights(model_id: str,
         device (`str`):
             The device to load the weights onto.
         hf_hub_download_kwargs (`dict`):
-            Additional arguments to pass to the `hf_hub_download` method when 
+            Additional arguments to pass to the `hf_hub_download` method when
             loading from the HuggingFace Hub.
     """
     path = (os.path.join(model_id, hf_hub_download_kwargs["subfolder"]) if

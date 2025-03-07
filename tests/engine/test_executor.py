@@ -19,11 +19,13 @@ class Mock:
 
 class CustomUniExecutor(UniProcExecutor):
 
-    def collective_rpc(self,
-                       method: Union[str, Callable],
-                       timeout: Optional[float] = None,
-                       args: tuple = (),
-                       kwargs: Optional[dict] = None) -> list[Any]:
+    def collective_rpc(
+            self,
+            method: Union[str, Callable],
+            timeout: Optional[float] = None,
+            args: tuple = (),
+            kwargs: Optional[dict] = None,
+    ) -> list[Any]:
         # Drop marker to show that this was ran
         with open(".marker", "w"):
             ...

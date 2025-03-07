@@ -54,10 +54,12 @@ class OpenAIServingPooling(OpenAIServing):
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
     ) -> None:
-        super().__init__(engine_client=engine_client,
-                         model_config=model_config,
-                         models=models,
-                         request_logger=request_logger)
+        super().__init__(
+            engine_client=engine_client,
+            model_config=model_config,
+            models=models,
+            request_logger=request_logger,
+        )
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -104,8 +106,8 @@ class OpenAIServingPooling(OpenAIServing):
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             if prompt_adapter_request is not None:
-                raise NotImplementedError("Prompt adapter is not supported "
-                                          "for pooling models")
+                raise NotImplementedError(
+                    "Prompt adapter is not supported for pooling models")
 
             if isinstance(request, PoolingChatRequest):
                 (
@@ -127,14 +129,16 @@ class OpenAIServingPooling(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                (request_prompts,
-                 engine_prompts) = await self._preprocess_completion(
-                     request,
-                     tokenizer,
-                     request.input,
-                     truncate_prompt_tokens=truncate_prompt_tokens,
-                     add_special_tokens=request.add_special_tokens,
-                 )
+                (
+                    request_prompts,
+                    engine_prompts,
+                ) = await self._preprocess_completion(
+                    request,
+                    tokenizer,
+                    request.input,
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
+                )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
@@ -147,11 +151,13 @@ class OpenAIServingPooling(OpenAIServing):
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
 
-                self._log_inputs(request_id_item,
-                                 request_prompts[i],
-                                 params=pooling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
+                self._log_inputs(
+                    request_id_item,
+                    request_prompts[i],
+                    params=pooling_params,
+                    lora_request=lora_request,
+                    prompt_adapter_request=prompt_adapter_request,
+                )
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))

@@ -46,22 +46,26 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "NousResearch/Hermes-3-Llama-3.1-8B",
         "arguments": [
-            "--tool-call-parser", "hermes", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_hermes.jinja")
+            "--tool-call-parser",
+            "hermes",
+            "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_hermes.jinja"),
         ],
         "system_prompt":
         "You are a helpful assistant with access to tools. If a tool"
         " that you have would be helpful to answer a user query, "
         "call the tool. Otherwise, answer the user's query directly "
         "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
-        "to the user's question - just respond to it normally."
+        "to the user's question - just respond to it normally.",
     },
     "llama": {
         "model":
         "meta-llama/Meta-Llama-3.1-8B-Instruct",
         "arguments": [
-            "--tool-call-parser", "llama3_json", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_llama3.1_json.jinja")
+            "--tool-call-parser",
+            "llama3_json",
+            "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_llama3.1_json.jinja"),
         ],
         "supports_parallel":
         False,
@@ -70,8 +74,10 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "meta-llama/Llama-3.2-3B-Instruct",
         "arguments": [
-            "--tool-call-parser", "llama3_json", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_llama3.2_json.jinja")
+            "--tool-call-parser",
+            "llama3_json",
+            "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_llama3.2_json.jinja"),
         ],
         "supports_parallel":
         False,
@@ -80,25 +86,33 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "mistralai/Mistral-7B-Instruct-v0.3",
         "arguments": [
-            "--tool-call-parser", "mistral", "--chat-template",
+            "--tool-call-parser",
+            "mistral",
+            "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja"),
-            "--ignore-patterns=\"consolidated.safetensors\""
+            '--ignore-patterns="consolidated.safetensors"',
         ],
         "system_prompt":
         "You are a helpful assistant with access to tools. If a tool"
         " that you have would be helpful to answer a user query, "
         "call the tool. Otherwise, answer the user's query directly "
         "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
-        "to the user's question - just respond to it normally."
+        "to the user's question - just respond to it normally.",
     },
     "granite20b": {
         "model":
         "mbayser/granite-20b-functioncalling-FP8-KV",
         "arguments": [
-            "--tool-call-parser", "granite-20b-fc", "--chat-template",
+            "--tool-call-parser",
+            "granite-20b-fc",
+            "--chat-template",
             str(VLLM_PATH /
                 "examples/tool_chat_template_granite_20b_fc.jinja"),
-            "--max_num_seqs", "1", "--enforce-eager", "--cpu-offload-gb", "20"
+            "--max_num_seqs",
+            "1",
+            "--enforce-eager",
+            "--cpu-offload-gb",
+            "20",
         ],
         "supports_parallel":
         False,
@@ -109,8 +123,10 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "ibm-granite/granite-3.0-8b-instruct",
         "arguments": [
-            "--tool-call-parser", "granite", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_granite.jinja")
+            "--tool-call-parser",
+            "granite",
+            "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_granite.jinja"),
         ],
     },
     "granite-3.1-8b": {
@@ -125,10 +141,12 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "internlm/internlm2_5-7b-chat",
         "arguments": [
-            "--tool-call-parser", "internlm", "--chat-template",
+            "--tool-call-parser",
+            "internlm",
+            "--chat-template",
             str(VLLM_PATH /
                 "examples/tool_chat_template_internlm2_tool.jinja"),
-            "--trust_remote_code"
+            "--trust_remote_code",
         ],
         "supports_parallel":
         False,
@@ -137,8 +155,10 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "Team-ACE/ToolACE-8B",
         "arguments": [
-            "--tool-call-parser", "pythonic", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_toolace.jinja")
+            "--tool-call-parser",
+            "pythonic",
+            "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_toolace.jinja"),
         ],
         "supports_parallel":
         True,
@@ -158,7 +178,7 @@ WEATHER_TOOL: ChatCompletionToolParam = {
                     "string",
                     "description":
                     "The city to find the weather for, "
-                    "e.g. 'San Francisco'"
+                    "e.g. 'San Francisco'",
                 },
                 "state": {
                     "type":
@@ -166,16 +186,16 @@ WEATHER_TOOL: ChatCompletionToolParam = {
                     "description":
                     "must the two-letter abbreviation for the state "
                     "that the city is in, e.g. 'CA' which would "
-                    "mean 'California'"
+                    "mean 'California'",
                 },
                 "unit": {
                     "type": "string",
                     "description": "The unit to fetch the temperature in",
-                    "enum": ["celsius", "fahrenheit"]
-                }
-            }
-        }
-    }
+                    "enum": ["celsius", "fahrenheit"],
+                },
+            },
+        },
+    },
 }
 
 SEARCH_TOOL: ChatCompletionToolParam = {
@@ -197,119 +217,127 @@ SEARCH_TOOL: ChatCompletionToolParam = {
                     "description":
                     "The term to use in the search. This should"
                     "ideally be keywords to search for, not a"
-                    "natural-language question"
+                    "natural-language question",
                 }
             },
-            "required": ["search_term"]
-        }
-    }
+            "required": ["search_term"],
+        },
+    },
 }
 
-MESSAGES_WITHOUT_TOOLS: list[ChatCompletionMessageParam] = [{
-    "role":
-    "user",
-    "content":
-    "Hi! How are you?"
-}, {
-    "role":
-    "assistant",
-    "content":
-    "I'm doing great! How can I assist you?"
-}, {
-    "role":
-    "user",
-    "content":
-    "Can you tell me a joke please?"
-}]
+MESSAGES_WITHOUT_TOOLS: list[ChatCompletionMessageParam] = [
+    {
+        "role": "user",
+        "content": "Hi! How are you?"
+    },
+    {
+        "role": "assistant",
+        "content": "I'm doing great! How can I assist you?"
+    },
+    {
+        "role": "user",
+        "content": "Can you tell me a joke please?"
+    },
+]
 
 MESSAGES_ASKING_FOR_TOOLS: list[ChatCompletionMessageParam] = [{
     "role":
     "user",
     "content":
-    "What is the weather in Dallas, Texas in Fahrenheit?"
+    "What is the weather in Dallas, Texas in Fahrenheit?",
 }]
 
-MESSAGES_WITH_TOOL_RESPONSE: list[ChatCompletionMessageParam] = [{
-    "role":
-    "user",
-    "content":
-    "What is the weather in Dallas, Texas in Fahrenheit?"
-}, {
-    "role":
-    "assistant",
-    "tool_calls": [{
-        "id": "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
-        "type": "function",
-        "function": {
-            "name":
-            WEATHER_TOOL["function"]["name"],
-            "arguments":
-            '{"city": "Dallas", "state": "TX", '
-            '"unit": "fahrenheit"}'
-        }
-    }]
-}, {
-    "role":
-    "tool",
-    "tool_call_id":
-    "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
-    "content":
-    "The weather in Dallas is 98 degrees fahrenheit, with partly"
-    "cloudy skies and a low chance of rain."
-}]
+MESSAGES_WITH_TOOL_RESPONSE: list[ChatCompletionMessageParam] = [
+    {
+        "role": "user",
+        "content": "What is the weather in Dallas, Texas in Fahrenheit?",
+    },
+    {
+        "role":
+        "assistant",
+        "tool_calls": [{
+            "id": "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
+            "type": "function",
+            "function": {
+                "name":
+                WEATHER_TOOL["function"]["name"],
+                "arguments":
+                '{"city": "Dallas", "state": "TX", '
+                '"unit": "fahrenheit"}',
+            },
+        }],
+    },
+    {
+        "role":
+        "tool",
+        "tool_call_id":
+        "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
+        "content":
+        "The weather in Dallas is 98 degrees fahrenheit, with partly"
+        "cloudy skies and a low chance of rain.",
+    },
+]
 
 MESSAGES_ASKING_FOR_PARALLEL_TOOLS: list[ChatCompletionMessageParam] = [{
     "role":
     "user",
     "content":
     "What is the weather in Dallas, Texas and Orlando, Florida in "
-    "Fahrenheit?"
+    "Fahrenheit?",
 }]
 
-MESSAGES_WITH_PARALLEL_TOOL_RESPONSE: list[ChatCompletionMessageParam] = [{
-    "role":
-    "user",
-    "content":
-    "What is the weather in Dallas, Texas and Orlando, Florida in "
-    "Fahrenheit?"
-}, {
-    "role":
-    "assistant",
-    "tool_calls": [{
-        "id": "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
-        "type": "function",
-        "function": {
-            "name":
-            WEATHER_TOOL["function"]["name"],
-            "arguments":
-            '{"city": "Dallas", "state": "TX", '
-            '"unit": "fahrenheit"}'
-        }
-    }, {
-        "id": "chatcmpl-tool-d027061e1bd21cda48bee7da829c1f5b",
-        "type": "function",
-        "function": {
-            "name":
-            WEATHER_TOOL["function"]["name"],
-            "arguments":
-            '{"city": "Orlando", "state": "Fl", '
-            '"unit": "fahrenheit"}'
-        }
-    }]
-}, {
-    "role":
-    "tool",
-    "tool_call_id":
-    "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
-    "content":
-    "The weather in Dallas TX is 98 degrees fahrenheit with mostly "
-    "cloudy skies and a chance of rain in the evening."
-}, {
-    "role":
-    "tool",
-    "tool_call_id":
-    "chatcmpl-tool-d027061e1bd21cda48bee7da829c1f5b",
-    "content":
-    "The weather in Orlando FL is 78 degrees fahrenheit with clear"
-    "skies."
-}]
+MESSAGES_WITH_PARALLEL_TOOL_RESPONSE: list[ChatCompletionMessageParam] = [
+    {
+        "role":
+        "user",
+        "content":
+        "What is the weather in Dallas, Texas and Orlando, Florida in "
+        "Fahrenheit?",
+    },
+    {
+        "role":
+        "assistant",
+        "tool_calls": [
+            {
+                "id": "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
+                "type": "function",
+                "function": {
+                    "name":
+                    WEATHER_TOOL["function"]["name"],
+                    "arguments":
+                    '{"city": "Dallas", "state": "TX", '
+                    '"unit": "fahrenheit"}',
+                },
+            },
+            {
+                "id": "chatcmpl-tool-d027061e1bd21cda48bee7da829c1f5b",
+                "type": "function",
+                "function": {
+                    "name":
+                    WEATHER_TOOL["function"]["name"],
+                    "arguments":
+                    '{"city": "Orlando", "state": "Fl", '
+                    '"unit": "fahrenheit"}',
+                },
+            },
+        ],
+    },
+    {
+        "role":
+        "tool",
+        "tool_call_id":
+        "chatcmpl-tool-03e6481b146e408e9523d9c956696295",
+        "content":
+        "The weather in Dallas TX is 98 degrees fahrenheit with mostly "
+        "cloudy skies and a chance of rain in the evening.",
+    },
+    {
+        "role":
+        "tool",
+        "tool_call_id":
+        "chatcmpl-tool-d027061e1bd21cda48bee7da829c1f5b",
+        "content":
+        "The weather in Orlando FL is 78 degrees fahrenheit with clear"
+        "skies.",
+    },
+]

@@ -14,8 +14,8 @@ def sampler():
 
 def create_logits_tensor(token_ids: list[int],
                          vocab_size: int = 100) -> torch.Tensor:
-    """Helper function to create logits tensor that 
-       will produce desired token ids on argmax"""
+    """Helper function to create logits tensor that
+    will produce desired token ids on argmax"""
     logits = torch.full((len(token_ids), vocab_size), -100.0).cuda()
     for i, token_id in enumerate(token_ids):
         logits[i, token_id] = 100.0
@@ -69,9 +69,11 @@ def test_early_mismatch(sampler):
     logits = create_logits_tensor(output_tokens)
 
     output = sampler(spec_tokens, logits, metadata)
-    expected = torch.tensor([[1, 5, INVALID_TOKEN_ID, INVALID_TOKEN_ID]],
-                            dtype=torch.int,
-                            device=logits.device)
+    expected = torch.tensor(
+        [[1, 5, INVALID_TOKEN_ID, INVALID_TOKEN_ID]],
+        dtype=torch.int,
+        device=logits.device,
+    )
     assert torch.equal(output.sampled_token_ids, expected)
 
 
@@ -84,9 +86,11 @@ def test_multiple_sequences(sampler):
     logits = create_logits_tensor(output_tokens)
 
     output = sampler(spec_tokens, logits, metadata)
-    expected = torch.tensor([[1, 2, 5], [3, 4, INVALID_TOKEN_ID]],
-                            dtype=torch.int,
-                            device=logits.device)
+    expected = torch.tensor(
+        [[1, 2, 5], [3, 4, INVALID_TOKEN_ID]],
+        dtype=torch.int,
+        device=logits.device,
+    )
     assert torch.equal(output.sampled_token_ids, expected)
 
 
@@ -125,10 +129,14 @@ def test_multiple_mismatches(sampler):
     logits = create_logits_tensor(output_tokens)
 
     output = sampler(spec_tokens, logits, metadata)
-    expected = torch.tensor([[1, 2, 7, INVALID_TOKEN_ID],
-                             [4, 8, INVALID_TOKEN_ID, INVALID_TOKEN_ID]],
-                            dtype=torch.int,
-                            device=logits.device)
+    expected = torch.tensor(
+        [
+            [1, 2, 7, INVALID_TOKEN_ID],
+            [4, 8, INVALID_TOKEN_ID, INVALID_TOKEN_ID],
+        ],
+        dtype=torch.int,
+        device=logits.device,
+    )
     assert torch.equal(output.sampled_token_ids, expected)
 
 
@@ -137,9 +145,13 @@ def test_multiple_mismatches(sampler):
     [
         ([[1, 2]], [1, 2, 3], [[1, 2, 3]]),  # Perfect match with bonus
         ([[1]], [2, 3], [[2, INVALID_TOKEN_ID]]),  # First mismatch
-        ([[1, 2], [3, 4]], [1, 5, 6, 3, 4, 7], [[1, 5, INVALID_TOKEN_ID],
-                                                [3, 4, 7]]),  # Mixed matches
-    ])
+        (
+            [[1, 2], [3, 4]],
+            [1, 5, 6, 3, 4, 7],
+            [[1, 5, INVALID_TOKEN_ID], [3, 4, 7]],
+        ),  # Mixed matches
+    ],
+)
 def test_parametrized_cases(sampler, spec_tokens, output_tokens, expected):
     """Parametrized test for various matching scenarios"""
     metadata = create_sampling_metadata(spec_tokens)

@@ -81,7 +81,7 @@ async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
         json={
             "model": model_name,
             "messages": messages,
-            "encoding_format": "float"
+            "encoding_format": "float",
         },
     )
     response.raise_for_status()

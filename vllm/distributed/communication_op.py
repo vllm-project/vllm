@@ -26,9 +26,10 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
     return get_tp_group().gather(input_, dst, dim)
 
 
-def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
-                                                                Any]]] = None,
-                          src: int = 0):
+def broadcast_tensor_dict(
+    tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
+    src: int = 0,
+):
     if not torch.distributed.is_initialized():
         return tensor_dict
     return get_tp_group().broadcast_tensor_dict(tensor_dict, src)

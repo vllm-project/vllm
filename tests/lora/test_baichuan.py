@@ -29,7 +29,8 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         prompts,
         sampling_params,
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None)
+        if lora_id else None,
+    )
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -49,12 +50,14 @@ def v1(run_with_both_engines_lora):
 
 
 def test_baichuan_lora(baichuan_lora_files):
-    llm = vllm.LLM(MODEL_PATH,
-                   max_model_len=1024,
-                   enable_lora=True,
-                   max_loras=4,
-                   max_lora_rank=64,
-                   trust_remote_code=True)
+    llm = vllm.LLM(
+        MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        max_loras=4,
+        max_lora_rank=64,
+        trust_remote_code=True,
+    )
 
     expected_lora_output = [
         "SELECT count(*) FROM singer",
@@ -76,27 +79,31 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files,
     if num_gpus_available < 4:
         pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
 
-    llm_tp1 = vllm.LLM(MODEL_PATH,
-                       enable_lora=True,
-                       max_num_seqs=16,
-                       max_loras=4,
-                       max_lora_rank=64,
-                       tensor_parallel_size=1,
-                       trust_remote_code=True,
-                       fully_sharded_loras=fully_sharded)
+    llm_tp1 = vllm.LLM(
+        MODEL_PATH,
+        enable_lora=True,
+        max_num_seqs=16,
+        max_loras=4,
+        max_lora_rank=64,
+        tensor_parallel_size=1,
+        trust_remote_code=True,
+        fully_sharded_loras=fully_sharded,
+    )
     output_tp1 = do_sample(llm_tp1, baichuan_lora_files, lora_id=1)
 
     del llm_tp1
     cleanup_dist_env_and_memory()
 
-    llm_tp2 = vllm.LLM(MODEL_PATH,
-                       enable_lora=True,
-                       max_num_seqs=16,
-                       max_loras=4,
-                       max_lora_rank=64,
-                       tensor_parallel_size=2,
-                       trust_remote_code=True,
-                       fully_sharded_loras=fully_sharded)
+    llm_tp2 = vllm.LLM(
+        MODEL_PATH,
+        enable_lora=True,
+        max_num_seqs=16,
+        max_loras=4,
+        max_lora_rank=64,
+        tensor_parallel_size=2,
+        trust_remote_code=True,
+        fully_sharded_loras=fully_sharded,
+    )
     output_tp2 = do_sample(llm_tp2, baichuan_lora_files, lora_id=2)
 
     del llm_tp2
@@ -104,14 +111,16 @@ def test_baichuan_tensor_parallel_equality(baichuan_lora_files,
 
     assert output_tp1 == output_tp2
 
-    llm_tp4 = vllm.LLM(MODEL_PATH,
-                       enable_lora=True,
-                       max_num_seqs=16,
-                       max_loras=4,
-                       max_lora_rank=64,
-                       tensor_parallel_size=4,
-                       trust_remote_code=True,
-                       fully_sharded_loras=fully_sharded)
+    llm_tp4 = vllm.LLM(
+        MODEL_PATH,
+        enable_lora=True,
+        max_num_seqs=16,
+        max_loras=4,
+        max_lora_rank=64,
+        tensor_parallel_size=4,
+        trust_remote_code=True,
+        fully_sharded_loras=fully_sharded,
+    )
     output_tp4 = do_sample(llm_tp4, baichuan_lora_files, lora_id=2)
 
     del llm_tp4

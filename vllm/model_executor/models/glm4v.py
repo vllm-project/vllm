@@ -3,6 +3,7 @@
 # Adapted from
 # https://github.com/THUDM/CogAgent
 """Inference-only CogAgent model compatible with THUDM weights."""
+
 from argparse import Namespace
 from collections.abc import Mapping, Sequence
 from typing import Literal, Optional, TypedDict, Union
@@ -53,10 +54,12 @@ class EVA2CLIPPatchEmbedding(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.proj = nn.Conv2d(config.in_channels,
-                              config.hidden_size,
-                              kernel_size=config.patch_size,
-                              stride=config.patch_size)
+        self.proj = nn.Conv2d(
+            config.in_channels,
+            config.hidden_size,
+            kernel_size=config.patch_size,
+            stride=config.patch_size,
+        )
         self.cls_embedding = nn.Parameter(torch.zeros(1, config.hidden_size))
         self.position_embedding = nn.Embedding(config.num_positions,
                                                config.hidden_size)
@@ -87,7 +90,7 @@ class EVA2CLIPAttention(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = '',
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -130,7 +133,7 @@ class EVA2CLIPMLP(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = '',
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -161,7 +164,7 @@ class EVA2CLIPTransformerLayer(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = '',
+        prefix: str = "",
     ):
         super().__init__()
         self.input_layernorm = LayerNorm(config.hidden_size,
@@ -192,14 +195,15 @@ class EVA2CLIPTransformer(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = '',
+        prefix: str = "",
     ):
         super().__init__()
         self.layers = nn.ModuleList([
-            EVA2CLIPTransformerLayer(config,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.layers.{layer_idx}")
-            for layer_idx in range(config.num_hidden_layers)
+            EVA2CLIPTransformerLayer(
+                config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.layers.{layer_idx}",
+            ) for layer_idx in range(config.num_hidden_layers)
         ])
 
     def forward(self, hidden_states):
@@ -215,7 +219,7 @@ class EVA2CLIPGLU(nn.Module):
         config,
         in_features,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = '',
+        prefix: str = "",
     ):
         """
         The original implementation is the same as:
@@ -254,27 +258,32 @@ class EVA2CLIPGLU(nn.Module):
         ```
         """
         super().__init__()
-        self.linear_proj = ReplicatedLinear(in_features,
-                                            config.hidden_size,
-                                            bias=False,
-                                            quant_config=quant_config,
-                                            prefix=f"{prefix}.linear_proj")
+        self.linear_proj = ReplicatedLinear(
+            in_features,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_proj",
+        )
         self.norm1 = nn.LayerNorm(config.hidden_size)
         self.act1 = nn.GELU()
         self.act2 = SiluAndMul()
 
         self.merged_proj = MergedColumnParallelLinear(
-            config.hidden_size, [config.ffn_hidden_size] * 2,
+            config.hidden_size,
+            [config.ffn_hidden_size] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.merged_proj")
+            prefix=f"{prefix}.merged_proj",
+        )
 
         self.dense_4h_to_h = RowParallelLinear(
             config.ffn_hidden_size,
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.dense_4h_to_h")
+            prefix=f"{prefix}.dense_4h_to_h",
+        )
 
     def forward(self, x):
         x, _ = self.linear_proj(x)
@@ -291,22 +300,28 @@ class EVA2CLIPModel(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = '',
+        prefix: str = "",
     ):
         super().__init__()
         vision_config = Namespace(**config.vision_config)
         self.patch_embedding = EVA2CLIPPatchEmbedding(vision_config)
-        self.transformer = EVA2CLIPTransformer(vision_config,
-                                               quant_config=quant_config,
-                                               prefix=f"{prefix}.transformer")
-        self.linear_proj = EVA2CLIPGLU(config,
-                                       in_features=config.hidden_size,
-                                       quant_config=quant_config,
-                                       prefix=f"{prefix}.linear_proj")
-        self.conv = nn.Conv2d(in_channels=vision_config.hidden_size,
-                              out_channels=config.hidden_size,
-                              kernel_size=2,
-                              stride=2)
+        self.transformer = EVA2CLIPTransformer(
+            vision_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.transformer",
+        )
+        self.linear_proj = EVA2CLIPGLU(
+            config,
+            in_features=config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_proj",
+        )
+        self.conv = nn.Conv2d(
+            in_channels=vision_config.hidden_size,
+            out_channels=config.hidden_size,
+            kernel_size=2,
+            stride=2,
+        )
         self.boi = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
         self.eoi = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
         self.scaling_factor = vision_config.scaling_factor
@@ -523,16 +538,17 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(GLM4VMultiModalProcessor,
-                                        info=GLM4VProcessingInfo,
-                                        dummy_inputs=GLM4VDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(
+    GLM4VMultiModalProcessor,
+    info=GLM4VProcessingInfo,
+    dummy_inputs=GLM4VDummyInputsBuilder,
+)
 class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
                        SupportsMultiModal):
-
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],
-        "merged_proj": ["gate_proj", "dense_h_to_4h"]
+        "merged_proj": ["gate_proj", "dense_h_to_4h"],
     }
 
     def get_mm_mapping(self) -> MultiModelKeys:
@@ -542,7 +558,8 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         return MultiModelKeys.from_string_field(
             language_model="transformer.encoder",
             connector="transformer.vision.linear_proj",
-            tower_model="transformer.vision.transformer")
+            tower_model="transformer.vision.transformer",
+        )
 
     def __init__(
         self,

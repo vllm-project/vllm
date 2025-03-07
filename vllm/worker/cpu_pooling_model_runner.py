@@ -20,6 +20,7 @@ class ModelInputForCPUWithPoolingMetadata(ModelInputForCPU):
     """
     Used by the CPUPoolingModelRunner.
     """
+
     pooling_metadata: Optional["PoolingMetadata"] = None
 
 
@@ -57,8 +58,11 @@ class CPUPoolingModelRunner(
             intermediate_tensors,
         }
 
-        with set_forward_context(model_input.attn_metadata, self.vllm_config,
-                                 model_input.virtual_engine):
+        with set_forward_context(
+                model_input.attn_metadata,
+                self.vllm_config,
+                model_input.virtual_engine,
+        ):
             hidden_states = model_executable(**execute_model_kwargs)
 
         # Only perform pooling in the driver worker.
@@ -66,8 +70,10 @@ class CPUPoolingModelRunner(
             return []
 
         return [
-            self.model.pooler(hidden_states=hidden_states,
-                              pooling_metadata=model_input.pooling_metadata)
+            self.model.pooler(
+                hidden_states=hidden_states,
+                pooling_metadata=model_input.pooling_metadata,
+            )
         ]
 
     def make_model_input_from_broadcasted_tensor_dict(
@@ -83,7 +89,7 @@ class CPUPoolingModelRunner(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[List[str]] = None,
     ) -> ModelInputForCPUWithPoolingMetadata:
         assert seq_group_metadata_list is not None
         model_input = self._prepare_model_input_tensors(
@@ -93,9 +99,11 @@ class CPUPoolingModelRunner(
         pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
                                                  model_input.seq_lens)
 
-        return dataclasses.replace(model_input,
-                                   virtual_engine=virtual_engine,
-                                   pooling_metadata=pooling_metadata)
+        return dataclasses.replace(
+            model_input,
+            virtual_engine=virtual_engine,
+            pooling_metadata=pooling_metadata,
+        )
 
     def _prepare_pooling(
         self,

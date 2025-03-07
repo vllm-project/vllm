@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Wrapper around `transformers` models"""
+
 import re
 from typing import Iterable, Literal, Optional, Union
 
@@ -44,17 +45,18 @@ logger = init_logger(__name__)
 
 
 def vllm_flash_attention_forward(
-        # Transformers args
-        module: torch.nn.Module,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attention_mask: torch.Tensor,
-        # Transformers kwargs
-        scaling: Optional[float] = None,
-        # vLLM kwargs
-        attention_instances: Optional[list[Attention]] = None,
-        **kwargs):
+    # Transformers args
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor,
+    # Transformers kwargs
+    scaling: Optional[float] = None,
+    # vLLM kwargs
+    attention_instances: Optional[list[Attention]] = None,
+    **kwargs,
+):
     self_attn = attention_instances[module.layer_idx]
     if scaling is not None:
         self_attn.impl.scale = float(scaling)
@@ -77,7 +79,7 @@ def replace_linear_class(
         quant_config=None) -> Union[ColumnParallelLinear, RowParallelLinear]:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
-    
+
     `quant_config` is not yet supported.
     Args:
         linear (nn.Linear): `nn.Linear` to be replaced.
@@ -148,17 +150,20 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA):
                 num_kv_heads=num_kv_heads,
                 cache_config=cache_config,
                 quant_config=self.quant_config,
-                prefix=f"{i}.attn") for i in range(config.num_hidden_layers)
+                prefix=f"{i}.attn",
+            ) for i in range(config.num_hidden_layers)
         ]
 
         # Model modifications
         self.replace_vocab_embed_class(self.model)
 
         # ForCausalLM modifications
-        self.lm_head = ParallelLMHead(self.vocab_size,
-                                      config.hidden_size,
-                                      quant_config=self.quant_config,
-                                      prefix=maybe_prefix(prefix, "lm_head"))
+        self.lm_head = ParallelLMHead(
+            self.vocab_size,
+            config.hidden_size,
+            quant_config=self.quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.get_input_embeddings().weight
 
@@ -215,7 +220,8 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA):
             position_ids=positions[None, ...],
             intermediate_tensors=intermediate_tensors,
             attention_instances=self.attention_instances,
-            return_dict=False)[0][0, ...]  # we remove batch dimension for now
+            return_dict=False,
+        )[0][0, ...]  # we remove batch dimension for now
         return model_output
 
     def compute_logits(
@@ -229,7 +235,6 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA):
 
     def sample(self, logits: torch.Tensor,
                sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
-
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 

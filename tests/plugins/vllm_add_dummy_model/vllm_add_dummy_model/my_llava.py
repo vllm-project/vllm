@@ -12,9 +12,11 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
-@MULTIMODAL_REGISTRY.register_processor(LlavaMultiModalProcessor,
-                                        info=LlavaProcessingInfo,
-                                        dummy_inputs=LlavaDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(
+    LlavaMultiModalProcessor,
+    info=LlavaProcessingInfo,
+    dummy_inputs=LlavaDummyInputsBuilder,
+)
 class MyLlava(LlavaForConditionalGeneration):
 
     def compute_logits(

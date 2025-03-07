@@ -64,7 +64,6 @@ class PallasAttentionBackend(AttentionBackend):
 
 @dataclass
 class PallasMetadata(AttentionMetadata):
-
     # Currently, input sequences can only contain all prefills
     # or all decoding.
     block_tables: Optional[torch.Tensor] = None
@@ -136,7 +135,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         assert tpu_type is not None
         tpu_type = tpu_type.lower()
 
-        if (("lite" not in tpu_type) and ("v6" not in tpu_type)):
+        if ("lite" not in tpu_type) and ("v6" not in tpu_type):
             if self.num_kv_heads % 2 == 0:
                 self.megacore_mode = "kv_head"
             else:
@@ -168,7 +167,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
             kv_cache[0] = [num_kv_heads, num_blocks, block_size, head_size]
             kv_cache[1] = [num_kv_heads, num_blocks, block_size, head_size]
-                NOTE: kv_cache[0] and kv_cache[1] will be an empty tensor 
+                NOTE: kv_cache[0] and kv_cache[1] will be an empty tensor
                 with shape [0] for profiling run.
             attn_metadata: Metadata for attention.
         Returns:

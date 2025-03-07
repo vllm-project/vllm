@@ -2,12 +2,13 @@
 """
 Simple KV Cache Connector for Distributed Machine Learning Inference
 
-The SimpleConnector transfers KV caches between prefill vLLM worker (KV cache 
+The SimpleConnector transfers KV caches between prefill vLLM worker (KV cache
 producer) and decode vLLM worker (KV cache consumer) using PyNcclPipe or
 MooncakePipe.
 
 But the logic can be extended to support other pipe and lookup buffer.
 """
+
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
@@ -34,21 +35,23 @@ class SimpleConnector(KVConnectorBase):
         local_rank: int,
         config: VllmConfig,
     ):
-
         self.config = config.kv_transfer_config
         self.tp_size = config.parallel_config.tensor_parallel_size
 
         if self.config.kv_connector == "PyNcclConnector":
             from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import (
                 PyNcclPipe)
+
             logger.info(
                 "Initializing PyNcclConfig under kv_transfer_config %s",
-                self.config)
+                self.config,
+            )
         elif self.config.kv_connector == "MooncakeConnector":
             # Check if MOONCAKE_CONFIG_PATH is set
             import os
-            use_mooncake_distributed_pipe = os.getenv(
-                'MOONCAKE_CONFIG_PATH') is not None
+
+            use_mooncake_distributed_pipe = (os.getenv("MOONCAKE_CONFIG_PATH")
+                                             is not None)
 
             if not use_mooncake_distributed_pipe:
                 raise ValueError(
@@ -57,9 +60,11 @@ class SimpleConnector(KVConnectorBase):
             else:
                 from vllm.distributed.kv_transfer.kv_pipe.mooncake_pipe import (  # noqa: E501
                     MooncakePipe)
+
                 logger.info(
                     "Initializing MooncakeConfig under kv_transfer_config %s",
-                    self.config)
+                    self.config,
+                )
 
         self.lookup_buffer_size = self.config.kv_buffer_size
 
@@ -77,7 +82,6 @@ class SimpleConnector(KVConnectorBase):
         # In disaggregated prefill, the prefill vLLM only uses send pipe
         # and the decode vLLM only uses recv pipe
         if self.config.is_kv_producer:
-
             if self.config.kv_connector == "PyNcclConnector":
                 self.producer_data_pipe = PyNcclPipe(
                     local_rank=local_rank,
@@ -98,12 +102,13 @@ class SimpleConnector(KVConnectorBase):
                 # We only need to initialize MooncakePipe once
                 self.producer_signal_pipe = self.producer_data_pipe
 
-            self.producer_buffer = SimpleBuffer(self.producer_signal_pipe,
-                                                self.producer_data_pipe,
-                                                self.config.kv_buffer_size)
+            self.producer_buffer = SimpleBuffer(
+                self.producer_signal_pipe,
+                self.producer_data_pipe,
+                self.config.kv_buffer_size,
+            )
 
         else:
-
             # the current vLLM instance is KV consumer, so it needs to connect
             # its recv pipe to the send pipe of KV producder
             if self.config.kv_connector == "PyNcclConnector":
@@ -133,17 +138,22 @@ class SimpleConnector(KVConnectorBase):
 
     def select(self, input_tokens: Optional[torch.Tensor],
                roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
-
-        assert self.consumer_buffer is not None, "Please initialize the "\
-            "consumer buffer before calling select."
+        assert (
+            self.consumer_buffer is not None
+        ), "Please initialize the consumer buffer before calling select."
         return self.consumer_buffer.drop_select(input_tokens, roi)
 
-    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-               key: torch.Tensor, value: torch.Tensor,
-               hidden: torch.Tensor) -> None:
-
-        assert self.producer_buffer is not None, "Please initialize the "\
-            "producer buffer before calling insert."
+    def insert(
+        self,
+        input_tokens: torch.Tensor,
+        roi: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        hidden: torch.Tensor,
+    ) -> None:
+        assert (
+            self.producer_buffer is not None
+        ), "Please initialize the producer buffer before calling insert."
 
         self.producer_buffer.insert(input_tokens, roi, key, value, hidden)
 
@@ -155,7 +165,6 @@ class SimpleConnector(KVConnectorBase):
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
-
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
         slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
@@ -192,20 +201,26 @@ class SimpleConnector(KVConnectorBase):
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
 
-            self.insert(current_tokens,
-                        torch.ones_like(current_tokens,
-                                        dtype=bool), keys, values,
-                        hidden_or_intermediate_states[start_pos:end_pos])
+            self.insert(
+                current_tokens,
+                torch.ones_like(current_tokens, dtype=bool),
+                keys,
+                values,
+                hidden_or_intermediate_states[start_pos:end_pos],
+            )
 
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 
     def recv_kv_caches_and_hidden_states(
-        self, model_executable: torch.nn.Module,
+        self,
+        model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor]
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
-               "ModelInputForGPUWithSamplingMetadata"]:
-
+        kv_caches: List[torch.Tensor],
+    ) -> Tuple[
+            Union[torch.Tensor, IntermediateTensors],
+            bool,
+            "ModelInputForGPUWithSamplingMetadata",
+    ]:
         # When bypass_model_exec is set to False, it means that at least for one
         # request its corresponding KV cache or hidden state is missing.
         # In this case we need to do prefilling to recompute missing KV cache
@@ -274,9 +289,10 @@ class SimpleConnector(KVConnectorBase):
             end_pos = start_pos + num_computed_tokens
 
             # put received KV caches into paged memory
-            for i in range(model_executable.model.start_layer,
-                           model_executable.model.end_layer):
-
+            for i in range(
+                    model_executable.model.start_layer,
+                    model_executable.model.end_layer,
+            ):
                 kv_cache = kv_caches[i - model_executable.model.start_layer]
                 layer = model_executable.model.layers[i]
 
@@ -303,13 +319,17 @@ class SimpleConnector(KVConnectorBase):
             # prefilling on those tokens that are missing KV caches.
             logger.warning(
                 "[rank%d]: Failed to receive all KVs and hidden "
-                "states, redo model forwarding.", torch.distributed.get_rank())
+                "states, redo model forwarding.",
+                torch.distributed.get_rank(),
+            )
             hidden_or_intermediate_states = None
 
         else:
             logger.debug(
                 "[rank%d]: Successfully received all KVs and hidden "
-                "states, skip model forwarding.", torch.distributed.get_rank())
+                "states, skip model forwarding.",
+                torch.distributed.get_rank(),
+            )
             hidden_or_intermediate_states = torch.cat(
                 hidden_or_intermediate_states_for_one_req, dim=0)
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for H2OVL's multimodal preprocessing kwargs."""
+
 from collections.abc import Mapping
 from typing import Optional
 
@@ -114,10 +115,13 @@ def _run_check(
     assert pixel_shape[0] == total_expected_num_patches
 
 
-@pytest.mark.parametrize("model_id", [
-    "h2oai/h2ovl-mississippi-800m",
-    "h2oai/h2ovl-mississippi-2b",
-])
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "h2oai/h2ovl-mississippi-800m",
+        "h2oai/h2ovl-mississippi-2b",
+    ],
+)
 @pytest.mark.parametrize(
     "size_factors",
     [

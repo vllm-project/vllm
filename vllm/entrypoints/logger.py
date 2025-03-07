@@ -39,6 +39,11 @@ class RequestLogger:
         logger.info(
             "Received request %s: prompt: %r, "
             "params: %s, prompt_token_ids: %s, "
-            "lora_request: %s, prompt_adapter_request: %s.", request_id,
-            prompt, params, prompt_token_ids, lora_request,
-            prompt_adapter_request)
+            "lora_request: %s, prompt_adapter_request: %s.",
+            request_id,
+            prompt,
+            params,
+            prompt_token_ids,
+            lora_request,
+            prompt_adapter_request,
+        )

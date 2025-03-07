@@ -21,6 +21,7 @@
 
 # This file is based on the LLama model definition file in transformers
 """PyTorch Cohere model."""
+
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -189,21 +190,25 @@ class CohereAttention(nn.Module):
         self.sliding_window = (interleaved_sliding_window
                                if layer_has_sliding_window else None)
 
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              per_layer_sliding_window=self.sliding_window,
-                              prefix=f"{prefix}.attn")
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            per_layer_sliding_window=self.sliding_window,
+            prefix=f"{prefix}.attn",
+        )
         if self.use_qk_norm:
-            self.q_norm = LayerNorm(param_shape=(self.num_heads,
-                                                 self.head_dim),
-                                    eps=config.layer_norm_eps)
-            self.k_norm = LayerNorm(param_shape=(self.num_kv_heads,
-                                                 self.head_dim),
-                                    eps=config.layer_norm_eps)
+            self.q_norm = LayerNorm(
+                param_shape=(self.num_heads, self.head_dim),
+                eps=config.layer_norm_eps,
+            )
+            self.k_norm = LayerNorm(
+                param_shape=(self.num_kv_heads, self.head_dim),
+                eps=config.layer_norm_eps,
+            )
 
     def _apply_qk_norm(self, q, k):
         q = q.view(*q.shape[:-1], -1, self.head_dim)
@@ -232,18 +237,22 @@ class CohereAttention(nn.Module):
 
 class CohereDecoderLayer(nn.Module):
 
-    def __init__(self,
-                 config: CohereConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        config: CohereConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = CohereAttention(config,
-                                         cache_config,
-                                         quant_config=quant_config,
-                                         prefix=f"{prefix}.self_attn")
+        self.self_attn = CohereAttention(
+            config,
+            cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
 
         self.mlp = CohereMLP(config, quant_config=quant_config)
         self.input_layernorm = LayerNorm(param_shape=(config.hidden_size),
@@ -281,8 +290,8 @@ class CohereModel(nn.Module):
         lora_config = vllm_config.lora_config
 
         self.config = config
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
+        lora_vocab = ((lora_config.lora_extra_vocab_size *
+                       (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
@@ -291,12 +300,12 @@ class CohereModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: CohereDecoderLayer(
                 config, cache_config, quant_config, prefix=prefix),
-            prefix=f"{prefix}.layers")
+            prefix=f"{prefix}.layers",
+        )
         self.norm = LayerNorm(param_shape=(config.hidden_size),
                               eps=config.layer_norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -361,9 +370,11 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.quant_config = quant_config
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size,
-                                                scale=config.logit_scale)
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size,
+            config.vocab_size,
+            scale=config.logit_scale,
+        )
         self.model = CohereModel(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "model"))
         self.sampler = get_sampler()
@@ -390,13 +401,16 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        is_not_lora = hasattr(self.model.embed_tokens, 'weight')
+        is_not_lora = hasattr(self.model.embed_tokens, "weight")
         if is_not_lora:
             logits = self.logits_processor(self.model.embed_tokens,
                                            hidden_states, sampling_metadata)
         else:
-            logits = self.logits_processor(self.model.embed_tokens.base_layer,
-                                           hidden_states, sampling_metadata)
+            logits = self.logits_processor(
+                self.model.embed_tokens.base_layer,
+                hidden_states,
+                sampling_metadata,
+            )
 
         return logits
 
@@ -421,9 +435,8 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if self.quant_config is not None and (
+                    scale_name := self.quant_config.get_cache_scale(name)):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",

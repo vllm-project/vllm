@@ -22,6 +22,7 @@ try:
     from opentelemetry.trace import SpanKind, Tracer, set_tracer_provider
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator)
+
     _is_otel_imported = True
 except ImportError:
     # Capture and format traceback to provide detailed context for the import
@@ -29,6 +30,7 @@ except ImportError:
     # memory leaks.
     # See https://github.com/vllm-project/vllm/pull/7266#discussion_r1707395458
     import traceback
+
     otel_import_error_traceback = traceback.format_exc()
 
     class Context:  # type: ignore
@@ -81,7 +83,7 @@ def get_span_exporter(endpoint):
 
 
 def extract_trace_context(
-        headers: Optional[Mapping[str, str]]) -> Optional[Context]:
+    headers: Optional[Mapping[str, str]], ) -> Optional[Context]:
     if is_otel_available():
         headers = headers or {}
         return TraceContextTextMapPropagator().extract(headers)
@@ -90,7 +92,6 @@ def extract_trace_context(
 
 
 def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
-
     return {h: headers[h] for h in TRACE_HEADERS if h in headers}
 
 
@@ -112,12 +113,10 @@ class SpanAttributes:
     GEN_AI_LATENCY_E2E = "gen_ai.latency.e2e"
     GEN_AI_LATENCY_TIME_IN_SCHEDULER = "gen_ai.latency.time_in_scheduler"
     # Time taken in the forward pass for this across all workers
-    GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD = (
-        "gen_ai.latency.time_in_model_forward")
+    GEN_AI_LATENCY_TIME_IN_MODEL_FORWARD = "gen_ai.latency.time_in_model_forward"
     # Time taken in the model execute function. This will include model
     # forward, block/sync across workers, cpu-gpu sync time and sampling time.
-    GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE = (
-        "gen_ai.latency.time_in_model_execute")
+    GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE = "gen_ai.latency.time_in_model_execute"
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:

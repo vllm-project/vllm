@@ -91,7 +91,7 @@ ISO639_1_SUPPORTED_LANGS = {
     "uk": "Ukrainian",
     "ur": "Urdu",
     "vi": "Vietnamese",
-    "cy": "Welsh"
+    "cy": "Welsh",
 }
 ISO639_1_OTHER_LANGS = {
     "lo": "Lao",
@@ -136,7 +136,7 @@ ISO639_1_OTHER_LANGS = {
     "sd": "Sindhi",
     "am": "Amharic",
     "lb": "Luxembourgish",
-    "bo": "Tibetan"
+    "bo": "Tibetan",
 }
 
 # As per https://platform.openai.com/docs/guides/speech-to-text#overview.
@@ -155,14 +155,16 @@ class OpenAIServingTranscription(OpenAIServing):
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
     ):
-        super().__init__(engine_client=engine_client,
-                         model_config=model_config,
-                         models=models,
-                         request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids)
+        super().__init__(
+            engine_client=engine_client,
+            model_config=model_config,
+            models=models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=return_tokens_as_token_ids,
+        )
 
-        self.default_sampling_params = (
-            self.model_config.get_diff_sampling_param())
+        self.default_sampling_params = self.model_config.get_diff_sampling_param(
+        )
         processor = cached_get_processor(model_config.model)
         self.max_audio_clip_s = processor.feature_extractor.chunk_length
         self.model_sr = processor.feature_extractor.sampling_rate
@@ -171,7 +173,8 @@ class OpenAIServingTranscription(OpenAIServing):
         if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
-                self.default_sampling_params)
+                self.default_sampling_params,
+            )
 
     async def _preprocess_transcription(
         self,
@@ -190,7 +193,9 @@ class OpenAIServingTranscription(OpenAIServing):
                 logger.warning(
                     "The selected language %s has limited accuracy with"
                     " reported WER>=0.5. Results may be less accurate "
-                    "for this choice.", request.language)
+                    "for this choice.",
+                    request.language,
+                )
             else:
                 raise ValueError(
                     f"Unsupported language: {request.language}."
@@ -207,8 +212,7 @@ class OpenAIServingTranscription(OpenAIServing):
         duration = librosa.get_duration(y=y, sr=sr)
         if duration > self.max_audio_clip_s:
             raise ValueError(
-                f"Maximum clip duration ({self.max_audio_clip_s}s) "
-                "exceeded.")
+                f"Maximum clip duration ({self.max_audio_clip_s}s) exceeded.")
 
         prompt = {
             "encoder_prompt": {
@@ -218,14 +222,16 @@ class OpenAIServingTranscription(OpenAIServing):
                 },
             },
             "decoder_prompt":
-            f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}"
+            f"<|startoftranscript|>{lang_token}<|transcribe|><|notimestamps|>{request.prompt}",
         }
         return cast(PromptType, prompt), duration
 
     # TODO (varun) : Make verbose response work !
     async def create_transcription(
-        self, audio_data: bytes, request: TranscriptionRequest,
-        raw_request: Request
+        self,
+        audio_data: bytes,
+        request: TranscriptionRequest,
+        raw_request: Request,
     ) -> Union[TranscriptionResponse, AsyncGenerator[str, None],
                ErrorResponse]:
         """Transcription API similar to OpenAI's API.
@@ -243,7 +249,7 @@ class OpenAIServingTranscription(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        if request.response_format not in ['text', 'json']:
+        if request.response_format not in ["text", "json"]:
             return self.create_error_response(
                 "Currently only support response_format `text` or `json`")
 
@@ -285,10 +291,11 @@ class OpenAIServingTranscription(OpenAIServing):
 
             self._log_inputs(
                 request_id,
-                prompt['decoder_prompt'],  # type: ignore
+                prompt["decoder_prompt"],  # type: ignore
                 params=sampling_params,
                 lora_request=None,
-                prompt_adapter_request=None)
+                prompt_adapter_request=None,
+            )
 
             result_generator = self.engine_client.generate(
                 prompt,
@@ -300,11 +307,13 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(str(e))
 
         if request.stream:
-            return self.transcription_stream_generator(request,
-                                                       result_generator,
-                                                       request_id,
-                                                       request_metadata,
-                                                       duration_s)
+            return self.transcription_stream_generator(
+                request,
+                result_generator,
+                request_id,
+                request_metadata,
+                duration_s,
+            )
         # Non-streaming response.
         try:
             assert result_generator is not None
@@ -318,10 +327,13 @@ class OpenAIServingTranscription(OpenAIServing):
             return self.create_error_response(str(e))
 
     async def transcription_stream_generator(
-            self, request: TranscriptionRequest,
-            result_generator: AsyncGenerator[RequestOutput, None],
-            request_id: str, request_metadata: RequestResponseMetadata,
-            audio_duration_s: float) -> AsyncGenerator[str, None]:
+        self,
+        request: TranscriptionRequest,
+        result_generator: AsyncGenerator[RequestOutput, None],
+        request_id: str,
+        request_metadata: RequestResponseMetadata,
+        audio_duration_s: float,
+    ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
         chunk_object_type: Final = "transcription.chunk"
@@ -329,11 +341,11 @@ class OpenAIServingTranscription(OpenAIServing):
         completion_tokens = 0
         num_prompt_tokens = 0
 
-        include_usage = request.stream_include_usage \
-            if request.stream_include_usage else False
-        include_continuous_usage = request.stream_continuous_usage_stats\
-              if include_usage and request.stream_continuous_usage_stats\
-                else False
+        include_usage = (request.stream_include_usage
+                         if request.stream_include_usage else False)
+        include_continuous_usage = (
+            request.stream_continuous_usage_stats if include_usage
+            and request.stream_continuous_usage_stats else False)
 
         try:
             async for res in result_generator:
@@ -368,13 +380,16 @@ class OpenAIServingTranscription(OpenAIServing):
                     choice_data = TranscriptionResponseStreamChoice(
                         delta=delta_message,
                         finish_reason=output.finish_reason,
-                        stop_reason=output.stop_reason)
+                        stop_reason=output.stop_reason,
+                    )
 
-                chunk = TranscriptionStreamResponse(id=request_id,
-                                                    object=chunk_object_type,
-                                                    created=created_time,
-                                                    choices=[choice_data],
-                                                    model=model_name)
+                chunk = TranscriptionStreamResponse(
+                    id=request_id,
+                    object=chunk_object_type,
+                    created=created_time,
+                    choices=[choice_data],
+                    model=model_name,
+                )
 
                 # handle usage stats if requested & if continuous
                 if include_continuous_usage:
@@ -390,10 +405,11 @@ class OpenAIServingTranscription(OpenAIServing):
             # Once the final token is handled, if stream_options.include_usage
             # is sent, send the usage.
             if include_usage:
-                final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
-                                        completion_tokens=completion_tokens,
-                                        total_tokens=num_prompt_tokens +
-                                        completion_tokens)
+                final_usage = UsageInfo(
+                    prompt_tokens=num_prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=num_prompt_tokens + completion_tokens,
+                )
 
                 final_usage_chunk = TranscriptionStreamResponse(
                     id=request_id,
@@ -401,16 +417,18 @@ class OpenAIServingTranscription(OpenAIServing):
                     created=created_time,
                     choices=[],
                     model=model_name,
-                    usage=final_usage)
-                final_usage_data = (final_usage_chunk.model_dump_json(
-                    exclude_unset=True, exclude_none=True))
+                    usage=final_usage,
+                )
+                final_usage_data = final_usage_chunk.model_dump_json(
+                    exclude_unset=True, exclude_none=True)
                 yield f"data: {final_usage_data}\n\n"
 
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = UsageInfo(
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=completion_tokens,
-                total_tokens=num_prompt_tokens + completion_tokens)
+                total_tokens=num_prompt_tokens + completion_tokens,
+            )
 
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error

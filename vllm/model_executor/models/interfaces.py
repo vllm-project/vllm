@@ -38,11 +38,11 @@ class SupportsMultiModal(Protocol):
 
     def get_multimodal_embeddings(self, **kwargs) -> T:
         """
-        Returns multimodal embeddings generated from multimodal kwargs 
+        Returns multimodal embeddings generated from multimodal kwargs
         to be merged with text embeddings.
 
         The output embeddings must be one of the following formats:
-    
+
         - A list or tuple of 2D tensors, where each tensor corresponds to
           each input multimodal data item (e.g, image).
         - A single 3D tensor, with the batch dimension grouping the 2D tensors.
@@ -72,8 +72,8 @@ class SupportsMultiModal(Protocol):
         multimodal_embeddings: Optional[T] = None,
     ) -> Tensor:
         """
-        Returns the input embeddings merged from the text embeddings from 
-        input_ids and the multimodal embeddings generated from multimodal 
+        Returns the input embeddings merged from the text embeddings from
+        input_ids and the multimodal embeddings generated from multimodal
         kwargs.
         """
         ...
@@ -88,7 +88,7 @@ class _SupportsMultiModalType(Protocol):
 
 @overload
 def supports_multimodal(
-        model: Type[object]) -> TypeIs[Type[SupportsMultiModal]]:
+    model: Type[object], ) -> TypeIs[Type[SupportsMultiModal]]:
     ...
 
 
@@ -172,7 +172,9 @@ def supports_lora(
             if not missing_attrs:
                 logger.warning(
                     "The model (%s) contains all LoRA-specific attributes, "
-                    "but does not set `supports_lora=True`.", model)
+                    "but does not set `supports_lora=True`.",
+                    model,
+                )
 
     return result
 
@@ -260,7 +262,9 @@ def supports_pp(
     if supports_attributes and not supports_inspect:
         logger.warning(
             "The model (%s) sets `supports_pp=True`, but does not accept "
-            "`intermediate_tensors` in its `forward` method", model)
+            "`intermediate_tensors` in its `forward` method",
+            model,
+        )
 
     if not supports_attributes:
         pp_attrs = ("make_empty_intermediate_tensors", )
@@ -279,7 +283,9 @@ def supports_pp(
             if not missing_attrs:
                 logger.warning(
                     "The model (%s) contains all PP-specific attributes, "
-                    "but does not set `supports_pp=True`.", model)
+                    "but does not set `supports_pp=True`.",
+                    model,
+                )
 
     return supports_attributes and supports_inspect
 
@@ -327,7 +333,7 @@ def has_inner_state(model: Type[object]) -> TypeIs[Type[HasInnerState]]:
 
 
 def has_inner_state(
-    model: Union[Type[object], object]
+    model: Union[Type[object], object],
 ) -> Union[TypeIs[Type[HasInnerState]], TypeIs[HasInnerState]]:
     if isinstance(model, type):
         return isinstance(model, _HasInnerStateType)
@@ -364,7 +370,7 @@ def is_attention_free(model: Type[object]) -> TypeIs[Type[IsAttentionFree]]:
 
 
 def is_attention_free(
-    model: Union[Type[object], object]
+    model: Union[Type[object], object],
 ) -> Union[TypeIs[Type[IsAttentionFree]], TypeIs[IsAttentionFree]]:
     if isinstance(model, type):
         return isinstance(model, _IsAttentionFreeType)
@@ -375,7 +381,7 @@ def is_attention_free(
 @runtime_checkable
 class IsHybrid(Protocol):
     """The interface required for all models like Jamba that have both
-    attention and mamba blocks, indicates that 
+    attention and mamba blocks, indicates that
     hf_config has 'layers_block_type'"""
 
     is_hybrid: ClassVar[Literal[True]] = True
@@ -401,7 +407,7 @@ def is_hybrid(model: Type[object]) -> TypeIs[Type[IsHybrid]]:
 
 
 def is_hybrid(
-    model: Union[Type[object], object]
+    model: Union[Type[object], object],
 ) -> Union[TypeIs[Type[IsHybrid]], TypeIs[IsHybrid]]:
     if isinstance(model, type):
         return isinstance(model, _IsHybridType)
@@ -418,7 +424,7 @@ class SupportsCrossEncoding(Protocol):
 
 @overload
 def supports_cross_encoding(
-        model: Type[object]) -> TypeIs[Type[SupportsCrossEncoding]]:
+    model: Type[object], ) -> TypeIs[Type[SupportsCrossEncoding]]:
     ...
 
 
@@ -430,7 +436,6 @@ def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]:
 def _supports_cross_encoding(
     model: Union[Type[object], object],
 ) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
-
     if isinstance(model, type):
         return isinstance(model, SupportsCrossEncoding)
 
@@ -482,7 +487,7 @@ class SupportsTranscription(Protocol):
 
 @overload
 def supports_transcription(
-        model: Type[object]) -> TypeIs[Type[SupportsTranscription]]:
+    model: Type[object], ) -> TypeIs[Type[SupportsTranscription]]:
     ...
 
 

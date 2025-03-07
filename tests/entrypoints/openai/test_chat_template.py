@@ -14,47 +14,65 @@ assert chatml_jinja_path.exists()
 
 # Define models, templates, and their corresponding expected outputs
 MODEL_TEMPLATE_GENERATON_OUTPUT = [
-    ("facebook/opt-125m", chatml_jinja_path, True, False, """<|im_start|>user
+    (
+        "facebook/opt-125m",
+        chatml_jinja_path,
+        True,
+        False,
+        """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
 Hi there!<|im_end|>
 <|im_start|>user
 What is the capital of<|im_end|>
 <|im_start|>assistant
-"""),
-    ("facebook/opt-125m", chatml_jinja_path, False, False, """<|im_start|>user
+""",
+    ),
+    (
+        "facebook/opt-125m",
+        chatml_jinja_path,
+        False,
+        False,
+        """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
 Hi there!<|im_end|>
 <|im_start|>user
-What is the capital of"""),
-    ("facebook/opt-125m", chatml_jinja_path, False, True, """<|im_start|>user
+What is the capital of""",
+    ),
+    (
+        "facebook/opt-125m",
+        chatml_jinja_path,
+        False,
+        True,
+        """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
 Hi there!<|im_end|>
 <|im_start|>user
 What is the capital of<|im_end|>
 <|im_start|>assistant
-The capital of"""),
+The capital of""",
+    ),
 ]
 
 TEST_MESSAGES = [
     {
-        'role': 'user',
-        'content': 'Hello'
+        "role": "user",
+        "content": "Hello"
     },
     {
-        'role': 'assistant',
-        'content': 'Hi there!'
+        "role": "assistant",
+        "content": "Hi there!"
     },
     {
-        'role': 'user',
-        'content': 'What is the capital of'
+        "role": "user",
+        "content": "What is the capital of"
     },
 ]
 ASSISTANT_MESSAGE_TO_CONTINUE = {
-    'role': 'assistant',
-    'content': 'The capital of'
+    "role": "assistant",
+    "content": "The capital of",
 }
 
 
@@ -65,8 +83,11 @@ def test_load_chat_template():
     # Test assertions
     assert template_content is not None
     # Hard coded value for template_chatml.jinja
-    assert template_content == """{% for message in messages %}{{'<|im_start|>' + message['role'] + '\\n' + message['content']}}{% if (loop.last and add_generation_prompt) or not loop.last %}{{ '<|im_end|>' + '\\n'}}{% endif %}{% endfor %}
-{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{ '<|im_start|>assistant\\n' }}{% endif %}"""  # noqa: E501
+    assert (
+        template_content ==
+        """{% for message in messages %}{{'<|im_start|>' + message['role'] + '\\n' + message['content']}}{% if (loop.last and add_generation_prompt) or not loop.last %}{{ '<|im_end|>' + '\\n'}}{% endif %}{% endfor %}
+{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{ '<|im_start|>assistant\\n' }}{% endif %}"""
+    )  # noqa: E501
 
 
 def test_no_load_chat_template_filelike():
@@ -88,9 +109,15 @@ def test_no_load_chat_template_literallike():
 
 @pytest.mark.parametrize(
     "model,template,add_generation_prompt,continue_final_message,expected_output",
-    MODEL_TEMPLATE_GENERATON_OUTPUT)
-def test_get_gen_prompt(model, template, add_generation_prompt,
-                        continue_final_message, expected_output):
+    MODEL_TEMPLATE_GENERATON_OUTPUT,
+)
+def test_get_gen_prompt(
+    model,
+    template,
+    add_generation_prompt,
+    continue_final_message,
+    expected_output,
+):
     # Initialize the tokenizer
     tokenizer = get_tokenizer(tokenizer_name=model)
     template_content = load_chat_template(chat_template=template)
@@ -98,8 +125,8 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
     # Create a mock request object using keyword arguments
     mock_request = ChatCompletionRequest(
         model=model,
-        messages=TEST_MESSAGES + [ASSISTANT_MESSAGE_TO_CONTINUE]
-        if continue_final_message else TEST_MESSAGES,
+        messages=(TEST_MESSAGES + [ASSISTANT_MESSAGE_TO_CONTINUE]
+                  if continue_final_message else TEST_MESSAGES),
         add_generation_prompt=add_generation_prompt,
         continue_final_message=continue_final_message,
     )

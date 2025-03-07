@@ -66,7 +66,6 @@ class EngineClient(ABC):
         request_id: str,
         params: BeamSearchParams,
     ) -> AsyncGenerator[RequestOutput, None]:
-
         beam_width = params.beam_width
         max_tokens = params.max_tokens
         ignore_eos = params.ignore_eos
@@ -102,20 +101,23 @@ class EngineClient(ABC):
             temperature=temperature,
         )
         all_beams = [
-            BeamSearchSequence(tokens=prompt_token_ids,
-                               cum_logprob=0,
-                               logprobs=[],
-                               multi_modal_data=multi_modal_data,
-                               mm_processor_kwargs=mm_processor_kwargs)
+            BeamSearchSequence(
+                tokens=prompt_token_ids,
+                cum_logprob=0,
+                logprobs=[],
+                multi_modal_data=multi_modal_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+            )
         ]
         completed = []
 
         for _ in range(max_tokens):
             prompts_batch = [
-                TokensPrompt(prompt_token_ids=beam.tokens,
-                             multi_modal_data=beam.multi_modal_data,
-                             mm_processor_kwargs=beam.mm_processor_kwargs)
-                for beam in all_beams
+                TokensPrompt(
+                    prompt_token_ids=beam.tokens,
+                    multi_modal_data=beam.multi_modal_data,
+                    mm_processor_kwargs=beam.mm_processor_kwargs,
+                ) for beam in all_beams
             ]
 
             tasks = []
@@ -125,8 +127,11 @@ class EngineClient(ABC):
                 request_id_item = f"{request_id}-{i}"
                 task = asyncio.create_task(
                     collect_from_async_generator(
-                        self.generate(individual_prompt, beam_search_params,
-                                      request_id_item)))
+                        self.generate(
+                            individual_prompt,
+                            beam_search_params,
+                            request_id_item,
+                        )))
                 tasks.append(task)
 
             output = await asyncio.gather(*tasks)
@@ -140,19 +145,19 @@ class EngineClient(ABC):
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     for token_id, logprob_obj in logprobs.items():
-                        if token_id == tokenizer.eos_token_id and \
-                            not ignore_eos:
+                        if token_id == tokenizer.eos_token_id and not ignore_eos:
                             completed.append(
                                 BeamSearchSequence(
-                                    tokens=current_beam.tokens +
-                                    [token_id] if include_stop_str_in_output
-                                    else current_beam.tokens,
+                                    tokens=(current_beam.tokens + [token_id]
+                                            if include_stop_str_in_output else
+                                            current_beam.tokens),
                                     logprobs=current_beam.logprobs +
                                     [logprobs],
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
                                     finish_reason="stop",
-                                    stop_reason=tokenizer.eos_token_id))
+                                    stop_reason=tokenizer.eos_token_id,
+                                ))
                         else:
                             new_beams.append(
                                 BeamSearchSequence(
@@ -164,7 +169,8 @@ class EngineClient(ABC):
                                     multi_modal_data=current_beam.
                                     multi_modal_data,
                                     mm_processor_kwargs=current_beam.
-                                    mm_processor_kwargs))
+                                    mm_processor_kwargs,
+                                ))
 
             sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
             all_beams = sorted_beams[:beam_width]
@@ -174,7 +180,7 @@ class EngineClient(ABC):
         best_beams = sorted_completed[:beam_width]
 
         for beam in best_beams:
-            if (beam.tokens[-1] == tokenizer.eos_token_id and not ignore_eos):
+            if beam.tokens[-1] == tokenizer.eos_token_id and not ignore_eos:
                 # Skip the eos token in the text.
                 tokens = beam.tokens[tokenized_length:-1]
             else:
@@ -185,19 +191,21 @@ class EngineClient(ABC):
             request_id=request_id,
             prompt=prompt_text,
             outputs=[
-                CompletionOutput(text=beam.text,
-                                 cumulative_logprob=beam.cum_logprob,
-                                 token_ids=beam.tokens[tokenized_length:],
-                                 index=i,
-                                 logprobs=beam.logprobs,
-                                 finish_reason=beam.finish_reason if
-                                 beam.finish_reason is not None else "length",
-                                 stop_reason=beam.stop_reason)
-                for (i, beam) in enumerate(best_beams)
+                CompletionOutput(
+                    text=beam.text,
+                    cumulative_logprob=beam.cum_logprob,
+                    token_ids=beam.tokens[tokenized_length:],
+                    index=i,
+                    logprobs=beam.logprobs,
+                    finish_reason=(beam.finish_reason if beam.finish_reason
+                                   is not None else "length"),
+                    stop_reason=beam.stop_reason,
+                ) for (i, beam) in enumerate(best_beams)
             ],
             finished=True,
             prompt_token_ids=prompt_token_ids,
-            prompt_logprobs=None)
+            prompt_logprobs=None,
+        )
 
         yield beam_search_output
 

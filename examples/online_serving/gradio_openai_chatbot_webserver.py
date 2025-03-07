@@ -7,24 +7,28 @@ from openai import OpenAI
 
 # Argument parser setup
 parser = argparse.ArgumentParser(
-    description='Chatbot Interface with Customizable Parameters')
-parser.add_argument('--model-url',
-                    type=str,
-                    default='http://localhost:8000/v1',
-                    help='Model URL')
-parser.add_argument('-m',
-                    '--model',
+    description="Chatbot Interface with Customizable Parameters")
+parser.add_argument(
+    "--model-url",
+    type=str,
+    default="http://localhost:8000/v1",
+    help="Model URL",
+)
+parser.add_argument("-m",
+                    "--model",
                     type=str,
                     required=True,
-                    help='Model name for the chatbot')
-parser.add_argument('--temp',
+                    help="Model name for the chatbot")
+parser.add_argument("--temp",
                     type=float,
                     default=0.8,
-                    help='Temperature for text generation')
-parser.add_argument('--stop-token-ids',
-                    type=str,
-                    default='',
-                    help='Comma-separated stop token IDs')
+                    help="Temperature for text generation")
+parser.add_argument(
+    "--stop-token-ids",
+    type=str,
+    default="",
+    help="Comma-separated stop token IDs",
+)
 parser.add_argument("--host", type=str, default=None)
 parser.add_argument("--port", type=int, default=8001)
 
@@ -63,18 +67,19 @@ def predict(message, history):
         temperature=args.temp,  # Temperature for text generation
         stream=True,  # Stream response
         extra_body={
-            'repetition_penalty':
+            "repetition_penalty":
             1,
-            'stop_token_ids': [
-                int(id.strip()) for id in args.stop_token_ids.split(',')
+            "stop_token_ids": ([
+                int(id.strip()) for id in args.stop_token_ids.split(",")
                 if id.strip()
-            ] if args.stop_token_ids else []
-        })
+            ] if args.stop_token_ids else []),
+        },
+    )
 
     # Read and return generated text from response stream
     partial_message = ""
     for chunk in stream:
-        partial_message += (chunk.choices[0].delta.content or "")
+        partial_message += chunk.choices[0].delta.content or ""
         yield partial_message
 
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Custom normalization layers."""
+
 from typing import Optional, Tuple, Union
 
 import torch
@@ -106,6 +107,7 @@ class RMSNorm(CustomOp):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         from vllm_hpu_extension.ops import HPUFusedRMSNorm
+
         if HPUFusedRMSNorm is None:
             return self.forward_native(x, residual)
         if residual is not None:
@@ -207,7 +209,7 @@ class GemmaRMSNorm(CustomOp):
             return self.forward_native(x, residual)
 
         if not getattr(self, "_is_compiled", False):
-            self.forward_static = torch.compile(  # type: ignore
-                self.forward_static)
+            self.forward_static = torch.compile(
+                self.forward_static)  # type: ignore
             self._is_compiled = True
         return self.forward_native(x, residual)

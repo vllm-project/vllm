@@ -35,8 +35,10 @@ async def test_tokenizer_group_lora(sql_lora_files, tokenizer_group_type):
     assert tokenizer_group.get_lora_tokenizer(
         None) == await tokenizer_group.get_lora_tokenizer_async(None)
 
-    assert isinstance(tokenizer_group.get_lora_tokenizer(lora_request),
-                      PreTrainedTokenizerBase)
+    assert isinstance(
+        tokenizer_group.get_lora_tokenizer(lora_request),
+        PreTrainedTokenizerBase,
+    )
     assert tokenizer_group.get_lora_tokenizer(
         lora_request) != tokenizer_group.get_lora_tokenizer(None)
     assert tokenizer_group.get_lora_tokenizer(

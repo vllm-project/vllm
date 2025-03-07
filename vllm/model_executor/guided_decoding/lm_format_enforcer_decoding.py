@@ -62,5 +62,5 @@ def _normalize_json_schema_object(schema: Union[str, dict]) -> dict:
 
 @lru_cache
 def _cached_build_vllm_token_enforcer_tokenizer_data(
-        tokenizer: PreTrainedTokenizerBase) -> TokenEnforcerTokenizerData:
+    tokenizer: PreTrainedTokenizerBase, ) -> TokenEnforcerTokenizerData:
     return build_vllm_token_enforcer_tokenizer_data(tokenizer)

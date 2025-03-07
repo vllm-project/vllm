@@ -134,8 +134,8 @@ def test_free_kv_cache_block_queue_get_all_free_blocks():
 
     # Append a block back and check again
     queue.append(block_to_remove)
-    assert queue.get_all_free_blocks() == \
-        blocks[1:2] + blocks[3:] + [block_to_remove]
+    assert queue.get_all_free_blocks(
+    ) == blocks[1:2] + blocks[3:] + [block_to_remove]
 
 
 def test_generate_block_hash_extra_keys():
@@ -169,7 +169,7 @@ def test_generate_block_hash_extra_keys():
 
     # Test with multiple extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 15, 0)
-    assert extra_keys == ('hash1', 'hash2')
+    assert extra_keys == ("hash1", "hash2")
     assert next_mm_idx == 2
 
 

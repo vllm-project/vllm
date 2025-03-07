@@ -29,14 +29,14 @@ def choose_mp_linear_kernel(
         compute_capability: Optional[int] = None) -> Type[MPLinearKernel]:
     """
     Choose an MPLinearKernel that can implement the given config for the given
-     compute capability. Attempts to choose the best kernel in terms of 
+     compute capability. Attempts to choose the best kernel in terms of
      performance.
 
     Args:
-        config (MPLinearLayerConfig): Description of the linear layer to be 
+        config (MPLinearLayerConfig): Description of the linear layer to be
           implemented.
         compute_capability (Optional[int], optional): The compute capability of
-          the target device, if None uses `current_platform` to get the compute 
+          the target device, if None uses `current_platform` to get the compute
           capability. Defaults to None.
 
     Raises:
@@ -55,7 +55,7 @@ def choose_mp_linear_kernel(
     for kernel in _POSSIBLE_KERNELS:
         if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
             failure_reasons.append(
-                f' {kernel.__name__} disabled by environment variable')
+                f" {kernel.__name__} disabled by environment variable")
             continue
 
         if kernel.get_min_capability() > compute_capability:
@@ -70,10 +70,9 @@ def choose_mp_linear_kernel(
             return kernel
         else:
             failure_reasons.append(
-                f' {kernel.__name__} cannot implement due to: {failure_reason}'
+                f" {kernel.__name__} cannot implement due to: {failure_reason}"
             )
 
-    raise ValueError(
-        "Failed to find a kernel that can implement the "\
-        "WNA16 linear layer. Reasons: \n"
-        + '\n'.join(failure_reasons))
+    raise ValueError("Failed to find a kernel that can implement the "
+                     "WNA16 linear layer. Reasons: \n" +
+                     "\n".join(failure_reasons))

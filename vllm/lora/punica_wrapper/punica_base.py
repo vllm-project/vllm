@@ -217,7 +217,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.indices_len[:] = indices_len
 
     def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
-
         (
             b_seq_start_tensor,
             seq_length_tensor,
@@ -403,7 +402,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         long_lora_context: Optional["LongContextLoRAContext"] = None,
         **kwargs,
     ):
-
         self._update_base_metadata(
             mapping,
             lora_index_to_id,

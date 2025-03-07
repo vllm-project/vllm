@@ -49,12 +49,11 @@ def test_contexted_kv_attention(
     device: str,
     op: Callable,
 ) -> None:
-
-    if 'fp8' in kv_cache_dtype and not current_platform.has_device_capability(
+    if "fp8" in kv_cache_dtype and not current_platform.has_device_capability(
             89):
         pytest.skip(
-            'Triton limitation: fp8e4nv data type is not supported on CUDA'
-            ' arch < 89')
+            "Triton limitation: fp8e4nv data type is not supported on CUDA"
+            " arch < 89")
 
     current_platform.seed_everything(0)
     torch.set_default_device(device)
@@ -144,49 +143,53 @@ def test_contexted_kv_attention(
             block_id += 1
     # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
     # to K_cache[num_blocks, num_kv_heads, head_size/8, block_size, 8]
-    k_cache = k_cache.view(-1, block_size, num_kv_heads, head_size // 8,
-                           8).permute(0, 2, 3, 1, 4).contiguous()
+    k_cache = (k_cache.view(-1, block_size, num_kv_heads, head_size // 8,
+                            8).permute(0, 2, 3, 1, 4).contiguous())
     # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size]
     # to V_cache[num_blocks, num_kv_heads, head_size, block_size]
-    v_cache = v_cache.view(-1, block_size, num_kv_heads,
-                           head_size).permute(0, 2, 3, 1).contiguous()
+    v_cache = (v_cache.view(-1, block_size, num_kv_heads,
+                            head_size).permute(0, 2, 3, 1).contiguous())
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Warm up the Triton kernel by calling it once before actually measuring
     # generation time
-    op(query,
-       k,
-       v,
-       output,
-       kv_cache_dtype,
-       k_cache,
-       v_cache,
-       block_table,
-       b_start_loc,
-       b_seq_len,
-       max_input_len,
-       k_scale,
-       v_scale,
-       sliding_window=sliding_window)
+    op(
+        query,
+        k,
+        v,
+        output,
+        kv_cache_dtype,
+        k_cache,
+        v_cache,
+        block_table,
+        b_start_loc,
+        b_seq_len,
+        max_input_len,
+        k_scale,
+        v_scale,
+        sliding_window=sliding_window,
+    )
     torch.cuda.synchronize()
     start_time = time.time()
-    op(query,
-       k,
-       v,
-       output,
-       kv_cache_dtype,
-       k_cache,
-       v_cache,
-       block_table,
-       b_start_loc,
-       b_seq_len,
-       max_input_len,
-       k_scale,
-       v_scale,
-       sliding_window=sliding_window)
+    op(
+        query,
+        k,
+        v,
+        output,
+        kv_cache_dtype,
+        k_cache,
+        v_cache,
+        block_table,
+        b_start_loc,
+        b_seq_len,
+        max_input_len,
+        k_scale,
+        v_scale,
+        sliding_window=sliding_window,
+    )
     torch.cuda.synchronize()
     end_time = time.time()
-    print(f"triton Time: {(end_time - start_time)*1000:.2f} ms")
+    print(f"triton Time: {(end_time - start_time) * 1000:.2f} ms")
 
     scale = float(1.0 / (head_size**0.5))
 
@@ -236,7 +239,7 @@ def test_contexted_kv_attention(
     )
     torch.cuda.synchronize()
     end_time = time.time()
-    print(f"xformers Time: {(end_time - start_time)*1000:.2f} ms")
+    print(f"xformers Time: {(end_time - start_time) * 1000:.2f} ms")
     output_ref = output_ref.reshape(output.shape)
     atol = 1e-3 if "fp8" in kv_cache_dtype else 1e-4
     torch.testing.assert_close(output, output_ref, atol=atol, rtol=0)
@@ -259,12 +262,11 @@ def test_contexted_kv_attention_alibi(
     device: str,
     op: Callable,
 ) -> None:
-
-    if 'fp8' in kv_cache_dtype and not current_platform.has_device_capability(
+    if "fp8" in kv_cache_dtype and not current_platform.has_device_capability(
             89):
         pytest.skip(
-            'Triton limitation: fp8e4nv data type is not supported on CUDA'
-            ' arch < 89')
+            "Triton limitation: fp8e4nv data type is not supported on CUDA"
+            " arch < 89")
 
     current_platform.seed_everything(0)
     torch.set_default_device(device)
@@ -292,10 +294,12 @@ def test_contexted_kv_attention_alibi(
             )
             num_remaining_heads = min(closest_power_of_2,
                                       total_num_heads - closest_power_of_2)
-            extra_powers = torch.arange(start=1,
-                                        end=1 + 2 * num_remaining_heads,
-                                        step=2,
-                                        dtype=torch.int32)
+            extra_powers = torch.arange(
+                start=1,
+                end=1 + 2 * num_remaining_heads,
+                step=2,
+                dtype=torch.int32,
+            )
             slopes = torch.cat(
                 [slopes, torch.pow(extra_base, extra_powers)], dim=0)
         return slopes
@@ -377,49 +381,53 @@ def test_contexted_kv_attention_alibi(
             block_id += 1
     # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
     # to K_cache[num_blocks, num_kv_heads, head_size/8, block_size, 8]
-    k_cache = k_cache.view(-1, block_size, num_kv_heads, head_size // 8,
-                           8).permute(0, 2, 3, 1, 4).contiguous()
+    k_cache = (k_cache.view(-1, block_size, num_kv_heads, head_size // 8,
+                            8).permute(0, 2, 3, 1, 4).contiguous())
     # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size]
     # to V_cache[num_blocks, num_kv_heads, head_size, block_size]
-    v_cache = v_cache.view(-1, block_size, num_kv_heads,
-                           head_size).permute(0, 2, 3, 1).contiguous()
+    v_cache = (v_cache.view(-1, block_size, num_kv_heads,
+                            head_size).permute(0, 2, 3, 1).contiguous())
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Warm up the Triton kernel by calling it once before actually measuring
     # generation time
-    op(query,
-       k,
-       v,
-       output,
-       kv_cache_dtype,
-       k_cache,
-       v_cache,
-       block_table,
-       b_start_loc,
-       b_seq_len,
-       max_input_len,
-       k_scale,
-       v_scale,
-       alibi_slopes=alibi_slopes)
+    op(
+        query,
+        k,
+        v,
+        output,
+        kv_cache_dtype,
+        k_cache,
+        v_cache,
+        block_table,
+        b_start_loc,
+        b_seq_len,
+        max_input_len,
+        k_scale,
+        v_scale,
+        alibi_slopes=alibi_slopes,
+    )
     torch.cuda.synchronize()
     start_time = time.time()
-    op(query,
-       k,
-       v,
-       output,
-       kv_cache_dtype,
-       k_cache,
-       v_cache,
-       block_table,
-       b_start_loc,
-       b_seq_len,
-       max_input_len,
-       k_scale,
-       v_scale,
-       alibi_slopes=alibi_slopes)
+    op(
+        query,
+        k,
+        v,
+        output,
+        kv_cache_dtype,
+        k_cache,
+        v_cache,
+        block_table,
+        b_start_loc,
+        b_seq_len,
+        max_input_len,
+        k_scale,
+        v_scale,
+        alibi_slopes=alibi_slopes,
+    )
     torch.cuda.synchronize()
     end_time = time.time()
-    print(f"triton Time: {(end_time - start_time)*1000:.2f} ms")
+    print(f"triton Time: {(end_time - start_time) * 1000:.2f} ms")
     scale = float(1.0 / (head_size**0.5))
 
     # NOTE(DefTruth): In order to reuse _make_alibi_bias function,
@@ -435,12 +443,15 @@ def test_contexted_kv_attention_alibi(
         for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
             seq_end = seq_start + seq_len
             query_end = query_start + query_len
-            query_pad[seq_start:seq_end, ...] = torch.cat([
-                torch.zeros(
-                    seq_len - query_len, num_heads, head_size, dtype=dtype),
-                query[query_start:query_end, ...]
-            ],
-                                                          dim=0)
+            query_pad[seq_start:seq_end, ...] = torch.cat(
+                [
+                    torch.zeros(
+                        seq_len - query_len, num_heads, head_size,
+                        dtype=dtype),
+                    query[query_start:query_end, ...],
+                ],
+                dim=0,
+            )
             seq_start += seq_len
             query_start += query_len
         query = query_pad
@@ -478,15 +489,14 @@ def test_contexted_kv_attention_alibi(
     for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
         seq_end = seq_start + seq_len
         query_end = query_start + query_len
-        out = xops.memory_efficient_attention_forward(query[:,
-                                                            seq_start:seq_end],
-                                                      key[:,
-                                                          seq_start:seq_end],
-                                                      value[:,
-                                                            seq_start:seq_end],
-                                                      attn_bias=attn_bias[i],
-                                                      p=0.0,
-                                                      scale=scale)
+        out = xops.memory_efficient_attention_forward(
+            query[:, seq_start:seq_end],
+            key[:, seq_start:seq_end],
+            value[:, seq_start:seq_end],
+            attn_bias=attn_bias[i],
+            p=0.0,
+            scale=scale,
+        )
         out = out.view_as(query[:, seq_start:seq_end]).view(
             seq_len, num_heads, head_size)
         output_ref[query_start:query_end, ...].copy_(out[seq_len - query_len:,
@@ -495,7 +505,7 @@ def test_contexted_kv_attention_alibi(
         query_start += query_len
     torch.cuda.synchronize()
     end_time = time.time()
-    print(f"xformers Time: {(end_time - start_time)*1000:.2f} ms")
+    print(f"xformers Time: {(end_time - start_time) * 1000:.2f} ms")
     atol = 1e-3 if "fp8" in kv_cache_dtype else 1e-6
     torch.testing.assert_close(output, output_ref, atol=atol, rtol=0)
 
@@ -527,9 +537,16 @@ def test_contexted_kv_attention_f32(
     device: str,
     op: Callable,
 ) -> None:
-    test_contexted_kv_attention(num_heads, num_queries_per_kv, head_size,
-                                sliding_window, dtype, kv_cache_dtype, device,
-                                op)
+    test_contexted_kv_attention(
+        num_heads,
+        num_queries_per_kv,
+        head_size,
+        sliding_window,
+        dtype,
+        kv_cache_dtype,
+        device,
+        op,
+    )
 
 
 @pytest.mark.optional
@@ -550,5 +567,12 @@ def test_contexted_kv_attention_alibi_f32(
     device: str,
     op: Callable,
 ) -> None:
-    test_contexted_kv_attention_alibi(num_heads, num_queries_per_kv, head_size,
-                                      dtype, kv_cache_dtype, device, op)
+    test_contexted_kv_attention_alibi(
+        num_heads,
+        num_queries_per_kv,
+        head_size,
+        dtype,
+        kv_cache_dtype,
+        device,
+        op,
+    )

@@ -57,30 +57,36 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                                        requires_grad=False)
         layer.meta = Parameter(layer.meta.data, requires_grad=False)
 
-    def create_weights(self, layer: torch.nn.Module, input_size: int,
-                       output_partition_sizes: List[int],
-                       input_size_per_partition: int,
-                       params_dtype: torch.dtype, weight_loader: Callable,
-                       **kwargs):
-
-        assert params_dtype == torch.float16, (
-            "float16 is required for marlin24 compressed models. Set dtype=torch.float16"  # noqa: E501
-        )
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size: int,
+        output_partition_sizes: List[int],
+        input_size_per_partition: int,
+        params_dtype: torch.dtype,
+        weight_loader: Callable,
+        **kwargs,
+    ):
+        assert (
+            params_dtype == torch.float16
+        ), "float16 is required for marlin24 compressed models. Set dtype=torch.float16"  # noqa: E501
 
         pack_factor = 32 // self.quant_type.size_bits
         output_size_per_partition = sum(output_partition_sizes)
 
-        qweight = PackedvLLMParameter(data=torch.empty(
-            input_size_per_partition // self.tile_size // 2,
-            output_size_per_partition * self.tile_size // pack_factor,
-            dtype=torch.int32,
-        ),
-                                      input_dim=0,
-                                      output_dim=1,
-                                      packed_dim=1,
-                                      packed_factor=pack_factor,
-                                      marlin_tile_size=self.tile_size,
-                                      weight_loader=weight_loader)
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
+                input_size_per_partition // self.tile_size // 2,
+                output_size_per_partition * self.tile_size // pack_factor,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=pack_factor,
+            marlin_tile_size=self.tile_size,
+            weight_loader=weight_loader,
+        )
 
         input_groups = (1 if self.group_size is None else
                         input_size_per_partition // self.group_size)
@@ -93,7 +99,7 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                 dtype=params_dtype,
             ),
             "weight_loader":
-            weight_loader
+            weight_loader,
         }
 
         if self.group_size is not None:
@@ -108,17 +114,19 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
                                                           dtype=torch.int64),
                                          weight_loader=weight_loader)
 
-        meta = PackedvLLMParameter(data=torch.empty(
-            input_size_per_partition // 8 // 2 // 2,
-            output_size_per_partition * 2,
-            dtype=torch.int16,
-        ),
-                                   input_dim=0,
-                                   output_dim=1,
-                                   packed_dim=1,
-                                   packed_factor=1,
-                                   marlin_tile_size=2,
-                                   weight_loader=weight_loader)
+        meta = PackedvLLMParameter(
+            data=torch.empty(
+                input_size_per_partition // 8 // 2 // 2,
+                output_size_per_partition * 2,
+                dtype=torch.int16,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=1,
+            marlin_tile_size=2,
+            weight_loader=weight_loader,
+        )
 
         layer.register_parameter("weight_packed", qweight)
         layer.register_parameter("weight_shape", weight_shape)
@@ -129,13 +137,18 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
             output_size_per_partition //
             GPTQ_MARLIN_24_MIN_THREAD_N) * GPTQ_MARLIN_24_MAX_PARALLEL
 
-        workspace = Parameter(torch.zeros(max_workspace_size, dtype=torch.int),
-                              requires_grad=False)
+        workspace = Parameter(
+            torch.zeros(max_workspace_size, dtype=torch.int),
+            requires_grad=False,
+        )
         layer.workspace = workspace
 
-    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
-                      bias: Optional[torch.Tensor]) -> torch.Tensor:
-
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
         qweight = layer.weight_packed
         meta = layer.meta
         scales = layer.scale_packed
@@ -147,9 +160,17 @@ class CompressedTensorsW4A16Sparse24(CompressedTensorsScheme):
         size_k = x_2d.shape[1]
         size_n = scales.shape[1]
 
-        output_2d = ops.gptq_marlin_24_gemm(x_2d, qweight, meta, scales,
-                                            workspace, self.quant_type, size_m,
-                                            size_n, size_k)
+        output_2d = ops.gptq_marlin_24_gemm(
+            x_2d,
+            qweight,
+            meta,
+            scales,
+            workspace,
+            self.quant_type,
+            size_m,
+            size_n,
+            size_k,
+        )
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
 

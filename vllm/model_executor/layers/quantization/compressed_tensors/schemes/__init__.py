@@ -12,9 +12,13 @@ from .compressed_tensors_wNa16 import (WNA16_SUPPORTED_BITS,
 from .compressed_tensors_24 import CompressedTensors24  # isort: skip
 
 __all__ = [
-    "CompressedTensorsScheme", "CompressedTensorsWNA16",
-    "CompressedTensorsW8A16Fp8", "CompressedTensorsW4A16Sparse24",
-    "CompressedTensorsW8A8Int8", "CompressedTensorsW8A8Fp8",
-    "WNA16_SUPPORTED_BITS", "W4A16SPARSE24_SUPPORTED_BITS",
-    "CompressedTensors24"
+    "CompressedTensorsScheme",
+    "CompressedTensorsWNA16",
+    "CompressedTensorsW8A16Fp8",
+    "CompressedTensorsW4A16Sparse24",
+    "CompressedTensorsW8A8Int8",
+    "CompressedTensorsW8A8Fp8",
+    "WNA16_SUPPORTED_BITS",
+    "W4A16SPARSE24_SUPPORTED_BITS",
+    "CompressedTensors24",
 ]

@@ -25,6 +25,7 @@ class ProcessorInputs:
     Represents the keyword arguments to
     :meth:`vllm.multimodal.processing.BaseMultiModalProcessor.apply`.
     """
+
     prompt_text: str
     mm_data: MultiModalDataDict
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
@@ -201,8 +202,11 @@ class MultiModalProfiler(Generic[_I]):
                     "multi-modal inputs to fail during inference, even when "
                     "the input text is short. To avoid this, you should "
                     "increase `max_model_len`, reduce `max_num_seqs`, "
-                    "and/or reduce `mm_counts`.", seq_len, total_len,
-                    total_placeholders_by_modality)
+                    "and/or reduce `mm_counts`.",
+                    seq_len,
+                    total_len,
+                    total_placeholders_by_modality,
+                )
 
             num_tokens_to_pad = max(total_len, seq_len) - total_len
             prompt_token_ids.extend([0] * num_tokens_to_pad)

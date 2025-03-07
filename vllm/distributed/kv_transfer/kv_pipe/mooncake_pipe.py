@@ -29,7 +29,7 @@ class MooncakeTransferEngineConfig:
     device_name: str
 
     @staticmethod
-    def from_file(file_path: str) -> 'MooncakeTransferEngineConfig':
+    def from_file(file_path: str) -> "MooncakeTransferEngineConfig":
         """Load the config from a JSON file."""
         with open(file_path) as fin:
             config = json.load(fin)
@@ -43,9 +43,9 @@ class MooncakeTransferEngineConfig:
         )
 
     @staticmethod
-    def load_from_env() -> 'MooncakeTransferEngineConfig':
+    def load_from_env() -> "MooncakeTransferEngineConfig":
         """Load config from a file specified in the environment variable."""
-        config_file_path = os.getenv('MOONCAKE_CONFIG_PATH')
+        config_file_path = os.getenv("MOONCAKE_CONFIG_PATH")
         if config_file_path is None:
             raise ValueError(
                 "The environment variable 'MOONCAKE_CONFIG_PATH' is not set.")
@@ -77,25 +77,27 @@ class MooncakeTransferEngine:
             logger.error(
                 "An error occurred while loading the configuration: %s", exc)
             raise
-        prefill_host, base_prefill_port = self.config.prefill_url.split(':')
-        decode_host, base_decode_port = self.config.decode_url.split(':')
+        prefill_host, base_prefill_port = self.config.prefill_url.split(":")
+        decode_host, base_decode_port = self.config.decode_url.split(":")
 
         # Avoid ports conflict when running prefill and decode on the same node
-        if prefill_host == decode_host and \
-                base_prefill_port == base_decode_port:
+        if prefill_host == decode_host and base_prefill_port == base_decode_port:
             base_decode_port = str(int(base_decode_port) + 100)
 
         prefill_port = int(base_prefill_port) + self.local_rank
         decode_port = int(base_decode_port) + self.local_rank
-        self.prefill_url = ':'.join([prefill_host, str(prefill_port)])
-        self.decode_url = ':'.join([decode_host, str(decode_port)])
+        self.prefill_url = ":".join([prefill_host, str(prefill_port)])
+        self.decode_url = ":".join([decode_host, str(decode_port)])
 
-        self.initialize(self.prefill_url if kv_rank == 0 else self.decode_url,
-                        self.config.metadata_server, self.config.protocol,
-                        self.config.device_name, self.config.metadata_backend)
+        self.initialize(
+            self.prefill_url if kv_rank == 0 else self.decode_url,
+            self.config.metadata_server,
+            self.config.protocol,
+            self.config.device_name,
+            self.config.metadata_backend,
+        )
 
-        self.remote_url = (self.decode_url
-                           if kv_rank == 0 else self.prefill_url)
+        self.remote_url = self.decode_url if kv_rank == 0 else self.prefill_url
 
         # Initialize ZeroMQ context and sockets
         self.context = zmq.Context()  # type: ignore[attr-defined]
@@ -105,8 +107,13 @@ class MooncakeTransferEngine:
         self.receiver_ack = self.context.socket(zmq.constants.PUSH)
 
         self.buffer_cleaner = ThreadPoolExecutor(max_workers=1)
-        self._setup_metadata_sockets(kv_rank, prefill_host, base_prefill_port,
-                                     decode_host, base_decode_port)
+        self._setup_metadata_sockets(
+            kv_rank,
+            prefill_host,
+            base_prefill_port,
+            decode_host,
+            base_decode_port,
+        )
 
     def _setup_metadata_sockets(self, kv_rank: int, p_host: str, p_port: str,
                                 d_host: str, d_port: str) -> None:
@@ -125,9 +132,14 @@ class MooncakeTransferEngine:
             self.receiver_ack.bind(f"tcp://*:{d_rank_offset + 2}")
             self.sender_ack.connect(f"tcp://{p_host}:{p_rank_offset + 2}")
 
-    def initialize(self, local_hostname: str, metadata_server: str,
-                   protocol: str, device_name: str,
-                   metadata_backend: Union[str, None]) -> None:
+    def initialize(
+        self,
+        local_hostname: str,
+        metadata_server: str,
+        protocol: str,
+        device_name: str,
+        metadata_backend: Union[str, None],
+    ) -> None:
         """Initialize the mooncake instance."""
         if metadata_backend is None:
             self.engine.initialize(local_hostname, metadata_server, protocol,
@@ -140,8 +152,13 @@ class MooncakeTransferEngine:
                     "Mooncake Configuration error. `metadata_backend`"
                     f" should be one of {supported_backend}.")
 
-            self.engine.initializeExt(local_hostname, metadata_server,
-                                      protocol, device_name, metadata_backend)
+            self.engine.initializeExt(
+                local_hostname,
+                metadata_server,
+                protocol,
+                device_name,
+                metadata_backend,
+            )
 
     def allocate_managed_buffer(self, length: int) -> int:
         """Allocate a managed buffer of the specified length."""
@@ -177,7 +194,7 @@ class MooncakeTransferEngine:
     def wait_for_ack(self, src_ptr: int, length: int) -> None:
         """Asynchronously wait for ACK from the receiver."""
         ack = self.sender_ack.recv_pyobj()
-        if ack != b'ACK':
+        if ack != b"ACK":
             logger.error("Failed to receive ACK from the receiver")
 
         self.free_managed_buffer(src_ptr, length)
@@ -198,7 +215,7 @@ class MooncakeTransferEngine:
         ret = self.read_bytes_from_buffer(dst_ptr, length)
 
         # Buffer cleanup
-        self.receiver_ack.send_pyobj(b'ACK')
+        self.receiver_ack.send_pyobj(b"ACK")
         self.free_managed_buffer(dst_ptr, length)
 
         return ret
@@ -207,10 +224,12 @@ class MooncakeTransferEngine:
 class MooncakePipe(KVPipeBase):
     """MooncakeTransferEngine based Pipe implementation."""
 
-    def __init__(self,
-                 local_rank: int,
-                 config: KVTransferConfig,
-                 device: Optional[str] = None):
+    def __init__(
+        self,
+        local_rank: int,
+        config: KVTransferConfig,
+        device: Optional[str] = None,
+    ):
         """Initialize the mooncake pipe and set related parameters."""
         self.config = config
         self.local_rank = local_rank
@@ -251,7 +270,7 @@ class MooncakePipe(KVPipeBase):
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
         tensor = tensor if tensor is not None else self.none_tensor
-        assert (len(tensor.shape) > 0)
+        assert len(tensor.shape) > 0
         self.transport_thread.submit(self._send_impl, tensor)
 
     def recv_tensor(self) -> Optional[torch.Tensor]:

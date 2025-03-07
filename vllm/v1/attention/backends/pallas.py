@@ -142,7 +142,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = ([num_blocks, block_size, num_kv_heads, head_size], 
+            kv_cache = ([num_blocks, block_size, num_kv_heads, head_size],
                         [num_blocks, block_size, num_kv_heads, head_size])
             attn_metadata: Metadata for attention.
         Returns:
@@ -177,7 +177,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             num_queries_per_block=NUM_QUERIES_PER_BLOCK,
             vmem_limit_bytes=self.vmem_limit_bytes,
             use_kernel=True,
-            sm_scale=self.scale)
+            sm_scale=self.scale,
+        )
 
         return output.reshape(num_tokens, hidden_size)
 
@@ -189,7 +190,7 @@ def write_to_kv_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    """ Write the key and values to the KV cache.
+    """Write the key and values to the KV cache.
 
     Args:
         key: shape = [num_tokens, num_kv_heads, head_size]

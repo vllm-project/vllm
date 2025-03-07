@@ -33,8 +33,10 @@ class LLMPredictor:
 
     def __init__(self):
         # Create an LLM.
-        self.llm = LLM(model="meta-llama/Llama-2-7b-chat-hf",
-                       tensor_parallel_size=tensor_parallel_size)
+        self.llm = LLM(
+            model="meta-llama/Llama-2-7b-chat-hf",
+            tensor_parallel_size=tensor_parallel_size,
+        )
 
     def __call__(self, batch: dict[str, np.ndarray]) -> dict[str, list]:
         # Generate texts from the prompts.
@@ -45,7 +47,7 @@ class LLMPredictor:
         generated_text: list[str] = []
         for output in outputs:
             prompt.append(output.prompt)
-            generated_text.append(' '.join([o.text for o in output.outputs]))
+            generated_text.append(" ".join([o.text for o in output.outputs]))
         return {
             "prompt": prompt,
             "generated_text": generated_text,

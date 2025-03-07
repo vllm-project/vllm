@@ -23,7 +23,7 @@ from .interfaces import SupportsCrossEncoding, SupportsV0Only
 
 
 def roberta_task_weights_filter(
-    all_weights: Iterable[Tuple[str, torch.Tensor]]
+    all_weights: Iterable[Tuple[str, torch.Tensor]],
 ) -> Tuple[Iterable[Tuple[str, torch.Tensor]], Iterable[Tuple[str,
                                                               torch.Tensor]]]:
     """
@@ -54,9 +54,11 @@ class RobertaEmbedding(nn.Module):
         self.word_embeddings = VocabParallelEmbedding(config.vocab_size,
                                                       config.hidden_size)
         self.padding_idx = config.pad_token_id
-        self.position_embeddings = nn.Embedding(config.max_position_embeddings,
-                                                config.hidden_size,
-                                                padding_idx=self.padding_idx)
+        self.position_embeddings = nn.Embedding(
+            config.max_position_embeddings,
+            config.hidden_size,
+            padding_idx=self.padding_idx,
+        )
 
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size,
                                                   config.hidden_size)
@@ -98,9 +100,11 @@ class RobertaEmbedding(nn.Module):
         for positions, tokens in zip(pos_list, token_list):
             # Verify assumption that incoming position are
             # always a sequence from 0 to N.
-            expected_pos = torch.arange(positions.size()[0],
-                                        dtype=torch.long,
-                                        device=inputs_embeds.device)
+            expected_pos = torch.arange(
+                positions.size()[0],
+                dtype=torch.long,
+                device=inputs_embeds.device,
+            )
             assert torch.equal(positions, expected_pos)
             new_pos_list.append(
                 create_position_ids_from_input_ids(tokens, self.padding_idx))
@@ -163,20 +167,22 @@ class RobertaClassificationHead(nn.Module):
 class RobertaEmbeddingModel(BertEmbeddingModel):
     """A model that uses Roberta to provide embedding functionalities.
 
-   This class encapsulates the BertModel and provides an interface for
-   embedding operations and customized pooling functions.
+    This class encapsulates the BertModel and provides an interface for
+    embedding operations and customized pooling functions.
 
-   Attributes:
-       model: An instance of BertModel used for forward operations.
-       _pooler: An instance of Pooler used for pooling operations.
-   """
+    Attributes:
+        model: An instance of BertModel used for forward operations.
+        _pooler: An instance of Pooler used for pooling operations.
+    """
 
     def _build_model(self,
                      vllm_config: VllmConfig,
                      prefix: str = "") -> BertModel:
-        return BertModel(vllm_config=vllm_config,
-                         prefix=prefix,
-                         embedding_class=RobertaEmbedding)
+        return BertModel(
+            vllm_config=vllm_config,
+            prefix=prefix,
+            embedding_class=RobertaEmbedding,
+        )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         weights = self.hf_to_vllm_mapper.apply(weights)
@@ -195,31 +201,32 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
                                        SupportsV0Only):
     """A model that uses Roberta to provide embedding functionalities.
 
-   This class encapsulates the BertModel and provides an interface for
-   embedding operations and customized pooling functions.
+    This class encapsulates the BertModel and provides an interface for
+    embedding operations and customized pooling functions.
 
-   Attributes:
-       roberta: An instance of BertModel used for forward operations.
-       _pooler: An instance of Pooler used for pooling operations.
-   """
+    Attributes:
+        roberta: An instance of BertModel used for forward operations.
+        _pooler: An instance of Pooler used for pooling operations.
+    """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
 
-        self.default_activation_function = \
-            get_cross_encoder_activation_function(config)
+        self.default_activation_function = get_cross_encoder_activation_function(
+            config)
 
         self.num_labels = config.num_labels
-        self.roberta = BertModel(vllm_config=vllm_config,
-                                 prefix=maybe_prefix(prefix, "bert"),
-                                 embedding_class=RobertaEmbedding,
-                                 add_pooling_layer=False)
+        self.roberta = BertModel(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "bert"),
+            embedding_class=RobertaEmbedding,
+            add_pooling_layer=False,
+        )
         self.classifier = RobertaClassificationHead(config)
         self._pooler = CrossEncodingPooler(config, self.classifier)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-
         bert_weights, task_weights = roberta_task_weights_filter(weights)
         self.roberta.load_weights(bert_weights)
 
@@ -247,8 +254,10 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
         inputs_embeds: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.roberta(input_ids=input_ids,
-                            position_ids=positions,
-                            inputs_embeds=inputs_embeds,
-                            intermediate_tensors=intermediate_tensors,
-                            token_type_ids=token_type_ids)
+        return self.roberta(
+            input_ids=input_ids,
+            position_ids=positions,
+            inputs_embeds=inputs_embeds,
+            intermediate_tensors=intermediate_tensors,
+            token_type_ids=token_type_ids,
+        )

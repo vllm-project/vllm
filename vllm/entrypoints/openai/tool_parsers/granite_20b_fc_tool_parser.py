@@ -108,7 +108,6 @@ class Granite20bFCToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
-
         if len(current_text) < len(
                 self.bot_token) and self.bot_token.startswith(current_text):
             return None
@@ -120,8 +119,7 @@ class Granite20bFCToolParser(ToolParser):
         # sent yet, don't allow sending
         # an incomplete string since OpenAI only ever (as far as I have
         # seen) allows sending the entire tool/ function name at once.
-        flags = Allow.ALL if self.current_tool_name_sent \
-            else Allow.ALL & ~Allow.STR
+        flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
         try:
             tool_call_arr = []
             is_complete = []
@@ -142,12 +140,12 @@ class Granite20bFCToolParser(ToolParser):
                     start_idx = consume_space(start_idx, current_text)
                     tool_call_arr.append(obj)
             except partial_json_parser.core.exceptions.MalformedJSON:
-                logger.debug('not enough tokens to parse into JSON yet')
+                logger.debug("not enough tokens to parse into JSON yet")
                 return None
 
             # select as the current tool call the one we're on the state at
-            current_tool_call: dict = tool_call_arr[self.current_tool_id] \
-                if len(tool_call_arr) > 0 else {}
+            current_tool_call: dict = (tool_call_arr[self.current_tool_id]
+                                       if len(tool_call_arr) > 0 else {})
 
             # case -- if no tokens have been streamed for the tool, e.g.
             #   only the array brackets, stream nothing
@@ -158,7 +156,6 @@ class Granite20bFCToolParser(ToolParser):
             #   -> array has > 0 length AND length has moved past cursor
             elif (len(tool_call_arr) > 0
                   and len(tool_call_arr) > self.current_tool_id + 1):
-
                 # if we're moving on to a new call, first make sure we
                 # haven't missed anything in the previous one that was
                 # auto-generated due to JSON completions, but wasn't
@@ -173,10 +170,12 @@ class Granite20bFCToolParser(ToolParser):
 
                         logger.debug("got arguments diff: %s", argument_diff)
                         delta = DeltaMessage(tool_calls=[
-                            DeltaToolCall(index=self.current_tool_id,
-                                          function=DeltaFunctionCall(
-                                              arguments=argument_diff).
-                                          model_dump(exclude_none=True))
+                            DeltaToolCall(
+                                index=self.current_tool_id,
+                                function=DeltaFunctionCall(
+                                    arguments=argument_diff).model_dump(
+                                        exclude_none=True),
+                            )
                         ])
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
@@ -196,14 +195,15 @@ class Granite20bFCToolParser(ToolParser):
             elif not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
                 if function_name:
-
                     delta = DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      type="function",
-                                      id=f"chatcmpl-tool-{random_uuid()}",
-                                      function=DeltaFunctionCall(
-                                          name=function_name).model_dump(
-                                              exclude_none=True))
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            type="function",
+                            id=f"chatcmpl-tool-{random_uuid()}",
+                            function=DeltaFunctionCall(
+                                name=function_name).model_dump(
+                                    exclude_none=True),
+                        )
                     ])
                     self.current_tool_name_sent = True
                 else:
@@ -228,17 +228,18 @@ class Granite20bFCToolParser(ToolParser):
                     elif prev_arguments:
                         prev_args_json = json.dumps(prev_arguments)
                         if cur_args_json != prev_args_json:
-
                             prefix = find_common_prefix(
                                 prev_args_json, cur_args_json)
                             argument_diff = prefix[sent:]
 
                     if argument_diff is not None:
                         delta = DeltaMessage(tool_calls=[
-                            DeltaToolCall(index=self.current_tool_id,
-                                          function=DeltaFunctionCall(
-                                              arguments=argument_diff).
-                                          model_dump(exclude_none=True))
+                            DeltaToolCall(
+                                index=self.current_tool_id,
+                                function=DeltaFunctionCall(
+                                    arguments=argument_diff).model_dump(
+                                        exclude_none=True),
+                            )
                         ])
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
@@ -249,6 +250,6 @@ class Granite20bFCToolParser(ToolParser):
         except Exception as e:
             logger.error("Error trying to handle streaming tool call: %s", e)
             logger.debug(
-                "Skipping chunk as a result of tool streaming extraction "
-                "error")
+                "Skipping chunk as a result of tool streaming extraction error"
+            )
             return None

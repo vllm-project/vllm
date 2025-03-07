@@ -17,7 +17,6 @@ def test_scheduler_plugins():
     from vllm.sampling_params import SamplingParams
 
     with pytest.raises(Exception) as exception_info:
-
         engine_args = EngineArgs(
             model="facebook/opt-125m",
             enforce_eager=True,  # reduce test time

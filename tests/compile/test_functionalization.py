@@ -25,7 +25,7 @@ RMS_OP = torch.ops._C.rms_norm.default
 RMS_QUANT_OPS = {
     "static_fp8": [
         torch.ops._C.rms_norm_static_fp8_quant.default,
-        torch.ops._C.fused_add_rms_norm_static_fp8_quant.default
+        torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,
     ],
 }
 
@@ -39,9 +39,14 @@ prompts = [
 
 @pytest.mark.parametrize(
     "model, quant_key",
-    [("nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e", kFp8StaticTensorSym),
-     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8_DYNAMIC-e2e",
-      kFp8DynamicTokenSym)])
+    [
+        ("nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e", kFp8StaticTensorSym),
+        (
+            "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8_DYNAMIC-e2e",
+            kFp8DynamicTokenSym,
+        ),
+    ],
+)
 @pytest.mark.parametrize("do_fusion", [True, False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
                     reason="Only test on CUDA")
@@ -84,14 +89,14 @@ def test_fix_functionalization(model: str, quant_key: QuantKey,
 
     # OPS_IN_MODEL always appear. RMS_OP is fused away if we run fusion,
     # and replaced by fused quantized ops in RMS_QUANT_OPS.
-    rms_ops = [FUSED_OPS[(quant_key, True)], FUSED_OPS[(quant_key, False)]
-               ] if do_fusion else [RMS_OP]
+    rms_ops = ([FUSED_OPS[(quant_key, True)], FUSED_OPS[(quant_key, False)]]
+               if do_fusion else [RMS_OP])
     ops = OPS_IN_MODEL + rms_ops
 
     for op in ops:
         find_auto_fn(backend_no_func.graph_post_pass.nodes, op)
-        assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes,
-                                  op) is None  # noqa: E501
+        assert (find_auto_fn_maybe(backend_func.graph_post_pass.nodes, op)
+                is None)  # noqa: E501
 
     # make sure the ops were all de-functionalized
     found = dict()

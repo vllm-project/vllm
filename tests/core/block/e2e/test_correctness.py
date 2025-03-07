@@ -14,21 +14,23 @@ from .conftest import get_token_ids_from_llm_generator
     [{
         # Use a small model for a fast test.
         "model": "facebook/opt-125m",
-
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
-
         # Allow only 5 sequences of ~1024 tokens in worst case.
         "block_size": 16,
         "num_gpu_blocks_override": 5 * (64 + 1),
-    }])
+    }],
+)
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [{
-    "preemption_mode": "swap"
-}, {
-    "preemption_mode": "recompute"
-}])
+@pytest.mark.parametrize(
+    "test_llm_kwargs",
+    [{
+        "preemption_mode": "swap"
+    }, {
+        "preemption_mode": "recompute"
+    }],
+)
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
 def test_block_manager_with_preemption(baseline_llm_generator,
@@ -46,8 +48,8 @@ def test_block_manager_with_preemption(baseline_llm_generator,
     KV mapping has time to build up error.
 
     NOTE(Kuntai): Though we have removed block manager v1, this test is still
-    useful as it asserts the behavior of block manager v2 (now it is called 
-    SelfAttnBlockSpaceManager) is the same when swapping / preemption, so we  
+    useful as it asserts the behavior of block manager v2 (now it is called
+    SelfAttnBlockSpaceManager) is the same when swapping / preemption, so we
     keep this test.
     """
     output_len = 1024
@@ -90,35 +92,36 @@ def test_block_manager_with_preemption(baseline_llm_generator,
     [{
         # Use a small model for a fast test.
         "model": "facebook/opt-125m",
-
         # Our prompts will generate 128 tokens; since the prompts themselves are
         # small, we don't need much KV space beyond 128.
         "max_model_len": 160,
-
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
-    }])
+    }],
+)
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
     [
         {
             "block_size": 16,
-
             # Allow only 2 sequences of ~128 tokens in worst case.
             # Note 8 = 128/block_size
             "num_gpu_blocks_override": 2 * (8 + 1),
         },
         {
             "block_size": 8,
-
             # Allow only 2 sequences of ~128 tokens in worst case.
             # Note 16 = 128/block_size
             "num_gpu_blocks_override": 2 * (16 + 2),
-        }
-    ])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{
-    "num_lookahead_slots": 0,
-}])
+        },
+    ],
+)
+@pytest.mark.parametrize(
+    "baseline_llm_kwargs",
+    [{
+        "num_lookahead_slots": 0,
+    }],
+)
 @pytest.mark.parametrize(
     "test_llm_kwargs",
     [
@@ -131,8 +134,9 @@ def test_block_manager_with_preemption(baseline_llm_generator,
         {
             "num_lookahead_slots": 10,
             "preemption_mode": "recompute",
-        }
-    ])
+        },
+    ],
+)
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
 def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
@@ -166,11 +170,11 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
         temperature=temperature,
     )
 
-    print('Getting token ids without lookahead scheduling')
+    print("Getting token ids without lookahead scheduling")
     baseline_token_ids = get_token_ids_from_llm_generator(
         baseline_llm_generator, prompts, sampling_params)
 
-    print('Getting token ids with lookahead scheduling')
+    print("Getting token ids with lookahead scheduling")
     test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
                                                       prompts, sampling_params)
 
@@ -187,42 +191,54 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
         {
             # Use a small model for a fast test.
             "model": "facebook/opt-125m",
-
             # skip cuda graph creation for fast test.
             "enforce_eager": True,
             "enable_chunked_prefill": True,
         },
-    ])
-@pytest.mark.parametrize("per_test_common_llm_kwargs",
-                         [{
-                             "block_size": 8,
-                             "max_num_batched_tokens": 2,
-                             "max_num_seqs": 2,
-                         }, {
-                             "block_size": 8,
-                             "max_num_batched_tokens": 3,
-                             "max_num_seqs": 2,
-                         }, {
-                             "block_size": 8,
-                             "max_num_batched_tokens": 256,
-                             "max_num_seqs": 10,
-                         }])
-@pytest.mark.parametrize("baseline_llm_kwargs", [
-    {},
-])
-@pytest.mark.parametrize("test_llm_kwargs", [
-    {
-        "num_lookahead_slots": 0,
-    },
-    {
-        "num_lookahead_slots": 5,
-    },
-])
+    ],
+)
+@pytest.mark.parametrize(
+    "per_test_common_llm_kwargs",
+    [
+        {
+            "block_size": 8,
+            "max_num_batched_tokens": 2,
+            "max_num_seqs": 2,
+        },
+        {
+            "block_size": 8,
+            "max_num_batched_tokens": 3,
+            "max_num_seqs": 2,
+        },
+        {
+            "block_size": 8,
+            "max_num_batched_tokens": 256,
+            "max_num_seqs": 10,
+        },
+    ],
+)
+@pytest.mark.parametrize(
+    "baseline_llm_kwargs",
+    [
+        {},
+    ],
+)
+@pytest.mark.parametrize(
+    "test_llm_kwargs",
+    [
+        {
+            "num_lookahead_slots": 0,
+        },
+        {
+            "num_lookahead_slots": 5,
+        },
+    ],
+)
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
 def test_chunked_prefill_block_manager(baseline_llm_generator,
                                        test_llm_generator, batch_size):
-    """Verify that chunked prefill works with SelfAttnBlockSpaceManager, 
+    """Verify that chunked prefill works with SelfAttnBlockSpaceManager,
     with and without lookahead scheduling.
     """
     output_len = 32
@@ -244,11 +260,11 @@ def test_chunked_prefill_block_manager(baseline_llm_generator,
         temperature=temperature,
     )
 
-    print('Getting token ids with BlockManager')
+    print("Getting token ids with BlockManager")
     baseline_token_ids = get_token_ids_from_llm_generator(
         baseline_llm_generator, prompts, sampling_params)
 
-    print('Getting token ids with BlockManager, with lookahead slots.')
+    print("Getting token ids with BlockManager, with lookahead slots.")
     test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
                                                       prompts, sampling_params)
 
@@ -264,24 +280,25 @@ def test_chunked_prefill_block_manager(baseline_llm_generator,
     [{
         # Use a small model for a fast test.
         "model": "facebook/opt-125m",
-
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
-
         # Allow only 5 sequences of ~1024 tokens in worst case.
         "block_size": 16,
         "num_gpu_blocks_override": 5 * (64 + 1),
-
         # Enable prefill cache
         "enable_prefix_caching": True,
-    }])
+    }],
+)
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [{
-    "preemption_mode": "swap"
-}, {
-    "preemption_mode": "recompute"
-}])
+@pytest.mark.parametrize(
+    "test_llm_kwargs",
+    [{
+        "preemption_mode": "swap"
+    }, {
+        "preemption_mode": "recompute"
+    }],
+)
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
 def test_block_manager_prefix_caching_enabled_with_preemption(
@@ -299,8 +316,8 @@ def test_block_manager_prefix_caching_enabled_with_preemption(
     KV mapping has time to build up error.
 
     NOTE(Kuntai): Though we have removed block manager v1, this test is still
-    useful as it asserts the behavior of block manager v2 (now it is called 
-    SelfAttnBlockSpaceManager) is the same when swapping / preemption, so we  
+    useful as it asserts the behavior of block manager v2 (now it is called
+    SelfAttnBlockSpaceManager) is the same when swapping / preemption, so we
     keep this test.
     """
     output_len = 1024
@@ -325,11 +342,11 @@ def test_block_manager_prefix_caching_enabled_with_preemption(
         temperature=temperature,
     )
 
-    print('Getting token ids from block manager')
+    print("Getting token ids from block manager")
     baseline_token_ids = get_token_ids_from_llm_generator(
         baseline_llm_generator, prompts, sampling_params)
 
-    print('Getting token ids from block manager, with preemption')
+    print("Getting token ids from block manager, with preemption")
     test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
                                                       prompts, sampling_params)
 
@@ -345,25 +362,30 @@ def test_block_manager_prefix_caching_enabled_with_preemption(
     [{
         # Use a small model for a fast test.
         "model": "facebook/opt-125m",
-
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
-
         # Allow only 5 sequences of ~1024 tokens in worst case.
         "block_size": 16,
         "num_gpu_blocks_override": 5 * (64 + 1),
-    }])
+    }],
+)
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
     "enable_prefix_caching": False
 }])
-@pytest.mark.parametrize("test_llm_kwargs", [{
-    "enable_prefix_caching": True,
-    "preemption_mode": "swap"
-}, {
-    "enable_prefix_caching": True,
-    "preemption_mode": "recompute"
-}])
+@pytest.mark.parametrize(
+    "test_llm_kwargs",
+    [
+        {
+            "enable_prefix_caching": True,
+            "preemption_mode": "swap"
+        },
+        {
+            "enable_prefix_caching": True,
+            "preemption_mode": "recompute"
+        },
+    ],
+)
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
 def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
@@ -399,11 +421,11 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
         temperature=temperature,
     )
 
-    print('Getting token ids with APC disabled')
+    print("Getting token ids with APC disabled")
     baseline_token_ids = get_token_ids_from_llm_generator(
         baseline_llm_generator, prompts, sampling_params)
 
-    print('Getting token ids with APC enabled')
+    print("Getting token ids with APC enabled")
     test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
                                                       prompts, sampling_params)
 
@@ -419,22 +441,24 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
     [{
         # Use a small model for a fast test.
         "model": "facebook/opt-125m",
-
         # skip cuda graph creation for fast test.
         "enforce_eager": True,
-
         # we keep the blocks small, so that hit eviction quickly
         "max_model_len": 48,
         "block_size": 16,
         "num_gpu_blocks_override": 3,
-    }])
+    }],
+)
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
     "enable_prefix_caching": False
 }])
-@pytest.mark.parametrize("test_llm_kwargs", [{
-    "enable_prefix_caching": True,
-}])
+@pytest.mark.parametrize(
+    "test_llm_kwargs",
+    [{
+        "enable_prefix_caching": True,
+    }],
+)
 @pytest.mark.parametrize("seed", [1])
 def test_auto_prefix_caching_after_evition_start(baseline_llm_generator,
                                                  test_llm_generator):
@@ -454,7 +478,7 @@ def test_auto_prefix_caching_after_evition_start(baseline_llm_generator,
         "You are a helpful assistant. Please answer truthfully and write out "
         "your thinking step by step to be sure you get the right answer. You "
         "are helpful and harmless and you follow ethical guidelines. "
-        "who are you?"
+        "who are you?",
     ]
 
     sampling_params = SamplingParams(
@@ -463,11 +487,11 @@ def test_auto_prefix_caching_after_evition_start(baseline_llm_generator,
         temperature=temperature,
     )
 
-    print('Getting token ids with APC disabled')
+    print("Getting token ids with APC disabled")
     baseline_token_ids = get_token_ids_from_llm_generator(
         baseline_llm_generator, prompts, sampling_params)
 
-    print('Getting token ids with APC enabled')
+    print("Getting token ids with APC enabled")
     test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
                                                       prompts, sampling_params)
 

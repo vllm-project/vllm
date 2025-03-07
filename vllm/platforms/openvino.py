@@ -30,10 +30,16 @@ class OpenVinoPlatform(Platform):
     dispatch_key: str = "CPU"
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
-                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+    def get_attn_backend_cls(
+        cls,
+        selected_backend: _Backend,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: Optional[str],
+        block_size: int,
+        use_v1: bool,
+        use_mla: bool,
+    ) -> str:
         if selected_backend != _Backend.OPENVINO:
             logger.info("Cannot use %s backend on OpenVINO.", selected_backend)
         logger.info("Using OpenVINO Attention backend.")
@@ -73,8 +79,7 @@ class OpenVinoPlatform(Platform):
                 ), "OpenVINO only supports single CPU socket currently."
 
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = \
-                "vllm.worker.openvino_worker.OpenVINOWorker"
+            parallel_config.worker_cls = "vllm.worker.openvino_worker.OpenVINOWorker"
 
         # check and update model config
         model_config = vllm_config.model_config
@@ -145,8 +150,6 @@ class OpenVinoPlatform(Platform):
                 f" {kv_cache_space}, expect a positive integer value.")
 
         assert vllm_config.device_config.device_type == "openvino"
-        assert vllm_config.lora_config is None, \
-            "OpenVINO backend doesn't support LoRA"
-        assert cls.is_openvino_cpu() or \
-            cls.is_openvino_gpu(), \
-            "OpenVINO backend supports only CPU and GPU devices"
+        assert vllm_config.lora_config is None, "OpenVINO backend doesn't support LoRA"
+        assert (cls.is_openvino_cpu() or cls.is_openvino_gpu()
+                ), "OpenVINO backend supports only CPU and GPU devices"

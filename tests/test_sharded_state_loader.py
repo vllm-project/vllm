@@ -48,9 +48,11 @@ def test_filter_subtensors():
 @pytest.fixture(scope="module")
 def llama_3p2_1b_files():
     with TemporaryDirectory() as cache_dir:
-        input_dir = snapshot_download("meta-llama/Llama-3.2-1B-Instruct",
-                                      cache_dir=cache_dir,
-                                      ignore_patterns=["*.bin*", "original/*"])
+        input_dir = snapshot_download(
+            "meta-llama/Llama-3.2-1B-Instruct",
+            cache_dir=cache_dir,
+            ignore_patterns=["*.bin*", "original/*"],
+        )
 
         yield input_dir
 
@@ -92,40 +94,46 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
 
     # Run in separate processes for memory & CUDA isolation
     with TemporaryDirectory() as output_dir:
-        p = ctx.Process(target=_run_writer,
-                        args=(input_dir, output_dir, weights_patterns),
-                        kwargs=dict(
-                            tensor_parallel_size=tp_size,
-                            distributed_executor_backend="mp",
-                            gpu_memory_utilization=gpu_memory_utilization,
-                            enforce_eager=True,
-                        ))
+        p = ctx.Process(
+            target=_run_writer,
+            args=(input_dir, output_dir, weights_patterns),
+            kwargs=dict(
+                tensor_parallel_size=tp_size,
+                distributed_executor_backend="mp",
+                gpu_memory_utilization=gpu_memory_utilization,
+                enforce_eager=True,
+            ),
+        )
         p.start()
         p.join()
 
         queue = ctx.Queue()
 
-        p = ctx.Process(target=_run_generate,
-                        args=(input_dir, queue),
-                        kwargs=dict(
-                            distributed_executor_backend="mp",
-                            enable_lora=enable_lora,
-                            gpu_memory_utilization=gpu_memory_utilization,
-                            tensor_parallel_size=tp_size,
-                        ))
+        p = ctx.Process(
+            target=_run_generate,
+            args=(input_dir, queue),
+            kwargs=dict(
+                distributed_executor_backend="mp",
+                enable_lora=enable_lora,
+                gpu_memory_utilization=gpu_memory_utilization,
+                tensor_parallel_size=tp_size,
+            ),
+        )
         p.start()
         p.join()
         out_before = queue.get()
 
-        p = ctx.Process(target=_run_generate,
-                        args=(output_dir, queue),
-                        kwargs=dict(
-                            distributed_executor_backend="mp",
-                            enable_lora=enable_lora,
-                            gpu_memory_utilization=gpu_memory_utilization,
-                            tensor_parallel_size=tp_size,
-                            load_format="sharded_state",
-                        ))
+        p = ctx.Process(
+            target=_run_generate,
+            args=(output_dir, queue),
+            kwargs=dict(
+                distributed_executor_backend="mp",
+                enable_lora=enable_lora,
+                gpu_memory_utilization=gpu_memory_utilization,
+                tensor_parallel_size=tp_size,
+                load_format="sharded_state",
+            ),
+        )
         p.start()
         p.join()
         out_after = queue.get()

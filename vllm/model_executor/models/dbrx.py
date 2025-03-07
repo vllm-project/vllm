@@ -82,12 +82,16 @@ class DbrxExperts(FusedMoE):
         self.config = config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.d_model = config.d_model
-        self.intermediate_size = (self.config.ffn_config.ffn_hidden_size //
-                                  self.tp_size)
+        self.intermediate_size = self.config.ffn_config.ffn_hidden_size // self.tp_size
 
     # Define custom weight loader for dbrx model
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
-                      weight_name: str, param_name: str):
+    def weight_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        param_name: str,
+    ):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
         shard_size = self.intermediate_size
@@ -151,10 +155,12 @@ class DbrxMoE(nn.Module):
 
         self.router = DbrxRouter(config, self.params_dtype)
 
-        self.experts = DbrxExperts(config=config,
-                                   quant_config=quant_config,
-                                   params_dtype=self.params_dtype,
-                                   prefix=f"{prefix}.experts")
+        self.experts = DbrxExperts(
+            config=config,
+            quant_config=quant_config,
+            params_dtype=self.params_dtype,
+            prefix=f"{prefix}.experts",
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_shape = hidden_states.shape
@@ -222,13 +228,15 @@ class DbrxAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
@@ -294,7 +302,8 @@ class DbrxBlock(nn.Module):
             config,
             cache_config,
             quant_config,
-            prefix=f"{prefix}.norm_attn_norm")
+            prefix=f"{prefix}.norm_attn_norm",
+        )
         self.ffn = DbrxMoE(config, quant_config, prefix=f"{prefix}.ffn")
 
     def forward(
@@ -336,9 +345,8 @@ class DbrxModel(nn.Module):
                                                       nn.Parameter):
                 # Remove the bias term in Linear and LayerNorm.
                 module.register_parameter("bias", None)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    config.d_model))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.d_model)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
@@ -435,8 +443,8 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         loaded_params: Set[str] = set()
 
         for name, loaded_weight in weights:
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if self.quant_config is not None and (
+                    scale_name := self.quant_config.get_cache_scale(name)):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",

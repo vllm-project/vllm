@@ -102,8 +102,11 @@ class NoOpEliminationPass(VllmInductorPass):
         self.dump_graph(graph, "after_noop_elimination")
         self.end_and_log()
 
-    def all_dims_equivalent(self, dims: Iterable[Union[int, torch.fx.Node]],
-                            i_dims: Iterable[Union[int, SymInt]]):
+    def all_dims_equivalent(
+        self,
+        dims: Iterable[Union[int, torch.fx.Node]],
+        i_dims: Iterable[Union[int, SymInt]],
+    ):
         return all(
             self.dims_equivalent(s, i_s) for s, i_s in zip(dims, i_dims))
 

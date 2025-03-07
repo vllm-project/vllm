@@ -41,8 +41,10 @@ def assert_tool_calls(actual_tool_calls: list[ToolCall],
 
 
 def stream_delta_message_generator(
-        jamba_tool_parser: JambaToolParser, jamba_tokenizer: AnyTokenizer,
-        model_output: str) -> Generator[DeltaMessage, None, None]:
+    jamba_tool_parser: JambaToolParser,
+    jamba_tokenizer: AnyTokenizer,
+    model_output: str,
+) -> Generator[DeltaMessage, None, None]:
     all_token_ids = jamba_tokenizer.encode(model_output,
                                            add_special_tokens=False)
 
@@ -56,7 +58,7 @@ def stream_delta_message_generator(
         current_token_ids = all_token_ids[:i + 1]
 
         (new_tokens, delta_text, new_prefix_offset,
-         new_read_offset) = detokenize_incrementally(
+         new_read_offset) = (detokenize_incrementally(
              tokenizer=jamba_tokenizer,
              all_input_ids=current_token_ids,
              prev_tokens=previous_tokens,
@@ -64,7 +66,7 @@ def stream_delta_message_generator(
              read_offset=read_offset,
              skip_special_tokens=False,
              spaces_between_special_tokens=True,
-         )
+         ))
 
         current_text = previous_text + delta_text
 
@@ -81,8 +83,8 @@ def stream_delta_message_generator(
             yield delta_message
 
         previous_text = current_text
-        previous_tokens = previous_tokens + new_tokens if previous_tokens\
-            else new_tokens
+        previous_tokens = (previous_tokens +
+                           new_tokens if previous_tokens else new_tokens)
         prefix_offset = new_prefix_offset
         read_offset = new_read_offset
 
@@ -105,48 +107,55 @@ def test_extract_tool_calls_no_tools(jamba_tool_parser):
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
         (
-            ''' <tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n]</tool_calls>''',  # noqa: E501
+            """ <tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n]</tool_calls>""",  # noqa: E501
             [
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Dallas",
-                                                       "state": "TX",
-                                                       "unit": "fahrenheit"
-                                                   })))
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Dallas",
+                        "state": "TX",
+                        "unit": "fahrenheit",
+                    }),
+                ))
             ],
-            None),
+            None,
+        ),
         (
-            ''' Sure! let me call the tool for you.<tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n]</tool_calls>''',  # noqa: E501
+            """ Sure! let me call the tool for you.<tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n]</tool_calls>""",  # noqa: E501
             [
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Dallas",
-                                                       "state": "TX",
-                                                       "unit": "fahrenheit"
-                                                   })))
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Dallas",
+                        "state": "TX",
+                        "unit": "fahrenheit",
+                    }),
+                ))
             ],
-            " Sure! let me call the tool for you."),
+            " Sure! let me call the tool for you.",
+        ),
         (
-            ''' <tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},\n    {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n]</tool_calls>''',  # noqa: E501
+            """ <tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},\n    {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n]</tool_calls>""",  # noqa: E501
             [
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Dallas",
-                                                       "state": "TX",
-                                                       "unit": "fahrenheit"
-                                                   }))),
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Orlando",
-                                                       "state": "FL",
-                                                       "unit": "fahrenheit"
-                                                   })))
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Dallas",
+                        "state": "TX",
+                        "unit": "fahrenheit",
+                    }),
+                )),
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Orlando",
+                        "state": "FL",
+                        "unit": "fahrenheit",
+                    }),
+                )),
             ],
-            None)
+            None,
+        ),
     ],
 )
 def test_extract_tool_calls(jamba_tool_parser, model_output,
@@ -169,56 +178,67 @@ def test_extract_tool_calls(jamba_tool_parser, model_output,
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
-        ('''This is a test''', [], '''This is a test'''),
+        ("""This is a test""", [], """This is a test"""),
         (
-            ''' <tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n]</tool_calls>''',  # noqa: E501
+            """ <tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n]</tool_calls>""",  # noqa: E501
             [
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Dallas",
-                                                       "state": "TX",
-                                                       "unit": "fahrenheit"
-                                                   })))
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Dallas",
+                        "state": "TX",
+                        "unit": "fahrenheit",
+                    }),
+                ))
             ],
-            " "),
+            " ",
+        ),
         (
-            ''' Sure! let me call the tool for you.<tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n]</tool_calls>''',  # noqa: E501
+            """ Sure! let me call the tool for you.<tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}\n]</tool_calls>""",  # noqa: E501
             [
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Dallas",
-                                                       "state": "TX",
-                                                       "unit": "fahrenheit"
-                                                   })))
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Dallas",
+                        "state": "TX",
+                        "unit": "fahrenheit",
+                    }),
+                ))
             ],
-            " Sure! let me call the tool for you."),
+            " Sure! let me call the tool for you.",
+        ),
         (
-            ''' <tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},\n    {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n]</tool_calls>''',  # noqa: E501
+            """ <tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},\n    {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n]</tool_calls>""",  # noqa: E501
             [
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Dallas",
-                                                       "state": "TX",
-                                                       "unit": "fahrenheit"
-                                                   }))),
-                ToolCall(function=FunctionCall(name="get_current_weather",
-                                               arguments=json.dumps(
-                                                   {
-                                                       "city": "Orlando",
-                                                       "state": "FL",
-                                                       "unit": "fahrenheit"
-                                                   })))
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Dallas",
+                        "state": "TX",
+                        "unit": "fahrenheit",
+                    }),
+                )),
+                ToolCall(function=FunctionCall(
+                    name="get_current_weather",
+                    arguments=json.dumps({
+                        "city": "Orlando",
+                        "state": "FL",
+                        "unit": "fahrenheit",
+                    }),
+                )),
             ],
-            " ")
+            " ",
+        ),
     ],
 )
-def test_extract_tool_calls_streaming(jamba_tool_parser, jamba_tokenizer,
-                                      model_output, expected_tool_calls,
-                                      expected_content):
-    other_content: str = ''
+def test_extract_tool_calls_streaming(
+    jamba_tool_parser,
+    jamba_tokenizer,
+    model_output,
+    expected_tool_calls,
+    expected_content,
+):
+    other_content: str = ""
     function_names: list[str] = []
     function_args_strs: list[str] = []
     tool_call_idx: int = -1
@@ -267,12 +287,14 @@ def test_extract_tool_calls_streaming(jamba_tool_parser, jamba_tokenizer,
     assert other_content == expected_content
 
     actual_tool_calls = [
-        ToolCall(id=tool_call_id,
-                 function=FunctionCall(
-                     name=function_name,
-                     arguments=partial_json_parser.ensure_json(
-                         function_args_str, Allow.OBJ | Allow.STR)))
-        for tool_call_id, function_name, function_args_str in zip(
+        ToolCall(
+            id=tool_call_id,
+            function=FunctionCall(
+                name=function_name,
+                arguments=partial_json_parser.ensure_json(
+                    function_args_str, Allow.OBJ | Allow.STR),
+            ),
+        ) for tool_call_id, function_name, function_args_str in zip(
             tool_call_ids, function_names, function_args_strs)
     ]
     assert_tool_calls(actual_tool_calls, expected_tool_calls)

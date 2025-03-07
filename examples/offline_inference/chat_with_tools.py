@@ -50,20 +50,22 @@ model_name = "mistralai/Mistral-7B-Instruct-v0.3"
 # or any other mistral model with function calling ability
 
 sampling_params = SamplingParams(max_tokens=8192, temperature=0.0)
-llm = LLM(model=model_name,
-          tokenizer_mode="mistral",
-          config_format="mistral",
-          load_format="mistral")
+llm = LLM(
+    model=model_name,
+    tokenizer_mode="mistral",
+    config_format="mistral",
+    load_format="mistral",
+)
 
 
 def generate_random_id(length=9):
     characters = string.ascii_letters + string.digits
-    random_id = ''.join(random.choice(characters) for _ in range(length))
+    random_id = "".join(random.choice(characters) for _ in range(length))
     return random_id
 
 
 # simulate an API that can be called
-def get_current_weather(city: str, state: str, unit: 'str'):
+def get_current_weather(city: str, state: str, unit: "str"):
     return (f"The weather in {city}, {state} is 85 degrees {unit}. It is "
             "partly cloudly, with highs in the 90's.")
 
@@ -82,31 +84,31 @@ tools = [{
                     "type":
                     "string",
                     "description":
-                    "The city to find the weather for, e.g. 'San Francisco'"
+                    "The city to find the weather for, e.g. 'San Francisco'",
                 },
                 "state": {
                     "type":
                     "string",
                     "description":
                     "the two-letter abbreviation for the state that the city is"
-                    " in, e.g. 'CA' which would mean 'California'"
+                    " in, e.g. 'CA' which would mean 'California'",
                 },
                 "unit": {
                     "type": "string",
                     "description": "The unit to fetch the temperature in",
-                    "enum": ["celsius", "fahrenheit"]
-                }
+                    "enum": ["celsius", "fahrenheit"],
+                },
             },
-            "required": ["city", "state", "unit"]
-        }
-    }
+            "required": ["city", "state", "unit"],
+        },
+    },
 }]
 
 messages = [{
     "role":
     "user",
     "content":
-    "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
+    "Can you tell me what the temperate will be in Dallas, in fahrenheit?",
 }]
 
 outputs = llm.chat(messages, sampling_params=sampling_params, tools=tools)
@@ -122,7 +124,7 @@ messages.append({
 # above defined function
 tool_calls = json.loads(output)
 tool_answers = [
-    tool_funtions[call['name']](**call['arguments']) for call in tool_calls
+    tool_funtions[call["name"]](**call["arguments"]) for call in tool_calls
 ]
 
 # append the answer as a tool message and let the LLM give you an answer

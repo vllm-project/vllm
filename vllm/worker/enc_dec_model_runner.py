@@ -41,6 +41,7 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     """
     Used by the EncoderDecoderModelRunner.
     """
+
     encoder_input_tokens: Optional[torch.Tensor] = None
     encoder_input_positions: Optional[torch.Tensor] = None
 
@@ -68,13 +69,13 @@ class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     ) -> "EncoderDecoderModelInput":
         return cast(
             EncoderDecoderModelInput,
-            super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
+            super().from_broadcasted_tensor_dict(tensor_dict, attn_backend),
+        )
 
 
 class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
-    _model_input_cls: Type[EncoderDecoderModelInput] = (
-        EncoderDecoderModelInput)
-    _builder_cls: Type[ModelInputForGPUBuilder] = (ModelInputForGPUBuilder)
+    _model_input_cls: Type[EncoderDecoderModelInput] = EncoderDecoderModelInput
+    _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
 
     def __init__(
         self,
@@ -84,14 +85,14 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
-        '''
+        """
         EncoderDecoderModelRunner constructor.
 
         `lora_config` and `prompt_adapter_config` are
         unused (since these features are not yet supported for encoder/decoder
-        models) but these arguments are present here for compatibility with 
+        models) but these arguments are present here for compatibility with
         the base-class constructor.
-        '''
+        """
         self._maybe_force_supported_attention_backend()
 
         super().__init__(
@@ -104,10 +105,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         assert_enc_dec_mr_supported_scenario(self)
 
     def _maybe_force_supported_attention_backend(self):
-        '''
+        """
         Force vLLM to use the XFormers attention backend,
         which is currently the only supported option.
-        '''
+        """
 
         def raise_backend_err():
             # The user has specified an attention backend override
@@ -121,14 +122,18 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         if is_forced_by_global:  # noqa: SIM102
             # Backend override enforced by global variable takes
             # precedence over vLLM backend environment variable.
-            if maybe_global_forced_backend not in\
-                 [_Backend.XFORMERS, _Backend.FLASH_ATTN]:
+            if maybe_global_forced_backend not in [
+                    _Backend.XFORMERS,
+                    _Backend.FLASH_ATTN,
+            ]:
                 raise_backend_err()
         elif is_forced_by_env_var:  # noqa: SIM102
             # Backend override enforced by vLLM backend
             # environment variable
-            if maybe_env_var_forced_backend not in\
-                 [_Backend.XFORMERS, _Backend.FLASH_ATTN]:
+            if maybe_env_var_forced_backend not in [
+                    _Backend.XFORMERS,
+                    _Backend.FLASH_ATTN,
+            ]:
                 raise_backend_err()
 
     def _list_to_int32_tensor(
@@ -158,8 +163,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         num_steps: int = 1,
     ) -> Optional[List[PoolerOutput]]:
         if num_steps > 1:
-            raise ValueError("num_steps > 1 is not supported in "
-                             "EncoderDecoderModelRunner")
+            raise ValueError(
+                "num_steps > 1 is not supported in EncoderDecoderModelRunner")
 
         if (model_input.attn_metadata is not None
                 and model_input.attn_metadata.prefill_metadata is None
@@ -171,14 +176,18 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         else:
             model_executable = self.model
 
-        seqlen_agnostic_kwargs = {
-            "finished_requests_ids": model_input.finished_requests_ids,
-            "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
-        } if self.has_inner_state else {}
+        seqlen_agnostic_kwargs = (
+            {
+                "finished_requests_ids": model_input.finished_requests_ids,
+                "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
+            } if self.has_inner_state else {})
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        with set_forward_context(model_input.attn_metadata, self.vllm_config,
-                                 model_input.virtual_engine):
+        with set_forward_context(
+                model_input.attn_metadata,
+                self.vllm_config,
+                model_input.virtual_engine,
+        ):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
@@ -187,7 +196,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 intermediate_tensors=intermediate_tensors,
                 **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                              device=self.device),
-                **seqlen_agnostic_kwargs)
+                **seqlen_agnostic_kwargs,
+            )
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
@@ -217,7 +227,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[List[str]] = None,
     ) -> EncoderDecoderModelInput:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -233,8 +243,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             attn_metadata,
             encoder_input_tokens_tensor,
             encoder_input_positions_tensor,
-        ) = (self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
-                                                       model_input))
+        ) = self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
+                                                      model_input)
         # Inject attn_metadata encoder/cross-attention fields &
         # encoder input tokens/positions into model_input.
         # Frozen dataclass fields cannot be modified, so use
@@ -248,18 +258,22 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         )
 
         generators = self.get_generators(finished_requests_ids)
-        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
-                                                     model_input.seq_lens,
-                                                     model_input.query_lens,
-                                                     self.device,
-                                                     self.pin_memory,
-                                                     generators=generators)
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list,
+            model_input.seq_lens,
+            model_input.query_lens,
+            self.device,
+            self.pin_memory,
+            generators=generators,
+        )
         is_prompt = (seq_group_metadata_list[0].is_prompt
                      if seq_group_metadata_list else None)
-        return dataclasses.replace(model_input,
-                                   sampling_metadata=sampling_metadata,
-                                   is_prompt=is_prompt,
-                                   virtual_engine=virtual_engine)
+        return dataclasses.replace(
+            model_input,
+            sampling_metadata=sampling_metadata,
+            is_prompt=is_prompt,
+            virtual_engine=virtual_engine,
+        )
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -279,20 +293,22 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
         batch_size = 0
         for group_id in range(max_num_seqs):
-            seq_len = (max_num_batched_tokens // max_num_seqs +
-                       (group_id < max_num_batched_tokens % max_num_seqs))
+            seq_len = max_num_batched_tokens // max_num_seqs + (
+                group_id < max_num_batched_tokens % max_num_seqs)
             batch_size += seq_len
 
-            decoder_dummy_data = self.input_registry \
-                .dummy_data_for_profiling(self.model_config,
-                                          seq_len,
-                                          self.mm_registry,
-                                          is_encoder_data=False)
-            encoder_dummy_data = self.input_registry \
-                .dummy_data_for_profiling(self.model_config,
-                                          seq_len,
-                                          self.mm_registry,
-                                          is_encoder_data=True)
+            decoder_dummy_data = self.input_registry.dummy_data_for_profiling(
+                self.model_config,
+                seq_len,
+                self.mm_registry,
+                is_encoder_data=False,
+            )
+            encoder_dummy_data = self.input_registry.dummy_data_for_profiling(
+                self.model_config,
+                seq_len,
+                self.mm_registry,
+                is_encoder_data=True,
+            )
 
             # Having more tokens is over-conservative but otherwise fine
             assert len(
@@ -302,10 +318,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 f"but got: {len(decoder_dummy_data.seq_data.prompt_token_ids)}"
             )
 
-            assert decoder_dummy_data.multi_modal_data is None or \
-            encoder_dummy_data.multi_modal_data is None, (
-                "Multi-modal data can't be provided in both encoder and decoder"
-            )
+            assert (
+                decoder_dummy_data.multi_modal_data is None
+                or encoder_dummy_data.multi_modal_data is None
+            ), "Multi-modal data can't be provided in both encoder and decoder"
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
@@ -319,7 +335,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 or encoder_dummy_data.multi_modal_data,
                 multi_modal_placeholders=decoder_dummy_data.
                 multi_modal_placeholders
-                or encoder_dummy_data.multi_modal_placeholders)
+                or encoder_dummy_data.multi_modal_placeholders,
+            )
             seqs.append(seq)
 
         finished_requests_ids = [seq.request_id for seq in seqs]
@@ -353,7 +370,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         Constructs a new model inputs data structure, based on
         (1) the existing fields in the `model_inputs` argument,
         and (2) the following additional fields which are
-        computed (or in the case of `attn_metadata`, updated) 
+        computed (or in the case of `attn_metadata`, updated)
         by this function:
         * attn_metadata
         * encoder_input_tokens
@@ -403,7 +420,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 encoder_seq_lens.append(seq_len)
 
                 # Build slot mapping
-                is_profile_run = (seq_group_metadata.block_tables is None)
+                is_profile_run = seq_group_metadata.block_tables is None
                 if is_profile_run:
                     # During memory profiling, the block tables are not
                     # initialized yet. In this case, we just use a dummy
@@ -482,14 +499,17 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # sequence starting offset tensors
         max_encoder_seq_len = max(encoder_seq_lens, default=0)
         encoder_seq_lens_tensor = self._list_to_int32_tensor(encoder_seq_lens)
-        encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
-                                            1,
-                                            dtype=torch.int32,
-                                            device=self.device)
-        torch.cumsum(encoder_seq_lens_tensor,
-                     dim=0,
-                     dtype=encoder_seq_start_loc.dtype,
-                     out=encoder_seq_start_loc[1:])
+        encoder_seq_start_loc = torch.zeros(
+            encoder_seq_lens_tensor.shape[0] + 1,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        torch.cumsum(
+            encoder_seq_lens_tensor,
+            dim=0,
+            dtype=encoder_seq_start_loc.dtype,
+            out=encoder_seq_start_loc[1:],
+        )
 
         # Update attention metadata with encoder-oriented attributes
         attn_metadata = model_input.attn_metadata
@@ -512,5 +532,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             cross_block_tables,
         )
 
-        return (attn_metadata, encoder_input_tokens_tensor,
-                encoder_input_positions_tensor)
+        return (
+            attn_metadata,
+            encoder_input_tokens_tensor,
+            encoder_input_positions_tensor,
+        )

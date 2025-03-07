@@ -186,7 +186,8 @@ def test_multi_step_llm_w_prompt_logprobs(
             prompts,
             max_tokens,
             num_logprobs,
-            num_prompt_logprobs=num_prompt_logprobs)
+            num_prompt_logprobs=num_prompt_logprobs,
+        )
 
     with vllm_runner(
             model,
@@ -199,7 +200,8 @@ def test_multi_step_llm_w_prompt_logprobs(
             prompts,
             max_tokens,
             num_logprobs,
-            num_prompt_logprobs=num_prompt_logprobs)
+            num_prompt_logprobs=num_prompt_logprobs,
+        )
 
     check_logprobs_close(
         outputs_0_lst=single_step_vllm_outputs,
@@ -297,19 +299,19 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
 
     assert len(example_prompts) >= 2
     challenge_prompts = copy.deepcopy(example_prompts)
-    challenge_prompts[0] = ('vLLM is a high-throughput and memory-efficient '
-                            'inference and serving engine for LLMs.\n'
+    challenge_prompts[0] = ("vLLM is a high-throughput and memory-efficient "
+                            "inference and serving engine for LLMs.\n"
                             )  # 24 tok
     challenge_prompts[1] = (
-        'Briefly describe the major milestones in the '
-        'development of artificial intelligence from 1950 to 2020.\n'
+        "Briefly describe the major milestones in the "
+        "development of artificial intelligence from 1950 to 2020.\n"
     )  # 30 tok
 
     # If necessary, adjust the length of `challenge_prompts` to match
     # `num_prompts`
     if len(challenge_prompts) < num_prompts:
-        challenge_prompts = (challenge_prompts *
-                             ((num_prompts // len(challenge_prompts)) + 1))
+        challenge_prompts = challenge_prompts * (
+            (num_prompts // len(challenge_prompts)) + 1)
     challenge_prompts = challenge_prompts[:num_prompts]
     assert len(challenge_prompts) == num_prompts
 

@@ -159,8 +159,14 @@ class SamplingMetadata:
             selected_token_indices,
             categorized_sample_indices,
             num_prompts,
-        ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
-                                device, generators, cache)
+        ) = _prepare_seq_groups(
+            seq_group_metadata_list,
+            seq_lens,
+            query_lens,
+            device,
+            generators,
+            cache,
+        )
         selected_token_indices = async_tensor_h2d(
             selected_token_indices,
             dtype=torch.long,
@@ -291,8 +297,8 @@ def _prepare_seq_groups(
         else:
             # Decode
             prompt_logprob_len = 0
-            query_len = query_lens[i] if query_lens is not None and len(
-                query_lens) > 0 else 1
+            query_len = (query_lens[i] if query_lens is not None
+                         and len(query_lens) > 0 else 1)
             sample_len = len(seq_ids) * query_len if do_sample else 0
 
             if sampling_params.seed is not None and generators is not None:
@@ -364,8 +370,12 @@ def _prepare_seq_groups(
     if cache is not None:
         cache.reset()
 
-    return (seq_groups, selected_token_indices, categorized_sample_indices,
-            num_prompts)
+    return (
+        seq_groups,
+        selected_token_indices,
+        categorized_sample_indices,
+        num_prompts,
+    )
 
 
 @dataclass
@@ -462,8 +472,7 @@ class SamplingTensors:
             for seq_group in sampling_metadata.seq_groups:
                 seq_ids = seq_group.seq_ids
                 sampling_params = seq_group.sampling_params
-                if (seq_group.is_prompt
-                        and sampling_params.prompt_logprobs is not None):
+                if seq_group.is_prompt and sampling_params.prompt_logprobs is not None:
                     prefill_len = len(seq_group.prompt_logprob_indices)
                     prompt_tokens.extend(
                         array(VLLM_TOKEN_ID_ARRAY_TYPE)

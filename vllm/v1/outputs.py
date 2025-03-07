@@ -7,7 +7,6 @@ import torch
 
 
 class LogprobsLists(NamedTuple):
-
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids: list[list[int]]
     # [num_reqs, max_num_logprobs + 1]
@@ -24,7 +23,6 @@ class LogprobsLists(NamedTuple):
 
 
 class LogprobsTensors(NamedTuple):
-
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids: torch.Tensor
     # [num_reqs, max_num_logprobs + 1]
@@ -42,7 +40,6 @@ class LogprobsTensors(NamedTuple):
 
 @dataclass
 class SamplerOutput:
-
     # [num_reqs, max_num_generated_tokens]
     # Different requests can have different number of generated tokens.
     # All requests are padded to max_num_generated_tokens.
@@ -55,7 +52,6 @@ class SamplerOutput:
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
 class ModelRunnerOutput:
-
     # [num_reqs]
     req_ids: list[str]
     # req_id -> index

@@ -23,7 +23,7 @@ class ProposerWorkerBase(LoRANotSupportedWorkerBase, SpeculativeProposer):
         # This parameter is only used by the MultiStepWorker, which relies on
         # the KV cache for token generation. It is not used by workers that
         # do not utilize the KV cache.
-        seq_ids_with_bonus_token_in_last_step: Set[int]
+        seq_ids_with_bonus_token_in_last_step: Set[int],
     ) -> Tuple[Optional[List[SamplerOutput]], bool]:
         raise NotImplementedError
 

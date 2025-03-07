@@ -2,6 +2,7 @@
 
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_model.py
 """PyTorch Ultravox model."""
+
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
@@ -344,12 +345,12 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 @MULTIMODAL_REGISTRY.register_processor(
     UltravoxMultiModalProcessor,
     info=UltravoxProcessingInfo,
-    dummy_inputs=UltravoxDummyInputsBuilder)
+    dummy_inputs=UltravoxDummyInputsBuilder,
+)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"]
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -384,9 +385,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             # this prefix is not for initialization, but for loading weights
             # note the trailing dot
             self.secondary_weights.append(
-                DefaultModelLoader.Source(model_or_path=config.text_model_id,
-                                          revision=None,
-                                          prefix="language_model."))
+                DefaultModelLoader.Source(
+                    model_or_path=config.text_model_id,
+                    revision=None,
+                    prefix="language_model.",
+                ))
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
@@ -492,25 +495,31 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-
             # TODO(ywang96): remove this block after v0 is deprecated.
             if not envs.VLLM_USE_V1:
                 attn_metadata = get_forward_context().attn_metadata
                 merge_multimodal_embeddings_from_map(
-                    inputs_embeds, multimodal_embeddings,
-                    attn_metadata.multi_modal_placeholder_index_maps["audio"])
+                    inputs_embeds,
+                    multimodal_embeddings,
+                    attn_metadata.multi_modal_placeholder_index_maps["audio"],
+                )
             else:
                 inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, multimodal_embeddings,
-                    _AUDIO_PLACEHOLDER_TOKEN)
+                    input_ids,
+                    inputs_embeds,
+                    multimodal_embeddings,
+                    _AUDIO_PLACEHOLDER_TOKEN,
+                )
         return inputs_embeds
 
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                intermediate_tensors: Optional[torch.Tensor] = None,
-                inputs_embeds: Optional[torch.Tensor] = None,
-                **kwargs) -> Union[torch.Tensor, IntermediateTensors]:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for Ultravox
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -536,10 +545,12 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
                                                       multimodal_embeddings)
             input_ids = None
 
-        hidden_states = self.language_model.model(input_ids,
-                                                  positions,
-                                                  intermediate_tensors,
-                                                  inputs_embeds=inputs_embeds)
+        hidden_states = self.language_model.model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -556,7 +567,6 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-
         loader = AutoWeightsLoader(self,
                                    ignore_unexpected_prefixes=["audio_tower."])
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

@@ -26,7 +26,6 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
     @classmethod
     def can_implement(
             cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
-
         if not current_platform.is_tpu():
             return False, "ScaledMMXLA requires running on TPU."
 
@@ -45,8 +44,11 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         # WEIGHT
         # [out, in] (different than cutlass_scaled_mm)
         weight = getattr(layer, self.w_q_name)
-        replace_parameter(layer, self.w_q_name,
-                          torch.nn.Parameter(weight.data, requires_grad=False))
+        replace_parameter(
+            layer,
+            self.w_q_name,
+            torch.nn.Parameter(weight.data, requires_grad=False),
+        )
 
         # WEIGHT SCALE
         # XLA kernels support only per-tensor and per-channel.
@@ -61,8 +63,10 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         # [out_channel,] (different than cutlass_scaled_mm)
         weight_scale = weight_scale.squeeze(-1)
         replace_parameter(
-            layer, self.w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False))
+            layer,
+            self.w_s_name,
+            torch.nn.Parameter(weight_scale.data, requires_grad=False),
+        )
 
         # Only support symmetric dynamic activation quantization.
         setattr(layer, self.i_s_name, None)
@@ -74,7 +78,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         warnings.filterwarnings(
             "ignore",
             message=
-            "Pred is a Python constant. When used with torch.cond, it specializes on one of the branches."  # noqa: E501
+            "Pred is a Python constant. When used with torch.cond, it specializes on one of the branches.",  # noqa: E501
         )
 
     def no_add_bias(self, x: torch.Tensor, bias: Optional[torch.Tensor]):
@@ -83,20 +87,25 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
     def add_bias(self, x: torch.Tensor, bias: Optional[torch.Tensor]):
         return x + bias
 
-    def apply_weights(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         w_q, w_s, _, _, _ = self._get_weight_params(layer)
 
         import torch_xla.experimental.xla_quantized_matmul  # noqa: F401
-        out = torch.ops.xla.quantized_matmul(x,
-                                             w_q,
-                                             w_s,
-                                             zero_point=None,
-                                             block_size=-1,
-                                             int4_weight=False,
-                                             quantize_activation=True)
+
+        out = torch.ops.xla.quantized_matmul(
+            x,
+            w_q,
+            w_s,
+            zero_point=None,
+            block_size=-1,
+            int4_weight=False,
+            quantize_activation=True,
+        )
 
         # Explicitly capture control flow to make dynamo happy.
         # https://pytorch.org/docs/main/generated/exportdb/index.html#cond-branch-class-method # noqa: E501

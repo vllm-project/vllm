@@ -81,7 +81,8 @@ def test_model_runner_input():
         input_tokens=torch.ones(10),
         input_positions=torch.ones(10),
         sampling_metadata=sampling_metadata,
-        attn_metadata=attn_metadata)
+        attn_metadata=attn_metadata,
+    )
 
     assert isinstance(model_input, ModelInputForGPUWithSamplingMetadata)
 
@@ -101,8 +102,7 @@ def test_model_runner_input():
     assert (received_model_input.input_positions == model_input.input_positions
             ).all()
     assert received_model_input.multi_modal_kwargs is None
-    assert (received_model_input.multi_modal_kwargs ==
-            model_input.multi_modal_kwargs)
+    assert received_model_input.multi_modal_kwargs == model_input.multi_modal_kwargs
     assert received_model_input.lora_requests is None
     assert received_model_input.lora_requests == model_input.lora_requests
     assert received_model_input.lora_mapping is None
@@ -134,7 +134,8 @@ def test_embedding_model_runner_input():
         input_tokens=torch.ones(10),
         input_positions=torch.ones(10),
         pooling_metadata=pooling_metadata,
-        attn_metadata=attn_metadata)
+        attn_metadata=attn_metadata,
+    )
 
     assert isinstance(model_input, ModelInputForGPUWithPoolingMetadata)
 
@@ -154,8 +155,7 @@ def test_embedding_model_runner_input():
     assert (received_model_input.input_positions == model_input.input_positions
             ).all()
     assert received_model_input.multi_modal_kwargs is None
-    assert (received_model_input.multi_modal_kwargs ==
-            model_input.multi_modal_kwargs)
+    assert received_model_input.multi_modal_kwargs == model_input.multi_modal_kwargs
     assert received_model_input.lora_requests is None
     assert received_model_input.lora_requests == model_input.lora_requests
     assert received_model_input.lora_mapping is None
@@ -186,7 +186,8 @@ def test_multi_step_model_runner_input():
         input_tokens=torch.ones(10),
         input_positions=torch.ones(10),
         sampling_metadata=sampling_metadata,
-        attn_metadata=attn_metadata)
+        attn_metadata=attn_metadata,
+    )
 
     model_input = StatefulModelInput(
         frozen_model_input=frozen_model_input,
@@ -205,8 +206,8 @@ def test_multi_step_model_runner_input():
     # Test round trip serialization.
     tensor_dict = model_input.as_broadcastable_tensor_dict()
     attn_backend = MockAttentionBackend()
-    received_model_input = (StatefulModelInput.from_broadcasted_tensor_dict(
-        tensor_dict, attn_backend=attn_backend))
+    received_model_input = StatefulModelInput.from_broadcasted_tensor_dict(
+        tensor_dict, attn_backend=attn_backend)
 
     receieved_frozen_input = received_model_input.frozen_model_input
 
@@ -222,11 +223,9 @@ def test_multi_step_model_runner_input():
     assert (frozen_model_input.multi_modal_kwargs ==
             frozen_model_input.multi_modal_kwargs)
     assert receieved_frozen_input.lora_requests is None
-    assert (receieved_frozen_input.lora_requests ==
-            frozen_model_input.lora_requests)
+    assert receieved_frozen_input.lora_requests == frozen_model_input.lora_requests
     assert receieved_frozen_input.lora_mapping is None
-    assert (
-        receieved_frozen_input.lora_mapping == frozen_model_input.lora_mapping)
+    assert receieved_frozen_input.lora_mapping == frozen_model_input.lora_mapping
     for field in dataclasses.fields(AttentionMetadata):
         assert getattr(receieved_frozen_input.attn_metadata, field.name,
                        None) == getattr(attn_metadata, field.name, None)
@@ -237,8 +236,7 @@ def test_multi_step_model_runner_input():
 
     # check non frozen fields
     assert received_model_input.is_last_step == model_input.is_last_step
-    assert (received_model_input.is_first_multi_step ==
-            model_input.is_first_multi_step)
+    assert received_model_input.is_first_multi_step == model_input.is_first_multi_step
     assert received_model_input.current_step == model_input.current_step
     assert (received_model_input.last_sampled_token_ids ==
             model_input.last_sampled_token_ids).all()

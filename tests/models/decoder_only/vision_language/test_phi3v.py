@@ -86,15 +86,17 @@ def run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(model,
-                     task="generate",
-                     max_model_len=4096,
-                     max_num_seqs=2,
-                     dtype=dtype,
-                     limit_mm_per_prompt={"image": mm_limit},
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(
+            model,
+            task="generate",
+            max_model_len=4096,
+            max_num_seqs=2,
+            dtype=dtype,
+            limit_mm_per_prompt={"image": mm_limit},
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
+            enforce_eager=True,
+    ) as vllm_model:
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
@@ -109,12 +111,13 @@ def run_test(
                    model_kwargs=hf_model_kwargs) as hf_model:
         eos_token_id = hf_model.processor.tokenizer.eos_token_id
         hf_outputs_per_case = [
-            hf_model.generate_greedy_logprobs_limit(prompts,
-                                                    max_tokens,
-                                                    num_logprobs=num_logprobs,
-                                                    images=images,
-                                                    eos_token_id=eos_token_id)
-            for prompts, images in inputs
+            hf_model.generate_greedy_logprobs_limit(
+                prompts,
+                max_tokens,
+                num_logprobs=num_logprobs,
+                images=images,
+                eos_token_id=eos_token_id,
+            ) for prompts, images in inputs
         ]
 
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_case,
@@ -149,8 +152,16 @@ def run_test(
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
-                dtype: str, max_tokens: int, num_logprobs: int) -> None:
+def test_models(
+    hf_runner,
+    vllm_runner,
+    image_assets,
+    model,
+    size_factors,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_image = [(
@@ -212,16 +223,23 @@ def test_regression_7840(hf_runner, vllm_runner, image_assets, model,
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
-                             size_factors, dtype: str, max_tokens: int,
-                             num_logprobs: int) -> None:
+def test_multi_images_models(
+    hf_runner,
+    vllm_runner,
+    image_assets,
+    model,
+    size_factors,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_case = [
-        ([HF_MULTIIMAGE_IMAGE_PROMPT for _ in size_factors],
-         [[rescale_image_size(image, factor) for image in images]
-          for factor in size_factors])
-    ]
+    inputs_per_case = [(
+        [HF_MULTIIMAGE_IMAGE_PROMPT for _ in size_factors],
+        [[rescale_image_size(image, factor) for image in images]
+         for factor in size_factors],
+    )]
 
     run_test(
         hf_runner,

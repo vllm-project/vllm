@@ -27,10 +27,16 @@ class HpuPlatform(Platform):
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
-                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+    def get_attn_backend_cls(
+        cls,
+        selected_backend: _Backend,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: Optional[str],
+        block_size: int,
+        use_v1: bool,
+        use_mla: bool,
+    ) -> str:
         logger.info("Using HPUAttention backend.")
         return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
 
@@ -44,7 +50,6 @@ class HpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-
         scheduler_config = vllm_config.scheduler_config
         if scheduler_config.is_multi_step:
             raise NotImplementedError(
@@ -63,8 +68,8 @@ class HpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
-        if (parallel_config.distributed_executor_backend == 'mp'
-                and envs.VLLM_WORKER_MULTIPROC_METHOD == 'fork'):
+        if (parallel_config.distributed_executor_backend == "mp"
+                and envs.VLLM_WORKER_MULTIPROC_METHOD == "fork"):
             if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD",
                               None) is not None:
                 logger.warning("On HPU, VLLM_WORKER_MULTIPROC_METHOD=fork "

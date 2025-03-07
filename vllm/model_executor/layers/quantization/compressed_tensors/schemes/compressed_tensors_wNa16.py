@@ -32,12 +32,13 @@ WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 class CompressedTensorsWNA16(CompressedTensorsScheme):
     _kernel_backends_being_used: Set[str] = set()
 
-    def __init__(self,
-                 strategy: str,
-                 num_bits: int,
-                 group_size: Optional[int] = None,
-                 actorder: Optional[ActivationOrdering] = None):
-
+    def __init__(
+        self,
+        strategy: str,
+        num_bits: int,
+        group_size: Optional[int] = None,
+        actorder: Optional[ActivationOrdering] = None,
+    ):
         self.pack_factor = 32 // num_bits
         self.strategy = strategy
         self.group_size = -1 if group_size is None else group_size
@@ -60,23 +61,30 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         # ampere and up
         return 80
 
-    def create_weights(self, layer: torch.nn.Module, output_size: int,
-                       input_size: int, output_partition_sizes: List[int],
-                       input_size_per_partition: int,
-                       params_dtype: torch.dtype, weight_loader: Callable,
-                       **kwargs):
-
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        output_size: int,
+        input_size: int,
+        output_partition_sizes: List[int],
+        input_size_per_partition: int,
+        params_dtype: torch.dtype,
+        weight_loader: Callable,
+        **kwargs,
+    ):
         output_size_per_partition = sum(output_partition_sizes)
 
         mp_linear_kernel_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
-            partition_weight_shape=\
-                (input_size_per_partition, output_size_per_partition),
+            partition_weight_shape=(
+                input_size_per_partition,
+                output_size_per_partition,
+            ),
             weight_type=self.quant_type,
             act_type=params_dtype,
             group_size=self.group_size,
             zero_points=False,
-            has_g_idx=self.has_g_idx
+            has_g_idx=self.has_g_idx,
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
@@ -88,7 +96,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # If group_size is -1, we are in channelwise case.
         group_size = self.group_size if self.group_size != -1 else input_size
-        row_parallel = (input_size != input_size_per_partition)
+        row_parallel = input_size != input_size_per_partition
         partition_scales = not marlin_repeat_scales_on_all_ranks(
             self.has_g_idx, self.group_size, row_parallel)
 
@@ -98,17 +106,18 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             assert input_size_per_partition % group_size == 0
             scales_and_zp_size = input_size_per_partition // group_size
 
-        weight = PackedvLLMParameter(input_dim=1,
-                                     output_dim=0,
-                                     weight_loader=weight_loader,
-                                     packed_factor=self.pack_factor,
-                                     packed_dim=1,
-                                     data=torch.empty(
-                                         output_size_per_partition,
-                                         input_size_per_partition //
-                                         self.pack_factor,
-                                         dtype=torch.int32,
-                                     ))
+        weight = PackedvLLMParameter(
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+            packed_factor=self.pack_factor,
+            packed_dim=1,
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition // self.pack_factor,
+                dtype=torch.int32,
+            ),
+        )
 
         weight_scale_args = {
             "weight_loader":
@@ -118,7 +127,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
                 output_size_per_partition,
                 scales_and_zp_size,
                 dtype=params_dtype,
-            )
+            ),
         }
         if not partition_scales:
             weight_scale = ChannelQuantScaleParameter(output_dim=0,
@@ -140,25 +149,33 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         # group index (for activation reordering)
         if self.has_g_idx:
-            weight_g_idx = RowvLLMParameter(data=torch.empty(
-                input_size_per_partition,
-                dtype=torch.int32,
-            ),
-                                            input_dim=0,
-                                            weight_loader=weight_loader)
+            weight_g_idx = RowvLLMParameter(
+                data=torch.empty(
+                    input_size_per_partition,
+                    dtype=torch.int32,
+                ),
+                input_dim=0,
+                weight_loader=weight_loader,
+            )
             layer.register_parameter("weight_g_idx", weight_g_idx)
 
-        self.kernel = kernel_type(mp_linear_kernel_config,
-                                  w_q_param_name="weight_packed",
-                                  w_s_param_name="weight_scale",
-                                  w_zp_param_name=None,
-                                  w_gidx_param_name="weight_g_idx")
+        self.kernel = kernel_type(
+            mp_linear_kernel_config,
+            w_q_param_name="weight_packed",
+            w_s_param_name="weight_scale",
+            w_zp_param_name=None,
+            w_gidx_param_name="weight_g_idx",
+        )
 
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from the format the kernel may want. Handle repacking here.
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.kernel.process_weights_after_loading(layer)
 
-    def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
-                      bias: Optional[torch.Tensor]) -> torch.Tensor:
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
         return self.kernel.apply_weights(layer, x, bias)

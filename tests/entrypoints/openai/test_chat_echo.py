@@ -46,7 +46,7 @@ class TestCase(NamedTuple):
     "test_case",
     [
         TestCase(model_name=MODEL_NAME, echo=True),
-        TestCase(model_name=MODEL_NAME, echo=False)
+        TestCase(model_name=MODEL_NAME, echo=False),
     ],
 )
 async def test_chat_session_with_echo_and_continue_final_message(
@@ -55,18 +55,22 @@ async def test_chat_session_with_echo_and_continue_final_message(
     # test echo with continue_final_message parameter
     chat_completion = await client.chat.completions.create(
         model=test_case.model_name,
-        messages=[{
-            "role": "user",
-            "content": "tell me a common saying"
-        }, {
-            "role": "assistant",
-            "content": saying
-        }],
+        messages=[
+            {
+                "role": "user",
+                "content": "tell me a common saying"
+            },
+            {
+                "role": "assistant",
+                "content": saying
+            },
+        ],
         extra_body={
             "echo": test_case.echo,
             "continue_final_message": True,
-            "add_generation_prompt": False
-        })
+            "add_generation_prompt": False,
+        },
+    )
     assert chat_completion.id is not None
     assert len(chat_completion.choices) == 1
 

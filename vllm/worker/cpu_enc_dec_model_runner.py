@@ -28,6 +28,7 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
     """
     Used by the EncoderDecoderModelRunner.
     """
+
     encoder_input_tokens: Optional[torch.Tensor] = None
     encoder_input_positions: Optional[torch.Tensor] = None
 
@@ -52,7 +53,8 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
     ) -> "EncoderDecoderModelInputForCPU":
         return cast(
             EncoderDecoderModelInputForCPU,
-            super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
+            super().from_broadcasted_tensor_dict(tensor_dict, attn_backend),
+        )
 
 
 class CPUEncoderDecoderModelRunner(
@@ -91,7 +93,7 @@ class CPUEncoderDecoderModelRunner(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
+        finished_requests_ids: Optional[List[str]] = None,
     ) -> EncoderDecoderModelInputForCPU:
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
@@ -103,12 +105,14 @@ class CPUEncoderDecoderModelRunner(
                                                       model_input)
         # Sampling metadata is only required for the final pp group
         generators = self.get_generators(finished_requests_ids)
-        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
-                                                     model_input.seq_lens,
-                                                     model_input.query_lens,
-                                                     self.device,
-                                                     pin_memory=False,
-                                                     generators=generators)
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list,
+            model_input.seq_lens,
+            model_input.query_lens,
+            self.device,
+            pin_memory=False,
+            generators=generators,
+        )
         return dataclasses.replace(
             model_input,
             sampling_metadata=sampling_metadata,
@@ -141,7 +145,7 @@ class CPUEncoderDecoderModelRunner(
         Constructs a new model inputs data structure, based on
         (1) the existing fields in the `model_inputs` argument,
         and (2) the following additional fields which are
-        computed (or in the case of `attn_metadata`, updated) 
+        computed (or in the case of `attn_metadata`, updated)
         by this function:
         * attn_metadata
         * encoder_input_tokens
@@ -244,14 +248,17 @@ class CPUEncoderDecoderModelRunner(
         # sequence starting offset tensors
         max_encoder_seq_len = max(encoder_seq_lens, default=0)
         encoder_seq_lens_tensor = self._list_to_int32_tensor(encoder_seq_lens)
-        encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
-                                            1,
-                                            dtype=torch.int32,
-                                            device=self.device)
-        torch.cumsum(encoder_seq_lens_tensor,
-                     dim=0,
-                     dtype=encoder_seq_start_loc.dtype,
-                     out=encoder_seq_start_loc[1:])
+        encoder_seq_start_loc = torch.zeros(
+            encoder_seq_lens_tensor.shape[0] + 1,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        torch.cumsum(
+            encoder_seq_lens_tensor,
+            dim=0,
+            dtype=encoder_seq_start_loc.dtype,
+            out=encoder_seq_start_loc[1:],
+        )
 
         # Update attention metadata with encoder-oriented attributes
         attn_metadata = model_input.attn_metadata
@@ -272,8 +279,11 @@ class CPUEncoderDecoderModelRunner(
             cross_block_tables,
         )
 
-        return (attn_metadata, encoder_input_tokens_tensor,
-                encoder_input_positions_tensor)
+        return (
+            attn_metadata,
+            encoder_input_tokens_tensor,
+            encoder_input_positions_tensor,
+        )
 
     @torch.no_grad()
     def execute_model(
@@ -303,8 +313,11 @@ class CPUEncoderDecoderModelRunner(
             intermediate_tensors,
         }
 
-        with set_forward_context(model_input.attn_metadata, self.vllm_config,
-                                 model_input.virtual_engine):
+        with set_forward_context(
+                model_input.attn_metadata,
+                self.vllm_config,
+                model_input.virtual_engine,
+        ):
             hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.

@@ -64,14 +64,15 @@ class PoolingOutput:
     Args:
         data: The extracted hidden states.
     """
+
     data: torch.Tensor
 
     def __repr__(self) -> str:
-        return (f"PoolingOutput(data={self.data})")
+        return f"PoolingOutput(data={self.data})"
 
     def __eq__(self, other: object) -> bool:
-        return (isinstance(other, self.__class__) and bool(
-            (self.data == other.data).all()))
+        return isinstance(other, self.__class__) and bool(
+            (self.data == other.data).all())
 
     @property
     @deprecated("`LLM.encode()` now stores raw outputs in the `data` "
@@ -155,7 +156,8 @@ class RequestOutput:
             text=text,
             token_ids=token_ids,
             cumulative_logprob=cumulative_logprob,
-            logprobs=logprobs)
+            logprobs=logprobs,
+        )
 
         return RequestOutput(
             request_id=request_id,
@@ -174,7 +176,7 @@ class RequestOutput:
         self.prompt_logprobs = next_output.prompt_logprobs
         self.finished |= next_output.finished
 
-        #TODO assuming n == 1 for now
+        # TODO assuming n == 1 for now
         completion = self.outputs[0]
         next_completion = next_output.outputs[0]
         completion.text += next_completion.text
@@ -188,8 +190,10 @@ class RequestOutput:
 
     @classmethod
     def from_seq_group(
-        cls, seq_group: SequenceGroup, use_cache: bool,
-        seq_id_to_seq_group: dict[str, SequenceGroupBase]
+        cls,
+        seq_group: SequenceGroup,
+        use_cache: bool,
+        seq_id_to_seq_group: dict[str, SequenceGroupBase],
     ) -> Optional["RequestOutput"]:
         finished = seq_group.is_finished()
 
@@ -221,7 +225,8 @@ class RequestOutput:
                 prompt_token_ids=[],
                 prompt_logprobs=None,
                 outputs=[],
-                finished=False)
+                finished=False,
+            )
 
         top_n_seqs = seq_group.get_seqs()
 
@@ -242,8 +247,8 @@ class RequestOutput:
                 text_buffer_length, delta)
 
             output_token_ids = seq.get_output_token_ids_to_return(delta)
-            num_output_tokens = 1 if isinstance(output_token_ids,
-                                                int) else len(output_token_ids)
+            num_output_tokens = (1 if isinstance(output_token_ids, int) else
+                                 len(output_token_ids))
             num_cached_tokens = seq.data.get_num_cached_tokens()
 
             output_logprobs = seq.output_logprobs if include_logprobs else None
@@ -262,13 +267,15 @@ class RequestOutput:
                 cached_outputs = seq_group.cached_request_output.outputs  # type: ignore
                 if i >= len(cached_outputs):
                     cached_outputs.append(
-                        CompletionOutput(index=i,
-                                         text="",
-                                         token_ids=[],
-                                         cumulative_logprob=None,
-                                         logprobs=None,
-                                         finish_reason=None,
-                                         stop_reason=None))
+                        CompletionOutput(
+                            index=i,
+                            text="",
+                            token_ids=[],
+                            cumulative_logprob=None,
+                            logprobs=None,
+                            finish_reason=None,
+                            stop_reason=None,
+                        ))
                 output = cached_outputs[i]
 
                 # Init cached output object
@@ -281,8 +288,8 @@ class RequestOutput:
                 else:
                     output.token_ids = output_token_ids
 
-                output.cumulative_logprob = seq.get_cumulative_logprob() \
-                    if include_logprobs else None
+                output.cumulative_logprob = (seq.get_cumulative_logprob()
+                                             if include_logprobs else None)
                 output.logprobs = output_logprobs
                 output.finish_reason = SequenceStatus.get_finished_reason(
                     seq.status)
@@ -290,12 +297,15 @@ class RequestOutput:
 
             else:
                 output = CompletionOutput(
-                    top_n_seqs.index(seq), output_text, [output_token_ids]
-                    if isinstance(output_token_ids, int) else output_token_ids,
+                    top_n_seqs.index(seq),
+                    output_text,
+                    ([output_token_ids] if isinstance(output_token_ids, int)
+                     else output_token_ids),
                     seq.get_cumulative_logprob() if include_logprobs else None,
                     output_logprobs,
                     SequenceStatus.get_finished_reason(seq.status),
-                    seq.stop_reason)
+                    seq.stop_reason,
+                )
 
             outputs.append(output)
 
@@ -327,7 +337,7 @@ class RequestOutput:
             "encoder_prompt": encoder_prompt,
             "encoder_prompt_token_ids": encoder_prompt_token_ids,
             "num_cached_tokens": num_cached_tokens,
-            "multi_modal_placeholders": seq_group.multi_modal_placeholders
+            "multi_modal_placeholders": seq_group.multi_modal_placeholders,
         }
 
         if use_cache:
@@ -367,8 +377,13 @@ class PoolingRequestOutput(Generic[_O]):
         finished (bool): A flag indicating whether the pooling is completed.
     """
 
-    def __init__(self, request_id: str, outputs: _O,
-                 prompt_token_ids: list[int], finished: bool):
+    def __init__(
+        self,
+        request_id: str,
+        outputs: _O,
+        prompt_token_ids: list[int],
+        finished: bool,
+    ):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.finished = finished
@@ -406,9 +421,11 @@ class PoolingRequestOutput(Generic[_O]):
 class RequestOutputFactory:
 
     @staticmethod
-    def create(seq_group: SequenceGroup,
-               seq_id_to_seq_group: dict[str, SequenceGroupBase],
-               use_cache: bool = False):
+    def create(
+        seq_group: SequenceGroup,
+        seq_id_to_seq_group: dict[str, SequenceGroupBase],
+        use_cache: bool = False,
+    ):
         if seq_group.pooled_data is not None:
             return PoolingRequestOutput.from_seq_group(seq_group)
         else:
@@ -424,6 +441,7 @@ class EmbeddingOutput:
         embedding: The embedding vector, which is a list of floats.
         Its length depends on the hidden dimension of the model.
     """
+
     embedding: list[float]
 
     @staticmethod
@@ -462,6 +480,7 @@ class ClassificationOutput:
         probs: The probability vector, which is a list of floats.
         Its length depends on the number of classes.
     """
+
     probs: list[float]
 
     @staticmethod
@@ -499,6 +518,7 @@ class ScoringOutput:
     Args:
         score: The similarity score, which is a scalar value.
     """
+
     score: float
 
     @staticmethod

@@ -7,8 +7,10 @@ from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 
 
 def apply_min_token_penalties(
-        logits: torch.Tensor, output_token_ids: list[list[int]],
-        min_tokens: dict[int, tuple[int, set[int]]]) -> None:
+    logits: torch.Tensor,
+    output_token_ids: list[list[int]],
+    min_tokens: dict[int, tuple[int, set[int]]],
+) -> None:
     """
     Applies minimum token penalty by setting the logits of the stop tokens
     to -inf.
@@ -36,9 +38,14 @@ def apply_all_penalties(
     _, vocab_size = logits.shape
     output_tokens_t = _convert_to_tensors(output_token_ids, vocab_size,
                                           logits.device)
-    return apply_penalties(logits, prompt_token_ids, output_tokens_t,
-                           presence_penalties, frequency_penalties,
-                           repetition_penalties)
+    return apply_penalties(
+        logits,
+        prompt_token_ids,
+        output_tokens_t,
+        presence_penalties,
+        frequency_penalties,
+        repetition_penalties,
+    )
 
 
 def _convert_to_tensors(output_token_ids: list[list[int]], vocab_size: int,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with PagedAttention on rocm"""
+
 from typing import Any, Optional
 
 import torch
@@ -17,7 +18,6 @@ logger = init_logger(__name__)
 
 
 class ROCmAttentionBackend(AttentionBackend):
-
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -173,6 +173,7 @@ class ROCmAttentionImpl(AttentionImpl):
             v_scale=layer._v_scale,
             alibi_slopes=self.alibi_slopes,
             sliding_window=self.sliding_window[0],
-            sm_scale=self.scale)
+            sm_scale=self.scale,
+        )
 
         return output

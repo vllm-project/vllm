@@ -100,10 +100,12 @@ class LoRALayerWeights:
                              dtype=dtype,
                              device=device,
                              pin_memory=pin_memory)
-        lora_b = torch.zeros([rank, output_dim],
-                             dtype=dtype,
-                             device=device,
-                             pin_memory=pin_memory)
+        lora_b = torch.zeros(
+            [rank, output_dim],
+            dtype=dtype,
+            device=device,
+            pin_memory=pin_memory,
+        )
         if bias_enabled:
             bias = torch.zeros([output_dim],
                                dtype=dtype,

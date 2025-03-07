@@ -22,6 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only PhiMoE model."""
+
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -55,7 +56,6 @@ from .utils import (is_pp_missing_parameter,
 
 
 class PhiMoEConfig(PretrainedConfig):
-
     model_type = "phimoe"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -222,8 +222,8 @@ def phimoe_routing_function(
     topk: int,
     renormalize: bool,
 ):
-    assert hidden_states.shape[0] == gating_output.shape[0], (
-        "Number of tokens mismatch")
+    assert hidden_states.shape[0] == gating_output.shape[
+        0], "Number of tokens mismatch"
     assert topk == 2, "Only top-2 routing is supported"
     assert renormalize is False, "Renormalization is not supported"
 
@@ -274,7 +274,8 @@ class PhiMoE(nn.Module):
             quant_config=quant_config,
             tp_size=tp_size,
             custom_routing_function=phimoe_routing_function,
-            prefix=f"{prefix}.experts")
+            prefix=f"{prefix}.experts",
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -458,14 +459,14 @@ class PhiMoEModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: PhiMoEDecoderLayer(
                 config, cache_config, quant_config, prefix=prefix),
-            prefix=f"{prefix}.layers")
+            prefix=f"{prefix}.layers",
+        )
         self.norm = nn.LayerNorm(config.hidden_size,
                                  eps=config.rms_norm_eps,
                                  elementwise_affine=True)
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -596,7 +597,8 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
-            num_experts=self.config.num_local_experts)
+            num_experts=self.config.num_local_experts,
+        )
 
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
@@ -604,8 +606,8 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if self.quant_config is not None and (
+                    scale_name := self.quant_config.get_cache_scale(name)):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",

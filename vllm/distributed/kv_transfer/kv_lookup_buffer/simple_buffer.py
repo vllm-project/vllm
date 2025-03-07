@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-    Implements a distributed key-value (KV) cache transfer mechanism.
+Implements a distributed key-value (KV) cache transfer mechanism.
 
-    Key Features:
-    - Distributed KV cache transmission using PyNccl pipes.
-    - Non-blocking `insert`, blocking `drop_select`.
-    - Use CPU signal pipe to avoid racing condition
-    - Handles buffer size constraints and provide backpressure mechanism to 
-      stop the prefill instance when the decode instance is slow.
+Key Features:
+- Distributed KV cache transmission using PyNccl pipes.
+- Non-blocking `insert`, blocking `drop_select`.
+- Use CPU signal pipe to avoid racing condition
+- Handles buffer size constraints and provide backpressure mechanism to
+  stop the prefill instance when the decode instance is slow.
 """
+
 import threading
 from collections import deque
 from typing import Deque, List, Optional, Union
@@ -25,8 +26,12 @@ logger = init_logger(__name__)
 
 class SimpleBuffer(KVLookupBufferBase):
 
-    def __init__(self, signal_pipe: KVPipeBase, data_pipe: KVPipeBase,
-                 buffer_size_thresh: float):
+    def __init__(
+        self,
+        signal_pipe: KVPipeBase,
+        data_pipe: KVPipeBase,
+        buffer_size_thresh: float,
+    ):
         """
         signal_pipe: on CPU
 
@@ -50,9 +55,11 @@ class SimpleBuffer(KVLookupBufferBase):
         self.normal_signal = torch.tensor([0], device="cpu")
         self.end_signal = None
 
-    def _matches(self, tokens_roi_sender: List[torch.Tensor],
-                 tokens_roi_recver: List[torch.Tensor]):
-
+    def _matches(
+        self,
+        tokens_roi_sender: List[torch.Tensor],
+        tokens_roi_recver: List[torch.Tensor],
+    ):
         # tokens_roi_sender: tokens and roi of the producer (in the buffer)
         # tokens_roi_recver: tokens and roi of the consumer (query)
 
@@ -81,7 +88,6 @@ class SimpleBuffer(KVLookupBufferBase):
 
     def _send_tensor_and_dec_size(self,
                                   tensor: Optional[torch.Tensor]) -> None:
-
         assert tensor is not None, "Use self.data_pipe.send(None) instead"
         self.buffer_size -= tensor.element_size() * tensor.numel()
         if tensor.dtype == torch.bool:
@@ -89,7 +95,6 @@ class SimpleBuffer(KVLookupBufferBase):
         self.data_pipe.send_tensor(tensor)
 
     def _get_element_size(self, data: Optional[Union[List, torch.Tensor]]):
-
         if isinstance(data, torch.Tensor):
             return data.element_size() * data.numel()
         if not data:
@@ -99,10 +104,14 @@ class SimpleBuffer(KVLookupBufferBase):
 
         raise AssertionError(f"Unknown data type {type(data)}")
 
-    def _add_to_buffer(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-                       key: torch.Tensor, value: torch.Tensor,
-                       hidden: torch.Tensor):
-
+    def _add_to_buffer(
+        self,
+        input_tokens: torch.Tensor,
+        roi: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        hidden: torch.Tensor,
+    ):
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone()
         if isinstance(roi, torch.Tensor):
@@ -133,9 +142,7 @@ class SimpleBuffer(KVLookupBufferBase):
         return signal is None
 
     def drop_select_handler(self):
-
         try:
-
             while True:
                 signal = self.signal_pipe.recv_tensor()
                 if self._is_end_signal(signal):
@@ -145,9 +152,10 @@ class SimpleBuffer(KVLookupBufferBase):
                 input_tokens = self.data_pipe.recv_tensor()
 
                 roi = self.data_pipe.recv_tensor()
-                assert roi is not None, "Please provide the roi when sending "\
-                    "drop-select request"
-                roi = (roi > 0.5)
+                assert (
+                    roi is not None
+                ), "Please provide the roi when sending drop-select request"
+                roi = roi > 0.5
                 tokens_roi_recver = [input_tokens, roi]
 
                 def is_buffer_available(
@@ -177,7 +185,7 @@ class SimpleBuffer(KVLookupBufferBase):
                     self.buffer_cv.notify()
 
         except RuntimeError as e:
-            if 'Connection closed by peer' not in str(e):
+            if "Connection closed by peer" not in str(e):
                 raise e
 
         logger.debug("Closing drop_select_handler")
@@ -185,10 +193,9 @@ class SimpleBuffer(KVLookupBufferBase):
     def drop_select(
             self, input_tokens: Optional[torch.Tensor],
             roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
-
-        assert self.request_handling_thread is None, \
-            "drop_select should be called by the KV cache consumer "\
-            "(e.g. the decode vLLM instance)"
+        assert self.request_handling_thread is None, (
+            "drop_select should be called by the KV cache consumer "
+            "(e.g. the decode vLLM instance)")
 
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone()
@@ -204,17 +211,21 @@ class SimpleBuffer(KVLookupBufferBase):
         if roi is not None:
             # convert from float tensor to bool tensor
             # as PyNccl does not support sending bool tensor
-            roi = (roi > 0.5)
+            roi = roi > 0.5
         key = self.data_pipe.recv_tensor()
         value = self.data_pipe.recv_tensor()
         hidden = self.data_pipe.recv_tensor()
 
         return [input_tokens, roi, key, value, hidden]
 
-    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-               key: torch.Tensor, value: torch.Tensor,
-               hidden: torch.Tensor) -> None:
-
+    def insert(
+        self,
+        input_tokens: torch.Tensor,
+        roi: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        hidden: torch.Tensor,
+    ) -> None:
         self._add_to_buffer(input_tokens, roi, key, value, hidden)
 
         # when calling the insert, the current process is a sender
@@ -225,9 +236,8 @@ class SimpleBuffer(KVLookupBufferBase):
             self.request_handling_thread.start()
 
     def close(self):
-
-        if hasattr(self, "request_handling_thread"
-                   ) and self.request_handling_thread is not None:
+        if (hasattr(self, "request_handling_thread")
+                and self.request_handling_thread is not None):
             self.request_handling_thread.join()
 
         else:

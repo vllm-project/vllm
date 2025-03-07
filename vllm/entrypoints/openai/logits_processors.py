@@ -38,8 +38,7 @@ def _get_allowed_token_ids_logits_processor(
     if not allowed_token_ids:
         raise ValueError("Empty allowed_token_ids provided")
     if not all(0 <= tid < vocab_size for tid in allowed_token_ids):
-        raise ValueError("allowed_token_ids contains "
-                         "out-of-vocab token id")
+        raise ValueError("allowed_token_ids contains out-of-vocab token id")
     return AllowedTokenIdsLogitsProcessor(allowed_token_ids)
 
 

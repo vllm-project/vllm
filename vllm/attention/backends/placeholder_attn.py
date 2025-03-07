@@ -14,8 +14,11 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.multimodal import MultiModalPlaceholderMap
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
-                                          ModelInputForGPUWithSamplingMetadata)
+    from vllm.worker.model_runner import (
+        ModelInputForGPUBuilder,
+        ModelInputForGPUWithSamplingMetadata,
+    )
+
 from vllm.utils import async_tensor_h2d
 
 # Placeholder attention backend for models like Mamba and pooling models that
@@ -73,6 +76,7 @@ class PlaceholderAttentionBackend(AttentionBackend):
 @dataclass
 class PlaceholderAttentionMetadata(AttentionMetadata):
     """Attention metadata for prefill and decode batched together."""
+
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
     seq_lens: Optional[List[int]]
@@ -126,8 +130,8 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
         # Compute some attn_metadata fields which default to None
         query_start_loc = (None if self.query_start_loc is None else
                            self.query_start_loc[:self.num_prefills + 1])
-        seq_lens = (None if self.seq_lens is None else
-                    self.seq_lens[:self.num_prefills])
+        seq_lens = None if self.seq_lens is None else self.seq_lens[:self.
+                                                                    num_prefills]
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
                            self.seq_lens_tensor[:self.num_prefills])
         seq_start_loc = (None if self.seq_start_loc is None else
@@ -189,24 +193,26 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             max_query_len=None,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
-            query_start_loc=(self.query_start_loc[self.num_prefills:] -
-                             self.query_start_loc[self.num_prefills])
-            if self.query_start_loc is not None else None,
-            seq_start_loc=self.seq_start_loc[self.num_prefills:]
-            if self.seq_start_loc is not None else None,
+            query_start_loc=((self.query_start_loc[self.num_prefills:] -
+                              self.query_start_loc[self.num_prefills])
+                             if self.query_start_loc is not None else None),
+            seq_start_loc=(self.seq_start_loc[self.num_prefills:]
+                           if self.seq_start_loc is not None else None),
             context_lens_tensor=None,
             block_tables=block_tables,
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
 
-    def advance_step(self,
-                     model_input: "ModelInputForGPUWithSamplingMetadata",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int,
-                     num_seqs: int,
-                     num_queries: int,
-                     turn_prefills_into_decodes: bool = False):
+    def advance_step(
+        self,
+        model_input: "ModelInputForGPUWithSamplingMetadata",
+        sampled_token_ids: Optional[torch.Tensor],
+        block_size: int,
+        num_seqs: int,
+        num_queries: int,
+        turn_prefills_into_decodes: bool = False,
+    ):
         """
         Update metadata in-place to advance one decode step.
         """
@@ -217,10 +223,10 @@ class PlaceholderAttentionMetadata(AttentionMetadata):
             assert num_seqs > num_queries
             assert self.use_cuda_graph
 
-        assert not turn_prefills_into_decodes, \
-            ("Multi-Step + Chunked-Prefill is not supported for attention-free"
-             "models. turn_prefills_into_decodes is a "
-             "Multi-Step + Chunked-Prefill specific parameter.")
+        assert not turn_prefills_into_decodes, (
+            "Multi-Step + Chunked-Prefill is not supported for attention-free"
+            "models. turn_prefills_into_decodes is a "
+            "Multi-Step + Chunked-Prefill specific parameter.")
 
         assert self.seq_lens is not None
         assert self.max_decode_seq_len == max(self.seq_lens)
@@ -264,7 +270,6 @@ class PlaceholderAttentionMetadataBuilder(
         AttentionMetadataBuilder[PlaceholderAttentionMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
-
         self.input_builder = input_builder
         self.runner = input_builder.runner
 
@@ -274,25 +279,38 @@ class PlaceholderAttentionMetadataBuilder(
         self.curr_seq_lens: List[int] = []
         self.multimodal_placeholder_maps: Dict[
             str,
-            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
+            MultiModalPlaceholderMap] = (defaultdict(MultiModalPlaceholderMap))
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
 
     def _add_seq_group(
-            self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool):
+        self,
+        inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
+        chunked_prefill_enabled: bool,
+    ):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
         """
         is_prompt = inter_data.is_prompt
 
-        for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
-             curr_sliding_window_block) in zip(
-                 inter_data.seq_ids, [len(t) for t in inter_data.input_tokens],
-                 inter_data.orig_seq_lens, inter_data.seq_lens,
-                 inter_data.query_lens, inter_data.context_lens,
-                 inter_data.curr_sliding_window_blocks):
+        for (
+                seq_id,
+                token_len,
+                seq_len,
+                curr_seq_len,
+                query_len,
+                context_len,
+                curr_sliding_window_block,
+        ) in zip(
+                inter_data.seq_ids,
+            [len(t) for t in inter_data.input_tokens],
+                inter_data.orig_seq_lens,
+                inter_data.seq_lens,
+                inter_data.query_lens,
+                inter_data.context_lens,
+                inter_data.curr_sliding_window_blocks,
+        ):
             self.context_lens.append(context_len)
 
             if is_prompt:
@@ -309,8 +327,13 @@ class PlaceholderAttentionMetadataBuilder(
                 self.num_decode_tokens += query_len
                 self.curr_seq_lens.append(curr_seq_len)
 
-    def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int):
+    def build(
+        self,
+        seq_lens: List[int],
+        query_lens: List[int],
+        cuda_graph_pad_size: int,
+        batch_size: int,
+    ):
         """Build attention metadata with on-device tensors.
 
         Args:
@@ -346,7 +369,7 @@ class PlaceholderAttentionMetadataBuilder(
 
         if use_captured_graph:
             num_decode_tokens = batch_size - self.num_prefill_tokens
-        assert max_query_len > 0, ("query_lens: {}".format(query_lens))
+        assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
         assert device is not None
         context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int,

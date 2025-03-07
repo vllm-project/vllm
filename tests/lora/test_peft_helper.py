@@ -249,7 +249,7 @@ def test_corrupt_dora_config(dora_files, tmp_path):
 
     # Identify and remove all magnitude vectors
     keys_to_keep = [
-        k for k in tensors.keys() if not k.endswith('lora_magnitude_vector')
+        k for k in tensors.keys() if not k.endswith("lora_magnitude_vector")
     ]
     reduced_tensors = {k: tensors[k] for k in keys_to_keep}
 
@@ -266,10 +266,12 @@ def test_corrupt_dora_config(dora_files, tmp_path):
         tensors = load_file(str(adapter_model_path))
 
         # This should trigger our validation in from_lora_tensors
-        LoRAModel.from_lora_tensors(lora_model_id=1,
-                                    tensors=tensors,
-                                    peft_helper=peft_helper,
-                                    device="cpu")
+        LoRAModel.from_lora_tensors(
+            lora_model_id=1,
+            tensors=tensors,
+            peft_helper=peft_helper,
+            device="cpu",
+        )
 
     # Test 2: Invalid configuration - negative rank
     test_dir = tmp_path / "corrupt_dora_2"

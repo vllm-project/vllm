@@ -27,15 +27,15 @@ def choose_scaled_mm_linear_kernel(
         compute_capability: Optional[int] = None
 ) -> Type[ScaledMMLinearKernel]:
     """
-    Choose an ScalledMMLinearKernel that can implement the given config for the 
-    given compute capability. Attempts to choose the best kernel in terms of 
+    Choose an ScalledMMLinearKernel that can implement the given config for the
+    given compute capability. Attempts to choose the best kernel in terms of
     performance.
 
     Args:
-        config (ScaledMMLinearLayerConfig): Description of the linear layer 
+        config (ScaledMMLinearLayerConfig): Description of the linear layer
             to be implemented.
         compute_capability (Optional[int], optional): The compute capability of
-            the target device, if None uses `current_platform` to get the 
+            the target device, if None uses `current_platform` to get the
             compute capability. Defaults to None.
 
     Raises:
@@ -52,10 +52,10 @@ def choose_scaled_mm_linear_kernel(
 
     failure_reasons = []
     for kernel in _POSSIBLE_KERNELS[current_platform._enum]:
-        if kernel.__name__ in os.environ.get("VLLM_DISABLED_KERNELS", "")\
-            .split(","):
+        if kernel.__name__ in os.environ.get("VLLM_DISABLED_KERNELS",
+                                             "").split(","):
             failure_reasons.append(
-                f' {kernel.__name__} disabled by environment variable')
+                f" {kernel.__name__} disabled by environment variable")
             continue
 
         # If the current platform uses compute_capability,
@@ -75,10 +75,9 @@ def choose_scaled_mm_linear_kernel(
             return kernel
         else:
             failure_reasons.append(
-                f' {kernel.__name__} cannot implement due to: {failure_reason}'
+                f" {kernel.__name__} cannot implement due to: {failure_reason}"
             )
 
-    raise ValueError(
-        "Failed to find a kernel that can implement the "\
-        "ScaledMM linear layer. Reasons: \n"
-        + '\n'.join(failure_reasons))
+    raise ValueError("Failed to find a kernel that can implement the "
+                     "ScaledMM linear layer. Reasons: \n" +
+                     "\n".join(failure_reasons))

@@ -35,8 +35,7 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
         self.modality = modality
 
     def __repr__(self) -> str:
-        return (f"{type(self).__name__}(modality={self.modality!r}, "
-                f"len={len(self)})")
+        return f"{type(self).__name__}(modality={self.modality!r}, " f"len={len(self)})"
 
     def __len__(self) -> int:
         return self.get_count()
@@ -249,7 +248,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     def get_count(self, modality: str, *, strict: bool = True) -> int:
         """
         Get the number of data items belonging to a modality.
-        
+
         If `strict=False`, return `0` instead of raising :exc:`KeyError`
         even if the modality is not found.
         """

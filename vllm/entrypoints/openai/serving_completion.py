@@ -47,17 +47,20 @@ class OpenAIServingCompletion(OpenAIServing):
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
     ):
-        super().__init__(engine_client=engine_client,
-                         model_config=model_config,
-                         models=models,
-                         request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids)
-        self.default_sampling_params = (
-            self.model_config.get_diff_sampling_param())
+        super().__init__(
+            engine_client=engine_client,
+            model_config=model_config,
+            models=models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=return_tokens_as_token_ids,
+        )
+        self.default_sampling_params = self.model_config.get_diff_sampling_param(
+        )
         if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
-                self.default_sampling_params)
+                self.default_sampling_params,
+            )
 
     async def create_completion(
         self,
@@ -128,15 +131,18 @@ class OpenAIServingCompletion(OpenAIServing):
                     sampling_params = request.to_sampling_params(
                         default_max_tokens,
                         self.model_config.logits_processor_pattern,
-                        self.default_sampling_params)
+                        self.default_sampling_params,
+                    )
 
                 request_id_item = f"{request_id}-{i}"
 
-                self._log_inputs(request_id_item,
-                                 request_prompts[i],
-                                 params=sampling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
+                self._log_inputs(
+                    request_id_item,
+                    request_prompts[i],
+                    params=sampling_params,
+                    lora_request=lora_request,
+                    prompt_adapter_request=prompt_adapter_request,
+                )
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
@@ -185,7 +191,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 model_name,
                 num_prompts=num_prompts,
                 tokenizer=tokenizer,
-                request_metadata=request_metadata)
+                request_metadata=request_metadata,
+            )
 
         # Non-streaming response
         final_res_batch: list[Optional[RequestOutput]] = [None] * num_prompts
@@ -253,8 +260,8 @@ class OpenAIServingCompletion(OpenAIServing):
         stream_options = request.stream_options
         if stream_options:
             include_usage = stream_options.include_usage
-            include_continuous_usage = include_usage and \
-                                       stream_options.continuous_usage_stats
+            include_continuous_usage = (include_usage and
+                                        stream_options.continuous_usage_stats)
         else:
             include_usage, include_continuous_usage = False, False
 
@@ -289,7 +296,8 @@ class OpenAIServingCompletion(OpenAIServing):
                             # echo the prompt and first token
                             delta_text = prompt_text + output.text
                             delta_token_ids = [
-                                *prompt_token_ids, *output.token_ids
+                                *prompt_token_ids,
+                                *output.token_ids,
                             ]
                             out_logprobs = [
                                 *prompt_logprobs,
@@ -302,14 +310,13 @@ class OpenAIServingCompletion(OpenAIServing):
                         delta_token_ids = output.token_ids
                         out_logprobs = output.logprobs
 
-                        if not delta_text and not delta_token_ids \
-                            and not previous_num_tokens[i]:
+                        if (not delta_text and not delta_token_ids
+                                and not previous_num_tokens[i]):
                             # Chunked prefill case, don't return empty chunks
                             continue
 
                     if request.logprobs is not None:
-                        assert out_logprobs is not None, (
-                            "Did not output logprobs")
+                        assert out_logprobs is not None, "Did not output logprobs"
                         logprobs = self._create_completion_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=out_logprobs,
@@ -339,7 +346,8 @@ class OpenAIServingCompletion(OpenAIServing):
                                 finish_reason=finish_reason,
                                 stop_reason=stop_reason,
                             )
-                        ])
+                        ],
+                    )
                     if include_continuous_usage:
                         prompt_tokens = num_prompt_tokens[prompt_idx]
                         completion_tokens = previous_num_tokens[i]
@@ -357,7 +365,8 @@ class OpenAIServingCompletion(OpenAIServing):
             final_usage_info = UsageInfo(
                 prompt_tokens=total_prompt_tokens,
                 completion_tokens=total_completion_tokens,
-                total_tokens=total_prompt_tokens + total_completion_tokens)
+                total_tokens=total_prompt_tokens + total_completion_tokens,
+            )
 
             if include_usage:
                 final_usage_chunk = CompletionStreamResponse(
@@ -367,8 +376,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     choices=[],
                     usage=final_usage_info,
                 )
-                final_usage_data = (final_usage_chunk.model_dump_json(
-                    exclude_unset=False, exclude_none=True))
+                final_usage_data = final_usage_chunk.model_dump_json(
+                    exclude_unset=False, exclude_none=True)
                 yield f"data: {final_usage_data}\n\n"
 
             # report to FastAPI middleware aggregate usage across all choices
@@ -490,8 +499,9 @@ class OpenAIServingCompletion(OpenAIServing):
 
         last_token_len = 0
 
-        should_return_as_token_id = return_as_token_id if \
-            return_as_token_id is not None else self.return_tokens_as_token_ids
+        should_return_as_token_id = (return_as_token_id
+                                     if return_as_token_id is not None else
+                                     self.return_tokens_as_token_ids)
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
@@ -523,10 +533,12 @@ class OpenAIServingCompletion(OpenAIServing):
                 out_top_logprobs.append({
                     # Convert float("-inf") to the
                     # JSON-serializable float that OpenAI uses
-                    self._get_decoded_token(top_lp[1],
-                                            top_lp[0],
-                                            tokenizer,
-                                            return_as_token_id=should_return_as_token_id):
+                    self._get_decoded_token(
+                        top_lp[1],
+                        top_lp[0],
+                        tokenizer,
+                        return_as_token_id=should_return_as_token_id,
+                    ):
                     max(top_lp[1].logprob, -9999.0)
                     for i, top_lp in enumerate(step_top_logprobs.items())
                     if num_output_top_logprobs >= i

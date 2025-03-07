@@ -11,10 +11,12 @@ from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 class TestNaiveBlockAllocator:
 
     @staticmethod
-    def create_allocate_lambda(allocate_type: str,
-                               allocator: NaiveBlockAllocator,
-                               prev_block: Optional[Block],
-                               token_ids: list[int]):
+    def create_allocate_lambda(
+        allocate_type: str,
+        allocator: NaiveBlockAllocator,
+        prev_block: Optional[Block],
+        token_ids: list[int],
+    ):
         if allocate_type == "immutable":
             allocate_block = lambda: allocator.allocate_immutable_block(
                 prev_block=prev_block, token_ids=token_ids)
@@ -32,14 +34,17 @@ class TestNaiveBlockAllocator:
     @pytest.mark.parametrize("block_size", [1, 16])
     def test_allocate_ooms(allocate_type: str, num_blocks: int,
                            block_size: int):
-        allocator = NaiveBlockAllocator(create_block=NaiveBlock,
-                                        num_blocks=num_blocks,
-                                        block_size=block_size)
+        allocator = NaiveBlockAllocator(
+            create_block=NaiveBlock,
+            num_blocks=num_blocks,
+            block_size=block_size,
+        )
         allocate_block = TestNaiveBlockAllocator.create_allocate_lambda(
             allocate_type,
             allocator,
             prev_block=None,
-            token_ids=list(range(block_size)))
+            token_ids=list(range(block_size)),
+        )
 
         [allocate_block() for _ in range(num_blocks)]
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
@@ -51,14 +56,17 @@ class TestNaiveBlockAllocator:
     @pytest.mark.parametrize("block_size", [1, 16])
     def test_free_prevents_oom(allocate_type: str, num_blocks: int,
                                block_size: int):
-        allocator = NaiveBlockAllocator(create_block=NaiveBlock,
-                                        num_blocks=num_blocks,
-                                        block_size=block_size)
+        allocator = NaiveBlockAllocator(
+            create_block=NaiveBlock,
+            num_blocks=num_blocks,
+            block_size=block_size,
+        )
         allocate_block = TestNaiveBlockAllocator.create_allocate_lambda(
             allocate_type,
             allocator,
             prev_block=None,
-            token_ids=list(range(block_size)))
+            token_ids=list(range(block_size)),
+        )
 
         blocks = [allocate_block() for _ in range(num_blocks)]
 
@@ -86,14 +94,17 @@ class TestNaiveBlockAllocator:
     @pytest.mark.parametrize("block_size", [16])
     def test_get_num_free_blocks(allocate_type: str, num_blocks: int,
                                  block_size: int):
-        allocator = NaiveBlockAllocator(create_block=NaiveBlock,
-                                        num_blocks=num_blocks,
-                                        block_size=block_size)
+        allocator = NaiveBlockAllocator(
+            create_block=NaiveBlock,
+            num_blocks=num_blocks,
+            block_size=block_size,
+        )
         allocate_block = TestNaiveBlockAllocator.create_allocate_lambda(
             allocate_type,
             allocator,
             prev_block=None,
-            token_ids=list(range(block_size)))
+            token_ids=list(range(block_size)),
+        )
 
         assert allocator.get_num_free_blocks() == num_blocks
 
@@ -107,22 +118,27 @@ class TestNaiveBlockAllocator:
     @pytest.mark.parametrize("num_blocks", [4])
     @pytest.mark.parametrize("block_size", [8])
     def test_naive_block_get_num_full_blocks_touched(num_blocks, block_size):
-        """ Verify the allocator can correctly return the number of
+        """Verify the allocator can correctly return the number of
         full blocks touched.
         """
-        allocator_src = NaiveBlockAllocator(create_block=NaiveBlock,
-                                            num_blocks=num_blocks,
-                                            block_size=block_size)
-        allocator_dst = NaiveBlockAllocator(create_block=NaiveBlock,
-                                            num_blocks=num_blocks,
-                                            block_size=block_size)
+        allocator_src = NaiveBlockAllocator(
+            create_block=NaiveBlock,
+            num_blocks=num_blocks,
+            block_size=block_size,
+        )
+        allocator_dst = NaiveBlockAllocator(
+            create_block=NaiveBlock,
+            num_blocks=num_blocks,
+            block_size=block_size,
+        )
 
         # Create a chain of cacheable blocks in the dst
         allocate_block = TestNaiveBlockAllocator.create_allocate_lambda(
             "immutable",
             allocator_src,
             prev_block=None,
-            token_ids=list(range(block_size)))
+            token_ids=list(range(block_size)),
+        )
         src_blocks = [allocate_block() for _ in range(num_blocks - 1)]
 
         # All blocks are cached
@@ -130,11 +146,12 @@ class TestNaiveBlockAllocator:
             src_blocks) == num_blocks - 1
 
         # Insert one non-full block in the src
-        allocate_non_full_block = \
-            TestNaiveBlockAllocator.create_allocate_lambda(
-                "mutable", allocator_src,
-                prev_block=src_blocks[-1],token_ids=[]
-            )
+        allocate_non_full_block = TestNaiveBlockAllocator.create_allocate_lambda(
+            "mutable",
+            allocator_src,
+            prev_block=src_blocks[-1],
+            token_ids=[],
+        )
         src_blocks.append(allocate_non_full_block())
         src_blocks[-1].append_token_ids([0])
 

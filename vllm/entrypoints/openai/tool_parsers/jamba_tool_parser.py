@@ -38,15 +38,16 @@ class JambaToolParser(ToolParser):
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
-        self.streamed_args_for_tool: list[str] = [
-        ]  # map what has been streamed for each tool so far to a list
+        self.streamed_args_for_tool: list[str] = (
+            [])  # map what has been streamed for each tool so far to a list
 
         self.tool_calls_start_token: str = "<tool_calls>"
         self.tool_calls_end_token: str = "</tool_calls>"
 
         self.tool_calls_regex = re.compile(
             rf"{self.tool_calls_start_token}(.*?){self.tool_calls_end_token}",
-            re.DOTALL)
+            re.DOTALL,
+        )
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -64,7 +65,7 @@ class JambaToolParser(ToolParser):
 
     def adjust_request(
             self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        if request.tools and request.tool_choice != 'none':
+        if request.tools and request.tool_choice != "none":
             # do not skip special tokens because jamba use the special
             # tokens to indicate the start and end of the tool calls
             # information.
@@ -74,7 +75,6 @@ class JambaToolParser(ToolParser):
     def extract_tool_calls(
             self, model_output: str,
             request: ChatCompletionRequest) -> ExtractedToolCallInformation:
-
         # sanity check; avoid unnecessary processing
         if self.tool_calls_start_token not in model_output:
             return ExtractedToolCallInformation(tools_called=False,
@@ -82,7 +82,6 @@ class JambaToolParser(ToolParser):
                                                 content=model_output)
 
         else:
-
             try:
                 # use a regex to find the tool call between the tags
                 function_calls = self.tool_calls_regex.findall(model_output)[0]
@@ -96,8 +95,9 @@ class JambaToolParser(ToolParser):
                         function=FunctionCall(
                             name=function_call["name"],
                             # function call args are JSON but as a string
-                            arguments=json.dumps(function_call["arguments"])))
-                    for function_call in raw_function_calls
+                            arguments=json.dumps(function_call["arguments"]),
+                        ),
+                    ) for function_call in raw_function_calls
                 ]
 
                 content = model_output[:model_output.
@@ -106,7 +106,8 @@ class JambaToolParser(ToolParser):
                     tools_called=True,
                     tool_calls=tool_calls,
                     content=content if
-                    (len(content) > 0 and content != " ") else None)
+                    (len(content) > 0 and content != " ") else None,
+                )
 
             except Exception:
                 logger.exception(
@@ -125,7 +126,6 @@ class JambaToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
-
         # if the tool call token is not in the tokens generated so far, append
         # output to contents since it's not a tool
         if self.tool_calls_start_token not in current_text:
@@ -146,10 +146,8 @@ class JambaToolParser(ToolParser):
         # sent yet, don't allow sending
         # an incomplete string since OpenAI only ever (as far as I have
         # seen) allows sending the entire tool/ function name at once.
-        flags = Allow.ALL if self.current_tool_name_sent \
-            else Allow.ALL & ~Allow.STR
+        flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
         try:
-
             # Extract the tool calls between the special tool call tokens
             parsable_arr = current_text.split(
                 self.tool_calls_start_token)[-1].split(
@@ -161,13 +159,13 @@ class JambaToolParser(ToolParser):
                 tool_call_arr: list[dict] = partial_json_parser.loads(
                     parsable_arr, flags)
             except partial_json_parser.core.exceptions.MalformedJSON:
-                logger.debug('not enough tokens to parse into JSON yet')
+                logger.debug("not enough tokens to parse into JSON yet")
                 return None
 
             # select as the current tool call the one we're on the state at
 
-            current_tool_call: dict = tool_call_arr[self.current_tool_id] \
-                if len(tool_call_arr) > 0 else {}
+            current_tool_call: dict = (tool_call_arr[self.current_tool_id]
+                                       if len(tool_call_arr) > 0 else {})
 
             # case -- if no tokens have been streamed for the tool, e.g.
             #   only the array brackets, stream nothing
@@ -178,7 +176,6 @@ class JambaToolParser(ToolParser):
             #   -> array has > 0 length AND length has moved past cursor
             elif (len(tool_call_arr) > 0
                   and len(tool_call_arr) > self.current_tool_id + 1):
-
                 # if we're moving on to a new call, first make sure we
                 # haven't missed anything in the previous one that was
                 # auto-generated due to JSON completions, but wasn't
@@ -189,12 +186,15 @@ class JambaToolParser(ToolParser):
                     if diff:
                         diff = json.dumps(diff).replace(
                             self.streamed_args_for_tool[self.current_tool_id],
-                            "")
+                            "",
+                        )
                         delta = DeltaMessage(tool_calls=[
-                            DeltaToolCall(index=self.current_tool_id,
-                                          function=DeltaFunctionCall(
-                                              arguments=diff).model_dump(
-                                                  exclude_none=True))
+                            DeltaToolCall(
+                                index=self.current_tool_id,
+                                function=DeltaFunctionCall(
+                                    arguments=diff).model_dump(
+                                        exclude_none=True),
+                            )
                         ])
                         self.streamed_args_for_tool[
                             self.current_tool_id] += diff
@@ -216,14 +216,15 @@ class JambaToolParser(ToolParser):
             if not self.current_tool_name_sent:
                 function_name = current_tool_call.get("name")
                 if function_name:
-
                     delta = DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      type="function",
-                                      id=f"chatcmpl-tool-{random_uuid()}",
-                                      function=DeltaFunctionCall(
-                                          name=function_name).model_dump(
-                                              exclude_none=True))
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            type="function",
+                            id=f"chatcmpl-tool-{random_uuid()}",
+                            function=DeltaFunctionCall(
+                                name=function_name).model_dump(
+                                    exclude_none=True),
+                        )
                     ])
                     self.current_tool_name_sent = True
                 else:
@@ -232,15 +233,13 @@ class JambaToolParser(ToolParser):
             # now we know we're on the same tool call and we're streaming
             # arguments
             else:
-
                 prev_arguments = self.prev_tool_call_arr[
                     self.current_tool_id].get("arguments")
                 cur_arguments = current_tool_call.get("arguments")
 
-                new_text = delta_text.replace("\'", "\"")
+                new_text = delta_text.replace("'", '"')
 
                 if not cur_arguments and not prev_arguments:
-
                     delta = None
                 elif not cur_arguments and prev_arguments:
                     logger.error(
@@ -255,13 +254,17 @@ class JambaToolParser(ToolParser):
                     arguments_delta = cur_arguments_json[:cur_arguments_json.
                                                          index(new_text) +
                                                          len(new_text)]
-                    logger.debug("First tokens in arguments received: %s",
-                                 arguments_delta)
+                    logger.debug(
+                        "First tokens in arguments received: %s",
+                        arguments_delta,
+                    )
                     delta = DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      function=DeltaFunctionCall(
-                                          arguments=arguments_delta).
-                                      model_dump(exclude_none=True))
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                arguments=arguments_delta).model_dump(
+                                    exclude_none=True),
+                        )
                     ])
                     self.streamed_args_for_tool[
                         self.current_tool_id] += arguments_delta
@@ -269,17 +272,22 @@ class JambaToolParser(ToolParser):
                 elif cur_arguments and prev_arguments:
                     cur_args_json = json.dumps(cur_arguments)
                     prev_args_json = json.dumps(prev_arguments)
-                    logger.debug("Searching for diff between \n%s\n%s",
-                                 cur_args_json, prev_args_json)
+                    logger.debug(
+                        "Searching for diff between \n%s\n%s",
+                        cur_args_json,
+                        prev_args_json,
+                    )
 
                     argument_diff = extract_intermediate_diff(
                         cur_args_json, prev_args_json)
                     logger.debug("got arguments diff: %s", argument_diff)
                     delta = DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      function=DeltaFunctionCall(
-                                          arguments=argument_diff).model_dump(
-                                              exclude_none=True))
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                arguments=argument_diff).model_dump(
+                                    exclude_none=True),
+                        )
                     ])
                     self.streamed_args_for_tool[
                         self.current_tool_id] += argument_diff
@@ -298,6 +306,6 @@ class JambaToolParser(ToolParser):
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             logger.debug(
-                "Skipping chunk as a result of tool streaming extraction "
-                "error")
+                "Skipping chunk as a result of tool streaming extraction error"
+            )
             return None

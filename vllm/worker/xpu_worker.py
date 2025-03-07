@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A XPU worker class."""
+
 import gc
 import os
 from typing import List, Optional, Tuple
@@ -26,9 +27,9 @@ logger = init_logger(__name__)
 
 class XPUWorker(LoRANotSupportedWorkerBase, Worker):
     """A worker class that executes (a partition of) the model on a GPU.
-    
-    Each worker is associated with a single XPU device. The worker is 
-    responsible for maintaining the KV cache and executing the model on the 
+
+    Each worker is associated with a single XPU device. The worker is
+    responsible for maintaining the KV cache and executing the model on the
     XPU. In case of distributed inference, each worker is assigned a partition
     of the model.
     """
@@ -54,8 +55,9 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
         if parallel_config and is_driver_worker:
-            assert rank % parallel_config.tensor_parallel_size == 0, \
-                   "Driver worker should be rank 0 of tensor parallel group."
+            assert (
+                rank % parallel_config.tensor_parallel_size == 0
+            ), "Driver worker should be rank 0 of tensor parallel group."
 
         self.model_runner = XPUModelRunner(  # type: ignore
             vllm_config=vllm_config,
@@ -171,11 +173,13 @@ class XPUWorker(LoRANotSupportedWorkerBase, Worker):
                 rank=rank,
                 distributed_init_method=distributed_init_method,
                 local_rank=self.local_rank,
-                backend="ccl")
+                backend="ccl",
+            )
 
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size)
+            parallel_config.pipeline_parallel_size,
+        )
         # global all_reduce needed for overall oneccl warm up
         torch.distributed.all_reduce(torch.zeros(1).xpu())
 

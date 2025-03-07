@@ -37,7 +37,8 @@ def _ref_convert_id_to_token(
 
 @pytest.mark.parametrize(
     "request_output_kind",
-    [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+    [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY],
+)
 def test_incremental_detokenization(request_output_kind: RequestOutputKind,
                                     dummy_test_vectors):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
@@ -47,24 +48,28 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
 
     # Make N requests.
     requests = [
-        EngineCoreRequest(request_id=f"request-{idx}",
-                          prompt=prompt,
-                          prompt_token_ids=prompt_tokens,
-                          arrival_time=0,
-                          mm_inputs=None,
-                          mm_hashes=None,
-                          mm_placeholders=None,
-                          eos_token_id=None,
-                          lora_request=None,
-                          sampling_params=SamplingParams(
-                              skip_special_tokens=False,
-                              spaces_between_special_tokens=False,
-                              output_kind=request_output_kind,
-                              stop=[],
-                              include_stop_str_in_output=False,
-                          )) for idx, (prompt, prompt_tokens) in enumerate(
-                              zip(dummy_test_vectors.prompt_strings,
-                                  dummy_test_vectors.prompt_tokens))
+        EngineCoreRequest(
+            request_id=f"request-{idx}",
+            prompt=prompt,
+            prompt_token_ids=prompt_tokens,
+            arrival_time=0,
+            mm_inputs=None,
+            mm_hashes=None,
+            mm_placeholders=None,
+            eos_token_id=None,
+            lora_request=None,
+            sampling_params=SamplingParams(
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                output_kind=request_output_kind,
+                stop=[],
+                include_stop_str_in_output=False,
+            ),
+        ) for idx, (prompt, prompt_tokens) in enumerate(
+            zip(
+                dummy_test_vectors.prompt_strings,
+                dummy_test_vectors.prompt_tokens,
+            ))
     ]
 
     # Add requests to the detokenizer.
@@ -99,8 +104,10 @@ def test_incremental_detokenization(request_output_kind: RequestOutputKind,
 
     # Confirmed tracked values matches what we expected.
     for idx, (ref_gen_str, ref_gen_toks) in enumerate(
-            zip(dummy_test_vectors.generation_strings,
-                dummy_test_vectors.generation_tokens)):
+            zip(
+                dummy_test_vectors.generation_strings,
+                dummy_test_vectors.generation_tokens,
+            )):
         gen_str = gen_strings[f"request-{idx}"]
         gen_toks = gen_tokens[f"request-{idx}"]
 
@@ -153,8 +160,11 @@ def _validate_logprobs(
                 # logprob token id tensors associated with this
                 # position in the completion. Also break out the
                 # sampled token ranks
-                (ref_pos_logprob_toks, ref_pos_logprob_vals,
-                 ref_sampled_token_rank) = ref_logprobs[idx]
+                (
+                    ref_pos_logprob_toks,
+                    ref_pos_logprob_vals,
+                    ref_sampled_token_rank,
+                ) = ref_logprobs[idx]
                 # For each position in the completion sequence,
                 # ensure the actual sampled token is among the
                 # logprobs
@@ -168,7 +178,7 @@ def _validate_logprobs(
                         or num_lp_toks == num_sample_logprobs +
                         1), ("Valid numbers of sample logprobs are"
                              f" {num_sample_logprobs} or"
-                             f" {num_sample_logprobs+1} but"
+                             f" {num_sample_logprobs + 1} but"
                              f" {num_lp_toks} logprobs found at"
                              f" position {idx}. Logprobs dict:"
                              f" {pos_logprob_dict}")
@@ -176,7 +186,7 @@ def _validate_logprobs(
                 # Validate sampled token logprob rank
                 smp_lp = pos_logprob_dict[sampled_token]
                 smp_lp_rank = smp_lp.rank
-                assert (ref_sampled_token_rank == smp_lp_rank), (
+                assert ref_sampled_token_rank == smp_lp_rank, (
                     "Sampled token logprob rank"
                     f" {smp_lp_rank} does not match"
                     " correct value"
@@ -205,8 +215,7 @@ def _validate_logprobs(
 
                     # A "top" (rank 1) logprob must be
                     # present
-                    rank_one_appears = (True
-                                        if lp_rank == 1 else rank_one_appears)
+                    rank_one_appears = True if lp_rank == 1 else rank_one_appears
 
                     # Rank must be >= 1
                     assert lp_rank >= 1, (f"Logprob {lp} has invalid"
@@ -269,18 +278,25 @@ def _validate_logprobs(
             # Break out the reference prompt log prob value &
             # logprob token id matrices for the whole prompt.
             # Also break out the prompt token rank vector
-            (ref_prompt_logprob_toks, ref_prompt_logprob_vals,
-             ref_prompt_token_ranks) = ref_prompt_logprobs
+            (
+                ref_prompt_logprob_toks,
+                ref_prompt_logprob_vals,
+                ref_prompt_token_ranks,
+            ) = ref_prompt_logprobs
             for idx, (prompt_token, pos_logprob_dict) in enumerate(
                     zip(prompt_token_ids[1:], prompt_logprobs[1:])):
-
                 # Break out the reference prompt log prob value
                 # vector, prompt logprob token id vector, and
                 # prompt token rank at the current position.
-                (ref_pos_prompt_logprob_toks, ref_pos_prompt_logprob_vals,
-                 ref_pos_prompt_token_rank) = (ref_prompt_logprob_toks[idx, :],
-                                               ref_prompt_logprob_vals[idx, :],
-                                               ref_prompt_token_ranks[idx])
+                (
+                    ref_pos_prompt_logprob_toks,
+                    ref_pos_prompt_logprob_vals,
+                    ref_pos_prompt_token_rank,
+                ) = (
+                    ref_prompt_logprob_toks[idx, :],
+                    ref_prompt_logprob_vals[idx, :],
+                    ref_prompt_token_ranks[idx],
+                )
 
                 # For each position in the prompt sequence,
                 # ensure the actual prompt token is among the
@@ -294,7 +310,7 @@ def _validate_logprobs(
                         or num_plp_toks == num_prompt_logprobs +
                         1), ("Valid numbers of prompt logprobs are"
                              f" {num_prompt_logprobs} or"
-                             f" {num_prompt_logprobs+1} but"
+                             f" {num_prompt_logprobs + 1} but"
                              f" {num_plp_toks} logprobs found at"
                              f" position {idx}. Logprobs dict:"
                              f" {pos_logprob_dict}")
@@ -303,7 +319,7 @@ def _validate_logprobs(
                 prmpt_tok_lp = pos_logprob_dict[prompt_token]
                 prmpt_tok_lp_rank = prmpt_tok_lp.rank
                 ref_prmpt_tok_lp_rank = ref_pos_prompt_token_rank
-                assert (ref_prmpt_tok_lp_rank == prmpt_tok_lp_rank), (
+                assert ref_prmpt_tok_lp_rank == prmpt_tok_lp_rank, (
                     "Prompt token logprob rank"
                     f" {prmpt_tok_lp_rank} does not match"
                     " correct value"
@@ -332,8 +348,7 @@ def _validate_logprobs(
 
                     # A "top" (rank 1) logprob must be
                     # present
-                    rank_one_appears = (True
-                                        if plp_rank == 1 else rank_one_appears)
+                    rank_one_appears = True if plp_rank == 1 else rank_one_appears
 
                     # Rank must be >= 1
                     assert plp_rank >= 1, (
@@ -371,23 +386,27 @@ def _validate_logprobs(
 
 @pytest.mark.parametrize(
     "request_output_kind",
-    [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+    [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY],
+)
 @pytest.mark.parametrize("num_sample_logprobs",
                          [None, NUM_SAMPLE_LOGPROBS_UNDER_TEST])
 @pytest.mark.parametrize("num_prompt_logprobs",
                          [None, NUM_PROMPT_LOGPROBS_UNDER_TEST])
-def test_logprobs_processor(request_output_kind: RequestOutputKind,
-                            num_sample_logprobs: Optional[int],
-                            num_prompt_logprobs: Optional[int],
-                            dummy_test_vectors):
+def test_logprobs_processor(
+    request_output_kind: RequestOutputKind,
+    num_sample_logprobs: Optional[int],
+    num_prompt_logprobs: Optional[int],
+    dummy_test_vectors,
+):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
                                        log_stats=False)
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
-        generated_logprobs_raw=None if num_sample_logprobs is None else
-        dummy_test_vectors.generation_logprobs,
-        prompt_logprobs_raw=None
-        if num_prompt_logprobs is None else dummy_test_vectors.prompt_logprobs)
+        generated_logprobs_raw=(None if num_sample_logprobs is None else
+                                dummy_test_vectors.generation_logprobs),
+        prompt_logprobs_raw=(None if num_prompt_logprobs is None else
+                             dummy_test_vectors.prompt_logprobs),
+    )
 
     # Make N requests.
     request_id_list = [
@@ -395,26 +414,30 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
         for idx in range(len(dummy_test_vectors.prompt_strings))
     ]
     requests = [
-        EngineCoreRequest(request_id=request_id_list[idx],
-                          prompt=prompt,
-                          prompt_token_ids=prompt_tokens,
-                          arrival_time=0,
-                          mm_inputs=None,
-                          mm_hashes=None,
-                          mm_placeholders=None,
-                          eos_token_id=None,
-                          lora_request=None,
-                          sampling_params=SamplingParams(
-                              skip_special_tokens=False,
-                              spaces_between_special_tokens=False,
-                              output_kind=request_output_kind,
-                              stop=[],
-                              include_stop_str_in_output=False,
-                              logprobs=num_sample_logprobs,
-                              prompt_logprobs=num_prompt_logprobs,
-                          )) for idx, (prompt, prompt_tokens) in enumerate(
-                              zip(dummy_test_vectors.prompt_strings,
-                                  dummy_test_vectors.prompt_tokens))
+        EngineCoreRequest(
+            request_id=request_id_list[idx],
+            prompt=prompt,
+            prompt_token_ids=prompt_tokens,
+            arrival_time=0,
+            mm_inputs=None,
+            mm_hashes=None,
+            mm_placeholders=None,
+            eos_token_id=None,
+            lora_request=None,
+            sampling_params=SamplingParams(
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                output_kind=request_output_kind,
+                stop=[],
+                include_stop_str_in_output=False,
+                logprobs=num_sample_logprobs,
+                prompt_logprobs=num_prompt_logprobs,
+            ),
+        ) for idx, (prompt, prompt_tokens) in enumerate(
+            zip(
+                dummy_test_vectors.prompt_strings,
+                dummy_test_vectors.prompt_tokens,
+            ))
     ]
 
     # Add requests to the detokenizer.
@@ -461,10 +484,16 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
                     plp.extend(prompt_logprobs)
 
     # Confirmed tracked logprobs match what we expect
-    _validate_logprobs(gen_tokens, gen_logprobs, gen_prompt_logprobs,
-                       gen_cumulative_logprobs, dummy_test_vectors,
-                       request_id_list, num_sample_logprobs,
-                       num_prompt_logprobs)
+    _validate_logprobs(
+        gen_tokens,
+        gen_logprobs,
+        gen_prompt_logprobs,
+        gen_cumulative_logprobs,
+        dummy_test_vectors,
+        request_id_list,
+        num_sample_logprobs,
+        num_prompt_logprobs,
+    )
 
     assert output_processor.get_num_unfinished_requests() == 0
     assert not output_processor.has_unfinished_requests()
@@ -475,17 +504,21 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
                          [None, NUM_SAMPLE_LOGPROBS_UNDER_TEST])
 @pytest.mark.parametrize("num_prompt_logprobs",
                          [None, NUM_PROMPT_LOGPROBS_UNDER_TEST])
-def test_stop_string(include_stop_str_in_output: bool,
-                     num_sample_logprobs: Optional[int],
-                     num_prompt_logprobs: Optional[int], dummy_test_vectors):
+def test_stop_string(
+    include_stop_str_in_output: bool,
+    num_sample_logprobs: Optional[int],
+    num_prompt_logprobs: Optional[int],
+    dummy_test_vectors,
+):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
                                        log_stats=False)
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
-        generated_logprobs_raw=dummy_test_vectors.generation_logprobs
-        if num_sample_logprobs else None,
-        prompt_logprobs_raw=dummy_test_vectors.prompt_logprobs
-        if num_prompt_logprobs else None)
+        generated_logprobs_raw=(dummy_test_vectors.generation_logprobs
+                                if num_sample_logprobs else None),
+        prompt_logprobs_raw=(dummy_test_vectors.prompt_logprobs
+                             if num_prompt_logprobs else None),
+    )
 
     # Make N requests.
     request_id_list = [
@@ -511,9 +544,12 @@ def test_stop_string(include_stop_str_in_output: bool,
                 include_stop_str_in_output=include_stop_str_in_output,
                 logprobs=num_sample_logprobs,
                 prompt_logprobs=num_prompt_logprobs,
-            )) for idx, (prompt, prompt_tokens) in enumerate(
-                zip(dummy_test_vectors.prompt_strings,
-                    dummy_test_vectors.prompt_tokens))
+            ),
+        ) for idx, (prompt, prompt_tokens) in enumerate(
+            zip(
+                dummy_test_vectors.prompt_strings,
+                dummy_test_vectors.prompt_tokens,
+            ))
     ]
 
     # Add requests to the detokenizer.
@@ -571,7 +607,6 @@ def test_stop_string(include_stop_str_in_output: bool,
     # Confirmed tracked values matches what we expected.
     for idx, (ref_gen_str, stop_str) in enumerate(
             zip(dummy_test_vectors.generation_strings, STOP_STRINGS)):
-
         # Request should be aborted.
         request_id = f"request-{idx}"
         assert request_id in aborted
@@ -585,17 +620,21 @@ def test_stop_string(include_stop_str_in_output: bool,
         ref_str_inc_stop = ref_gen_str[:stop_str_idx] + stop_str
 
         if include_stop_str_in_output:
-            assert gen_str == ref_str_inc_stop, (
-                f"{gen_str=}, {ref_str_inc_stop=}")
+            assert gen_str == ref_str_inc_stop, f"{gen_str=}, {ref_str_inc_stop=}"
         else:
-            assert gen_str == ref_str_exc_stop, (
-                f"{gen_str=}, {ref_str_exc_stop=}")
+            assert gen_str == ref_str_exc_stop, f"{gen_str=}, {ref_str_exc_stop=}"
 
     # Confirmed tracked logprobs match what we expect
-    _validate_logprobs(gen_tokens, gen_logprobs, gen_prompt_logprobs,
-                       gen_cumulative_logprobs, dummy_test_vectors,
-                       request_id_list, num_sample_logprobs,
-                       num_prompt_logprobs)
+    _validate_logprobs(
+        gen_tokens,
+        gen_logprobs,
+        gen_prompt_logprobs,
+        gen_cumulative_logprobs,
+        dummy_test_vectors,
+        request_id_list,
+        num_sample_logprobs,
+        num_prompt_logprobs,
+    )
 
     assert output_processor.get_num_unfinished_requests() == 0
     assert not output_processor.has_unfinished_requests()
@@ -621,8 +660,10 @@ def test_iteration_stats(dummy_test_vectors):
             lora_request=None,
             sampling_params=SamplingParams(),
         ) for idx, (prompt, prompt_tokens) in enumerate(
-            zip(dummy_test_vectors.prompt_strings,
-                dummy_test_vectors.prompt_tokens))
+            zip(
+                dummy_test_vectors.prompt_strings,
+                dummy_test_vectors.prompt_tokens,
+            ))
     ]
 
     # Add all requests except one to the OutputProcessor.

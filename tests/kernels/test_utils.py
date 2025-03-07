@@ -22,4 +22,6 @@ def test_cuda_utils_opcheck():
     opcheck(torch.ops._C_cuda_utils.get_device_attribute, (0, 0))
     opcheck(
         torch.ops._C_cuda_utils.
-        get_max_shared_memory_per_block_device_attribute, (0, ))
+        get_max_shared_memory_per_block_device_attribute,
+        (0, ),
+    )

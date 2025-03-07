@@ -58,10 +58,10 @@ def ref_paged_attn(
         empty_mask = torch.ones(query_len, kv_len)
         mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
         if sliding_window is not None:
-            sliding_window_mask = torch.triu(empty_mask,
-                                             diagonal=kv_len -
-                                             (query_len + sliding_window) +
-                                             1).bool().logical_not()
+            sliding_window_mask = (torch.triu(
+                empty_mask,
+                diagonal=kv_len - (query_len + sliding_window) + 1,
+            ).bool().logical_not())
             mask |= sliding_window_mask
         if soft_cap is not None:
             attn = soft_cap * torch.tanh(attn / soft_cap)
@@ -101,7 +101,7 @@ def test_flash_attn_with_paged_kv(
     torch.set_default_device("cuda")
     if not is_fa_version_supported(fa_version):
         pytest.skip(f"Flash attention version {fa_version} not supported due "
-                    f"to: \"{fa_version_unsupported_reason(fa_version)}\"")
+                    f'to: "{fa_version_unsupported_reason(fa_version)}"')
 
     current_platform.seed_everything(0)
     num_seqs = len(kv_lens)
@@ -110,8 +110,8 @@ def test_flash_attn_with_paged_kv(
     assert num_query_heads % num_kv_heads == 0
     max_kv_len = max(kv_lens)
     scale = head_size**-0.5
-    window_size = ((sliding_window - 1, 0) if sliding_window is not None else
-                   (-1, -1))
+    window_size = (sliding_window - 1,
+                   0) if sliding_window is not None else (-1, -1)
 
     query = torch.randn(num_seqs, num_query_heads, head_size, dtype=dtype)
     key_cache = torch.randn(num_blocks,
@@ -146,23 +146,28 @@ def test_flash_attn_with_paged_kv(
     output = output if not use_out else out
     output = output.squeeze(1)
 
-    ref_output = ref_paged_attn(query=query,
-                                key_cache=key_cache,
-                                value_cache=value_cache,
-                                query_lens=[1] * num_seqs,
-                                kv_lens=kv_lens,
-                                block_tables=block_tables,
-                                scale=scale,
-                                soft_cap=soft_cap,
-                                sliding_window=sliding_window)
-    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=1e-2), \
-        f"{torch.max(torch.abs(output - ref_output))}"
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=[1] * num_seqs,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        soft_cap=soft_cap,
+        sliding_window=sliding_window,
+    )
+    (
+        torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=1e-2),
+        f"{torch.max(torch.abs(output - ref_output))}",
+    )
 
 
 @pytest.mark.parametrize("use_out", [True, False])
-@pytest.mark.parametrize("seq_lens",
-                         [[(1, 1328), (5, 18),
-                           (129, 463)], [(1, 523), (1, 37), (1, 2011)]])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]],
+)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
@@ -187,7 +192,7 @@ def test_varlen_with_paged_kv(
     torch.set_default_device("cuda")
     if not is_fa_version_supported(fa_version):
         pytest.skip(f"Flash attention version {fa_version} not supported due "
-                    f"to: \"{fa_version_unsupported_reason(fa_version)}\"")
+                    f'to: "{fa_version_unsupported_reason(fa_version)}"')
     current_platform.seed_everything(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -197,8 +202,8 @@ def test_varlen_with_paged_kv(
     assert num_query_heads % num_kv_heads == 0
     max_query_len = max(query_lens)
     max_kv_len = max(kv_lens)
-    window_size = ((sliding_window - 1, 0) if sliding_window is not None else
-                   (-1, -1))
+    window_size = (sliding_window - 1,
+                   0) if sliding_window is not None else (-1, -1)
     scale = head_size**-0.5
 
     query = torch.randn(sum(query_lens),
@@ -252,5 +257,7 @@ def test_varlen_with_paged_kv(
         sliding_window=sliding_window,
         soft_cap=soft_cap,
     )
-    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=1e-2), \
-        f"{torch.max(torch.abs(output - ref_output))}"
+    (
+        torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=1e-2),
+        f"{torch.max(torch.abs(output - ref_output))}",
+    )

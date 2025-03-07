@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Helpers for building inputs that can be leveraged for different test types.
-"""
+"""Helpers for building inputs that can be leveraged for different test types."""
+
 from collections.abc import Iterable
 from pathlib import PosixPath
 from typing import Callable, Optional, Union
@@ -31,10 +31,12 @@ def replace_test_placeholder(prompt: str, img_idx_to_prompt: Callable[[int],
     return img_prompt
 
 
-def get_model_prompts(base_prompts: Iterable[str],
-                      img_idx_to_prompt: Optional[Callable[[int], str]],
-                      video_idx_to_prompt: Optional[Callable[[int], str]],
-                      prompt_formatter: Callable[[str], str]) -> list[str]:
+def get_model_prompts(
+    base_prompts: Iterable[str],
+    img_idx_to_prompt: Optional[Callable[[int], str]],
+    video_idx_to_prompt: Optional[Callable[[int], str]],
+    prompt_formatter: Callable[[str], str],
+) -> list[str]:
     """Given a model-agnostic base prompt and test configuration for a model(s)
     to be tested, update the media placeholders and apply the prompt formatting
     to get the test prompt string for this model.
@@ -68,18 +70,21 @@ def get_model_prompts(base_prompts: Iterable[str],
 
 
 def build_single_image_inputs_from_test_info(
-        test_info: VLMTestInfo,
-        image_assets: _ImageAssets,
-        size_wrapper: ImageSizeWrapper,
-        tmp_path: Optional[PosixPath] = None):
+    test_info: VLMTestInfo,
+    image_assets: _ImageAssets,
+    size_wrapper: ImageSizeWrapper,
+    tmp_path: Optional[PosixPath] = None,
+):
     if test_info.prompt_formatter is None:
         raise ValueError(
             "Prompt formatter must be set to build single image inputs")
 
-    model_prompts = get_model_prompts(test_info.single_image_prompts,
-                                      test_info.img_idx_to_prompt,
-                                      test_info.video_idx_to_prompt,
-                                      test_info.prompt_formatter)
+    model_prompts = get_model_prompts(
+        test_info.single_image_prompts,
+        test_info.img_idx_to_prompt,
+        test_info.video_idx_to_prompt,
+        test_info.prompt_formatter,
+    )
 
     # For models that require a local path / URL encoded in the image; export
     # assets and encode into tmp_path for this test. This should be avoided
@@ -115,18 +120,21 @@ def build_single_image_inputs(images, model_prompts,
 
 
 def build_multi_image_inputs_from_test_info(
-        test_info: VLMTestInfo,
-        image_assets: _ImageAssets,
-        size_wrapper: ImageSizeWrapper,
-        tmp_path: Optional[PosixPath] = None):
+    test_info: VLMTestInfo,
+    image_assets: _ImageAssets,
+    size_wrapper: ImageSizeWrapper,
+    tmp_path: Optional[PosixPath] = None,
+):
     if test_info.prompt_formatter is None:
         raise ValueError(
             "Prompt formatter must be set to build multi image inputs")
 
-    model_prompts = get_model_prompts([test_info.multi_image_prompt],
-                                      test_info.img_idx_to_prompt,
-                                      test_info.video_idx_to_prompt,
-                                      test_info.prompt_formatter)
+    model_prompts = get_model_prompts(
+        [test_info.multi_image_prompt],
+        test_info.img_idx_to_prompt,
+        test_info.video_idx_to_prompt,
+        test_info.prompt_formatter,
+    )
 
     if test_info.prompt_path_encoder is not None:
         if tmp_path is None:
@@ -167,8 +175,8 @@ def build_embedding_inputs_from_test_info(
     if test_info.prompt_formatter is None:
         raise ValueError(
             "Prompt formatter must be set to build image embedding inputs")
-    if size_wrapper.type != SizeType.SIZE_FACTOR or not \
-            all(factor == 1.0 for factor in size_wrapper.data):
+    if size_wrapper.type != SizeType.SIZE_FACTOR or not all(
+            factor == 1.0 for factor in size_wrapper.data):
         raise ValueError("Embedding tests require constant (1.0) size factors")
     if test_info.convert_assets_to_embeddings is None:
         raise ValueError("No conversion func for getting embeddings found")

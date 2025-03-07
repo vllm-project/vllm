@@ -12,6 +12,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 try:
     import flashinfer.sampling as fs
+
     is_flashinfer_available = True
 except ImportError:
     is_flashinfer_available = False
@@ -53,9 +54,12 @@ class RejectionSampler(nn.Module):
         else:
             self.forward_method = self.forward_native
 
-    def forward(self, draft_token_ids: list[list[int]],
-                target_probs: torch.Tensor,
-                sampling_metadata: SamplingMetadata) -> SamplerOutput:
+    def forward(
+        self,
+        draft_token_ids: list[list[int]],
+        target_probs: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> SamplerOutput:
         if not sampling_metadata.all_greedy:
             raise NotImplementedError(
                 "Currently, only greedy sampling is supported by "
@@ -75,7 +79,7 @@ class RejectionSampler(nn.Module):
         sample_lens = [len(x) + 1 for x in draft_token_ids]
         # Convert draft token IDs to a tensor, split by sample_lens, then pad.
         draft_token_ids = [
-            torch.tensor(x, dtype=int, device='cpu') for x in draft_token_ids
+            torch.tensor(x, dtype=int, device="cpu") for x in draft_token_ids
         ]
         draft_token_ids_tensor = pad_sequence(draft_token_ids,
                                               batch_first=True,
@@ -84,9 +88,11 @@ class RejectionSampler(nn.Module):
         if sampling_metadata.all_greedy:
             target_token_ids = target_probs.argmax(dim=-1).view(-1)
             target_token_ids = target_token_ids.split(sample_lens)
-            target_token_ids = pad_sequence(target_token_ids,
-                                            batch_first=True,
-                                            padding_value=INVALID_TOKEN_ID)
+            target_token_ids = pad_sequence(
+                target_token_ids,
+                batch_first=True,
+                padding_value=INVALID_TOKEN_ID,
+            )
 
             vocab_size = target_probs.size(-1)
             # NOTE: CPU <-> GPU synchronization happens here.
@@ -98,9 +104,11 @@ class RejectionSampler(nn.Module):
             target_probs = _create_greedy_token_probs(target_token_ids,
                                                       vocab_size,
                                                       target_probs.device)
-            uniform_samples = torch.zeros(draft_token_ids_tensor.size(0),
-                                          draft_token_ids_tensor.size(1) + 1,
-                                          device=target_probs.device)
+            uniform_samples = torch.zeros(
+                draft_token_ids_tensor.size(0),
+                draft_token_ids_tensor.size(1) + 1,
+                device=target_probs.device,
+            )
         else:
             raise NotImplementedError(
                 "Currently, only greedy sampling is supported by "
@@ -125,7 +133,7 @@ class RejectionSampler(nn.Module):
         sample_lens = [len(x) + 1 for x in draft_token_ids]
         # Convert draft token IDs to a tensor, split by sample_lens, then pad.
         draft_token_ids = [
-            torch.tensor(x, dtype=int, device='cpu') for x in draft_token_ids
+            torch.tensor(x, dtype=int, device="cpu") for x in draft_token_ids
         ]
         draft_token_ids_tensor = pad_sequence(draft_token_ids,
                                               batch_first=True,
@@ -135,9 +143,11 @@ class RejectionSampler(nn.Module):
         if sampling_metadata.all_greedy:
             output_token_ids = target_probs.argmax(dim=-1).view(-1)
             output_token_ids = output_token_ids.split(sample_lens)
-            output_token_ids = pad_sequence(output_token_ids,
-                                            batch_first=True,
-                                            padding_value=INVALID_TOKEN_ID)
+            output_token_ids = pad_sequence(
+                output_token_ids,
+                batch_first=True,
+                padding_value=INVALID_TOKEN_ID,
+            )
             # Produce a mask that remains 1 (True) until the first
             # mismatch (cumprod turns 0 after a mismatch).
             accept_mask = (
@@ -150,12 +160,15 @@ class RejectionSampler(nn.Module):
         # Identify valid positions (non-padding).
         valid_mask = output_token_ids != INVALID_TOKEN_ID
         # Generate mask with bonus token.
-        generate_mask = torch.cat([
-            accept_mask,
-            torch.zeros(accept_mask.size(0), 1, device=accept_mask.device)
-        ],
-                                  dim=1).to(torch.bool) & valid_mask
-        zeros_mask = (generate_mask == 0)
+        generate_mask = (torch.cat(
+            [
+                accept_mask,
+                torch.zeros(accept_mask.size(0), 1, device=accept_mask.device),
+            ],
+            dim=1,
+        ).to(torch.bool)
+                         & valid_mask)
+        zeros_mask = generate_mask == 0
         first_zero_idx = zeros_mask.float().argmax(dim=1)
         # Figure out which rows actually contain at least one zero.
         rows_with_zero = zeros_mask.any(dim=1)
@@ -181,12 +194,14 @@ def _create_greedy_token_probs(
                               device=out_device)
 
     # Ignore INVALID_TOKEN_ID.
-    valid_mask = (token_ids != INVALID_TOKEN_ID)
+    valid_mask = token_ids != INVALID_TOKEN_ID
     valid_indices = token_ids.clone()
     valid_indices[~valid_mask] = 0
 
-    token_probs.scatter_(dim=2,
-                         index=valid_indices.unsqueeze(-1),
-                         src=valid_mask.unsqueeze(-1).float())
+    token_probs.scatter_(
+        dim=2,
+        index=valid_indices.unsqueeze(-1),
+        src=valid_mask.unsqueeze(-1).float(),
+    )
 
     return token_probs

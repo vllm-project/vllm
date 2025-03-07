@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Types for writing multimodal model tests."""
+
 from collections.abc import Iterable
 from enum import Enum
 from pathlib import PosixPath
@@ -87,7 +88,7 @@ class VLMTestInfo(NamedTuple):
     # Function for converting ImageAssets to image embeddings;
     # We need to define this explicitly for embedding tests
     convert_assets_to_embeddings: Optional[Callable[[_ImageAssets],
-                                                    torch.Tensor]] = None
+                                                    torch.Tensor]] = (None)
 
     # Exposed options for vLLM runner; we change these in a several tests,
     # but the defaults are derived from VllmRunner & the engine defaults
@@ -182,6 +183,7 @@ class VLMTestInfo(NamedTuple):
 
 class ExpandableVLMTestArgs(NamedTuple):
     """The expanded kwargs which correspond to a single test case."""
+
     model: str
     max_tokens: int
     num_logprobs: int

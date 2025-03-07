@@ -53,6 +53,7 @@ class WorkerBase:
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.compilation_config = vllm_config.compilation_config
         from vllm.platforms import current_platform
+
         self.current_platform = current_platform
 
     def init_device(self) -> None:
@@ -63,8 +64,7 @@ class WorkerBase:
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
-        """Initialize the KV cache with the given size in blocks.
-        """
+        """Initialize the KV cache with the given size in blocks."""
         raise NotImplementedError
 
     def get_model(self) -> nn.Module:
@@ -136,6 +136,7 @@ class DelegateWorkerBase(WorkerBase):
     useful for creating a WorkerBase that wraps another WorkerBase instance,
     e.g. speculative decoding.
     """
+
     worker: WorkerBase
 
     def __init__(
@@ -240,7 +241,7 @@ class WorkerInput:
         )
 
     def as_broadcastable_tensor_dict(
-            self) -> Dict[str, Union[int, torch.Tensor]]:
+        self, ) -> Dict[str, Union[int, torch.Tensor]]:
         """
         Extract broadcastable fields.
         """
@@ -265,6 +266,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     If custom control plane logic is needed to transfer metadata, or if the
     model runner cannot inherit from ModelRunnerBase, use WorkerBase instead.
     """
+
     is_driver_worker: bool
     model_runner: ModelRunnerBase
     observability_config: Optional[ObservabilityConfig] = None
@@ -310,10 +312,10 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         raise NotImplementedError
 
     def _get_worker_input_from_broadcast(
-        self
+        self,
     ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
             str, torch.Tensor]]]:
-        """ Get the worker input from the broadcasted tensor dict. """
+        """Get the worker input from the broadcasted tensor dict."""
         assert self.do_metadata_broadcast
         assert not self.is_driver_worker
         broadcast_data = broadcast_tensor_dict(src=0)
@@ -321,9 +323,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             return None
 
         worker_input = WorkerInput.from_broadcasted_tensor_dict(broadcast_data)
-        model_input = (
-            self.model_runner.make_model_input_from_broadcasted_tensor_dict(
-                broadcast_data))
+        model_input = self.model_runner.make_model_input_from_broadcasted_tensor_dict(
+            broadcast_data)
 
         kwargs = extract_previous_hidden_states(broadcast_data)
 
@@ -332,16 +333,16 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
     ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
-        """ Get the driver input and broadcast it to other workers.  """
+        """Get the driver input and broadcast it to other workers."""
         assert self.is_driver_worker
 
         worker_input: WorkerInput = self.prepare_worker_input(
             execute_model_req=execute_model_req)
-        model_input: ModelRunnerInputBase = (
-            self.model_runner.prepare_model_input(
-                execute_model_req.seq_group_metadata_list,
-                execute_model_req.virtual_engine,
-                execute_model_req.finished_requests_ids))
+        model_input: ModelRunnerInputBase = self.model_runner.prepare_model_input(
+            execute_model_req.seq_group_metadata_list,
+            execute_model_req.virtual_engine,
+            execute_model_req.finished_requests_ids,
+        )
 
         kwargs = extract_previous_hidden_states(execute_model_req)
 
@@ -397,7 +398,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
-        if (execute_model_req is not None and execute_model_req.spec_step_idx):
+        if execute_model_req is not None and execute_model_req.spec_step_idx:
             kwargs["spec_step_idx"] = execute_model_req.spec_step_idx
 
         self.execute_worker(worker_input)
@@ -419,8 +420,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         output = self.model_runner.execute_model(
             model_input=model_input,
-            kv_caches=self.kv_cache[worker_input.virtual_engine]
-            if self.kv_cache is not None else None,
+            kv_caches=(self.kv_cache[worker_input.virtual_engine]
+                       if self.kv_cache is not None else None),
             intermediate_tensors=intermediate_tensors,
             num_steps=num_steps,
             **kwargs,
@@ -441,8 +442,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 and self.observability_config.collect_model_execute_time
                 and output is not None):
             for o in output:
-                o.model_execute_time = (orig_model_execute_time +
-                                        model_execute_time)
+                o.model_execute_time = orig_model_execute_time + model_execute_time
 
         # output is List[SamplerOutput]
         return output
@@ -450,7 +450,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     def _execute_model_spmd(
         self,
         execute_model_req: ExecuteModelRequest,
-        intermediate_tensors: Optional[IntermediateTensors] = None
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Optional[List[SamplerOutput]]:
         """
         Execute model in Single Program Multiple Data (SPMD) fashion.
@@ -462,9 +462,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             "ExecuteModelRequest")
         worker_input: WorkerInput = self.prepare_worker_input(
             execute_model_req=execute_model_req)
-        model_input: ModelRunnerInputBase = (
-            self.model_runner.prepare_model_input(
-                execute_model_req.seq_group_metadata_list))
+        model_input: ModelRunnerInputBase = self.model_runner.prepare_model_input(
+            execute_model_req.seq_group_metadata_list)
 
         self.execute_worker(worker_input)
 
@@ -476,8 +475,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         return self.model_runner.execute_model(
             model_input=model_input,
-            kv_caches=self.kv_cache[worker_input.virtual_engine]
-            if self.kv_cache is not None else None,
+            kv_caches=(self.kv_cache[worker_input.virtual_engine]
+                       if self.kv_cache is not None else None),
             intermediate_tensors=intermediate_tensors,
             **kwargs,
         )
@@ -519,6 +518,7 @@ class WorkerWrapperBase:
             if trust_remote_code:
                 # note: lazy import to avoid importing torch before initializing
                 from vllm.utils import init_cached_hf_modules
+
                 init_cached_hf_modules()
 
     def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
@@ -533,7 +533,7 @@ class WorkerWrapperBase:
     def update_environment_variables(self, envs_list: List[Dict[str,
                                                                 str]]) -> None:
         envs = envs_list[self.rpc_rank]
-        key = 'CUDA_VISIBLE_DEVICES'
+        key = "CUDA_VISIBLE_DEVICES"
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
             # suppress the warning in `update_environment_variables`
@@ -547,11 +547,13 @@ class WorkerWrapperBase:
         """
         kwargs = all_kwargs[self.rpc_rank]
         self.vllm_config = kwargs.get("vllm_config", None)
-        assert self.vllm_config is not None, (
-            "vllm_config is required to initialize the worker")
+        assert (
+            self.vllm_config
+            is not None), "vllm_config is required to initialize the worker"
         enable_trace_function_call_for_thread(self.vllm_config)
 
         from vllm.plugins import load_general_plugins
+
         load_general_plugins()
 
         if isinstance(self.vllm_config.parallel_config.worker_cls, str):
@@ -588,7 +590,10 @@ class WorkerWrapperBase:
                     worker_extension_cls, )
                 logger.info(
                     "Injected %s into %s for extended collective_rpc calls %s",
-                    worker_extension_cls, worker_class, extended_calls)
+                    worker_extension_cls,
+                    worker_class,
+                    extended_calls,
+                )
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
@@ -625,10 +630,10 @@ class WorkerWrapperBase:
 
 
 def extract_previous_hidden_states(
-        data: Union[ExecuteModelRequest, Dict[str, torch.Tensor]]) -> \
-            Dict[str, torch.Tensor]:
+    data: Union[ExecuteModelRequest, Dict[str, torch.Tensor]],
+) -> Dict[str, torch.Tensor]:
     """If data contains previous_hidden_states, extract it. This returns a dict
-    which can be used directly as additional kwargs in any following 
+    which can be used directly as additional kwargs in any following
     execute_model calls. This is used in draft models like EAGLE."""
     output = {}
 
@@ -638,7 +643,7 @@ def extract_previous_hidden_states(
         if "previous_hidden_states" in data:
             output["previous_hidden_states"] = data["previous_hidden_states"]
     elif data.previous_hidden_states is not None:
-        output["previous_hidden_states"] = data.previous_hidden_states\
-            .hidden_states
+        output[
+            "previous_hidden_states"] = data.previous_hidden_states.hidden_states
 
     return output

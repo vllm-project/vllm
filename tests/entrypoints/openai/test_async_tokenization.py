@@ -47,14 +47,17 @@ async def client(server):
     argnames=["create_func_gen", "content_body"],
     argvalues=[
         (lambda x: x.completions.create, {
-            "prompt": " ".join(['A'] * 10_000)
+            "prompt": " ".join(["A"] * 10_000)
         }),
-        (lambda x: x.chat.completions.create, {
-            "messages": [{
-                "role": "user",
-                "content": " ".join(['A'] * 10_000)
-            }]
-        }),
+        (
+            lambda x: x.chat.completions.create,
+            {
+                "messages": [{
+                    "role": "user",
+                    "content": " ".join(["A"] * 10_000)
+                }]
+            },
+        ),
     ],
 )
 async def test_with_and_without_truncate(
@@ -67,13 +70,13 @@ async def test_with_and_without_truncate(
     body = {"model": MODEL_NAME, **content_body, "max_tokens": 10}
 
     num_requests = 10
-    truncate_prompt_tokens = ([1000] * (num_requests // 2) + [None] *
-                              (num_requests - num_requests // 2))
+    truncate_prompt_tokens = [1000] * (num_requests // 2) + [None] * (
+        num_requests - num_requests // 2)
     random.shuffle(truncate_prompt_tokens)
 
     bodies = [{
         **body, "extra_body": {
-            'truncate_prompt_tokens': t
+            "truncate_prompt_tokens": t
         }
     } for t in truncate_prompt_tokens]
 
@@ -94,17 +97,23 @@ async def test_with_and_without_truncate(
     argnames=["create_func_gen", "content_body"],
     argvalues=[
         (lambda x: x.completions.create, {
-            "prompt": " ".join(['A'] * 300_000)
+            "prompt": " ".join(["A"] * 300_000)
         }),
-        (lambda x: x.completions.create, {
-            "prompt": [" ".join(['A'] * 300_000)] * 2
-        }),
-        (lambda x: x.chat.completions.create, {
-            "messages": [{
-                "role": "user",
-                "content": " ".join(['A'] * 300_000)
-            }]
-        }),
+        (
+            lambda x: x.completions.create,
+            {
+                "prompt": [" ".join(["A"] * 300_000)] * 2
+            },
+        ),
+        (
+            lambda x: x.chat.completions.create,
+            {
+                "messages": [{
+                    "role": "user",
+                    "content": " ".join(["A"] * 300_000)
+                }]
+            },
+        ),
     ],
 )
 async def test_healthcheck_response_time(

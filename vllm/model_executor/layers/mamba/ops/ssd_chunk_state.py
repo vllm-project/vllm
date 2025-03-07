@@ -16,15 +16,15 @@ from .mamba_ssm import softplus
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_H': 1}),
-        triton.Config({'BLOCK_SIZE_H': 2}),
-        triton.Config({'BLOCK_SIZE_H': 4}),
-        triton.Config({'BLOCK_SIZE_H': 8}),
-        triton.Config({'BLOCK_SIZE_H': 16}),
-        triton.Config({'BLOCK_SIZE_H': 32}),
-        triton.Config({'BLOCK_SIZE_H': 64}),
+        triton.Config({"BLOCK_SIZE_H": 1}),
+        triton.Config({"BLOCK_SIZE_H": 2}),
+        triton.Config({"BLOCK_SIZE_H": 4}),
+        triton.Config({"BLOCK_SIZE_H": 8}),
+        triton.Config({"BLOCK_SIZE_H": 16}),
+        triton.Config({"BLOCK_SIZE_H": 32}),
+        triton.Config({"BLOCK_SIZE_H": 64}),
     ],
-    key=['chunk_size', 'nheads'],
+    key=["chunk_size", "nheads"],
 )
 @triton.jit
 def _chunk_cumsum_fwd_kernel(
@@ -82,14 +82,17 @@ def _chunk_cumsum_fwd_kernel(
                                   offs_c[None, :] * stride_dA_cs_csize)
     chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
 
-    dt = tl.load(dt_ptrs,
-                 mask=(offs_h[:, None] < nheads) &
-                 (offs_c[None, :] < chunk_size_limit),
-                 other=0.0).to(tl.float32)
+    dt = tl.load(
+        dt_ptrs,
+        mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit),
+        other=0.0,
+    ).to(tl.float32)
     if HAS_DT_BIAS:
-        dt_bias = tl.load(dt_bias_ptr + offs_h * stride_dt_bias_head,
-                          mask=offs_h < nheads,
-                          other=0.0).to(tl.float32)
+        dt_bias = tl.load(
+            dt_bias_ptr + offs_h * stride_dt_bias_head,
+            mask=offs_h < nheads,
+            other=0.0,
+        ).to(tl.float32)
         dt += dt_bias[:, None]
     if DT_SOFTPLUS:
         dt = tl.where(dt <= 20.0, softplus(dt), dt)
@@ -97,95 +100,110 @@ def _chunk_cumsum_fwd_kernel(
     # dt = tl.clamp(dt, dt_min, dt_max)
     dt = tl.minimum(tl.maximum(dt, dt_min), dt_max)
     dt = tl.where(
-        (offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit), dt,
-        0.0)
-    tl.store(dt_out_ptrs,
-             dt,
-             mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size))
+        (offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit),
+        dt,
+        0.0,
+    )
+    tl.store(
+        dt_out_ptrs,
+        dt,
+        mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size),
+    )
     A = tl.load(A_ptrs, mask=offs_h < nheads, other=0.0).to(tl.float32)
     dA = dt * A[:, None]
     dA_cs = tl.cumsum(dA, axis=1)
-    tl.store(dA_cs_ptrs,
-             dA_cs,
-             mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size))
+    tl.store(
+        dA_cs_ptrs,
+        dA_cs,
+        mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size),
+    )
 
 
 @triton.autotune(
     configs=[
         triton.Config(
             {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 256,
-                'BLOCK_SIZE_K': 64
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 64
             },
             num_stages=3,
-            num_warps=8),
+            num_warps=8,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 256,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=4,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 128,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=4,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 64,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=4,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 128,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=4,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 32,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=4,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 32,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=5,
-            num_warps=2),
+            num_warps=2,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 32,
-                'BLOCK_SIZE_N': 64,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=5,
-            num_warps=2),
+            num_warps=2,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 64,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=4,
-            num_warps=2),
+            num_warps=2,
+        ),
     ],
-    key=['hdim', 'dstate', 'chunk_size'],
+    key=["hdim", "dstate", "chunk_size"],
 )
 @triton.jit
 def _chunk_state_fwd_kernel(
@@ -240,13 +258,16 @@ def _chunk_state_fwd_kernel(
     num_pid_n = tl.cdiv(dstate, BLOCK_SIZE_N)
     pid_m = tl.program_id(axis=0) // num_pid_n
     pid_n = tl.program_id(axis=0) % num_pid_n
-    b_ptr += pid_b * stride_b_batch + pid_c * chunk_size * stride_b_seqlen + (
-        pid_h // nheads_ngroups_ratio) * stride_b_head
-    x_ptr += pid_b * stride_x_batch + pid_c * chunk_size * stride_x_seqlen + pid_h * stride_x_head
+    b_ptr += (pid_b * stride_b_batch + pid_c * chunk_size * stride_b_seqlen +
+              (pid_h // nheads_ngroups_ratio) * stride_b_head)
+    x_ptr += (pid_b * stride_x_batch + pid_c * chunk_size * stride_x_seqlen +
+              pid_h * stride_x_head)
     dt_ptr += pid_b * stride_dt_batch + pid_c * stride_dt_chunk + pid_h * stride_dt_head
-    dA_cumsum_ptr += pid_b * stride_dA_cs_batch + pid_c * stride_dA_cs_chunk + pid_h * stride_dA_cs_head
+    dA_cumsum_ptr += (pid_b * stride_dA_cs_batch + pid_c * stride_dA_cs_chunk +
+                      pid_h * stride_dA_cs_head)
     if HAS_SEQ_IDX:
-        seq_idx_ptr += pid_b * stride_seq_idx_batch + pid_c * chunk_size * stride_seq_idx_seqlen
+        seq_idx_ptr += (pid_b * stride_seq_idx_batch +
+                        pid_c * chunk_size * stride_seq_idx_seqlen)
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -269,14 +290,18 @@ def _chunk_state_fwd_kernel(
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, chunk_size_limit, BLOCK_SIZE_K):
-        x = tl.load(x_ptrs,
-                    mask=(offs_m[:, None] < hdim) &
-                    (offs_k[None, :] < chunk_size_limit - k),
-                    other=0.0)
-        b = tl.load(b_ptrs,
-                    mask=(offs_k[:, None] < chunk_size_limit - k) &
-                    (offs_n[None, :] < dstate),
-                    other=0.0).to(tl.float32)
+        x = tl.load(
+            x_ptrs,
+            mask=(offs_m[:, None] < hdim) &
+            (offs_k[None, :] < chunk_size_limit - k),
+            other=0.0,
+        )
+        b = tl.load(
+            b_ptrs,
+            mask=(offs_k[:, None] < chunk_size_limit - k) &
+            (offs_n[None, :] < dstate),
+            other=0.0,
+        ).to(tl.float32)
         dA_cs_k = tl.load(dA_cumsum_ptrs,
                           mask=offs_k < chunk_size_limit - k,
                           other=0.0).to(tl.float32)
@@ -289,8 +314,11 @@ def _chunk_state_fwd_kernel(
         if not HAS_SEQ_IDX:
             scale = tl.exp(dA_cs_last - dA_cs_k) * dt_k
         else:
-            scale = tl.where(seq_idx_k == seq_idx_last,
-                             tl.exp(dA_cs_last - dA_cs_k) * dt_k, 0.0)
+            scale = tl.where(
+                seq_idx_k == seq_idx_last,
+                tl.exp(dA_cs_last - dA_cs_k) * dt_k,
+                0.0,
+            )
         b *= scale[:, None]
         b = b.to(x_ptr.dtype.element_ty)
         acc += tl.dot(x, b)
@@ -302,7 +330,8 @@ def _chunk_state_fwd_kernel(
             seq_idx_ptrs += BLOCK_SIZE_K * stride_seq_idx_seqlen
     states = acc.to(states_ptr.dtype.element_ty)
 
-    states_ptr += pid_b * stride_states_batch + pid_c * stride_states_chunk + pid_h * stride_states_head
+    states_ptr += (pid_b * stride_states_batch + pid_c * stride_states_chunk +
+                   pid_h * stride_states_head)
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     states_ptrs = states_ptr + (offs_m[:, None] * stride_states_hdim +
@@ -315,78 +344,87 @@ def _chunk_state_fwd_kernel(
     configs=[
         triton.Config(
             {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 256,
-                'BLOCK_SIZE_K': 64
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 64
             },
             num_stages=3,
-            num_warps=8),
+            num_warps=8,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 256,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 256,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=4,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 128,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=4,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 64,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=4,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 128,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=4,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 32,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 128,
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=4,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 32,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=5,
-            num_warps=2),
+            num_warps=2,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 32,
-                'BLOCK_SIZE_N': 64,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 32,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=5,
-            num_warps=2),
+            num_warps=2,
+        ),
         triton.Config(
             {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 64,
-                'BLOCK_SIZE_K': 32
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32
             },
             num_stages=4,
-            num_warps=2),
+            num_warps=2,
+        ),
     ],
-    key=['hdim', 'dstate', 'chunk_size'],
+    key=["hdim", "dstate", "chunk_size"],
 )
 @triton.jit
 def _chunk_state_varlen_kernel(
@@ -443,12 +481,13 @@ def _chunk_state_varlen_kernel(
     pid_n = tl.program_id(axis=0) % num_pid_n
     end_idx = tl.load(cu_seqlens_ptr + pid_b + 1)
     pid_c = (end_idx - 1) // chunk_size
-    b_ptr += pid_c * chunk_size * stride_b_seqlen + (
-        pid_h // nheads_ngroups_ratio) * stride_b_head
+    b_ptr += (pid_c * chunk_size * stride_b_seqlen +
+              (pid_h // nheads_ngroups_ratio) * stride_b_head)
     x_ptr += pid_c * chunk_size * stride_x_seqlen + pid_h * stride_x_head
     dt_ptr += pid_c * stride_dt_chunk + pid_h * stride_dt_head
     dA_cumsum_ptr += pid_c * stride_dA_cs_chunk + pid_h * stride_dA_cs_head
-    chunk_states_ptr += pid_c * stride_chunk_states_chunk + pid_h * stride_chunk_states_head
+    chunk_states_ptr += (pid_c * stride_chunk_states_chunk +
+                         pid_h * stride_chunk_states_head)
 
     if HAS_INITSTATES:
         # if there are init states provided, we differentiate between states (which
@@ -474,16 +513,20 @@ def _chunk_state_varlen_kernel(
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, chunk_size_limit, BLOCK_SIZE_K):
-        x = tl.load(x_ptrs,
-                    mask=(offs_m[:, None] < hdim) &
-                    (offs_k[None, :] < chunk_size_limit - k) &
-                    (offs_k[None, :] >= start_idx_cur - k),
-                    other=0.0)
-        b = tl.load(b_ptrs,
-                    mask=(offs_k[:, None] < chunk_size_limit - k) &
-                    (offs_n[None, :] < dstate) &
-                    (offs_k[:, None] >= start_idx_cur - k),
-                    other=0.0).to(tl.float32)
+        x = tl.load(
+            x_ptrs,
+            mask=(offs_m[:, None] < hdim)
+            & (offs_k[None, :] < chunk_size_limit - k)
+            & (offs_k[None, :] >= start_idx_cur - k),
+            other=0.0,
+        )
+        b = tl.load(
+            b_ptrs,
+            mask=(offs_k[:, None] < chunk_size_limit - k)
+            & (offs_n[None, :] < dstate)
+            & (offs_k[:, None] >= start_idx_cur - k),
+            other=0.0,
+        ).to(tl.float32)
         dA_cs_k = tl.load(dA_cumsum_ptrs,
                           mask=offs_k < chunk_size_limit - k,
                           other=0.0).to(tl.float32)
@@ -491,7 +534,9 @@ def _chunk_state_varlen_kernel(
                        other=0.0).to(tl.float32)
         scale = tl.where(
             (offs_k >= start_idx_cur - k) & (offs_k < chunk_size_limit - k),
-            tl.exp(dA_cs_last - dA_cs_k) * dt_k, 0.0)
+            tl.exp(dA_cs_last - dA_cs_k) * dt_k,
+            0.0,
+        )
         b *= scale[:, None]
         b = b.to(x_ptr.dtype.element_ty)
         acc += tl.dot(x, b)
@@ -504,9 +549,7 @@ def _chunk_state_varlen_kernel(
     # If HAS_INITSTATES==True need to consider two possiblties
     # - if start_idx < pid_c * chunk_size, then we need to take the past_states_ptrs
     # - if state_idx >= pid * chunk_size, then we need to insert initstates
-    if ((start_idx < pid_c * chunk_size)  # first chunk
-            or (HAS_INITSTATES)):
-
+    if (start_idx < pid_c * chunk_size) or (HAS_INITSTATES):  # first chunk
         dA_cs_boundary = 0.0  # default
 
         if not HAS_INITSTATES:
@@ -514,7 +557,6 @@ def _chunk_state_varlen_kernel(
                 offs_m[:, None] * stride_chunk_states_hdim +
                 offs_n[None, :] * stride_chunk_states_dstate)
         else:
-
             # - this seems repetitve, buts its to help the compiler
             if start_idx < pid_c * chunk_size:
                 past_states_ptrs = chunk_states_ptr + (
@@ -533,10 +575,11 @@ def _chunk_state_varlen_kernel(
                                               1) * stride_dA_cs_csize).to(
                                                   tl.float32)
 
-        past_states = tl.load(past_states_ptrs,
-                              mask=(offs_m[:, None] < hdim) &
-                              (offs_n[None, :] < dstate),
-                              other=0.0).to(tl.float32)
+        past_states = tl.load(
+            past_states_ptrs,
+            mask=(offs_m[:, None] < hdim) & (offs_n[None, :] < dstate),
+            other=0.0,
+        ).to(tl.float32)
 
         scale = tl.exp(dA_cs_last - dA_cs_boundary)
         acc += past_states * scale
@@ -552,31 +595,40 @@ def _chunk_state_varlen_kernel(
     tl.store(states_ptrs, states, mask=c_mask)
 
 
-def _chunk_cumsum_fwd(dt,
-                      A,
-                      chunk_size,
-                      dt_bias=None,
-                      dt_softplus=False,
-                      dt_limit=(0.0, float("inf"))):
+def _chunk_cumsum_fwd(
+        dt,
+        A,
+        chunk_size,
+        dt_bias=None,
+        dt_softplus=False,
+        dt_limit=(0.0, float("inf")),
+):
     batch, seqlen, nheads = dt.shape
     assert A.shape == (nheads, )
     if dt_bias is not None:
         assert dt_bias.shape == (nheads, )
     nchunks = math.ceil(seqlen / chunk_size)
-    dt_out = torch.empty(batch,
-                         nheads,
-                         nchunks,
-                         chunk_size,
-                         device=dt.device,
-                         dtype=torch.float32)
-    dA_cumsum = torch.empty(batch,
-                            nheads,
-                            nchunks,
-                            chunk_size,
-                            device=dt.device,
-                            dtype=torch.float32)
-    grid_chunk_cs = lambda META: (batch, nchunks,
-                                  triton.cdiv(nheads, META['BLOCK_SIZE_H']))
+    dt_out = torch.empty(
+        batch,
+        nheads,
+        nchunks,
+        chunk_size,
+        device=dt.device,
+        dtype=torch.float32,
+    )
+    dA_cumsum = torch.empty(
+        batch,
+        nheads,
+        nchunks,
+        chunk_size,
+        device=dt.device,
+        dtype=torch.float32,
+    )
+    grid_chunk_cs = lambda META: (
+        batch,
+        nchunks,
+        triton.cdiv(nheads, META["BLOCK_SIZE_H"]),
+    )
     with torch.cuda.device(dt.device.index):
         _chunk_cumsum_fwd_kernel[grid_chunk_cs](
             dt,
@@ -630,12 +682,17 @@ def _chunk_state_fwd(B,
         assert states.shape == (batch, nchunks, nheads, headdim, dstate)
     else:
         states_dtype = torch.float32 if states_in_fp32 else B.dtype
-        states = torch.empty((batch, nchunks, nheads, headdim, dstate),
-                             device=x.device,
-                             dtype=states_dtype)
+        states = torch.empty(
+            (batch, nchunks, nheads, headdim, dstate),
+            device=x.device,
+            dtype=states_dtype,
+        )
     grid = lambda META: (
-        triton.cdiv(headdim, META['BLOCK_SIZE_M']) * triton.cdiv(
-            dstate, META['BLOCK_SIZE_N']), batch * nchunks, nheads)
+        triton.cdiv(headdim, META["BLOCK_SIZE_M"]) * triton.cdiv(
+            dstate, META["BLOCK_SIZE_N"]),
+        batch * nchunks,
+        nheads,
+    )
     with torch.cuda.device(x.device.index):
         _chunk_state_fwd_kernel[grid](
             x,
@@ -699,14 +756,20 @@ def chunk_state_varlen(B,
     if initial_states is not None:
         assert initial_states.shape == (batch, nheads, headdim, dstate)
 
-    states = torch.empty(batch,
-                         nheads,
-                         headdim,
-                         dstate,
-                         dtype=chunk_states.dtype,
-                         device=chunk_states.device)
-    grid = lambda META: (triton.cdiv(headdim, META['BLOCK_SIZE_M']) * triton.
-                         cdiv(dstate, META['BLOCK_SIZE_N']), batch, nheads)
+    states = torch.empty(
+        batch,
+        nheads,
+        headdim,
+        dstate,
+        dtype=chunk_states.dtype,
+        device=chunk_states.device,
+    )
+    grid = lambda META: (
+        triton.cdiv(headdim, META["BLOCK_SIZE_M"]) * triton.cdiv(
+            dstate, META["BLOCK_SIZE_N"]),
+        batch,
+        nheads,
+    )
     with torch.cuda.device(x.device.index):
         _chunk_state_varlen_kernel[grid](
             x,
@@ -742,9 +805,12 @@ def chunk_state_varlen(B,
             states.stride(1),
             states.stride(2),
             states.stride(3),
-            *((initial_states.stride(0), initial_states.stride(1),
-               initial_states.stride(2),
-               initial_states.stride(3)) if initial_states is not None else
-              (0, 0, 0, 0)),
-            HAS_INITSTATES=initial_states is not None)
+            *((
+                initial_states.stride(0),
+                initial_states.stride(1),
+                initial_states.stride(2),
+                initial_states.stride(3),
+            ) if initial_states is not None else (0, 0, 0, 0)),
+            HAS_INITSTATES=initial_states is not None,
+        )
     return states

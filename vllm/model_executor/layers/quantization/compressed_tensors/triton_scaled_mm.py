@@ -16,13 +16,29 @@ def is_weak_contiguous(x: torch.Tensor):
 
 
 @triton.jit
-def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
-                     M, N, K, stride_am, stride_ak, stride_bk, stride_bn,
-                     stride_cm, stride_cn, ACCUMULATOR_DTYPE: tl.constexpr,
-                     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
-                     BLOCK_SIZE_K: tl.constexpr,
-                     BLOCK_SIZE_SCALE_A: tl.constexpr,
-                     BLOCK_SIZE_SCALE_B: tl.constexpr):
+def scaled_mm_kernel(
+    a_ptr,
+    b_ptr,
+    scale_a_ptr,
+    scale_b_ptr,
+    c_ptr,
+    bias_ptr,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    ACCUMULATOR_DTYPE: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_SCALE_A: tl.constexpr,
+    BLOCK_SIZE_SCALE_B: tl.constexpr,
+):
     pid = tl.program_id(axis=0)
 
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
@@ -46,10 +62,10 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
     masks_bn = offsets_bn < N
 
     offsets_k = tl.arange(0, BLOCK_SIZE_K).to(tl.int64)
-    offsets_a = (stride_am * offsets_am[:, None] +
-                 stride_ak * offsets_k[None, :])
-    offsets_b = (stride_bk * offsets_k[:, None] +
-                 stride_bn * offsets_bn[None, :])
+    offsets_a = stride_am * offsets_am[:,
+                                       None] + stride_ak * offsets_k[None, :]
+    offsets_b = stride_bk * offsets_k[:,
+                                      None] + stride_bn * offsets_bn[None, :]
 
     # NOTE: BLOCK_SIZE_SCALE_A could be 1 or BLOCK_SIZE_M, so need to create
     # appropriate offsets and masks for each case. Same goes for
@@ -113,8 +129,8 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)
     offs_cm = offs_cm.to(tl.int64)
     offs_cn = offs_cn.to(tl.int64)
-    c_ptrs = (c_ptr + stride_cm * offs_cm[:, None] +
-              stride_cn * offs_cn[None, :])
+    c_ptrs = c_ptr + stride_cm * offs_cm[:,
+                                         None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
 
     tl.store(c_ptrs, c, mask=c_mask)
@@ -122,16 +138,18 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
 
 # input   - [M, K]
 # weight - [K, N]
-def triton_scaled_mm(input: torch.Tensor,
-                     weight: torch.Tensor,
-                     scale_a: torch.Tensor,
-                     scale_b: torch.Tensor,
-                     out_dtype: Type[torch.dtype],
-                     bias: Optional[torch.Tensor] = None,
-                     block_size_m: int = 32,
-                     block_size_n: int = 32,
-                     block_size_k: int = 32,
-                     use_heuristic=True) -> torch.Tensor:
+def triton_scaled_mm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: Type[torch.dtype],
+    bias: Optional[torch.Tensor] = None,
+    block_size_m: int = 32,
+    block_size_n: int = 32,
+    block_size_k: int = 32,
+    use_heuristic=True,
+) -> torch.Tensor:
     M, K = input.shape
     N = weight.shape[1]
 
@@ -152,8 +170,8 @@ def triton_scaled_mm(input: torch.Tensor,
     assert is_weak_contiguous(input)
     assert is_weak_contiguous(weight)
 
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(
-        N, META['BLOCK_SIZE_N']), )
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(
+        N, META["BLOCK_SIZE_N"]), )
 
     result = torch.empty((M, N), dtype=out_dtype, device=input.device)
 
@@ -180,26 +198,28 @@ def triton_scaled_mm(input: torch.Tensor,
 
     # A = input, B = weight, C = result
     # A = M x K, B = K x N, C = M x N
-    scaled_mm_kernel[grid](input,
-                           weight,
-                           scale_a,
-                           scale_b,
-                           result,
-                           bias,
-                           M,
-                           N,
-                           K,
-                           input.stride(0),
-                           input.stride(1),
-                           weight.stride(0),
-                           weight.stride(1),
-                           result.stride(0),
-                           result.stride(1),
-                           accumulator_dtype,
-                           BLOCK_SIZE_M=block_size_m,
-                           BLOCK_SIZE_N=block_size_n,
-                           BLOCK_SIZE_K=block_size_k,
-                           BLOCK_SIZE_SCALE_A=block_size_sa,
-                           BLOCK_SIZE_SCALE_B=block_size_sb)
+    scaled_mm_kernel[grid](
+        input,
+        weight,
+        scale_a,
+        scale_b,
+        result,
+        bias,
+        M,
+        N,
+        K,
+        input.stride(0),
+        input.stride(1),
+        weight.stride(0),
+        weight.stride(1),
+        result.stride(0),
+        result.stride(1),
+        accumulator_dtype,
+        BLOCK_SIZE_M=block_size_m,
+        BLOCK_SIZE_N=block_size_n,
+        BLOCK_SIZE_K=block_size_k,
+        BLOCK_SIZE_SCALE_A=block_size_sa,
+        BLOCK_SIZE_SCALE_B=block_size_sb,
+    )
 
     return result.to(out_dtype)

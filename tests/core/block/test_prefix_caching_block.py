@@ -25,18 +25,19 @@ class TestPrefixCachingBlock:
     @pytest.mark.parametrize("is_curr_block_full", [True, False])
     def test_first_block_has_correct_content_hash(seed: int, block_size: int,
                                                   is_curr_block_full: bool):
-        """Verify a block which is first in the sequence has the correct hash.
-        """
+        """Verify a block which is first in the sequence has the correct hash."""
         random.seed(seed)
-        num_to_fill = block_size if is_curr_block_full else random.randint(
-            0, block_size - 1)
+        num_to_fill = (block_size if is_curr_block_full else random.randint(
+            0, block_size - 1))
         token_ids = list(range(num_to_fill))
         mock_allocator = MagicMock(spec=PrefixCachingBlockAllocator)
 
-        block_with_prev = PrefixCachingBlock(prev_block=None,
-                                             token_ids=token_ids,
-                                             block_size=block_size,
-                                             allocator=mock_allocator)
+        block_with_prev = PrefixCachingBlock(
+            prev_block=None,
+            token_ids=token_ids,
+            block_size=block_size,
+            allocator=mock_allocator,
+        )
 
         if is_curr_block_full:
             # Expect hash since block is full.
@@ -44,7 +45,8 @@ class TestPrefixCachingBlock:
                 PrefixCachingBlock.hash_block_tokens(
                     is_first_block=True,
                     prev_block_hash=None,
-                    cur_block_token_ids=token_ids))
+                    cur_block_token_ids=token_ids,
+                ))
         else:
             # Do not expect hash since block is not full.
             assert block_with_prev.content_hash is None
@@ -54,9 +56,12 @@ class TestPrefixCachingBlock:
     @pytest.mark.parametrize("block_size", [1, 16])
     @pytest.mark.parametrize("is_curr_block_full", [True, False])
     @pytest.mark.parametrize("prev_block_has_hash", [True, False])
-    def test_nth_block_has_correct_content_hash(seed: int, block_size: int,
-                                                is_curr_block_full: bool,
-                                                prev_block_has_hash: bool):
+    def test_nth_block_has_correct_content_hash(
+        seed: int,
+        block_size: int,
+        is_curr_block_full: bool,
+        prev_block_has_hash: bool,
+    ):
         """Verify a block which is not first in the sequence has the correct
         hash.
         """
@@ -66,10 +71,10 @@ class TestPrefixCachingBlock:
         previous_block = MagicMock(spec=PrefixCachingBlock)
         prev_block_hash = random.randint(0, 1000)
         previous_block.content_hash = (prev_block_hash if prev_block_has_hash
-                                       else hash('None'))
+                                       else hash("None"))
 
-        num_to_fill = block_size if is_curr_block_full else random.randint(
-            0, block_size - 1)
+        num_to_fill = (block_size if is_curr_block_full else random.randint(
+            0, block_size - 1))
         token_ids = list(range(num_to_fill))
         mock_allocator = MagicMock(spec=PrefixCachingBlockAllocator)
 
@@ -82,11 +87,11 @@ class TestPrefixCachingBlock:
 
         if is_curr_block_full and prev_block_has_hash:
             # Expect hash since block is full and previous block has hash.
-            assert (block_with_prev.content_hash ==
-                    PrefixCachingBlock.hash_block_tokens(
-                        is_first_block=False,
-                        prev_block_hash=prev_block_hash,
-                        cur_block_token_ids=token_ids))
+            assert block_with_prev.content_hash == PrefixCachingBlock.hash_block_tokens(
+                is_first_block=False,
+                prev_block_hash=prev_block_hash,
+                cur_block_token_ids=token_ids,
+            )
         else:
             # Do not expect hash since block is not full or the previous block
             # does not have a hash.
@@ -109,13 +114,12 @@ class TestPrefixCachingBlock:
         first_chain, second_chain = (TestPrefixCachingBlock.create_chain(
             block_size=block_size,
             token_ids=token_ids,
-            num_empty_trailing_blocks=num_empty_trailing_blocks)
-                                     for _ in range(2))
+            num_empty_trailing_blocks=num_empty_trailing_blocks,
+        ) for _ in range(2))
 
         for first_chain_block, second_chain_block in zip(
                 first_chain, second_chain):
-            assert (first_chain_block.content_hash ==
-                    second_chain_block.content_hash)
+            assert first_chain_block.content_hash == second_chain_block.content_hash
 
         if not first_chain or not second_chain:
             assert first_chain == second_chain
@@ -125,8 +129,7 @@ class TestPrefixCachingBlock:
     def create_chain(block_size: int,
                      token_ids: list[int],
                      num_empty_trailing_blocks=0) -> list[PrefixCachingBlock]:
-        """Helper method which creates a chain of blocks.
-        """
+        """Helper method which creates a chain of blocks."""
         blocks: list[PrefixCachingBlock] = []
         num_blocks = math.ceil(
             len(token_ids) / block_size) + num_empty_trailing_blocks
@@ -159,9 +162,12 @@ class TestPrefixCachingBlock:
 class TestPrefixCachingBlockAllocator:
 
     @staticmethod
-    def create_allocate_lambda(allocate_type: str, allocator: BlockAllocator,
-                               prev_block: Optional[Block],
-                               token_ids: list[int]):
+    def create_allocate_lambda(
+        allocate_type: str,
+        allocator: BlockAllocator,
+        prev_block: Optional[Block],
+        token_ids: list[int],
+    ):
         if allocate_type == "immutable":
             allocate_block = lambda: allocator.allocate_immutable_block(
                 prev_block=prev_block, token_ids=token_ids)
@@ -211,7 +217,7 @@ class TestPrefixCachingBlockAllocator:
 
         # Expect all blocks to have same physical block index.
         for block in blocks:
-            assert (block.block_id == non_oom_block.block_id)
+            assert block.block_id == non_oom_block.block_id
 
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [1, 1024])
@@ -255,7 +261,7 @@ class TestPrefixCachingBlockAllocator:
         # Expect physical block indices to be the same in both chains.
         assert chain and second_chain
         for first_chain_block, second_chain_block in zip(chain, second_chain):
-            assert (first_chain_block.block_id == second_chain_block.block_id)
+            assert first_chain_block.block_id == second_chain_block.block_id
 
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [1, 1024])
@@ -325,7 +331,7 @@ class TestPrefixCachingBlockAllocator:
     @pytest.mark.parametrize("block_size", [8])
     def test_prefix_caching_block_get_num_full_blocks_touched(
             num_blocks, block_size):
-        """ Verify the allocator can correctly return the number of
+        """Verify the allocator can correctly return the number of
         blocks touched, when there are cached prefixes.
         """
         allocator_src = PrefixCachingBlockAllocator(num_blocks=num_blocks,
@@ -344,12 +350,11 @@ class TestPrefixCachingBlockAllocator:
         )
 
         # Create a chain of the same blocks in the src
-        blocks_to_swap_in = \
-            TestPrefixCachingBlockAllocator.create_immutable_chain(
-                block_size=block_size,
-                token_ids=token_ids,
-                allocator=allocator_src,
-            )
+        blocks_to_swap_in = TestPrefixCachingBlockAllocator.create_immutable_chain(
+            block_size=block_size,
+            token_ids=token_ids,
+            allocator=allocator_src,
+        )
         # All blocks are cached
         assert allocator_dst.get_num_full_blocks_touched(
             blocks_to_swap_in) == 0
@@ -464,7 +469,7 @@ class TestPrefixCachingBlockAllocator:
         res = allocator.get_common_computed_block_ids(
             [first_computed_ids, second_computed_ids])
 
-        assert (len(res) == zero_point_blocks)
+        assert len(res) == zero_point_blocks
 
     # Test case that assume those prompted block after first immutable would
     # be freed into hashless allocator, while first immutable block get ref
@@ -517,8 +522,8 @@ class TestPrefixCachingBlockAllocator:
         # Verify initial/pre-alloc state
 
         # Ensure all blocks are free inside hashless allocator
-        assert list(allocator._hashless_allocator._free_block_indices
-                    ) == all_blocks_list
+        assert (list(allocator._hashless_allocator._free_block_indices) ==
+                all_blocks_list)
         # Ensure no tracked blocks
         assert len(allocator._block_tracker.keys()) == num_blocks
         for block_id in range(num_blocks):
@@ -535,13 +540,14 @@ class TestPrefixCachingBlockAllocator:
         for i in range(num_blocks):
             block = allocator.allocate_immutable_block(
                 prev_block=None,
-                token_ids=token_ids[block_size * i:block_size * (i + 1)])
+                token_ids=token_ids[block_size * i:block_size * (i + 1)],
+            )
             new_block.append(block)
 
         # Verify post-alloc state
 
         # Ensure no blocks are free inside hashless allocator
-        assert (len(allocator._hashless_allocator._free_block_indices) == 0)
+        assert len(allocator._hashless_allocator._free_block_indices) == 0
         # Ensure all blocks are tracked
         assert len(allocator._block_tracker.keys()) == num_blocks
         for block_id in range(num_blocks):
@@ -843,8 +849,7 @@ class TestPrefixCachingBlockAllocator:
         allocator: PrefixCachingBlockAllocator,
         extra_hash: Optional[int] = None,
     ) -> list[PrefixCachingBlock]:
-        """Helper method which creates a chain of blocks.
-        """
+        """Helper method which creates a chain of blocks."""
         blocks: list[Block] = []
         num_blocks = math.ceil(len(token_ids) / block_size)
 
@@ -859,7 +864,8 @@ class TestPrefixCachingBlockAllocator:
             prev_block = allocator.allocate_immutable_block(
                 prev_block=prev_block,
                 token_ids=block_token_ids,
-                extra_hash=extra_hash)
+                extra_hash=extra_hash,
+            )
             blocks.append(prev_block)
 
         return blocks

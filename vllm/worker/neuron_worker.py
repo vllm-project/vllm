@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A Neuron worker class."""
+
 from typing import List, Optional, Tuple
 
 import torch
@@ -18,8 +19,7 @@ from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
 
 
 class NeuronWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
-    """A worker class that executes the model on a group of neuron cores.
-    """
+    """A worker class that executes the model on a group of neuron cores."""
 
     def __init__(
         self,
@@ -36,6 +36,7 @@ class NeuronWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
+
             init_cached_hf_modules()
 
         self.model_runner: NeuronModelRunner = NeuronModelRunner(
@@ -49,10 +50,10 @@ class NeuronWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         assert execute_model_req is not None
         assert (not execute_model_req.blocks_to_swap_in
                 and not execute_model_req.blocks_to_swap_out
-                and not execute_model_req.blocks_to_copy), (
-                    "Cache operations are not supported for Neuron backend.")
-        assert execute_model_req.num_lookahead_slots == 0, (
-            "lookahead not supported for Neuron backend.")
+                and not execute_model_req.blocks_to_copy
+                ), "Cache operations are not supported for Neuron backend."
+        assert (execute_model_req.num_lookahead_slots == 0
+                ), "lookahead not supported for Neuron backend."
         output = LocalOrDistributedWorkerBase.execute_model(
             self, execute_model_req)
         return output
@@ -85,8 +86,7 @@ class NeuronWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
-        """Initialize the KV cache.
-        """
+        """Initialize the KV cache."""
 
         # Different values are not tested.
         assert num_cpu_blocks == 0

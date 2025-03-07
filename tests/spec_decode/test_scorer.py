@@ -42,18 +42,23 @@ def assert_score_equal(score1: SpeculativeScores,
         score2.token_ids), f"{score1.token_ids}, {score2.token_ids}"
 
 
-@pytest.mark.parametrize('model_name', ['facebook/opt-125m'])
-@pytest.mark.parametrize('batch_size', [1, 2, 4, 8, 16])
-@pytest.mark.parametrize('max_propose_len', [1, 3, 5])
-@pytest.mark.parametrize('mixed_propose_len', [True])
-@pytest.mark.parametrize('device', ['cuda'])
-@pytest.mark.parametrize('prefill_chunking', [False, True])
-def test_scorer(model_name: str, batch_size: int, max_propose_len: int,
-                mixed_propose_len: bool, device: str,
-                prefill_chunking: bool) -> None:
+@pytest.mark.parametrize("model_name", ["facebook/opt-125m"])
+@pytest.mark.parametrize("batch_size", [1, 2, 4, 8, 16])
+@pytest.mark.parametrize("max_propose_len", [1, 3, 5])
+@pytest.mark.parametrize("mixed_propose_len", [True])
+@pytest.mark.parametrize("device", ["cuda"])
+@pytest.mark.parametrize("prefill_chunking", [False, True])
+def test_scorer(
+    model_name: str,
+    batch_size: int,
+    max_propose_len: int,
+    mixed_propose_len: bool,
+    device: str,
+    prefill_chunking: bool,
+) -> None:
     """
     Compare the batch expansion scorer and mqa scorer return the same score.
-    We test for both queries with the same propose length and different 
+    We test for both queries with the same propose length and different
     propose length, as well as mixed prefill-decode batches.
     """
     seed = 0
@@ -63,8 +68,7 @@ def test_scorer(model_name: str, batch_size: int, max_propose_len: int,
                                   num_gpu_blocks, seed)
     scorer_worker.model_runner.disable_logprobs = True  # accessed by mqa_scorer
     scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor = True
-    scorer_worker.model_runner.model.sampler.\
-        should_modify_greedy_probs_inplace = True
+    scorer_worker.model_runner.model.sampler.should_modify_greedy_probs_inplace = True
 
     vocab_size = scorer_worker.vocab_size
 
@@ -78,21 +82,23 @@ def test_scorer(model_name: str, batch_size: int, max_propose_len: int,
                         ] * non_zero_cnt + [0] * (batch_size - non_zero_cnt)
         random.shuffle(propose_lens)
 
-    seq_group_metadatalist, _, _ = create_batch(batch_size,
-                                                max_propose_len,
-                                                block_size=block_size,
-                                                num_gpu_blocks=num_gpu_blocks)
+    seq_group_metadatalist, _, _ = create_batch(
+        batch_size,
+        max_propose_len,
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+    )
 
-    if mixed_propose_len and prefill_chunking and (n_prefills :=
-                                                   batch_size - non_zero_cnt):
-        prefill, _, _ = create_batch(n_prefills,
-                                     None,
-                                     prefill_chunk_size=4,
-                                     block_size=block_size,
-                                     num_gpu_blocks=num_gpu_blocks,
-                                     seq_ids=list(
-                                         range(batch_size,
-                                               batch_size + n_prefills)))
+    if (mixed_propose_len and prefill_chunking
+            and (n_prefills := batch_size - non_zero_cnt)):
+        prefill, _, _ = create_batch(
+            n_prefills,
+            None,
+            prefill_chunk_size=4,
+            block_size=block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            seq_ids=list(range(batch_size, batch_size + n_prefills)),
+        )
         # re-order to guarantee prefill|decode order
         target_group_metadatalist = [
             seq_group_metadatalist[i] for i, p in enumerate(propose_lens)

@@ -83,8 +83,7 @@ class RPCProcessRequest:
     ) -> None:
         if inputs is not None:
             prompt = inputs
-        assert (prompt is not None and params is not None
-                and request_id is not None)
+        assert prompt is not None and params is not None and request_id is not None
 
         super().__init__()
 
@@ -148,17 +147,23 @@ class RPCAdapterLoadedResponse:
     request_id: str
 
 
-RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
-                      RPCUProfileRequest, RPCLoadAdapterRequest,
-                      RPCResetPrefixCacheRequest, RPCSleepRequest,
-                      RPCWakeUpRequest]
+RPC_REQUEST_T = Union[
+    RPCProcessRequest,
+    RPCAbortRequest,
+    RPCStartupRequest,
+    RPCUProfileRequest,
+    RPCLoadAdapterRequest,
+    RPCResetPrefixCacheRequest,
+    RPCSleepRequest,
+    RPCWakeUpRequest,
+]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
                           RPCError]
 
 
 def ENGINE_DEAD_ERROR(
-        error: Optional[BaseException] = None) -> MQEngineDeadError:
+    error: Optional[BaseException] = None, ) -> MQEngineDeadError:
     if error is None:
         return MQEngineDeadError(
             "Engine loop is not running. Inspect the stacktrace to "

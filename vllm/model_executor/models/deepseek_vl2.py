@@ -2,6 +2,7 @@
 
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
+
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
@@ -76,12 +77,10 @@ DeepseekVL2ImageInputs = Union[DeepseekVL2ImagePixelInputs,
 class MlpProjector(nn.Module):
 
     def __init__(self, cfg: MlpProjectorConfig):
-
         super().__init__()
 
         self.cfg = cfg
-        assert not cfg.token_pooling, (
-            "Token pooling is not supported currently.")
+        assert not cfg.token_pooling, "Token pooling is not supported currently."
 
         if cfg.projector_type == "downsample_mlp_gelu":
             mlp_depth = cfg.depth
@@ -89,7 +88,9 @@ class MlpProjector(nn.Module):
             modules = [
                 nn.Linear(
                     cfg.input_dim * cfg.downsample_ratio *
-                    cfg.downsample_ratio, cfg.n_embed * mlp_ratio)
+                    cfg.downsample_ratio,
+                    cfg.n_embed * mlp_ratio,
+                )
             ]
             for _ in range(1, mlp_depth - 1):
                 modules.append(nn.GELU())
@@ -119,10 +120,12 @@ class MlpProjector(nn.Module):
             x = F.pad(x, (0, 0, 0, pad, 0, pad), "constant", 0)
         """4 to 1 concat"""
         x = x.permute(0, 3, 1, 2)  # B, C, H, W
-        x = F.unfold(x,
-                     kernel_size=self.cfg.downsample_ratio,
-                     stride=self.cfg.downsample_ratio,
-                     padding=0)  # B, C*4, HW // 4
+        x = F.unfold(
+            x,
+            kernel_size=self.cfg.downsample_ratio,
+            stride=self.cfg.downsample_ratio,
+            padding=0,
+        )  # B, C*4, HW // 4
         x = x.permute(0, 2, 1)
 
         return self.layers(x)
@@ -152,8 +155,10 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
         if cropping:
             best_width, best_height = hf_processor.select_best_resolution(
                 (image_width, image_height))
-            num_width_tiles, num_height_tiles = (best_width // image_size,
-                                                 best_height // image_size)
+            num_width_tiles, num_height_tiles = (
+                best_width // image_size,
+                best_height // image_size,
+            )
         else:
             num_width_tiles = num_height_tiles = 1
 
@@ -166,9 +171,11 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
     def get_image_size_with_most_features(self) -> ImageSize:
         hf_config = self.get_hf_config()
         candidate_resolutions = hf_config.candidate_resolutions
-        height, width = max(candidate_resolutions,
-                            key=lambda x: self.get_num_image_tokens(
-                                image_width=x[1], image_height=x[0]))
+        height, width = max(
+            candidate_resolutions,
+            key=lambda x: self.get_num_image_tokens(image_width=x[1],
+                                                    image_height=x[0]),
+        )
         return ImageSize(width=width, height=height)
 
     def get_mm_max_tokens_per_item(
@@ -181,7 +188,8 @@ class DeepseekVL2ProcessingInfo(BaseProcessingInfo):
         max_image_tokens = self.get_num_image_tokens(
             image_height=max_image_size.height,
             image_width=max_image_size.width,
-            cropping=num_images <= 2)
+            cropping=num_images <= 2,
+        )
 
         return {"image": max_image_tokens}
 
@@ -202,9 +210,11 @@ class DeepseekVL2DummyInputsBuilder(
 
         mm_data = {
             "image":
-            self._get_dummy_images(width=max_image_size.width,
-                                   height=max_image_size.height,
-                                   num_images=num_images)
+            self._get_dummy_images(
+                width=max_image_size.width,
+                height=max_image_size.height,
+                num_images=num_images,
+            )
         }
 
         return ProcessorInputs(
@@ -217,12 +227,13 @@ class DeepseekVL2MultiModalProcessor(
         BaseMultiModalProcessor[DeepseekVL2ProcessingInfo]):
 
     def __init__(
-            self,
-            info: DeepseekVL2ProcessingInfo,
-            dummy_inputs: "BaseDummyInputsBuilder[DeepseekVL2ProcessingInfo]",
-            *,
-            cache: Optional[ProcessingCache] = None,
-            enable_sanity_checks: bool = True) -> None:
+        self,
+        info: DeepseekVL2ProcessingInfo,
+        dummy_inputs: "BaseDummyInputsBuilder[DeepseekVL2ProcessingInfo]",
+        *,
+        cache: Optional[ProcessingCache] = None,
+        enable_sanity_checks: bool = True,
+    ) -> None:
         super().__init__(
             info,
             dummy_inputs,
@@ -320,9 +331,9 @@ class DeepseekVL2MultiModalProcessor(
 @MULTIMODAL_REGISTRY.register_processor(
     DeepseekVL2MultiModalProcessor,
     info=DeepseekVL2ProcessingInfo,
-    dummy_inputs=DeepseekVL2DummyInputsBuilder)
+    dummy_inputs=DeepseekVL2DummyInputsBuilder,
+)
 class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
         "language.": "language_model.",
     })
@@ -418,7 +429,6 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def _validate_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
-
         h = w = self.vision_config.image_size
         expected_dims = (3, h, w)
 
@@ -477,7 +487,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 type="pixel_values",
                 data=self._validate_pixel_values(flatten_bn(pixel_values)),
                 images_spatial_crop=self._validate_images_spatial_crop(
-                    flatten_bn(images_spatial_crop, concat=True)))
+                    flatten_bn(images_spatial_crop, concat=True)),
+            )
 
         if image_embeds is not None:
             if not isinstance(image_embeds, torch.Tensor):
@@ -547,12 +558,14 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             # ----------------- local view add newline -----------------
             # [num_height_tiles * num_width_tiles, h * w, D] ->
             # [num_height_tiles * h, num_width_tiles * w, D]
-            local_features = rearrange(local_features,
-                                       "(th tw) (h w) d -> (th h) (tw w) d",
-                                       th=num_height_tiles,
-                                       tw=num_width_tiles,
-                                       h=h,
-                                       w=w)
+            local_features = rearrange(
+                local_features,
+                "(th tw) (h w) d -> (th h) (tw w) d",
+                th=num_height_tiles,
+                tw=num_width_tiles,
+                h=h,
+                w=w,
+            )
 
             # [D] -> [num_height_tiles * h, 1, D]
             new_lines_in_local = repeat(self.image_newline,
@@ -623,17 +636,21 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.image_token_id)
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                self.image_token_id,
+            )
         return inputs_embeds
 
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                intermediate_tensors: Optional[IntermediateTensors] = None,
-                inputs_embeds: Optional[torch.Tensor] = None,
-                **kwargs: object):
-
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ):
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -645,10 +662,12 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                                                       vision_embeddings)
             input_ids = None
 
-        hidden_states = self.language_model(input_ids,
-                                            positions,
-                                            intermediate_tensors,
-                                            inputs_embeds=inputs_embeds)
+        hidden_states = self.language_model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
 
         return hidden_states
 
@@ -669,7 +688,6 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-
         loader = AutoWeightsLoader(self)
         autoloaded_weights = loader.load_weights(weights,
                                                  mapper=self.hf_to_vllm_mapper)

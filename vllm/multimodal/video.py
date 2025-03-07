@@ -46,7 +46,8 @@ class VideoPlugin(ImagePlugin):
         return cached_get_video_processor(
             model_config.model,
             trust_remote_code=model_config.trust_remote_code,
-            **mm_processor_kwargs)
+            **mm_processor_kwargs,
+        )
 
     def _default_input_mapper(
         self,
@@ -92,6 +93,7 @@ def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
                               dtype=frames.dtype)
     # lazy import cv2 to avoid bothering users who only use text models
     import cv2
+
     for i, frame in enumerate(frames):
         resized_frame = cv2.resize(frame, (new_width, new_height))
         resized_frames[i] = resized_frame

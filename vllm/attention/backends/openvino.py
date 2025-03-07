@@ -12,8 +12,12 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.multimodal import MultiModalPlaceholderMap
 
 
-def copy_cache_block(src_tensor: ov.Tensor, dst_tensor: ov.Tensor,
-                     src_offset: int, dst_offset: int) -> None:
+def copy_cache_block(
+    src_tensor: ov.Tensor,
+    dst_tensor: ov.Tensor,
+    src_offset: int,
+    dst_offset: int,
+) -> None:
 
     def create_roi_tensor(
         tensor: ov.Tensor,
@@ -30,10 +34,8 @@ def copy_cache_block(src_tensor: ov.Tensor, dst_tensor: ov.Tensor,
         else:
             return ov.RemoteTensor(tensor, roi_begin, roi_end)
 
-    src_roi_tensor = \
-        create_roi_tensor(src_tensor, src_offset)
-    dst_roi_tensor = \
-        create_roi_tensor(dst_tensor, dst_offset)
+    src_roi_tensor = create_roi_tensor(src_tensor, src_offset)
+    dst_roi_tensor = create_roi_tensor(dst_tensor, dst_offset)
     src_roi_tensor.copy_to(dst_roi_tensor)
 
 

@@ -50,9 +50,14 @@ from vllm.utils import is_list_of, make_async, random_uuid
 
 logger = init_logger(__name__)
 
-CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
-                              EmbeddingCompletionRequest, RerankRequest,
-                              ScoreRequest, TokenizeCompletionRequest]
+CompletionLikeRequest = Union[
+    CompletionRequest,
+    DetokenizeRequest,
+    EmbeddingCompletionRequest,
+    RerankRequest,
+    ScoreRequest,
+    TokenizeCompletionRequest,
+]
 
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
@@ -97,22 +102,25 @@ class OpenAIServing:
             self._tokenize_prompt_input, executor=self._tokenizer_executor)
         self._tokenize_prompt_input_or_inputs_async = make_async(
             self._tokenize_prompt_input_or_inputs,
-            executor=self._tokenizer_executor)
+            executor=self._tokenizer_executor,
+        )
 
     def create_error_response(
-            self,
-            message: str,
-            err_type: str = "BadRequestError",
-            status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
+        self,
+        message: str,
+        err_type: str = "BadRequestError",
+        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+    ) -> ErrorResponse:
         return ErrorResponse(message=message,
                              type=err_type,
                              code=status_code.value)
 
     def create_streaming_error_response(
-            self,
-            message: str,
-            err_type: str = "BadRequestError",
-            status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> str:
+        self,
+        message: str,
+        err_type: str = "BadRequestError",
+        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+    ) -> str:
         json_str = json.dumps({
             "error":
             self.create_error_response(message=message,
@@ -139,12 +147,16 @@ class OpenAIServing:
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
-            status_code=HTTPStatus.NOT_FOUND)
+            status_code=HTTPStatus.NOT_FOUND,
+        )
 
     def _maybe_get_adapters(
         self, request: AnyRequest
-    ) -> Union[tuple[None, None], tuple[LoRARequest, None], tuple[
-            None, PromptAdapterRequest]]:
+    ) -> Union[
+            tuple[None, None],
+            tuple[LoRARequest, None],
+            tuple[None, PromptAdapterRequest],
+    ]:
         if self._is_model_supported(request.model):
             return None, None
         for lora in self.models.lora_requests:
@@ -172,10 +184,12 @@ class OpenAIServing:
         if truncate_prompt_tokens is None:
             encoded = tokenizer(prompt, add_special_tokens=add_special_tokens)
         else:
-            encoded = tokenizer(prompt,
-                                add_special_tokens=add_special_tokens,
-                                truncation=True,
-                                max_length=truncate_prompt_tokens)
+            encoded = tokenizer(
+                prompt,
+                add_special_tokens=add_special_tokens,
+                truncation=True,
+                max_length=truncate_prompt_tokens,
+            )
 
         input_ids = encoded.input_ids
 
@@ -208,12 +222,17 @@ class OpenAIServing:
         token_num = len(input_ids)
 
         # Note: EmbeddingRequest and ScoreRequest doesn't have max_tokens
-        if isinstance(request,
-                      (EmbeddingChatRequest, EmbeddingCompletionRequest,
-                       ScoreRequest, RerankRequest)):
-
-            operation = "score" if isinstance(request, ScoreRequest) \
-                else "embedding generation"
+        if isinstance(
+                request,
+            (
+                EmbeddingChatRequest,
+                EmbeddingCompletionRequest,
+                ScoreRequest,
+                RerankRequest,
+            ),
+        ):
+            operation = ("score" if isinstance(request, ScoreRequest) else
+                         "embedding generation")
             if token_num > self.max_model_len:
                 raise ValueError(
                     f"This model's maximum context length is "
@@ -225,8 +244,11 @@ class OpenAIServing:
 
         # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
         # and does not require model context length validation
-        if isinstance(request, (TokenizeCompletionRequest, TokenizeChatRequest,
-                                DetokenizeRequest)):
+        if isinstance(
+                request,
+            (TokenizeCompletionRequest, TokenizeChatRequest,
+             DetokenizeRequest),
+        ):
             return TextTokensPrompt(prompt=input_text,
                                     prompt_token_ids=input_ids)
 
@@ -323,21 +345,20 @@ class OpenAIServing:
         # VSCode Pyright extension should still work properly
         # "is True" is required for Pyright to perform type narrowing
         # See: https://github.com/microsoft/pyright/issues/7672
-        return [
-            self._normalize_prompt_text_to_input(
-                request,
-                tokenizer,
-                prompt=prompt_input["content"],
-                truncate_prompt_tokens=truncate_prompt_tokens,
-                add_special_tokens=add_special_tokens)
-            if prompt_input["is_tokens"] is False else
-            self._normalize_prompt_tokens_to_input(
-                request,
-                tokenizer,
-                prompt_ids=prompt_input["content"],
-                truncate_prompt_tokens=truncate_prompt_tokens)
-            for prompt_input in parse_and_batch_prompt(input_or_inputs)
-        ]
+        return [(self._normalize_prompt_text_to_input(
+            request,
+            tokenizer,
+            prompt=prompt_input["content"],
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            add_special_tokens=add_special_tokens,
+        ) if prompt_input["is_tokens"] is False else
+                 self._normalize_prompt_tokens_to_input(
+                     request,
+                     tokenizer,
+                     prompt_ids=prompt_input["content"],
+                     truncate_prompt_tokens=truncate_prompt_tokens,
+                 ))
+                for prompt_input in parse_and_batch_prompt(input_or_inputs)]
 
     async def _preprocess_completion(
         self,
@@ -440,11 +461,13 @@ class OpenAIServing:
             )
         else:
             # For MistralTokenizer
-            assert is_list_of(request_prompt, int), (
-                "Prompt has to be either a string or a list of token ids")
+            assert is_list_of(
+                request_prompt,
+                int), "Prompt has to be either a string or a list of token ids"
             prompt_inputs = TextTokensPrompt(
                 prompt=tokenizer.decode(request_prompt),
-                prompt_token_ids=request_prompt)
+                prompt_token_ids=request_prompt,
+            )
 
         engine_prompt = TokensPrompt(
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
@@ -511,10 +534,12 @@ class OpenAIServing:
         return raw_request.headers.get("X-Request-Id", default)
 
     @staticmethod
-    def _get_decoded_token(logprob: Logprob,
-                           token_id: int,
-                           tokenizer: AnyTokenizer,
-                           return_as_token_id: bool = False) -> str:
+    def _get_decoded_token(
+        logprob: Logprob,
+        token_id: int,
+        tokenizer: AnyTokenizer,
+        return_as_token_id: bool = False,
+    ) -> str:
         if return_as_token_id:
             return f"token_id:{token_id}"
 
@@ -527,9 +552,11 @@ class OpenAIServing:
             return True
         return self.models.is_base_model(model_name)
 
-    def _get_model_name(self,
-                        model_name: Optional[str] = None,
-                        lora_request: Optional[LoRARequest] = None) -> str:
+    def _get_model_name(
+        self,
+        model_name: Optional[str] = None,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> str:
         if lora_request:
             return lora_request.lora_name
         if model_name is None:
@@ -539,7 +566,7 @@ class OpenAIServing:
 
 def clamp_prompt_logprobs(
     prompt_logprobs: Union[PromptLogprobs,
-                           None]) -> Union[PromptLogprobs, None]:
+                           None], ) -> Union[PromptLogprobs, None]:
     if prompt_logprobs is None:
         return prompt_logprobs
 
@@ -547,6 +574,6 @@ def clamp_prompt_logprobs(
         if logprob_dict is None:
             continue
         for logprob_values in logprob_dict.values():
-            if logprob_values.logprob == float('-inf'):
+            if logprob_values.logprob == float("-inf"):
                 logprob_values.logprob = -9999.0
     return prompt_logprobs

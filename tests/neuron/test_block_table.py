@@ -148,6 +148,5 @@ def test_load_and_transform_block_tables(
         head_id,
         block_size_tiling_factor,
     )
-    assert (nki_out.shape == ref_out.shape
-            ), f"{nki_out.shape=} != {ref_out.shape=}"
+    assert nki_out.shape == ref_out.shape, f"{nki_out.shape=} != {ref_out.shape=}"
     assert torch.all(nki_out == ref_out)

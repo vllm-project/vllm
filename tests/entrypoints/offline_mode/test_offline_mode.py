@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for HF_HUB_OFFLINE mode"""
+
 import importlib
 import sys
 

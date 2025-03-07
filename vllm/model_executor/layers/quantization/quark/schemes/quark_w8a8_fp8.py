@@ -44,7 +44,8 @@ class QuarkW8A8Fp8(QuarkScheme):
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
                     weight=weight,
                     weight_scale=max_w_scale,
-                    input_scale=layer.input_scale)
+                    input_scale=layer.input_scale,
+                )
                 if input_scale is not None:
                     layer.input_scale = Parameter(input_scale,
                                                   requires_grad=False)
@@ -57,11 +58,11 @@ class QuarkW8A8Fp8(QuarkScheme):
             weight = layer.weight
 
             if current_platform.is_rocm():
-                weight, weight_scale, input_scale = \
-                    normalize_e4m3fn_to_e4m3fnuz(
-                        weight=weight,
-                        weight_scale=layer.weight_scale,
-                        input_scale=layer.input_scale)
+                weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                    weight=weight,
+                    weight_scale=layer.weight_scale,
+                    input_scale=layer.input_scale,
+                )
                 if input_scale is not None:
                     layer.input_scale = Parameter(input_scale,
                                                   requires_grad=False)
@@ -82,22 +83,29 @@ class QuarkW8A8Fp8(QuarkScheme):
         else:
             layer.input_scale = None
 
-    def create_weights(self, layer: torch.nn.Module,
-                       output_partition_sizes: List[int],
-                       input_size_per_partition: int,
-                       params_dtype: torch.dtype, weight_loader: Callable,
-                       **kwargs):
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        output_partition_sizes: List[int],
+        input_size_per_partition: int,
+        params_dtype: torch.dtype,
+        weight_loader: Callable,
+        **kwargs,
+    ):
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
 
         # WEIGHT
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=torch.float8_e4m3fn),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=torch.float8_e4m3fn,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE
@@ -108,12 +116,15 @@ class QuarkW8A8Fp8(QuarkScheme):
                 data=torch.empty((sum(output_partition_sizes), 1),
                                  dtype=torch.float32),
                 output_dim=0,
-                weight_loader=weight_loader)
+                weight_loader=weight_loader,
+            )
         else:
             assert self.qscheme == "per_tensor"
-            weight_scale = PerTensorScaleParameter(data=torch.empty(
-                len(output_partition_sizes), dtype=torch.float32),
-                                                   weight_loader=weight_loader)
+            weight_scale = PerTensorScaleParameter(
+                data=torch.empty(len(output_partition_sizes),
+                                 dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
 
         # min requirement for fp8 kernels
         weight_scale[:] = torch.finfo(torch.float32).min
@@ -121,17 +132,20 @@ class QuarkW8A8Fp8(QuarkScheme):
 
         # INPUT SCALE
         if self.is_static_input_scheme:
-            input_scale = PerTensorScaleParameter(data=torch.empty(
-                len(output_partition_sizes), dtype=torch.float32),
-                                                  weight_loader=weight_loader)
+            input_scale = PerTensorScaleParameter(
+                data=torch.empty(len(output_partition_sizes),
+                                 dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
-    def apply_weights(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         return apply_fp8_linear(
             input=x,
             weight=layer.weight,
@@ -139,4 +153,5 @@ class QuarkW8A8Fp8(QuarkScheme):
             input_scale=layer.input_scale,
             bias=bias,
             cutlass_fp8_supported=self.cutlass_fp8_supported,
-            use_per_token_if_dynamic=True)
+            use_per_token_if_dynamic=True,
+        )

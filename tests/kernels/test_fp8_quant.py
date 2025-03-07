@@ -11,8 +11,20 @@ from tests.kernels.utils import opcheck
 from vllm.platforms import current_platform
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-HIDDEN_SIZES = [1, 2, 3, 4, 16, 67, 768, 2048, 5120, 5137, 8192,
-                8193]  # Arbitrary values for testing
+HIDDEN_SIZES = [
+    1,
+    2,
+    3,
+    4,
+    16,
+    67,
+    768,
+    2048,
+    5120,
+    5137,
+    8192,
+    8193,
+]  # Arbitrary values for testing
 HIDDEN_SIZES += list(range(1024, 1033))  # vectorized conversion edge cases
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 SCALE_UBS = [True, False]
@@ -30,12 +42,16 @@ def opcheck_fp8_quant(output,
         scale = torch.empty((input.shape[0], 1),
                             device=input.device,
                             dtype=torch.float32)
-        opcheck(torch.ops._C.dynamic_per_token_scaled_fp8_quant,
-                (output, input, scale, scale_ub))
+        opcheck(
+            torch.ops._C.dynamic_per_token_scaled_fp8_quant,
+            (output, input, scale, scale_ub),
+        )
     else:
-        scale = torch.empty((input.numel() // input.shape[-1], 1),
-                            device=input.device,
-                            dtype=torch.float32)
+        scale = torch.empty(
+            (input.numel() // input.shape[-1], 1),
+            device=input.device,
+            dtype=torch.float32,
+        )
         opcheck(torch.ops._C.dynamic_scaled_fp8_quant, (output, input, scale))
 
 
@@ -45,16 +61,20 @@ def opcheck_fp8_quant(output,
 @pytest.mark.parametrize("scale_ub", SCALE_UBS)
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
-def test_dynamic_per_token_fp8_quant(num_tokens: int, hidden_size: int,
-                                     dtype: torch.dtype, scale_ub: bool,
-                                     seed: int) -> None:
+def test_dynamic_per_token_fp8_quant(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    scale_ub: bool,
+    seed: int,
+) -> None:
     current_platform.seed_everything(seed)
 
-    x = torch.rand(num_tokens, hidden_size, dtype=dtype,
-                   device="cuda") + 1e-6  # avoid nans
+    x = (torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda") + 1e-6
+         )  # avoid nans
 
-    scale_ub = torch.mean(x).to(dtype=torch.float32, device='cuda') \
-            if scale_ub else None
+    scale_ub = (torch.mean(x).to(dtype=torch.float32, device="cuda")
+                if scale_ub else None)
     ref_out, ref_scales = ref_dynamic_per_token_quant(x, FP8_DTYPE, scale_ub)
     ops_out, ops_scales = ops.scaled_fp8_quant(x,
                                                scale_ub=scale_ub,

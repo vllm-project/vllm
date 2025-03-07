@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Inference-only Snowflake Arctic model."""
+
 from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
@@ -44,29 +45,35 @@ logger = init_logger(__name__)
 
 class ArcticMLP(nn.Module):
 
-    def __init__(self,
-                 config: ArcticConfig,
-                 expert_id: int = -1,
-                 is_residual_mlp: bool = False,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 reduce_results: bool = True,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        config: ArcticConfig,
+        expert_id: int = -1,
+        is_residual_mlp: bool = False,
+        quant_config: Optional[QuantizationConfig] = None,
+        reduce_results: bool = True,
+        prefix: str = "",
+    ):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.expert_id = expert_id
 
-        self.ffn_dim = config.intermediate_size if not is_residual_mlp \
-            else self.hidden_size
+        self.ffn_dim = (config.intermediate_size
+                        if not is_residual_mlp else self.hidden_size)
 
-        self.w13 = MergedColumnParallelLinear(self.hidden_size,
-                                              [self.ffn_dim] * 2,
-                                              bias=False,
-                                              quant_config=quant_config)
-        self.w2 = RowParallelLinear(self.ffn_dim,
-                                    self.hidden_size,
-                                    bias=False,
-                                    reduce_results=reduce_results,
-                                    quant_config=quant_config)
+        self.w13 = MergedColumnParallelLinear(
+            self.hidden_size,
+            [self.ffn_dim] * 2,
+            bias=False,
+            quant_config=quant_config,
+        )
+        self.w2 = RowParallelLinear(
+            self.ffn_dim,
+            self.hidden_size,
+            bias=False,
+            reduce_results=reduce_results,
+            quant_config=quant_config,
+        )
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
                              "Only silu is supported for now.")
@@ -84,13 +91,15 @@ class ArcticMoE(nn.Module):
     Model-parallel implementation of Arctic MoE Layer.
     """
 
-    def __init__(self,
-                 config: ArcticConfig,
-                 tp_size: Optional[int] = None,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 reduce_results: bool = True,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        config: ArcticConfig,
+        tp_size: Optional[int] = None,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        reduce_results: bool = True,
+        prefix: str = "",
+    ):
         super().__init__()
 
         layer_id = extract_layer_index(prefix)
@@ -110,52 +119,77 @@ class ArcticMoE(nn.Module):
         self.params_dtype = params_dtype
 
         if not self.is_moe_layer:
-            self.mlp = ArcticMLP(config,
-                                 quant_config=quant_config,
-                                 reduce_results=reduce_results,
-                                 prefix=f"{prefix}.mlp")
+            self.mlp = ArcticMLP(
+                config,
+                quant_config=quant_config,
+                reduce_results=reduce_results,
+                prefix=f"{prefix}.mlp",
+            )
         else:
-            self.gate = ReplicatedLinear(self.hidden_size,
-                                         self.num_experts,
-                                         bias=False,
-                                         params_dtype=self.params_dtype,
-                                         quant_config=quant_config,
-                                         prefix=f"{prefix}.gate")
+            self.gate = ReplicatedLinear(
+                self.hidden_size,
+                self.num_experts,
+                bias=False,
+                params_dtype=self.params_dtype,
+                quant_config=quant_config,
+                prefix=f"{prefix}.gate",
+            )
             if self.is_quant:
                 self.ws = DeepSpeedFPParameter(
-                    torch.Size((self.num_experts, 2 * self.intermediate_size,
-                                self.hidden_size)),
+                    torch.Size((
+                        self.num_experts,
+                        2 * self.intermediate_size,
+                        self.hidden_size,
+                    )),
                     params_dtype=params_dtype,
                     quant_config=quant_config,
                 )
                 self.w2s = DeepSpeedFPParameter(
-                    torch.Size((self.num_experts, self.hidden_size,
-                                self.intermediate_size)),
+                    torch.Size((
+                        self.num_experts,
+                        self.hidden_size,
+                        self.intermediate_size,
+                    )),
                     params_dtype=params_dtype,
                     quant_config=quant_config,
                 )
             else:
                 self.ws = nn.Parameter(
-                    torch.empty(self.num_experts,
-                                2 * self.intermediate_size,
-                                self.hidden_size,
-                                device=current_platform.device_type,
-                                dtype=self.params_dtype))
+                    torch.empty(
+                        self.num_experts,
+                        2 * self.intermediate_size,
+                        self.hidden_size,
+                        device=current_platform.device_type,
+                        dtype=self.params_dtype,
+                    ))
                 self.w2s = nn.Parameter(
-                    torch.empty(self.num_experts,
-                                self.hidden_size,
-                                self.intermediate_size,
-                                device=current_platform.device_type,
-                                dtype=self.params_dtype))
-            set_weight_attrs(self.ws, {
-                "weight_loader": self.weight_loader,
-            })
-            set_weight_attrs(self.w2s, {
-                "weight_loader": self.weight_loader,
-            })
+                    torch.empty(
+                        self.num_experts,
+                        self.hidden_size,
+                        self.intermediate_size,
+                        device=current_platform.device_type,
+                        dtype=self.params_dtype,
+                    ))
+            set_weight_attrs(
+                self.ws,
+                {
+                    "weight_loader": self.weight_loader,
+                },
+            )
+            set_weight_attrs(
+                self.w2s,
+                {
+                    "weight_loader": self.weight_loader,
+                },
+            )
 
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
-                      weight_name: str, expert_id: int):
+    def weight_loader(
+        self,
+        param: nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        expert_id: int,
+    ):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.ds_dequantize() if self.is_quant else param.data
         shard_size = self.intermediate_size
@@ -204,7 +238,8 @@ class ArcticMoE(nn.Module):
             w2s_dequantized if self.is_quant else self.w2s,
             topk_weights,
             topk_ids,
-            inplace=True)
+            inplace=True,
+        )
         if self.reduce_results and self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
@@ -249,12 +284,14 @@ class ArcticAttention(nn.Module):
         self.rope_theta = config.rope_theta
         self.scaling = self.head_dim**-0.5
 
-        self.qkv_proj = QKVParallelLinear(self.hidden_size,
-                                          self.head_dim,
-                                          self.total_num_heads,
-                                          self.total_num_kv_heads,
-                                          bias=False,
-                                          quant_config=quant_config)
+        self.qkv_proj = QKVParallelLinear(
+            self.hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=False,
+            quant_config=quant_config,
+        )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
@@ -271,13 +308,15 @@ class ArcticAttention(nn.Module):
             is_neox_style=True,
         )
 
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
@@ -306,10 +345,12 @@ class ArcticDecoderLayer(nn.Module):
         layer_idx = extract_layer_index(prefix)
         is_moe_layer = (layer_idx + 1) % config.moe_layer_frequency == 0
         self.use_residual = config.use_residual and is_moe_layer
-        self.self_attn = ArcticAttention(config,
-                                         cache_config,
-                                         quant_config=quant_config,
-                                         prefix=f"{prefix}.self_attn")
+        self.self_attn = ArcticAttention(
+            config,
+            cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
         self.block_sparse_moe = ArcticMoE(
             config,
             quant_config=quant_config,
@@ -325,10 +366,12 @@ class ArcticDecoderLayer(nn.Module):
         if self.use_residual:
             self.residual_layernorm = RMSNorm(config.hidden_size,
                                               eps=config.rms_norm_eps)
-            self.residual_mlp = ArcticMLP(config,
-                                          is_residual_mlp=True,
-                                          reduce_results=False,
-                                          prefix=f"{prefix}.residual_mlp")
+            self.residual_mlp = ArcticMLP(
+                config,
+                is_residual_mlp=True,
+                reduce_results=False,
+                prefix=f"{prefix}.residual_mlp",
+            )
 
     def forward(
         self,
@@ -374,17 +417,18 @@ class ArcticModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=self.vocab_size)
+            org_num_embeddings=self.vocab_size,
+        )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: ArcticDecoderLayer(
                 config, cache_config, quant_config, prefix=prefix),
-            prefix=f"{prefix}.layers")
+            prefix=f"{prefix}.layers",
+        )
         self._attn_implementation = config._attn_implementation
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -484,20 +528,28 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         num_layers = self.config.num_hidden_layers
 
         for layer in range(num_layers):
-            mlp_params_mapping.append(
-                (f"layers.{layer}.residual_mlp.w13.weight",
-                 f"layers.{layer}.residual_mlp.w1.weight", 0))
-            mlp_params_mapping.append(
-                (f"layers.{layer}.residual_mlp.w13.weight",
-                 f"layers.{layer}.residual_mlp.w3.weight", 1))
+            mlp_params_mapping.append((
+                f"layers.{layer}.residual_mlp.w13.weight",
+                f"layers.{layer}.residual_mlp.w1.weight",
+                0,
+            ))
+            mlp_params_mapping.append((
+                f"layers.{layer}.residual_mlp.w13.weight",
+                f"layers.{layer}.residual_mlp.w3.weight",
+                1,
+            ))
             if layer % 2 == 0:
                 # MLP layers
-                mlp_params_mapping.append(
-                    (f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
-                     f"layers.{layer}.block_sparse_moe.mlp.w1.weight", 0))
-                mlp_params_mapping.append(
-                    (f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
-                     f"layers.{layer}.block_sparse_moe.mlp.w3.weight", 1))
+                mlp_params_mapping.append((
+                    f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
+                    f"layers.{layer}.block_sparse_moe.mlp.w1.weight",
+                    0,
+                ))
+                mlp_params_mapping.append((
+                    f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
+                    f"layers.{layer}.block_sparse_moe.mlp.w3.weight",
+                    1,
+                ))
             else:
                 # MoE layers
                 for expert_id in range(self.config.num_local_experts):
@@ -516,7 +568,7 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
             "Alternatively, use the prequantized 8-bit weights of arctic "
             "and set load-format to `sharded_state` will accelerate loading.")
         for name, loaded_weight in weights:
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -541,8 +593,11 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
                     weight_loader(param, loaded_weight, shard_id)
                     break
                 else:
-                    for param_name, weight_name, shard_id \
-                            in expert_params_mapping:
+                    for (
+                            param_name,
+                            weight_name,
+                            shard_id,
+                    ) in expert_params_mapping:
                         if weight_name not in name:
                             continue
                         name = name.replace(weight_name, param_name)
@@ -550,10 +605,12 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
                             continue
                         param = params_dict[name]
                         weight_loader = param.weight_loader
-                        weight_loader(param,
-                                      loaded_weight,
-                                      weight_name,
-                                      expert_id=shard_id)
+                        weight_loader(
+                            param,
+                            loaded_weight,
+                            weight_name,
+                            expert_id=shard_id,
+                        )
                         break
                     else:
                         if name.endswith(".bias") and name not in params_dict:

@@ -209,8 +209,8 @@ class JAISConfig(PretrainedConfig):
         if self.alibi_scaling is None:
             return
 
-        if (not isinstance(self.alibi_scaling, dict)
-                or len(self.alibi_scaling) != 2):
+        if not isinstance(self.alibi_scaling, dict) or len(
+                self.alibi_scaling) != 2:
             raise ValueError(
                 "`alibi_scaling` must be a dictionary with two fields, "
                 "`type` and `factor` or `type` and `train_seq_len`, "

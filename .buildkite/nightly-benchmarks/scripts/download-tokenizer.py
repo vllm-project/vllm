@@ -19,10 +19,12 @@ if __name__ == "__main__":
                         type=str,
                         required=True,
                         help="Name of the model")
-    parser.add_argument("--cachedir",
-                        type=str,
-                        required=True,
-                        help="Directory to save the tokenizer")
+    parser.add_argument(
+        "--cachedir",
+        type=str,
+        required=True,
+        help="Directory to save the tokenizer",
+    )
 
     args = parser.parse_args()
     main(args.model, args.cachedir)

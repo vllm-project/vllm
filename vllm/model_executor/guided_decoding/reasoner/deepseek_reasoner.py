@@ -11,6 +11,7 @@ class DeepSeekReasoner(Reasoner):
     """
     Reasoner for DeepSeek R series models.
     """
+
     start_token_id: int
     end_token_id: int
 
@@ -19,10 +20,12 @@ class DeepSeekReasoner(Reasoner):
 
     @classmethod
     def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
-        return cls(start_token_id=tokenizer.encode(
-            "<think>", add_special_tokens=False)[0],
-                   end_token_id=tokenizer.encode("</think>",
-                                                 add_special_tokens=False)[0])
+        return cls(
+            start_token_id=tokenizer.encode("<think>",
+                                            add_special_tokens=False)[0],
+            end_token_id=tokenizer.encode("</think>",
+                                          add_special_tokens=False)[0],
+        )
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.end_token_id in input_ids
@@ -31,8 +34,8 @@ class DeepSeekReasoner(Reasoner):
         """
         Extract the content after the end tokens
         """
-        if self.end_token_id not in input_ids or \
-            input_ids.index(self.end_token_id) + 1 == len(input_ids):
+        if self.end_token_id not in input_ids or input_ids.index(
+                self.end_token_id) + 1 == len(input_ids):
             return []
         else:
             return input_ids[input_ids.index(self.end_token_id) + 1:]

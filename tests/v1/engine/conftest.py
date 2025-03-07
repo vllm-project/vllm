@@ -21,7 +21,7 @@ EngineCorePromptLogprobsType = tuple[torch.Tensor, torch.Tensor]
 
 def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
     """Generate output processor dummy test vectors, without logprobs
-    
+
     Returns:
       DummyOutputProcessorTestVectors instance with no logprobs
     """
@@ -46,8 +46,11 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
     return DummyOutputProcessorTestVectors(
         tokenizer=tokenizer,
         tokenizer_group=init_tokenizer_from_configs(
-            vllm_config.model_config, vllm_config.scheduler_config,
-            vllm_config.parallel_config, vllm_config.lora_config),
+            vllm_config.model_config,
+            vllm_config.scheduler_config,
+            vllm_config.parallel_config,
+            vllm_config.lora_config,
+        ),
         vllm_config=vllm_config,
         full_tokens=[tokenizer(text).input_ids for text in FULL_STRINGS],
         prompt_tokens=prompt_tokens,
@@ -59,13 +62,14 @@ def _build_test_vectors_no_logprobs() -> DummyOutputProcessorTestVectors:
             for text, prompt_len in zip(FULL_STRINGS, prompt_strings_len)
         ],
         prompt_logprobs=[],
-        generation_logprobs=[])
+        generation_logprobs=[],
+    )
 
 
 @pytest.fixture
 def dummy_test_vectors() -> DummyOutputProcessorTestVectors:
     """Generate output processor dummy test vectors, with logprobs
-    
+
     Returns:
       DummyOutputProcessorTestVectors instance with logprobs
     """
@@ -77,12 +81,14 @@ def dummy_test_vectors() -> DummyOutputProcessorTestVectors:
         generate_dummy_sample_logprobs(
             sampled_tokens_list=tokens_list,
             num_logprobs=NUM_SAMPLE_LOGPROBS_UNDER_TEST,
-            tokenizer=dtv.tokenizer) for tokens_list in dtv.generation_tokens
+            tokenizer=dtv.tokenizer,
+        ) for tokens_list in dtv.generation_tokens
     ]
     dtv.prompt_logprobs = [
         generate_dummy_prompt_logprobs_tensors(
             prompt_tokens_list=tokens_list,
             num_logprobs=NUM_PROMPT_LOGPROBS_UNDER_TEST,
-            tokenizer=dtv.tokenizer) for tokens_list in dtv.prompt_tokens
+            tokenizer=dtv.tokenizer,
+        ) for tokens_list in dtv.prompt_tokens
     ]
     return dtv

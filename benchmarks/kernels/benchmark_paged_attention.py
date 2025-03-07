@@ -68,14 +68,16 @@ def main(
                                 device=device)
 
     # Create the KV cache.
-    key_caches, value_caches = create_kv_caches_with_random(NUM_BLOCKS,
-                                                            block_size,
-                                                            1,
-                                                            num_kv_heads,
-                                                            head_size,
-                                                            kv_cache_dtype,
-                                                            dtype,
-                                                            device=device)
+    key_caches, value_caches = create_kv_caches_with_random(
+        NUM_BLOCKS,
+        block_size,
+        1,
+        num_kv_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        device=device,
+    )
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Prepare for the paged attention kernel.
@@ -87,7 +89,7 @@ def main(
                 PARTITION_SIZE = 1024
             else:
                 PARTITION_SIZE = PARTITION_SIZE_ROCM
-        num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
+        num_partitions = (max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE
         tmp_output = torch.empty(
             size=(num_seqs, num_query_heads, num_partitions, head_size),
             dtype=output.dtype,
@@ -192,7 +194,7 @@ def main(
     print(f"Kernel running time: {latency * 1000000:.3f} us")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description="Benchmark the paged attention kernel.")
     parser.add_argument("--version",
@@ -203,16 +205,20 @@ if __name__ == '__main__':
     parser.add_argument("--seq-len", type=int, default=4096)
     parser.add_argument("--num-query-heads", type=int, default=64)
     parser.add_argument("--num-kv-heads", type=int, default=8)
-    parser.add_argument("--head-size",
-                        type=int,
-                        choices=[64, 80, 96, 112, 120, 128, 192, 256],
-                        default=128)
+    parser.add_argument(
+        "--head-size",
+        type=int,
+        choices=[64, 80, 96, 112, 120, 128, 192, 256],
+        default=128,
+    )
     parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
     parser.add_argument("--use-alibi", action="store_true")
-    parser.add_argument("--dtype",
-                        type=str,
-                        choices=["half", "bfloat16", "float"],
-                        default="half")
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        choices=["half", "bfloat16", "float"],
+        default="half",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument(
@@ -222,10 +228,13 @@ if __name__ == '__main__':
         default="auto",
         help="Data type for kv cache storage. If 'auto', will use model "
         "data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. "
-        "ROCm (AMD GPU) supports fp8 (=fp8_e4m3)")
-    parser.add_argument("--custom-paged-attn",
-                        action="store_true",
-                        help="Use custom paged attention")
+        "ROCm (AMD GPU) supports fp8 (=fp8_e4m3)",
+    )
+    parser.add_argument(
+        "--custom-paged-attn",
+        action="store_true",
+        help="Use custom paged attention",
+    )
     args = parser.parse_args()
     print(args)
 

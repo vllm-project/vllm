@@ -461,7 +461,7 @@ def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
     worker_adapter_manager.set_active_adapters(
         [
             LoRARequest("1", 1, sql_lora_files),
-            LoRARequest("2", 2, sql_lora_files)
+            LoRARequest("2", 2, sql_lora_files),
         ],
         mapping,
     )
@@ -564,7 +564,7 @@ def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
     worker_adapter_manager.set_active_adapters(
         [
             LoRARequest("1", 1, sql_lora_files),
-            LoRARequest("2", 2, sql_lora_files)
+            LoRARequest("2", 2, sql_lora_files),
         ],
         mapping,
     )
@@ -776,10 +776,13 @@ def test_dora_model_manager(dist_init, dummy_model, device):
     model = dummy_model
 
     # Create LoRA adapters with DoRA enabled
-    dora_lora1 = create_lora(1,
-                             model, ["layer1.dense1", "dense2", "lm_head"],
-                             device=device,
-                             use_dora=True)
+    dora_lora1 = create_lora(
+        1,
+        model,
+        ["layer1.dense1", "dense2", "lm_head"],
+        device=device,
+        use_dora=True,
+    )
     dora_lora2 = create_lora(2,
                              model, ["dense1", "dense2", "lm_head"],
                              device=device,
@@ -905,8 +908,10 @@ def test_packed_dora_loras(dist_init, dummy_model_gate_up, device):
         # Handle both cases
         if isinstance(packed_dora_lora.magnitude_param, list):
             assert packed_dora_lora.magnitude_param[i] is not None
-            torch.testing.assert_close(packed_dora_lora.magnitude_param[i],
-                                       original_lora.magnitude_param)
+            torch.testing.assert_close(
+                packed_dora_lora.magnitude_param[i],
+                original_lora.magnitude_param,
+            )
         else:
             # If it's a tensor, compare the relevant slice
             assert packed_dora_lora.magnitude_param is not None

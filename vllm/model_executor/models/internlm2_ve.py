@@ -100,9 +100,11 @@ class InternLM2VEDecoderLayer(nn.Module):
 class InternLM2VEModel(InternLM2Model):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config,
-                         prefix=prefix,
-                         layer_type=InternLM2VEDecoderLayer)
+        super().__init__(
+            vllm_config=vllm_config,
+            prefix=prefix,
+            layer_type=InternLM2VEDecoderLayer,
+        )
 
     def forward(
         self,

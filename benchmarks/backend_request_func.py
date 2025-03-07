@@ -192,7 +192,6 @@ async def async_request_deepspeed_mii(
 ) -> RequestFuncOutput:
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
-
         payload = {
             "prompt": request_func_input.prompt,
             "max_tokens": request_func_input.output_len,
@@ -241,13 +240,19 @@ async def async_request_openai_completions(
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
         payload = {
-            "model": request_func_input.model_name \
-                if request_func_input.model_name else request_func_input.model,
-            "prompt": request_func_input.prompt,
-            "temperature": 0.0,
-            "max_tokens": request_func_input.output_len,
-            "logprobs": request_func_input.logprobs,
-            "stream": True,
+            "model":
+            (request_func_input.model_name
+             if request_func_input.model_name else request_func_input.model),
+            "prompt":
+            request_func_input.prompt,
+            "temperature":
+            0.0,
+            "max_tokens":
+            request_func_input.output_len,
+            "logprobs":
+            request_func_input.logprobs,
+            "stream":
+            True,
             "stream_options": {
                 "include_usage": True,
             },
@@ -342,17 +347,21 @@ async def async_request_openai_chat_completions(
         if request_func_input.multi_modal_content:
             content.append(request_func_input.multi_modal_content)
         payload = {
-            "model": request_func_input.model_name \
-                if request_func_input.model_name else request_func_input.model,
+            "model":
+            (request_func_input.model_name
+             if request_func_input.model_name else request_func_input.model),
             "messages": [
                 {
                     "role": "user",
                     "content": content
                 },
             ],
-            "temperature": 0.0,
-            "max_completion_tokens": request_func_input.output_len,
-            "stream": True,
+            "temperature":
+            0.0,
+            "max_completion_tokens":
+            request_func_input.output_len,
+            "stream":
+            True,
             "stream_options": {
                 "include_usage": True,
             },
@@ -424,7 +433,7 @@ async def async_request_openai_chat_completions(
 
 
 def get_model(pretrained_model_name_or_path: str) -> str:
-    if os.getenv('VLLM_USE_MODELSCOPE', 'False').lower() == 'true':
+    if os.getenv("VLLM_USE_MODELSCOPE", "False").lower() == "true":
         from modelscope import snapshot_download
 
         # Use file lock to prevent multiple processes from
@@ -433,7 +442,8 @@ def get_model(pretrained_model_name_or_path: str) -> str:
             model_path = snapshot_download(
                 model_id=pretrained_model_name_or_path,
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-                ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
+                ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"],
+            )
 
             return model_path
     return pretrained_model_name_or_path

@@ -12,10 +12,12 @@ from ...utils import build_model_context
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
 # yapf: disable
 @pytest.mark.parametrize(
-    ("mm_processor_kwargs", "expected_toks_per_img", "expected_pixels_shape"), [
+    ("mm_processor_kwargs", "expected_toks_per_img", "expected_pixels_shape"),
+    [
         ({}, 1426, (5704, 1176)),
         ({"min_pixels": 64**2, "max_pixels": 512**2}, 330, (1320, 1176)),
-    ])
+    ],
+)
 # yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
 @pytest.mark.parametrize("kwargs_on_init", [True, False])

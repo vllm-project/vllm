@@ -10,8 +10,19 @@ from vllm.platforms import current_platform
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
-HIDDEN_SIZES = [8, 768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192,
-                8199]  # Arbitrary values for testing
+HIDDEN_SIZES = [
+    8,
+    768,
+    769,
+    770,
+    771,
+    5120,
+    5124,
+    5125,
+    5126,
+    8192,
+    8199,
+]  # Arbitrary values for testing
 ADD_RESIDUAL = [False, True]
 SEEDS = [0]
 CUDA_DEVICES = [
@@ -57,11 +68,15 @@ def test_rms_norm(
         torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
 
     if residual is not None:
-        opcheck(torch.ops._C.fused_add_rms_norm,
-                (x, residual, layer.weight.data, layer.variance_epsilon))
+        opcheck(
+            torch.ops._C.fused_add_rms_norm,
+            (x, residual, layer.weight.data, layer.variance_epsilon),
+        )
     else:
-        opcheck(torch.ops._C.rms_norm,
-                (out, x, layer.weight.data, layer.variance_epsilon))
+        opcheck(
+            torch.ops._C.rms_norm,
+            (out, x, layer.weight.data, layer.variance_epsilon),
+        )
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -118,7 +133,8 @@ def test_fused_rms_norm_quant(
 
         opcheck(
             torch.ops._C.fused_add_rms_norm_static_fp8_quant,
-            (out_quant_fused, x, residual_fused, weight, quant_scale_t, 1e-6))
+            (out_quant_fused, x, residual_fused, weight, quant_scale_t, 1e-6),
+        )
     else:
         torch.ops._C.rms_norm_static_fp8_quant(out_quant_fused, x, weight,
                                                quant_scale_t, 1e-6)
@@ -127,10 +143,14 @@ def test_fused_rms_norm_quant(
         torch.ops._C.static_scaled_fp8_quant(out_quant, out_norm,
                                              quant_scale_t)
 
-        opcheck(torch.ops._C.rms_norm_static_fp8_quant,
-                (out_quant_fused, x, weight, quant_scale_t, 1e-6))
+        opcheck(
+            torch.ops._C.rms_norm_static_fp8_quant,
+            (out_quant_fused, x, weight, quant_scale_t, 1e-6),
+        )
 
-    torch.testing.assert_close(out_quant_fused.to(dtype=torch.float32),
-                               out_quant.to(dtype=torch.float32),
-                               atol=1e-3,
-                               rtol=1e-3)
+    torch.testing.assert_close(
+        out_quant_fused.to(dtype=torch.float32),
+        out_quant.to(dtype=torch.float32),
+        atol=1e-3,
+        rtol=1e-3,
+    )

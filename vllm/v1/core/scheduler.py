@@ -41,8 +41,7 @@ class Scheduler:
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_scheduled_tokens = \
-            self.scheduler_config.max_num_batched_tokens
+        self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
 
         num_gpu_blocks = cache_config.num_gpu_blocks
@@ -54,7 +53,8 @@ class Scheduler:
             max_model_len=self.max_model_len,
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching,
-            log_stats=self.log_stats)
+            log_stats=self.log_stats,
+        )
         self.block_size = self.cache_config.block_size
 
         # req_id -> Request
@@ -135,17 +135,18 @@ class Scheduler:
                 req_index += 1
                 continue
 
-            num_new_tokens = (request.num_tokens_with_spec -
-                              request.num_computed_tokens)
+            num_new_tokens = request.num_tokens_with_spec - request.num_computed_tokens
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule, num_new_tokens, new_encoder_budget = (
-                self._try_schedule_encoder_inputs(request,
-                                                  request.num_computed_tokens,
-                                                  num_new_tokens,
-                                                  encoder_budget))
+                self._try_schedule_encoder_inputs(
+                    request,
+                    request.num_computed_tokens,
+                    num_new_tokens,
+                    encoder_budget,
+                ))
             if num_new_tokens == 0:
                 # The request cannot be scheduled because the encoder budget
                 # or the encoder cache is exhausted.
@@ -244,8 +245,8 @@ class Scheduler:
                         break
 
                 # Get already-cached tokens.
-                computed_blocks, num_computed_tokens = \
-                    self.kv_cache_manager.get_computed_blocks(request)
+                computed_blocks, num_computed_tokens = (
+                    self.kv_cache_manager.get_computed_blocks(request))
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
@@ -266,10 +267,14 @@ class Scheduler:
                 assert num_new_tokens > 0
 
                 # Schedule encoder inputs.
-                (encoder_inputs_to_schedule, num_new_tokens,
-                 new_encoder_budget) = self._try_schedule_encoder_inputs(
-                     request, num_computed_tokens, num_new_tokens,
-                     encoder_budget)
+                (
+                    encoder_inputs_to_schedule,
+                    num_new_tokens,
+                    new_encoder_budget,
+                ) = self._try_schedule_encoder_inputs(request,
+                                                      num_computed_tokens,
+                                                      num_new_tokens,
+                                                      encoder_budget)
                 if num_new_tokens == 0:
                     # The request cannot be scheduled.
                     break
@@ -319,8 +324,8 @@ class Scheduler:
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
-        assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
-                len(scheduled_running_reqs) <= len(self.running))
+        assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
+            scheduled_running_reqs) <= len(self.running)
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
@@ -522,8 +527,8 @@ class Scheduler:
                     len(generated_token_ids))
                 request.num_computed_tokens += num_computed_tokens_step
 
-            cached_encoder_input_ids = (
-                self.encoder_cache_manager.get_cached_input_ids(request))
+            cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(
+                request)
             # OPTIMIZATION: Avoid list(set) if the set is empty.
             if cached_encoder_input_ids:
                 for input_id in list(cached_encoder_input_ids):
@@ -576,7 +581,8 @@ class Scheduler:
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                        events=request.take_events(),
+                    ))
 
             self.scheduled_req_ids.remove(request.request_id)
             if not stopped:
@@ -596,8 +602,7 @@ class Scheduler:
 
         sampling_params = request.sampling_params
         last_token_id = request.output_token_ids[-1]
-        if (not sampling_params.ignore_eos
-                and last_token_id == request.eos_token_id):
+        if not sampling_params.ignore_eos and last_token_id == request.eos_token_id:
             request.status = RequestStatus.FINISHED_STOPPED
             return True
 

@@ -19,6 +19,7 @@ class AllocStatus(enum.Enum):
     3. Never: seq_group can never be allocated.
       The seq_group is too large to allocated in GPU.
     """
+
     OK = enum.auto()
     LATER = enum.auto()
     NEVER = enum.auto()
@@ -32,11 +33,13 @@ class BlockSpaceManager(ABC):
 
         if version == "selfattn":
             from vllm.core.block_manager import SelfAttnBlockSpaceManager
+
             return SelfAttnBlockSpaceManager
 
         if version == "placeholder":
             from vllm.core.placeholder_block_space_manager import (
                 PlaceholderBlockSpaceManager)
+
             return PlaceholderBlockSpaceManager
 
         raise ValueError(f"Unknown version {version=}")

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Utilities for selecting and loading neuron models."""
+
 import copy
 import importlib
 import os
@@ -31,18 +32,26 @@ TORCH_DTYPE_TO_NEURON_AMP = {
 
 # Models supported by Neuron.
 _NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str, str]] = {
-    "LlamaForCausalLM": ("transformers_neuronx.llama.model",
-                         "LlamaForSampling", "LlamaForCausalLM"),
-    "MistralForCausalLM": ("transformers_neuronx.mistral.model",
-                           "MistralForSampling", "MistralForCausalLM")
+    "LlamaForCausalLM": (
+        "transformers_neuronx.llama.model",
+        "LlamaForSampling",
+        "LlamaForCausalLM",
+    ),
+    "MistralForCausalLM": (
+        "transformers_neuronx.mistral.model",
+        "MistralForSampling",
+        "MistralForCausalLM",
+    ),
 }
 
 
 class NeuronCausalLM(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 on_device_sampling_disabled: bool = False) -> None:
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        on_device_sampling_disabled: bool = False,
+    ) -> None:
         super().__init__()
         self.config = config
         self.logits_processor = LogitsProcessor(config.vocab_size,
@@ -77,7 +86,6 @@ class NeuronCausalLM(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-
         if self.on_device_sampling_disabled:
             next_tokens = self.sampler(logits, sampling_metadata)
             return next_tokens
@@ -91,9 +99,11 @@ class NeuronCausalLM(nn.Module):
             for seq_id in seq_group.seq_ids:
                 token_id = sampled_token_ids[sample_idx].item()
                 samples.append(
-                    SequenceOutput(parent_seq_id=seq_id,
-                                   output_token=token_id,
-                                   logprobs={token_id: Logprob(token_id)}))
+                    SequenceOutput(
+                        parent_seq_id=seq_id,
+                        output_token=token_id,
+                        logprobs={token_id: Logprob(token_id)},
+                    ))
                 sample_idx += 1
             next_tokens.append(
                 CompletionSequenceGroupOutput(samples=samples,
@@ -135,9 +145,11 @@ def _get_buckets(env: str, default_value: List[int]) -> List[int]:
     return buckets_list
 
 
-def _get_default_neuron_config(model_config: ModelConfig,
-                               parallel_config: ParallelConfig,
-                               scheduler_config: SchedulerConfig):
+def _get_default_neuron_config(
+    model_config: ModelConfig,
+    parallel_config: ParallelConfig,
+    scheduler_config: SchedulerConfig,
+):
     from transformers_neuronx.config import ContinuousBatchingConfig
     from transformers_neuronx.constants import LAYOUT_BSH
 
@@ -145,20 +157,23 @@ def _get_default_neuron_config(model_config: ModelConfig,
         batch_size_for_shared_caches=scheduler_config.max_num_seqs)
     quant_config = dict(
         dequant_dtype=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
-        quantize_method="vector_dynamic")
-    neuron_quantization_config_builder = lambda quant: get_quantization_config(
-        quant).from_config(quant_config).get_quant_method(None, "")
+        quantize_method="vector_dynamic",
+    )
+    neuron_quantization_config_builder = (
+        lambda quant: get_quantization_config(quant).from_config(
+            quant_config).get_quant_method(None, ""))
     # TODO: Add Paged attention config to the default neuron arguments.
     default_neuron_args = dict(
         collectives_layout=LAYOUT_BSH,
         attention_layout=LAYOUT_BSH,
         fuse_qkv=True,
-        quant=neuron_quantization_config_builder(model_config.quantization)
-        if model_config.quantization else None,
+        quant=(neuron_quantization_config_builder(model_config.quantization)
+               if model_config.quantization else None),
         continuous_batching=continuous_batching_config,
         weight_tiling=bool(model_config.quantization),
         on_device_generation=_get_neuron_on_device_generation_config(
-            model_config))
+            model_config),
+    )
     return default_neuron_args
 
 
@@ -175,19 +190,22 @@ def _is_neuron_on_device_sampling_disabled(model_config: ModelConfig) -> bool:
 def _get_neuron_config_after_override(default_neuron_config,
                                       overridden_neuron_config):
     from transformers_neuronx.config import NeuronConfig
+
     overridden_neuron_config = overridden_neuron_config or {}
     default_neuron_config.update(overridden_neuron_config)
     return NeuronConfig(**default_neuron_config)
 
 
-def get_neuron_model(model_config: ModelConfig,
-                     parallel_config: ParallelConfig,
-                     scheduler_config: SchedulerConfig) -> nn.Module:
-
+def get_neuron_model(
+    model_config: ModelConfig,
+    parallel_config: ParallelConfig,
+    scheduler_config: SchedulerConfig,
+) -> nn.Module:
     # Create a model instance.
     model = NeuronCausalLM(
         model_config.hf_config,
-        _is_neuron_on_device_sampling_disabled(model_config))
+        _is_neuron_on_device_sampling_disabled(model_config),
+    )
 
     default_neuron_config_args = _get_default_neuron_config(
         model_config, parallel_config, scheduler_config)
@@ -201,12 +219,14 @@ def get_neuron_model(model_config: ModelConfig,
                                [scheduler_config.max_model_len])
 
     # Load the weights from the cached or downloaded files.
-    model.load_weights(model_config.model,
-                       tp_degree=parallel_config.tensor_parallel_size,
-                       amp=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
-                       neuron_config=neuron_config,
-                       context_length_estimate=context_length_estimates,
-                       n_positions=n_positions,
-                       batch_size=scheduler_config.max_num_seqs)
+    model.load_weights(
+        model_config.model,
+        tp_degree=parallel_config.tensor_parallel_size,
+        amp=TORCH_DTYPE_TO_NEURON_AMP[model_config.dtype],
+        neuron_config=neuron_config,
+        context_length_estimate=context_length_estimates,
+        n_positions=n_positions,
+        batch_size=scheduler_config.max_num_seqs,
+    )
 
     return model.eval()

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Benchmark guided decoding throughput."""
+
 import argparse
 import dataclasses
 import json
@@ -30,20 +31,24 @@ class SampleRequest:
         prompt_len: The length of the prompt in tokens.
         expected_output_len: The expected length of the output in tokens.
     """
+
     prompt: str
     prompt_len: int
     expected_output_len: int
     schema: dict
-    structure_type: str = 'json'
+    structure_type: str = "json"
     completion: str = None
 
 
-def run_vllm(requests: list[SampleRequest],
-             engine_args: EngineArgs,
-             n: int,
-             guided_decoding_rate: float = 1.0,
-             warmup: bool = False) -> float:
+def run_vllm(
+    requests: list[SampleRequest],
+    engine_args: EngineArgs,
+    n: int,
+    guided_decoding_rate: float = 1.0,
+    warmup: bool = False,
+) -> float:
     from vllm import LLM, SamplingParams
+
     llm = LLM(**vars(engine_args))
     assert all(
         llm.llm_engine.model_config.max_model_len >= (
@@ -73,8 +78,8 @@ def run_vllm(requests: list[SampleRequest],
                     top_p=1.0,
                     ignore_eos=True,
                     max_tokens=request.expected_output_len,
-                    guided_decoding=GuidedDecodingParams(json=request.schema)
-                    if guided_decoding_rate > 0 else None,
+                    guided_decoding=(GuidedDecodingParams(json=request.schema)
+                                     if guided_decoding_rate > 0 else None),
                 ))
         llm.generate(prompts, sampling_params, use_tqdm=False)
 
@@ -90,9 +95,9 @@ def run_vllm(requests: list[SampleRequest],
                 top_p=1.0,
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
-                guided_decoding=GuidedDecodingParams(
+                guided_decoding=(GuidedDecodingParams(
                     **{request.structure_type: request.schema})
-                if i in guided_decoding_req_idx else None,
+                                 if i in guided_decoding_req_idx else None),
             ))
 
     start = time.perf_counter()
@@ -109,17 +114,17 @@ def run_vllm(requests: list[SampleRequest],
 
 
 async def run_vllm_async(
-        requests: list[SampleRequest],
-        engine_args: AsyncEngineArgs,
-        n: int,
-        guided_decoding_rate: float = 1.0,
-        warmup: bool = False,
-        disable_frontend_multiprocessing: bool = False) -> float:
+    requests: list[SampleRequest],
+    engine_args: AsyncEngineArgs,
+    n: int,
+    guided_decoding_rate: float = 1.0,
+    warmup: bool = False,
+    disable_frontend_multiprocessing: bool = False,
+) -> float:
     from vllm import SamplingParams
 
     async with build_async_engine_client_from_engine_args(
             engine_args, disable_frontend_multiprocessing) as llm:
-
         assert all(
             llm.model_config.max_model_len >= (request.prompt_len +
                                                request.expected_output_len)
@@ -147,9 +152,9 @@ async def run_vllm_async(
                         top_p=1.0,
                         ignore_eos=True,
                         max_tokens=request.expected_output_len,
-                        guided_decoding=GuidedDecodingParams(
-                            json=request.schema)
-                        if guided_decoding_rate > 0 else None,
+                        guided_decoding=(GuidedDecodingParams(
+                            json=request.schema) if guided_decoding_rate > 0
+                                         else None),
                     ))
             generators = []
             for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
@@ -171,8 +176,9 @@ async def run_vllm_async(
                     top_p=1.0,
                     ignore_eos=True,
                     max_tokens=request.expected_output_len,
-                    guided_decoding=GuidedDecodingParams(json=request.schema)
-                    if i in guided_decoding_req_idx else None,
+                    guided_decoding=(GuidedDecodingParams(
+                        json=request.schema) if i in guided_decoding_req_idx
+                                     else None),
                 ))
 
         generators = []
@@ -185,14 +191,14 @@ async def run_vllm_async(
             start_time.append(time.perf_counter())
             latencies.append([])
         all_gens = merge_async_iterators(*generators)
-        generated_texts = [''] * len(requests)
+        generated_texts = [""] * len(requests)
         async for i, res in all_gens:
             generated_texts[i] = res.outputs[0].text
             lat = time.perf_counter() - start_time[i]
             latencies[i].append(lat)
         ret = [{
-            'generated': gt,
-            'expected': req.completion
+            "generated": gt,
+            "expected": req.completion
         } for gt, req in zip(generated_texts, requests)]
         end = time.perf_counter()
         first_latency = pd.Series([lat[0] * 1000 for lat in latencies])
@@ -203,7 +209,7 @@ async def run_vllm_async(
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
                     args: argparse.Namespace) -> list[SampleRequest]:
-    if args.dataset == 'json':
+    if args.dataset == "json":
         if args.json_schema_path is None:
             dir_path = os.path.dirname(os.path.realpath(__file__))
             args.json_schema_path = os.path.join(dir_path,
@@ -215,12 +221,13 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         input_len = len(tokenizer(prompt).input_ids)
         print(f"Input length of the prompt: {input_len} tokens")
         requests = [
-            SampleRequest(prompt=prompt,
-                          prompt_len=input_len,
-                          expected_output_len=args.output_len,
-                          schema=schema,
-                          structure_type=args.structure_type)
-            for _ in range(args.num_prompts)
+            SampleRequest(
+                prompt=prompt,
+                prompt_len=input_len,
+                expected_output_len=args.output_len,
+                schema=schema,
+                structure_type=args.structure_type,
+            ) for _ in range(args.num_prompts)
         ]
 
     elif args.dataset == "grammar":
@@ -243,12 +250,13 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         input_len = len(tokenizer(prompt).input_ids)
         print(f"Input length of the prompt: {input_len} tokens")
         requests = [
-            SampleRequest(prompt=prompt,
-                          prompt_len=input_len,
-                          expected_output_len=args.output_len,
-                          schema=schema,
-                          structure_type=args.structure_type)
-            for _ in range(args.num_prompts)
+            SampleRequest(
+                prompt=prompt,
+                prompt_len=input_len,
+                expected_output_len=args.output_len,
+                schema=schema,
+                structure_type=args.structure_type,
+            ) for _ in range(args.num_prompts)
         ]
 
     elif args.dataset == "regex":
@@ -261,12 +269,13 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         input_len = len(tokenizer(prompt).input_ids)
         print(f"Input length of the prompt: {input_len} tokens")
         requests = [
-            SampleRequest(prompt=prompt,
-                          prompt_len=input_len,
-                          expected_output_len=args.output_len,
-                          schema=regex,
-                          structure_type=args.structure_type)
-            for _ in range(args.num_prompts)
+            SampleRequest(
+                prompt=prompt,
+                prompt_len=input_len,
+                expected_output_len=args.output_len,
+                schema=regex,
+                structure_type=args.structure_type,
+            ) for _ in range(args.num_prompts)
         ]
 
     elif args.dataset == "choice":
@@ -276,12 +285,13 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         input_len = len(tokenizer(prompt).input_ids)
         print(f"Input length of the prompt: {input_len} tokens")
         requests = [
-            SampleRequest(prompt=prompt,
-                          prompt_len=input_len,
-                          expected_output_len=args.output_len,
-                          schema=choice,
-                          structure_type=args.structure_type)
-            for _ in range(args.num_prompts)
+            SampleRequest(
+                prompt=prompt,
+                prompt_len=input_len,
+                expected_output_len=args.output_len,
+                schema=choice,
+                structure_type=args.structure_type,
+            ) for _ in range(args.num_prompts)
         ]
 
     elif args.dataset == "xgrammar_bench":
@@ -302,11 +312,13 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
             completion = dataset["completion"][idx]
 
             requests.append(
-                SampleRequest(prompt=prompt,
-                              prompt_len=input_len,
-                              expected_output_len=args.output_len,
-                              schema=schema,
-                              completion=completion))
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=input_len,
+                    expected_output_len=args.output_len,
+                    schema=schema,
+                    completion=completion,
+                ))
 
     return requests
 
@@ -316,9 +328,10 @@ def evaluate(ret, args):
     def _eval_correctness_json(expected, actual):
         # extract json string from string using regex
         import re
-        actual = actual.replace('\n', '').replace(' ', '').strip()
+
+        actual = actual.replace("\n", "").replace(" ", "").strip()
         try:
-            actual = re.search(r'\{.*\}', actual).group()
+            actual = re.search(r"\{.*\}", actual).group()
             actual = json.loads(actual)
         except Exception:
             return False
@@ -330,28 +343,29 @@ def evaluate(ret, args):
 
     def _eval_correctness_regex(expected, actual):
         import re
+
         return re.match(args.regex, actual) is not None
 
     def _eval_correctness(expected, actual):
-        if args.structure_type == 'json':
+        if args.structure_type == "json":
             return _eval_correctness_json(expected, actual)
-        elif args.structure_type == 'regex':
+        elif args.structure_type == "regex":
             return _eval_correctness_regex(expected, actual)
-        elif args.structure_type == 'choice':
+        elif args.structure_type == "choice":
             return _eval_correctness_choice(expected, actual)
         else:
             return None
 
     scores = []
     for res in ret:
-        score = _eval_correctness(res['expected'], res['generated'])
-        res['correctness'] = score
+        score = _eval_correctness(res["expected"], res["generated"])
+        res["correctness"] = score
         scores.append(score)
 
     not_none_scores = [score for score in scores if score is not None]
 
-    return (sum(not_none_scores) / len(not_none_scores) *
-            100) if len(not_none_scores) > 0 else None
+    return ((sum(not_none_scores) / len(not_none_scores) *
+             100) if len(not_none_scores) > 0 else None)
 
 
 def main(args: argparse.Namespace):
@@ -359,22 +373,22 @@ def main(args: argparse.Namespace):
     random.seed(args.seed)
 
     # async engine is working for 'regex', 'choice' and 'grammar'
-    if args.dataset == 'grammar':
-        args.structure_type = 'grammar'
+    if args.dataset == "grammar":
+        args.structure_type = "grammar"
         args.async_engine = False
-    elif args.dataset == 'regex':
-        args.structure_type = 'regex'
+    elif args.dataset == "regex":
+        args.structure_type = "regex"
         args.async_engine = False
-    elif args.dataset == 'choice':
-        args.structure_type = 'choice'
+    elif args.dataset == "choice":
+        args.structure_type = "choice"
         args.async_engine = False
     else:
-        args.structure_type = 'json'
+        args.structure_type = "json"
 
     if args.no_guided_decoding:
         args.guided_decoding_ratio = 0
     if args.save_results:
-        result_file_name = f'{args.guided_decoding_ratio}guided'
+        result_file_name = f"{args.guided_decoding_ratio}guided"
         result_file_name += f"_{args.model.split('/')[-1]}"
         result_file_name += f"_{args.dataset}"
         result_file_name += f"_{args.num_prompts}"
@@ -394,13 +408,23 @@ def main(args: argparse.Namespace):
     if args.async_engine:
         engine_args = AsyncEngineArgs.from_cli_args(args)
         elapsed_time, ret, (first_latency, next_latency) = uvloop.run(
-            run_vllm_async(requests, engine_args, args.n,
-                           args.guided_decoding_ratio, args.warmup,
-                           args.disable_frontend_multiprocessing))
+            run_vllm_async(
+                requests,
+                engine_args,
+                args.n,
+                args.guided_decoding_ratio,
+                args.warmup,
+                args.disable_frontend_multiprocessing,
+            ))
     else:
         engine_args = EngineArgs.from_cli_args(args)
-        elapsed_time, ret = run_vllm(requests, engine_args, args.n,
-                                     args.guided_decoding_ratio, args.warmup)
+        elapsed_time, ret = run_vllm(
+            requests,
+            engine_args,
+            args.n,
+            args.guided_decoding_ratio,
+            args.warmup,
+        )
         first_latency, next_latency = None, None
 
     score = evaluate(ret, args)
@@ -418,7 +442,8 @@ def main(args: argparse.Namespace):
         f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
         f"{total_output_tokens / elapsed_time:.2f} output tokens/s",
         f"Correct rate is {score} %",
-        f"{latency_breakdown if first_latency is not None else ''}")
+        f"{latency_breakdown if first_latency is not None else ''}",
+    )
 
     # Output JSON results if specified
     if args.output_json or result_file_name:
@@ -431,7 +456,7 @@ def main(args: argparse.Namespace):
             "tokens_per_second": f"{total_num_tokens / elapsed_time:.2f}",
             "output_tokens_per_second":
             f"{total_output_tokens / elapsed_time:.2f}",
-            "correct_rate(%)": score
+            "correct_rate(%)": score,
         }
         results = {"outputs": ret, **results}
         if first_latency is not None:
@@ -451,56 +476,78 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="Benchmark guided decoding.")
     parser = AsyncEngineArgs.add_cli_args(parser)
 
-    parser.add_argument("--output-len",
-                        type=int,
-                        default=512,
-                        help="Output length for each request. Overrides the "
-                        "output length from the dataset.")
+    parser.add_argument(
+        "--output-len",
+        type=int,
+        default=512,
+        help="Output length for each request. Overrides the "
+        "output length from the dataset.",
+    )
     parser.add_argument(
         "--dataset",
-        default='json',
-        choices=['json', 'grammar', 'regex', 'choice', 'xgrammar_bench'])
-    parser.add_argument("--json_schema_path",
-                        type=str,
-                        default=None,
-                        help="Path to json schema.")
-    parser.add_argument("--n",
-                        type=int,
-                        default=1,
-                        help="Number of generated sequences per prompt.")
-    parser.add_argument("--num-prompts",
-                        type=int,
-                        default=10,
-                        help="Number of prompts to process.")
+        default="json",
+        choices=["json", "grammar", "regex", "choice", "xgrammar_bench"],
+    )
     parser.add_argument(
-        '--output-json',
+        "--json_schema_path",
         type=str,
         default=None,
-        help='Path to save the throughput results in JSON format.')
-    parser.add_argument("--async-engine",
-                        action='store_true',
-                        default=False,
-                        help="Use vLLM async engine rather than LLM class.")
-    parser.add_argument("--no-guided-decoding",
-                        action='store_true',
-                        default=False,
-                        help="Whether to disable JSON decoding or not.")
-    parser.add_argument("--guided-decoding-ratio",
-                        type=float,
-                        default=1.0,
-                        help="Ratio of Guided Decoding requests")
-    parser.add_argument("--disable-frontend-multiprocessing",
-                        action='store_true',
-                        default=False,
-                        help="Disable decoupled async engine frontend.")
-    parser.add_argument("--warmup",
-                        action="store_true",
-                        default=False,
-                        help="Run warmup prompts before benchmark.")
-    parser.add_argument("--save-results",
-                        action="store_true",
-                        default=False,
-                        help="save output results.")
+        help="Path to json schema.",
+    )
+    parser.add_argument(
+        "--n",
+        type=int,
+        default=1,
+        help="Number of generated sequences per prompt.",
+    )
+    parser.add_argument(
+        "--num-prompts",
+        type=int,
+        default=10,
+        help="Number of prompts to process.",
+    )
+    parser.add_argument(
+        "--output-json",
+        type=str,
+        default=None,
+        help="Path to save the throughput results in JSON format.",
+    )
+    parser.add_argument(
+        "--async-engine",
+        action="store_true",
+        default=False,
+        help="Use vLLM async engine rather than LLM class.",
+    )
+    parser.add_argument(
+        "--no-guided-decoding",
+        action="store_true",
+        default=False,
+        help="Whether to disable JSON decoding or not.",
+    )
+    parser.add_argument(
+        "--guided-decoding-ratio",
+        type=float,
+        default=1.0,
+        help="Ratio of Guided Decoding requests",
+    )
+    parser.add_argument(
+        "--disable-frontend-multiprocessing",
+        action="store_true",
+        default=False,
+        help="Disable decoupled async engine frontend.",
+    )
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        default=False,
+        help="Run warmup prompts before benchmark.",
+    )
+    parser.add_argument(
+        "--save-results",
+        action="store_true",
+        default=False,
+        help="save output results.",
+    )
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

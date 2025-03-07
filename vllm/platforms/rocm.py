@@ -57,7 +57,7 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
     "Phi3VForCausalLM":
     ("ROCm Triton flash attention may run into compilation errors due to "
      "excessive use of shared memory. If this happens, disable Triton FA "
-     "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`")
+     "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`"),
 }
 
 # Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES``
@@ -106,14 +106,28 @@ class RocmPlatform(Platform):
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
     supported_quantization: list[str] = [
-        "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
-        "fbgemm_fp8", "gguf", "quark", "ptpc_fp8"
+        "awq",
+        "gptq",
+        "fp8",
+        "compressed_tensors",
+        "compressed-tensors",
+        "fbgemm_fp8",
+        "gguf",
+        "quark",
+        "ptpc_fp8",
     ]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1,
-                             use_mla) -> str:
+    def get_attn_backend_cls(
+        cls,
+        selected_backend,
+        head_size,
+        dtype,
+        kv_cache_dtype,
+        block_size,
+        use_v1,
+        use_mla,
+    ) -> str:
         if use_mla:
             logger.info("Using Triton MLA backend.")
             return "vllm.attention.backends.triton_mla.TritonMLABackend"
@@ -176,22 +190,21 @@ class RocmPlatform(Platform):
                         "needed) on VLLM V1. Please launch without "
                         "--num-scheduler-steps.")
                 else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.multi_step_worker.MultiStepWorker"
+                    parallel_config.worker_cls = (
+                        "vllm.worker.multi_step_worker.MultiStepWorker")
             elif vllm_config.speculative_config:
                 if envs.VLLM_USE_V1:
                     raise NotImplementedError(
                         "Speculative decoding is not yet supported on VLLM V1."
                     )
                 else:
-                    parallel_config.worker_cls = \
+                    parallel_config.worker_cls = (
                         "vllm.spec_decode.spec_decode_worker.create_spec_worker"
-                    parallel_config.sd_worker_cls = \
-                        "vllm.worker.worker.Worker"
+                    )
+                    parallel_config.sd_worker_cls = "vllm.worker.worker.Worker"
             else:
                 if envs.VLLM_USE_V1:
-                    parallel_config.worker_cls = \
-                            "vllm.v1.worker.gpu_worker.Worker"
+                    parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
 
@@ -204,8 +217,10 @@ class RocmPlatform(Platform):
         if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
             msg = _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch]
             logger.warning(
-                "Model architecture '%s' is partially "
-                "supported by ROCm: %s", model_arch, msg)
+                "Model architecture '%s' is partially supported by ROCm: %s",
+                model_arch,
+                msg,
+            )
 
     @classmethod
     def verify_quantization(cls, quant: str) -> None:

@@ -41,7 +41,7 @@ async def client(server):
 
 @pytest.mark.asyncio
 async def test_completion_stream_options_and_logprobs_with_long_prompts(
-        client: openai.AsyncOpenAI):
+    client: openai.AsyncOpenAI, ):
     # Test stream with long prompt
     prompt = "What is the capital of France?" * 400
 
@@ -78,15 +78,18 @@ async def test_completion_stream_options_and_logprobs_with_long_prompts(
 
 @pytest.mark.asyncio
 async def test_chat_completion_stream_options_and_logprobs_with_long_prompts(
-        client: openai.AsyncOpenAI):
+    client: openai.AsyncOpenAI, ):
     # Test stream with long prompt
-    messages = [{
-        "role": "system",
-        "content": "You are a helpful assistant."
-    }, {
-        "role": "user",
-        "content": "What is the capital of France?" * 400
-    }]
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant."
+        },
+        {
+            "role": "user",
+            "content": "What is the capital of France?" * 400
+        },
+    ]
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,

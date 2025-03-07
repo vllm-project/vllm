@@ -56,7 +56,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
     def _update_sampling_metadata(self, sampling_metadata, num_seqs,
                                   num_queries):
-
         assert sampling_metadata.num_prompts == 0
         assert len(sampling_metadata.seq_groups) == num_queries
         assert sampling_metadata.selected_token_indices.shape == (
@@ -88,8 +87,13 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
 
-        attn_metadata.advance_step(model_input, sampled_token_ids,
-                                   self.block_size, num_seqs, num_queries)
+        attn_metadata.advance_step(
+            model_input,
+            sampled_token_ids,
+            self.block_size,
+            num_seqs,
+            num_queries,
+        )
 
         # Update sampling_metadata
         sampling_metadata = model_input.sampling_metadata
@@ -217,7 +221,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 assert model_input.prompt_adapter_mapping is not None
                 self.set_active_prompt_adapters(
                     model_input.prompt_adapter_requests,
-                    model_input.prompt_adapter_mapping)
+                    model_input.prompt_adapter_mapping,
+                )
 
             self.attn_state.begin_forward(model_input)
 
@@ -234,8 +239,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             # We can skip CPU samples for spec token generation.
             # (We do allow CPU samples for num_steps == 1 to support the
             # fallback case, where supports_gpu_multi_step(..) does not pass)
-            model_input.sampling_metadata.skip_sampler_cpu_output = (
-                not is_fallback)
+            model_input.sampling_metadata.skip_sampler_cpu_output = not is_fallback
 
             # Attn attr defines if we use cuda graphs
             use_cuda_graph = model_input.attn_metadata.use_cuda_graph
@@ -243,18 +247,20 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         # Get model
         if use_cuda_graph:
             graph_batch_size = model_input.input_tokens.shape[0]
-            model_executable = (self.graph_runners[model_input.virtual_engine]
-                                [graph_batch_size])
+            model_executable = self.graph_runners[
+                model_input.virtual_engine][graph_batch_size]
 
             if previous_hidden_states is not None:
                 hidden_states = torch.cat([
                     previous_hidden_states,
-                    torch.empty([
-                        graph_batch_size - previous_hidden_states.shape[0],
-                        *previous_hidden_states.shape[1:]
-                    ],
-                                dtype=previous_hidden_states.dtype,
-                                device=previous_hidden_states.device)
+                    torch.empty(
+                        [
+                            graph_batch_size - previous_hidden_states.shape[0],
+                            *previous_hidden_states.shape[1:],
+                        ],
+                        dtype=previous_hidden_states.dtype,
+                        device=previous_hidden_states.device,
+                    ),
                 ])
             else:
                 hidden_states = None
@@ -266,8 +272,9 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 
-            model_execute_kwargs = {"previous_hidden_states": hidden_states} \
-                if previous_hidden_states is not None else {}
+            model_execute_kwargs = ({
+                "previous_hidden_states": hidden_states
+            } if previous_hidden_states is not None else {})
 
             compute_logits_kwargs = {}
             # Run model
@@ -289,9 +296,11 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 )
 
             # Compute the logits.
-            logits = self.model.compute_logits(hidden_states,
-                                               model_input.sampling_metadata,
-                                               **compute_logits_kwargs)
+            logits = self.model.compute_logits(
+                hidden_states,
+                model_input.sampling_metadata,
+                **compute_logits_kwargs,
+            )
             if not self.is_driver_worker:
                 return []
             # Sample the next token.
@@ -303,14 +312,13 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
             if self.return_hidden_states and is_fallback:
                 if use_cuda_graph:
-                    indices = model_input.sampling_metadata\
-                      .selected_token_indices
+                    indices = model_input.sampling_metadata.selected_token_indices
                     output.hidden_states = hidden_states[:len(indices)]
                 else:
                     output.hidden_states = hidden_states
 
-            if model_input.attn_metadata.num_prefills == 0 \
-                and self.indices_of_seq_with_bonus_tokens is not None:
+            if (model_input.attn_metadata.num_prefills == 0
+                    and self.indices_of_seq_with_bonus_tokens is not None):
                 assert output.sampled_token_ids is not None
                 # output.sampled_token_ids should be of shape (num_seqs, 1)
                 nums_seqs, num_tokens_per_seq = output.sampled_token_ids.shape

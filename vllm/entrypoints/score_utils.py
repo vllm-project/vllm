@@ -13,7 +13,6 @@ def _cosine_similarity(
     embed_1: list[PoolingRequestOutput],
     embed_2: list[PoolingRequestOutput],
 ) -> list[PoolingRequestOutput]:
-
     scorer = CosineSimilarity(0)
     scores: Union[list[PoolingRequestOutput]] = []
 
@@ -32,7 +31,8 @@ def _cosine_similarity(
                 request_id=f"{emb_1.request_id}_{emb_2.request_id}",
                 outputs=pair_score,
                 prompt_token_ids=tokens,
-                finished=True))
+                finished=True,
+            ))
 
     return scores
 

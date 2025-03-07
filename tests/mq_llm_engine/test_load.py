@@ -28,7 +28,6 @@ def tmp_socket():
 async def test_load(tmp_socket):
     with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
                            ipc_path=tmp_socket) as engine:
-
         client = await engine.make_client()
 
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]

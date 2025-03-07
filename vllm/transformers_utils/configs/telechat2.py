@@ -1,20 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # adapted from https://www.modelscope.cn/models/TeleAI/TeleChat2-3B/resolve/master/configuration_telechat2.py
-""" Telechat configuration compatible with LlamaConfig. """
+"""Telechat configuration compatible with LlamaConfig."""
 
 from transformers.configuration_utils import PretrainedConfig
 
 
 class Telechat2Config(PretrainedConfig):
-
     model_type = "telechat"
     keys_to_ignore_at_inference = ["past_key_values"]
     attribute_map = {
         "num_hidden_layers": "n_layer",
         "num_attention_heads": "n_head",
         "intermediate_size": "ffn_hidden_size",
-        "rms_norm_eps": "layer_norm_epsilon"
+        "rms_norm_eps": "layer_norm_epsilon",
     }
 
     def __init__(

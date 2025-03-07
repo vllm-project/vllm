@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A TPU worker class."""
+
 import os
 from typing import Optional
 
@@ -64,6 +65,7 @@ class TPUWorker:
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
+
             init_cached_hf_modules()
 
         self.profiler = None
@@ -71,8 +73,10 @@ class TPUWorker:
             # For TPU, we can only have 1 active profiler session for 1 profiler
             # server. So we only profile on rank0.
             self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info("Profiling enabled. Traces will be saved to: %s",
-                        self.profile_dir)
+            logger.info(
+                "Profiling enabled. Traces will be saved to: %s",
+                self.profile_dir,
+            )
             self.profiler = xp.start_server(9012)
 
     def init_device(self):
@@ -81,10 +85,12 @@ class TPUWorker:
         torch.set_default_dtype(self.model_config.dtype)
 
         # Initialize the distributed environment.
-        init_tpu_worker_distributed_environment(self.parallel_config,
-                                                self.rank,
-                                                self.distributed_init_method,
-                                                self.local_rank)
+        init_tpu_worker_distributed_environment(
+            self.parallel_config,
+            self.rank,
+            self.distributed_init_method,
+            self.local_rank,
+        )
 
         # Device initialization should happen after initializing
         # the distributed runtime.
@@ -132,7 +138,8 @@ class TPUWorker:
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
-            runner_kv_caches)
+            runner_kv_caches,
+        )
 
         self.model_runner._dummy_run(
             runner_kv_caches,
@@ -216,5 +223,7 @@ def init_tpu_worker_distributed_environment(
         distributed_init_method=distributed_init_method,
         backend="gloo",
     )
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+    ensure_model_parallel_initialized(
+        parallel_config.tensor_parallel_size,
+        parallel_config.pipeline_parallel_size,
+    )

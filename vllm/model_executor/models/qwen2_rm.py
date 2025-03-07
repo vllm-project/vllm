@@ -5,6 +5,7 @@
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
 """Inference-only Qwen2-RM model compatible with HuggingFace weights."""
+
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -61,9 +62,11 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP,
                                 prefix=maybe_prefix(prefix, "model"))
 
         self.score = nn.Sequential(
-            ColumnParallelLinear(config.hidden_size,
-                                 config.hidden_size,
-                                 quant_config=quant_config),
+            ColumnParallelLinear(
+                config.hidden_size,
+                config.hidden_size,
+                quant_config=quant_config,
+            ),
             ReLU(),
             RowParallelLinear(config.hidden_size,
                               config.num_labels,
@@ -112,7 +115,8 @@ class Qwen2ForRewardModel(Qwen2RewardBaseModel):
             pooler_config,
             pooling_type=PoolingType.ALL,
             normalize=False,
-            softmax=False)
+            softmax=False,
+        )
 
 
 class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):

@@ -130,8 +130,10 @@ class MultiModalRegistry:
         if data_type_key in self._plugins:
             logger.warning(
                 "A plugin is already registered for data type %s, "
-                "and will be overwritten by the new plugin %s.", data_type_key,
-                plugin)
+                "and will be overwritten by the new plugin %s.",
+                data_type_key,
+                plugin,
+            )
 
         self._plugins[data_type_key] = plugin
 
@@ -234,8 +236,8 @@ class MultiModalRegistry:
         instance of multimodal data belonging to a specific modality, that are
         passed to the language model for a model class.
         """
-        return self._get_plugin(data_type_key) \
-            .register_max_multimodal_tokens(max_mm_tokens)
+        return self._get_plugin(data_type_key).register_max_multimodal_tokens(
+            max_mm_tokens)
 
     def register_max_image_tokens(
         self,
@@ -252,7 +254,7 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
     ) -> Mapping[str, int]:
         """
-        Get the maximum number of tokens per data item from each modality based 
+        Get the maximum number of tokens per data item from each modality based
         on underlying model configuration.
         """
         if self.has_processor(model_config):
@@ -276,11 +278,11 @@ class MultiModalRegistry:
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
-        on underlying model configuration, excluding modalities that user 
+        on underlying model configuration, excluding modalities that user
         explicitly disabled via `limit_mm_per_prompt`.
 
         Note:
-            This is currently directly used only in V1 for profiling the memory 
+            This is currently directly used only in V1 for profiling the memory
             usage of a model.
         """
         mm_limits = self.get_mm_limits_per_prompt(model_config)
@@ -336,7 +338,9 @@ class MultiModalRegistry:
         if model_config in self._limits_by_model:
             logger.warning(
                 "`mm_limits` has already been set for model=%s, and will "
-                "be overwritten by the new values.", model_config.model)
+                "be overwritten by the new values.",
+                model_config.model,
+            )
 
         multimodal_config = model_config.multimodal_config
         if multimodal_config is None:
@@ -349,7 +353,9 @@ class MultiModalRegistry:
                 logger.warning(
                     "Detected extra keys in `--limit-mm-per-prompt` which "
                     "are not registered as multi-modal plugins: %s. "
-                    "They will be ignored.", extra_keys)
+                    "They will be ignored.",
+                    extra_keys,
+                )
 
             # NOTE: Currently the default is set to 1 for each plugin
             # TODO: Automatically determine the limits based on budget
@@ -405,7 +411,9 @@ class MultiModalRegistry:
                 logger.warning(
                     "Model class %s already has a multi-modal processor "
                     "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    model_cls,
+                    self,
+                )
 
             self._processor_factories[model_cls] = _ProcessorFactories(
                 info=info,

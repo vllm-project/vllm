@@ -152,10 +152,13 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
 
-    def __init__(self, schema: Union[str, Dict, BaseModel],
-                 tokenizer: PreTrainedTokenizerBase,
-                 whitespace_pattern: Union[str, None],
-                 reasoner: Optional[Reasoner]):
+    def __init__(
+        self,
+        schema: Union[str, Dict, BaseModel],
+        tokenizer: PreTrainedTokenizerBase,
+        whitespace_pattern: Union[str, None],
+        reasoner: Optional[Reasoner],
+    ):
         """Compile the FSM that drives the JSON-guided generation.
 
         Parameters
@@ -194,8 +197,12 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         tokenizer = _adapt_tokenizer(tokenizer)
         return CFGGuide(cfg, tokenizer)
 
-    def __init__(self, cfg: str, tokenizer: PreTrainedTokenizerBase,
-                 reasoner: Optional[Reasoner]):
+    def __init__(
+        self,
+        cfg: str,
+        tokenizer: PreTrainedTokenizerBase,
+        reasoner: Optional[Reasoner],
+    ):
         """Compile the FSM that drives the context free grammar generation.
 
         Parameters
@@ -245,7 +252,7 @@ def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
 
     def change_decoder(
         decoder: Callable[[List[int]],
-                          str]) -> Callable[[List[int]], List[str]]:
+                          str], ) -> Callable[[List[int]], List[str]]:
         """Sync vLLM's decoder with the outlines by returning list."""
 
         def new_decoder(inp_tokens: List[int]) -> List[str]:

@@ -10,11 +10,13 @@ from .base_device_communicator import DeviceCommunicatorBase
 
 class CudaCommunicator(DeviceCommunicatorBase):
 
-    def __init__(self,
-                 cpu_group: ProcessGroup,
-                 device: Optional[torch.device] = None,
-                 device_group: Optional[ProcessGroup] = None,
-                 unique_name: str = ""):
+    def __init__(
+        self,
+        cpu_group: ProcessGroup,
+        device: Optional[torch.device] = None,
+        device_group: Optional[ProcessGroup] = None,
+        unique_name: str = "",
+    ):
         super().__init__(cpu_group, device, device_group, unique_name)
         if "tp" not in unique_name:
             # only tp uses custom allreduce
@@ -22,6 +24,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         else:
             from vllm.distributed.parallel_state import (
                 _ENABLE_CUSTOM_ALL_REDUCE)
+
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
         use_pynccl = True
 
@@ -53,8 +56,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # always try custom allreduce first,
         # and then pynccl.
         ca_comm = self.ca_comm
-        if ca_comm is not None and not ca_comm.disabled and \
-            ca_comm.should_custom_ar(input_):
+        if (ca_comm is not None and not ca_comm.disabled
+                and ca_comm.should_custom_ar(input_)):
             out = ca_comm.custom_all_reduce(input_)
             assert out is not None
             return out

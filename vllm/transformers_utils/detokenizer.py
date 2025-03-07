@@ -21,18 +21,20 @@ class Detokenizer:
         """Returns the HF tokenizer to use for a given sequence."""
         return self.tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
-    def decode_prompt_logprobs_inplace(self, seq_group: SequenceGroup,
-                                       prompt_logprobs: List[Optional[Dict[
-                                           int, Logprob]]],
-                                       position_offset: int) -> None:
+    def decode_prompt_logprobs_inplace(
+        self,
+        seq_group: SequenceGroup,
+        prompt_logprobs: List[Optional[Dict[int, Logprob]]],
+        position_offset: int,
+    ) -> None:
         """Decodes the logprobs for the prompt of a sequence group.
 
         Args:
             seq_group: The sequence group to decode.
             prompt_logprobs: The logprobs to decode.
-            position_offset: Offset of the first index of the logprobs 
+            position_offset: Offset of the first index of the logprobs
                 relative to the start of the sequence (for chunked prefill).
-        
+
         Returns:
             The prompt logprobs with the decoded tokens.
         """
@@ -54,7 +56,6 @@ class Detokenizer:
 
         for token_position_in_logprob, prompt_logprobs_for_token in enumerate(
                 prompt_logprobs):
-
             # Absolute token position equals the index in the logprobs
             # list plus the offset of the entire logprobs list relative
             # to the start of the sequence.
@@ -64,19 +65,25 @@ class Detokenizer:
             for token_id, sample_logprob in prompt_logprobs_for_token.items():
                 if (sample_logprob.decoded_token is None
                         and token_id != VLLM_INVALID_TOKEN_ID):
-                    prompt_token_ids_with_token = (
-                        prompt_token_ids[:token_position] + [token_id])
-                    (new_tokens, new_text, new_prefix_offset,
-                     new_read_offset) = detokenize_incrementally(
-                         tokenizer=tokenizer,
-                         all_input_ids=prompt_token_ids_with_token,
-                         prev_tokens=prev_tokens,
-                         prefix_offset=prefix_offset,
-                         read_offset=read_offset,
-                         skip_special_tokens=prms.skip_special_tokens,
-                         spaces_between_special_tokens=prms.
-                         spaces_between_special_tokens,
-                     )
+                    prompt_token_ids_with_token = prompt_token_ids[:
+                                                                   token_position] + [
+                                                                       token_id
+                                                                   ]
+                    (
+                        new_tokens,
+                        new_text,
+                        new_prefix_offset,
+                        new_read_offset,
+                    ) = detokenize_incrementally(
+                        tokenizer=tokenizer,
+                        all_input_ids=prompt_token_ids_with_token,
+                        prev_tokens=prev_tokens,
+                        prefix_offset=prefix_offset,
+                        read_offset=read_offset,
+                        skip_special_tokens=prms.skip_special_tokens,
+                        spaces_between_special_tokens=prms.
+                        spaces_between_special_tokens,
+                    )
 
                     sample_logprob.decoded_token = new_text
 
@@ -116,14 +123,14 @@ class Detokenizer:
         # computation for each logprob.
         if seq.tokens is None:
             (seq.tokens, seq.prefix_offset,
-             seq.read_offset) = convert_prompt_ids_to_tokens(
+             seq.read_offset) = (convert_prompt_ids_to_tokens(
                  tokenizer=tokenizer,
                  prompt_ids=all_input_ids[:-1],
                  skip_special_tokens=prms.skip_special_tokens,
-             )
+             ))
 
         (new_tokens, new_decoded_token_text, prefix_offset,
-         read_offset) = detokenize_incrementally(
+         read_offset) = (detokenize_incrementally(
              tokenizer=tokenizer,
              all_input_ids=all_input_ids,
              prev_tokens=seq.tokens,
@@ -131,7 +138,7 @@ class Detokenizer:
              read_offset=seq.read_offset,
              skip_special_tokens=prms.skip_special_tokens,
              spaces_between_special_tokens=prms.spaces_between_special_tokens,
-         )
+         ))
 
         # Decode logprobs
         logprobs = seq.output_logprobs[-1]

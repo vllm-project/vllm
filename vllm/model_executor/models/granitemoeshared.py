@@ -4,6 +4,7 @@
 The architecture is the same as granitemoe but with the addition of shared
 experts.
 """
+
 from typing import Iterable, Optional, Set, Tuple
 
 import torch
@@ -49,13 +50,15 @@ class GraniteMoeSharedMLP(nn.Module):
             output_sizes=[self.hidden_size] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.input_linear")
+            prefix=f"{prefix}.input_linear",
+        )
         self.output_linear = RowParallelLinear(
             self.hidden_size,
             self.input_size,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.output_linear")
+            prefix=f"{prefix}.output_linear",
+        )
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
                              "Only silu is supported for now.")
@@ -90,21 +93,21 @@ class GraniteMoeSharedDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            attention_multiplier=config.attention_multiplier)
+            attention_multiplier=config.attention_multiplier,
+        )
         self.block_sparse_moe = GraniteMoeMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
-            prefix=f"{prefix}.block_sparse_moe")
-        self.shared_mlp = None if \
-            getattr(config, 'shared_intermediate_size', 0) == 0 \
-            else GraniteMoeSharedMLP(
-                config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.shared_mlp"
-            )
+            prefix=f"{prefix}.block_sparse_moe",
+        )
+        self.shared_mlp = (None if getattr(config, "shared_intermediate_size",
+                                           0) == 0 else GraniteMoeSharedMLP(
+                                               config,
+                                               quant_config=quant_config,
+                                               prefix=f"{prefix}.shared_mlp"))
 
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -153,8 +156,8 @@ class GraniteMoeSharedModel(nn.Module):
         lora_config = vllm_config.lora_config
 
         self.padding_idx = config.pad_token_id
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
+        lora_vocab = ((lora_config.lora_extra_vocab_size *
+                       (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
 
@@ -171,7 +174,8 @@ class GraniteMoeSharedModel(nn.Module):
             lambda prefix: GraniteMoeSharedDecoderLayer(
                 config, cache_config, quant_config=quant_config, prefix=prefix
             ),
-            prefix=f"{prefix}.layers")
+            prefix=f"{prefix}.layers",
+        )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -246,19 +250,22 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.unpadded_vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config else lora_config.lora_vocab_padding_size,
+            padding_size=(
+                DEFAULT_VOCAB_PADDING_SIZE
+                # We need bigger padding if using lora for kernel
+                # compatibility
+                if not lora_config else lora_config.lora_vocab_padding_size),
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"))
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size,
-                                                scale=1 /
-                                                self.config.logits_scaling)
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size,
+            config.vocab_size,
+            scale=1 / self.config.logits_scaling,
+        )
 
         self.sampler = get_sampler()
 
@@ -288,13 +295,17 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             device: torch.device) -> IntermediateTensors:
         return IntermediateTensors({
             "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
+            torch.zeros(
+                (batch_size, self.config.hidden_size),
+                dtype=dtype,
+                device=device,
+            ),
             "residual":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
+            torch.zeros(
+                (batch_size, self.config.hidden_size),
+                dtype=dtype,
+                device=device,
+            ),
         })
 
     def sample(
@@ -309,33 +320,38 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                                    torch.Tensor]]) -> Set[str]:
         new_weights = {}
         for n, p in weights:
-            if n.endswith('.block_sparse_moe.input_linear.weight'):
+            if n.endswith(".block_sparse_moe.input_linear.weight"):
                 for e in range(p.size(0)):
                     w1_name = n.replace(
-                        '.block_sparse_moe.input_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w1.weight")
+                        ".block_sparse_moe.input_linear.weight",
+                        f".block_sparse_moe.experts.{e}.w1.weight",
+                    )
                     w3_name = n.replace(
-                        '.block_sparse_moe.input_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w3.weight")
+                        ".block_sparse_moe.input_linear.weight",
+                        f".block_sparse_moe.experts.{e}.w3.weight",
+                    )
                     w1_param, w3_param = p[e].chunk(2, dim=0)
                     assert w1_name not in new_weights
                     assert w3_name not in new_weights
                     new_weights[w1_name] = w1_param
                     new_weights[w3_name] = w3_param
-            elif n.endswith('.block_sparse_moe.output_linear.weight'):
+            elif n.endswith(".block_sparse_moe.output_linear.weight"):
                 for e in range(p.size(0)):
                     w2_name = n.replace(
-                        '.block_sparse_moe.output_linear.weight',
-                        f".block_sparse_moe.experts.{e}.w2.weight")
+                        ".block_sparse_moe.output_linear.weight",
+                        f".block_sparse_moe.experts.{e}.w2.weight",
+                    )
                     w2_param = p[e]
                     assert w2_name not in new_weights
                     new_weights[w2_name] = w2_param
-            elif n.endswith('.block_sparse_moe.router.layer.weight'):
-                gate_name = n.replace('.block_sparse_moe.router.layer.weight',
-                                      ".block_sparse_moe.gate.weight")
+            elif n.endswith(".block_sparse_moe.router.layer.weight"):
+                gate_name = n.replace(
+                    ".block_sparse_moe.router.layer.weight",
+                    ".block_sparse_moe.gate.weight",
+                )
                 assert gate_name not in new_weights
                 new_weights[gate_name] = p
-            elif n == 'lm_head.weight' and self.config.tie_word_embeddings:
+            elif n == "lm_head.weight" and self.config.tie_word_embeddings:
                 pass
             else:
                 new_weights[n] = p

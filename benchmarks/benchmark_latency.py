@@ -27,7 +27,8 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
         args=args,
         metrics={"latency": results["latencies"]},
         extra_info={k: results[k]
-                    for k in ["avg_latency", "percentiles"]})
+                    for k in ["avg_latency", "percentiles"]},
+    )
     if pt_records:
         pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch.json"
         write_to_json(pt_file, pt_records)

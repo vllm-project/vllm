@@ -23,6 +23,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only MiniCPM3 model compatible with HuggingFace weights."""
+
 from typing import Any, Dict, Optional
 
 import torch
@@ -82,33 +83,41 @@ class MiniCPM3Attention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.q_a_proj = ReplicatedLinear(self.hidden_size,
-                                         self.q_lora_rank,
-                                         bias=False,
-                                         quant_config=quant_config)
+        self.q_a_proj = ReplicatedLinear(
+            self.hidden_size,
+            self.q_lora_rank,
+            bias=False,
+            quant_config=quant_config,
+        )
         self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-        self.q_b_proj = ColumnParallelLinear(q_lora_rank,
-                                             self.num_heads * self.qk_head_dim,
-                                             bias=False,
-                                             quant_config=quant_config)
+        self.q_b_proj = ColumnParallelLinear(
+            q_lora_rank,
+            self.num_heads * self.qk_head_dim,
+            bias=False,
+            quant_config=quant_config,
+        )
 
-        self.kv_a_proj_with_mqa = ReplicatedLinear(self.hidden_size,
-                                                   self.kv_lora_rank +
-                                                   self.qk_rope_head_dim,
-                                                   bias=False,
-                                                   quant_config=quant_config)
+        self.kv_a_proj_with_mqa = ReplicatedLinear(
+            self.hidden_size,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            bias=False,
+            quant_config=quant_config,
+        )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
                                       eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
-            quant_config=quant_config)
+            quant_config=quant_config,
+        )
         # O projection.
-        self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
-                                        self.hidden_size,
-                                        bias=False,
-                                        quant_config=quant_config)
+        self.o_proj = RowParallelLinear(
+            self.num_heads * self.v_head_dim,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+        )
 
         self.rotary_emb = get_rope(
             self.qk_rope_head_dim,
@@ -117,13 +126,15 @@ class MiniCPM3Attention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(self.num_local_heads,
-                              self.qk_head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_local_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+        self.attn = Attention(
+            self.num_local_heads,
+            self.qk_head_dim,
+            self.scaling,
+            num_kv_heads=self.num_local_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
@@ -151,7 +162,8 @@ class MiniCPM3Attention(nn.Module):
         q_pe, k_pe = self.rotary_emb(
             positions,
             q_pe.reshape(-1, self.num_local_heads * self.qk_rope_head_dim),
-            k_pe.reshape(-1, self.qk_rope_head_dim))
+            k_pe.reshape(-1, self.qk_rope_head_dim),
+        )
         q_pe = q_pe.view(-1, self.num_local_heads, self.qk_rope_head_dim)
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
 
@@ -214,7 +226,8 @@ class MiniCPM3Model(MiniCPMModel):
             config.num_hidden_layers,
             lambda prefix: MiniCPM3DecoderLayer(
                 config, cache_config, quant_config, prefix=prefix),
-            prefix=f"{prefix}.layers")
+            prefix=f"{prefix}.layers",
+        )
 
 
 class MiniCPM3ForCausalLM(MiniCPMForCausalLM):

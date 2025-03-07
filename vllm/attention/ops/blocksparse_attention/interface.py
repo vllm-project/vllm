@@ -33,9 +33,9 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
     ):
         super().__init__()
         if use_spda is None:
-            use_spda = current_platform.is_rocm() or \
-                        current_platform.is_cpu() or not \
-                        IS_COMPUTE_8_OR_ABOVE
+            use_spda = (current_platform.is_rocm()
+                        or current_platform.is_cpu()
+                        or not IS_COMPUTE_8_OR_ABOVE)
         device = device or (torch.cuda.current_device()
                             if current_platform.is_cuda_alike() else "cpu")
         device = torch.device(device)
@@ -57,8 +57,8 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         self.head_sliding_step = get_head_sliding_step(n_heads, vert_stride,
                                                        homo_head)
 
-        sparse_layout, sparse_pattern, self.dense_attn_mask = (
-            self.get_attn_pattern(dtype, device))
+        sparse_layout, sparse_pattern, self.dense_attn_mask = self.get_attn_pattern(
+            dtype, device)
 
         if q_block_size is not None and q_block_size != block_size:
             if q_block_size > block_size:
@@ -93,7 +93,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         )
         if (not self.homo_head) and (self.active_head_range is not None):
             assert isinstance(self.active_head_range, tuple)
-            assert (len(self.active_head_range) == 2)
+            assert len(self.active_head_range) == 2
             h_start, h_end = self.active_head_range
             sparse_layout = tuple(x[h_start:h_end] for x in sparse_layout)
             if self.use_spda:

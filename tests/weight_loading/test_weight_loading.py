@@ -17,7 +17,8 @@ MIN_CAPABILITY = os.environ.get("MIN_CAPABILITY", "80")
 
 @pytest.mark.skipif(
     not current_platform.has_device_capability(int(MIN_CAPABILITY)),
-    reason="Current system does not have minimum capability.")
+    reason="Current system does not have minimum capability.",
+)
 def test_weight_loading(vllm_runner):
     """
     Test parameter weight loading with tp>1.
@@ -28,8 +29,8 @@ def test_weight_loading(vllm_runner):
             dtype=torch.half if QUANTIZATION == "gptq" else "auto",
             quantization=None if QUANTIZATION == "None" else QUANTIZATION,
             max_model_len=MAX_MODEL_LEN,
-            tensor_parallel_size=2) as model:
-
+            tensor_parallel_size=2,
+    ) as model:
         output = model.generate_greedy("Hello world!", max_tokens=20)
         print(output)
         assert output

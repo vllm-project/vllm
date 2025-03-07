@@ -21,8 +21,8 @@ def is_gptq_allspark_supported(min_capability: int,
     capability = current_platform.get_device_capability()
     assert capability is not None
 
-    return capability.to_int() >= min_capability \
-        and capability.to_int() <= max_capability
+    return (capability.to_int() >= min_capability
+            and capability.to_int() <= max_capability)
 
 
 MNK_FACTORS = [
@@ -51,7 +51,8 @@ def rand_data(shape, dtype=torch.float16):
 
 @pytest.mark.skipif(
     not is_gptq_allspark_supported(80, 89),
-    reason="AllSpark Ampere kernel is not supported on this GPU type.")
+    reason="AllSpark Ampere kernel is not supported on this GPU type.",
+)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 @pytest.mark.parametrize("group_size", [-1])
 @pytest.mark.parametrize("has_zp", HAS_ZP_OPTS)
@@ -80,18 +81,42 @@ def test_gptq_allspark_gemm_ampere(mnk_factors, group_size, has_zp, dtype):
 
     qw_reorder, s_reorder, zp_reorder = ops.allspark_repack_weight(
         qw, s, zp, has_zp)
-    opcheck(torch.ops._C.rearrange_kn_weight_as_n32k16_order,
-            (qw, s, zp, has_zp, qw_reorder, s_reorder, zp_reorder, k, n,
-             n_32align))
+    opcheck(
+        torch.ops._C.rearrange_kn_weight_as_n32k16_order,
+        (qw, s, zp, has_zp, qw_reorder, s_reorder, zp_reorder, k, n,
+         n_32align),
+    )
 
-    opcheck(torch.ops._C.allspark_w8a16_gemm,
-            (input, qw_reorder, s_reorder, zp_reorder, n, group_size, sm_count,
-             sm_version, ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD, has_zp, True),
-            test_utils=DEFAULT_OPCHECK_TEST_UTILS)
-    output = ops.allspark_w8a16_gemm(input, qw_reorder, s_reorder, zp_reorder,
-                                     n, group_size, sm_count, sm_version,
-                                     ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD,
-                                     has_zp, True)
+    opcheck(
+        torch.ops._C.allspark_w8a16_gemm,
+        (
+            input,
+            qw_reorder,
+            s_reorder,
+            zp_reorder,
+            n,
+            group_size,
+            sm_count,
+            sm_version,
+            ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD,
+            has_zp,
+            True,
+        ),
+        test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+    )
+    output = ops.allspark_w8a16_gemm(
+        input,
+        qw_reorder,
+        s_reorder,
+        zp_reorder,
+        n,
+        group_size,
+        sm_count,
+        sm_version,
+        ALLSPARK_AMPERE_M_CUBLAS_THRESHOLD,
+        has_zp,
+        True,
+    )
 
     output_ref = torch.matmul(input, w_ref)
     torch.cuda.synchronize()

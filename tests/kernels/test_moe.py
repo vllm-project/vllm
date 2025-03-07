@@ -3,6 +3,7 @@
 
 Run `pytest tests/kernels/test_moe.py`.
 """
+
 import pytest
 import torch
 from transformers import MixtralConfig
@@ -65,24 +66,28 @@ def test_fused_moe(
     else:
         e_map = None
 
-    triton_output = fused_moe(a,
-                              w1,
-                              w2,
-                              score,
-                              topk,
-                              global_num_experts=e,
-                              expert_map=e_map,
-                              renormalize=False)
+    triton_output = fused_moe(
+        a,
+        w1,
+        w2,
+        score,
+        topk,
+        global_num_experts=e,
+        expert_map=e_map,
+        renormalize=False,
+    )
     torch_output = torch_moe(a, w1, w2, score, topk, e_map)
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
-    iterative_output = iterative_moe(a,
-                                     w1,
-                                     w2,
-                                     score,
-                                     topk,
-                                     global_num_experts=e,
-                                     expert_map=e_map,
-                                     renormalize=False)
+    iterative_output = iterative_moe(
+        a,
+        w1,
+        w2,
+        score,
+        topk,
+        global_num_experts=e,
+        expert_map=e_map,
+        renormalize=False,
+    )
     torch.testing.assert_close(iterative_output,
                                torch_output,
                                atol=2e-2,
@@ -99,9 +104,18 @@ def test_fused_moe(
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.parametrize("has_zp", [True, False])
 @pytest.mark.parametrize("weight_bits", [4, 8])
-def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
-                        ep_size: int, dtype: torch.dtype, group_size: int,
-                        has_zp: bool, weight_bits: int):
+def test_fused_moe_wn16(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    ep_size: int,
+    dtype: torch.dtype,
+    group_size: int,
+    has_zp: bool,
+    weight_bits: int,
+):
     print(m, n, k, e, topk, dtype, group_size, has_zp, weight_bits)
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
@@ -129,9 +143,11 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
     w2_scales = torch.empty((e, k, n // group_size),
                             device="cuda",
                             dtype=dtype)
-    w1_qzeros = torch.empty((e, 2 * n // pack_factor, k // group_size),
-                            device="cuda",
-                            dtype=torch.uint8)
+    w1_qzeros = torch.empty(
+        (e, 2 * n // pack_factor, k // group_size),
+        device="cuda",
+        dtype=torch.uint8,
+    )
     w2_qzeros = torch.empty((e, k // pack_factor, n // group_size),
                             device="cuda",
                             dtype=torch.uint8)
@@ -139,11 +155,21 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
     for i in range(e * 2):
         expert_id = i % e
         if i // e == 0:
-            w, w_ref, w_qweight, w_scales, w_qzeros = \
-                w1, w1_ref, w1_qweight, w1_scales, w1_qzeros
+            w, w_ref, w_qweight, w_scales, w_qzeros = (
+                w1,
+                w1_ref,
+                w1_qweight,
+                w1_scales,
+                w1_qzeros,
+            )
         else:
-            w, w_ref, w_qweight, w_scales, w_qzeros = \
-                w2, w2_ref, w2_qweight, w2_scales, w2_qzeros
+            w, w_ref, w_qweight, w_scales, w_qzeros = (
+                w2,
+                w2_ref,
+                w2_qweight,
+                w2_scales,
+                w2_qzeros,
+            )
         weight, qweight, scales, qzeros = quantize_weights(
             w[expert_id].T, quant_type, group_size, has_zp, False)
         weight = weight.T
@@ -181,21 +207,23 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
     else:
         e_map = None
 
-    triton_output = fused_moe(a,
-                              w1_qweight,
-                              w2_qweight,
-                              score,
-                              topk,
-                              renormalize=False,
-                              use_int4_w4a16=weight_bits == 4,
-                              use_int8_w8a16=weight_bits == 8,
-                              global_num_experts=e,
-                              expert_map=e_map,
-                              w1_scale=w1_scales,
-                              w2_scale=w2_scales,
-                              w1_zp=w1_qzeros if has_zp else None,
-                              w2_zp=w2_qzeros if has_zp else None,
-                              block_shape=[0, group_size])
+    triton_output = fused_moe(
+        a,
+        w1_qweight,
+        w2_qweight,
+        score,
+        topk,
+        renormalize=False,
+        use_int4_w4a16=weight_bits == 4,
+        use_int8_w8a16=weight_bits == 8,
+        global_num_experts=e,
+        expert_map=e_map,
+        w1_scale=w1_scales,
+        w2_scale=w2_scales,
+        w1_zp=w1_qzeros if has_zp else None,
+        w2_zp=w2_qzeros if has_zp else None,
+        block_shape=[0, group_size],
+    )
     torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, e_map)
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
@@ -223,8 +251,10 @@ def test_mixtral_moe(dtype: torch.dtype):
     # Load the weights
     vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
     for i in range(config.num_local_experts):
-        weights = (hf_moe.experts[i].w1.weight.data,
-                   hf_moe.experts[i].w3.weight.data)
+        weights = (
+            hf_moe.experts[i].w1.weight.data,
+            hf_moe.experts[i].w3.weight.data,
+        )
         vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
         vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
 
@@ -243,10 +273,12 @@ def test_mixtral_moe(dtype: torch.dtype):
         torch.bfloat16: 1e-2,
     }
 
-    torch.testing.assert_close(hf_states.flatten(0, 1),
-                               vllm_states,
-                               rtol=mixtral_moe_tol[dtype],
-                               atol=mixtral_moe_tol[dtype])
+    torch.testing.assert_close(
+        hf_states.flatten(0, 1),
+        vllm_states,
+        rtol=mixtral_moe_tol[dtype],
+        atol=mixtral_moe_tol[dtype],
+    )
 
 
 @pytest.mark.parametrize("m", [1, 33, 64, 222])
@@ -282,8 +314,7 @@ def test_fused_marlin_moe(
         if not is_k_full:
             return
 
-    quant_type = (scalar_types.uint4b8
-                  if num_bits == 4 else scalar_types.uint8b128)
+    quant_type = scalar_types.uint4b8 if num_bits == 4 else scalar_types.uint8b128
     dtype = torch.float16
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
@@ -372,12 +403,15 @@ def test_fused_marlin_moe(
                                             dtype=torch.int32,
                                             device=a.device)
 
-        opcheck(torch.ops._moe_C.topk_softmax, (
-            topk_weights,
-            topk_ids,
-            token_expert_indicies,
-            score.float(),
-        ))
+        opcheck(
+            torch.ops._moe_C.topk_softmax,
+            (
+                topk_weights,
+                topk_ids,
+                token_expert_indicies,
+                score.float(),
+            ),
+        )
 
         block_size_m = 4
 
@@ -385,19 +419,42 @@ def test_fused_marlin_moe(
                                                       e)
 
         max_workspace_size = ((m + 255) // 256) * (max(2 * n, k) // 64) * 16
-        workspace = torch.zeros(max_workspace_size,
-                                dtype=torch.int,
-                                device="cuda",
-                                requires_grad=False)
+        workspace = torch.zeros(
+            max_workspace_size,
+            dtype=torch.int,
+            device="cuda",
+            requires_grad=False,
+        )
 
         zp = torch.empty((0, 0),
                          dtype=dtype,
                          device="cuda",
                          requires_grad=False)
-        opcheck(torch.ops._moe_C.marlin_gemm_moe,
-                (a, qweight1, sorted_token_ids, topk_weights, topk_ids,
-                 scales1, zp, g_idx1, sort_indices1, workspace, quant_type.id,
-                 m, 2 * n, k, True, e, topk, block_size_m, True, False))
+        opcheck(
+            torch.ops._moe_C.marlin_gemm_moe,
+            (
+                a,
+                qweight1,
+                sorted_token_ids,
+                topk_weights,
+                topk_ids,
+                scales1,
+                zp,
+                g_idx1,
+                sort_indices1,
+                workspace,
+                quant_type.id,
+                m,
+                2 * n,
+                k,
+                True,
+                e,
+                topk,
+                block_size_m,
+                True,
+                False,
+            ),
+        )
 
 
 @pytest.mark.skip("This test is here for the sake of debugging, "
@@ -423,7 +480,6 @@ def test_single_marlin_moe_multiply(
     num_bits: int,
     is_k_full: bool,
 ):
-
     # Filter act_order
     if act_order:
         if group_size == -1:
@@ -434,8 +490,7 @@ def test_single_marlin_moe_multiply(
         if not is_k_full:
             return
 
-    quant_type = (scalar_types.uint4b8
-                  if num_bits == 4 else scalar_types.uint8b128)
+    quant_type = scalar_types.uint4b8 if num_bits == 4 else scalar_types.uint8b128
     dtype = torch.float16
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w = torch.randn((e, n, k), device="cuda", dtype=dtype) / 10
@@ -487,7 +542,7 @@ def test_moe_align_block_size_opcheck():
     topk_ids = torch.randint(0,
                              num_experts, (3, 4),
                              dtype=torch.int32,
-                             device='cuda')
+                             device="cuda")
 
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     sorted_ids = torch.empty((max_num_tokens_padded, ),
@@ -502,6 +557,14 @@ def test_moe_align_block_size_opcheck():
                                       dtype=torch.int32,
                                       device=topk_ids.device)
 
-    opcheck(torch.ops._moe_C.moe_align_block_size,
-            (topk_ids, num_experts, block_size, sorted_ids, expert_ids,
-             num_tokens_post_pad))
+    opcheck(
+        torch.ops._moe_C.moe_align_block_size,
+        (
+            topk_ids,
+            num_experts,
+            block_size,
+            sorted_ids,
+            expert_ids,
+            num_tokens_post_pad,
+        ),
+    )

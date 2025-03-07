@@ -7,6 +7,7 @@ This is a tractable model, the weights and computation are specially designed
 if the config `tractable_init` is set to True. Otherwise, the weights are
 initialized randomly with a fixed seed.
 """
+
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -63,6 +64,7 @@ class LlamaConfig:
             factors.append((k, v))
         factors.sort()
         import hashlib
+
         return hashlib.md5(str(factors).encode()).hexdigest()
 
     def __post_init__(self):
@@ -89,14 +91,16 @@ class LlamaMLP(nn.Module):
             nn.init.eye_(self.gate_up_projection.weight.data[config.mlp_size:])
             nn.init.eye_(self.down_projection.weight.data)
         else:
-            nn.init.xavier_normal_(self.gate_up_projection.weight.data,
-                                   generator=torch.Generator().manual_seed(
-                                       config.random_seed),
-                                   gain=0.001)
-            nn.init.xavier_normal_(self.down_projection.weight.data,
-                                   generator=torch.Generator().manual_seed(
-                                       config.random_seed),
-                                   gain=0.001)
+            nn.init.xavier_normal_(
+                self.gate_up_projection.weight.data,
+                generator=torch.Generator().manual_seed(config.random_seed),
+                gain=0.001,
+            )
+            nn.init.xavier_normal_(
+                self.down_projection.weight.data,
+                generator=torch.Generator().manual_seed(config.random_seed),
+                gain=0.001,
+            )
 
     def forward(self, x):
         # for tractable_init and positive input, this is
@@ -132,14 +136,16 @@ class LlamaAttention(nn.Module):
                                                          config.hidden_size:])
             nn.init.eye_(self.output_projection.weight.data)
         else:
-            nn.init.xavier_normal_(self.qkv_projection.weight.data,
-                                   generator=torch.Generator().manual_seed(
-                                       config.random_seed),
-                                   gain=0.001)
-            nn.init.xavier_normal_(self.output_projection.weight.data,
-                                   generator=torch.Generator().manual_seed(
-                                       config.random_seed),
-                                   gain=0.001)
+            nn.init.xavier_normal_(
+                self.qkv_projection.weight.data,
+                generator=torch.Generator().manual_seed(config.random_seed),
+                gain=0.001,
+            )
+            nn.init.xavier_normal_(
+                self.output_projection.weight.data,
+                generator=torch.Generator().manual_seed(config.random_seed),
+                gain=0.001,
+            )
 
     def forward(
         self,
@@ -183,7 +189,7 @@ class LlamaDecoderLayer(nn.Module):
         - if residual is not None, the outputs are:
             - residual = (hidden_states + residual + 1) * 3 + positions * 2 + hidden_states + residual = (hidden_states + residual) * 4 + positions * 2 + 3
             - hidden_states = (residual + 1) ** 2
-        """ # noqa
+        """  # noqa
         if residual is None:
             residual = hidden_states
             hidden_states = hidden_states + 1
@@ -206,12 +212,14 @@ class LlamaDecoderLayer(nn.Module):
 @support_torch_compile
 class LlamaModel(nn.Module):
 
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 config: LlamaConfig,
-                 prefix: str = '',
-                 **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        config: LlamaConfig,
+        prefix: str = "",
+        **kwargs,
+    ) -> None:
         super().__init__()
         self.embedding_tokens = nn.Embedding(
             num_embeddings=config.vocab_size,
@@ -235,14 +243,18 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
-def tractable_computation(input_ids: torch.Tensor,
-                          positions: torch.Tensor,
-                          config: LlamaConfig,
-                          init_value: float = 1.0) -> torch.Tensor:
-    hidden_states = torch.ones(input_ids.size(0),
-                               config.hidden_size,
-                               device=input_ids.device,
-                               dtype=input_ids.dtype) * init_value
+def tractable_computation(
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    config: LlamaConfig,
+    init_value: float = 1.0,
+) -> torch.Tensor:
+    hidden_states = (torch.ones(
+        input_ids.size(0),
+        config.hidden_size,
+        device=input_ids.device,
+        dtype=input_ids.dtype,
+    ) * init_value)
 
     # first layer
     residual = hidden_states * 4 + positions.unsqueeze(1) * 2 + 3
@@ -261,7 +273,6 @@ def tractable_computation(input_ids: torch.Tensor,
 def run_model(llama_config,
               use_compile: bool,
               split_attn: bool = False) -> torch.Tensor:
-
     if use_compile:
         compilation_config = CompilationConfig(
             level=CompilationLevel.PIECEWISE,
@@ -277,9 +288,9 @@ def run_model(llama_config,
     vllm_config = VllmConfig(compilation_config=compilation_config,
                              additional_config=llama_config)
     with set_current_vllm_config(vllm_config):
-        model = LlamaModel(config=llama_config,
-                           vllm_config=vllm_config,
-                           prefix="").eval().cuda()
+        model = (LlamaModel(config=llama_config,
+                            vllm_config=vllm_config,
+                            prefix="").eval().cuda())
 
     B = 16  # max batch size
     input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
@@ -311,11 +322,13 @@ def test_toy_llama():
                                vocab_size=128,
                                num_layers=12)
 
-    tractable_config = LlamaConfig(hidden_size=128,
-                                   mlp_size=256,
-                                   vocab_size=128,
-                                   num_layers=2,
-                                   tractable_init=True)
+    tractable_config = LlamaConfig(
+        hidden_size=128,
+        mlp_size=256,
+        vocab_size=128,
+        num_layers=2,
+        tractable_init=True,
+    )
 
     outputs = []
     with compilation_counter.expect(
@@ -400,9 +413,9 @@ def benchmark():
 
         vllm_config = VllmConfig(compilation_config=compilation_config)
         with set_current_vllm_config(vllm_config):
-            model = LlamaModel(config=llama_config,
-                               vllm_config=vllm_config,
-                               prefix="").eval().cuda().to(torch.bfloat16)
+            model = (LlamaModel(config=llama_config,
+                                vllm_config=vllm_config,
+                                prefix="").eval().cuda().to(torch.bfloat16))
 
         B = 256  # max batch size
         input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
@@ -427,8 +440,9 @@ def benchmark():
                 # and use it later, because it will look up the name `b` in the
                 # enclosing scope, and the value of `b` will always be 256.
                 # it is fine here, because we only use the lambda function once.
-                runtime = do_bench(lambda: graphs[b][0]  # noqa
-                                   (input_ids[:b], positions[:b]))  # noqa
+                runtime = do_bench(lambda: graphs[b][0]
+                                   (input_ids[:b], positions[:b])  # noqa
+                                   )  # noqa
                 piecewise_cudagraph_time[b] = runtime
             else:
                 runtime = do_bench(lambda: graphs[b][0].replay())  # noqa

@@ -12,7 +12,7 @@ class BlockTable:
     """A class to manage blocks for a specific sequence.
 
     The BlockTable maps a sequence of tokens to a list of blocks, where each
-    block represents a contiguous memory allocation for a portion of the 
+    block represents a contiguous memory allocation for a portion of the
     sequence. The blocks are managed by a DeviceAwareBlockAllocator, which is
     responsible for allocating and freeing memory for the blocks.
 
@@ -80,10 +80,12 @@ class BlockTable:
         """
         return cdiv(len(token_ids) + num_lookahead_slots, block_size)
 
-    def allocate(self,
-                 token_ids: List[int],
-                 device: Device = Device.GPU,
-                 extra_hash: Optional[int] = None) -> None:
+    def allocate(
+        self,
+        token_ids: List[int],
+        device: Device = Device.GPU,
+        extra_hash: Optional[int] = None,
+    ) -> None:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
         This method allocates the required number of blocks to store the given
@@ -99,24 +101,28 @@ class BlockTable:
         """
         assert not self._is_allocated
         assert token_ids
-        blocks = self._allocate_blocks_for_token_ids(prev_block=None,
-                                                     token_ids=token_ids,
-                                                     device=device,
-                                                     extra_hash=extra_hash)
+        blocks = self._allocate_blocks_for_token_ids(
+            prev_block=None,
+            token_ids=token_ids,
+            device=device,
+            extra_hash=extra_hash,
+        )
         self.update(blocks)
         self._num_full_slots = len(token_ids)
 
     def update(self, blocks: List[Block]) -> None:
-        """Resets the table to the newly provided blocks 
+        """Resets the table to the newly provided blocks
         (with their corresponding block ids)
         """
         self._blocks.update(blocks)
 
-    def append_token_ids(self,
-                         token_ids: List[int],
-                         num_lookahead_slots: int = 0,
-                         num_computed_slots: Optional[int] = None,
-                         extra_hash: Optional[int] = None) -> None:
+    def append_token_ids(
+        self,
+        token_ids: List[int],
+        num_lookahead_slots: int = 0,
+        num_computed_slots: Optional[int] = None,
+        extra_hash: Optional[int] = None,
+    ) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -159,9 +165,10 @@ class BlockTable:
 
         # Ensure there are enough empty slots for the new tokens plus
         # lookahead slots
-        self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
-                                    num_lookahead_slots,
-                                    extra_hash=extra_hash)
+        self.ensure_num_empty_slots(
+            num_empty_slots=len(token_ids) + num_lookahead_slots,
+            extra_hash=extra_hash,
+        )
 
         # Update the blocks with the new tokens
         first_block_idx = self._num_full_slots // self._block_size
@@ -206,7 +213,8 @@ class BlockTable:
                 self._allocator.allocate_mutable_block(
                     prev_block=self._blocks[-1],
                     device=device,
-                    extra_hash=extra_hash))
+                    extra_hash=extra_hash,
+                ))
 
     def fork(self) -> "BlockTable":
         """Creates a new BlockTable instance with a copy of the blocks from the
@@ -279,11 +287,12 @@ class BlockTable:
         return sequence_token_ids[self.num_full_slots:]
 
     def _allocate_blocks_for_token_ids(
-            self,
-            prev_block: Optional[Block],
-            token_ids: List[int],
-            device: Device,
-            extra_hash: Optional[int] = None) -> List[Block]:
+        self,
+        prev_block: Optional[Block],
+        token_ids: List[int],
+        device: Device,
+        extra_hash: Optional[int] = None,
+    ) -> List[Block]:
         blocks: List[Block] = []
 
         block_token_ids = []
@@ -300,7 +309,8 @@ class BlockTable:
                     prev_block,
                     block_token_ids=block_token_ids,
                     device=device,
-                    extra_hash=extra_hash))
+                    extra_hash=extra_hash,
+                ))
             prev_block = blocks[-1]
 
         if tail_token_ids:
@@ -373,8 +383,8 @@ class BlockTable:
         num_token_ids = len(token_ids) + num_lookahead_slots
         first_chunk_size = self._block_size - (self._num_full_slots %
                                                self._block_size)
-        num_token_blocks = (1 + math.ceil(
-            (num_token_ids - first_chunk_size) / self._block_size))
+        num_token_blocks = 1 + math.ceil(
+            (num_token_ids - first_chunk_size) / self._block_size)
         return num_token_blocks
 
     def _chunk_token_blocks_for_append(

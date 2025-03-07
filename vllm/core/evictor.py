@@ -8,8 +8,9 @@ from typing import Dict, List, Tuple
 
 class EvictionPolicy(enum.Enum):
     """Enum for eviction policy used by make_evictor to instantiate the correct
-       Evictor subclass.
+    Evictor subclass.
     """
+
     LRU = enum.auto()
 
 
@@ -34,8 +35,13 @@ class Evictor(ABC):
         pass
 
     @abstractmethod
-    def add(self, block_id: int, content_hash: int, num_hashed_tokens: int,
-            last_accessed: float):
+    def add(
+        self,
+        block_id: int,
+        content_hash: int,
+        num_hashed_tokens: int,
+        last_accessed: float,
+    ):
         """Adds block to the evictor, making it a candidate for eviction"""
         pass
 
@@ -109,14 +115,20 @@ class LRUEvictor(Evictor):
 
         raise ValueError("No usable cache memory left")
 
-    def add(self, block_id: int, content_hash: int, num_hashed_tokens: int,
-            last_accessed: float):
+    def add(
+        self,
+        block_id: int,
+        content_hash: int,
+        num_hashed_tokens: int,
+        last_accessed: float,
+    ):
         self.free_table[block_id] = BlockMetaData(content_hash,
                                                   num_hashed_tokens,
                                                   last_accessed)
         heapq.heappush(
             self.priority_queue,
-            (last_accessed, -num_hashed_tokens, block_id, content_hash))
+            (last_accessed, -num_hashed_tokens, block_id, content_hash),
+        )
         self._cleanup_if_necessary()
 
     def update(self, block_id: int, last_accessed: float):
@@ -131,9 +143,12 @@ class LRUEvictor(Evictor):
         new_priority_queue: List[Tuple[float, int, int, int]] = []
 
         for block_id, block in self.free_table.items():
-            new_priority_queue.append(
-                (block.last_accessed, -block.num_hashed_tokens, block_id,
-                 block.content_hash))
+            new_priority_queue.append((
+                block.last_accessed,
+                -block.num_hashed_tokens,
+                block_id,
+                block.content_hash,
+            ))
         heapq.heapify(new_priority_queue)
 
         self.priority_queue = new_priority_queue

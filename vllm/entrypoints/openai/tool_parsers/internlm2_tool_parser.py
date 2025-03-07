@@ -32,7 +32,7 @@ class Internlm2ToolParser(ToolParser):
 
     def adjust_request(
             self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        if request.tools and request.tool_choice != 'none':
+        if request.tools and request.tool_choice != "none":
             # do not skip special tokens because internlm use the special
             # tokens to indicated the start and end of the tool calls
             # information.
@@ -56,34 +56,33 @@ class Internlm2ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
-        if '<|action_start|>' not in current_text:
+        if "<|action_start|>" not in current_text:
             self.position = len(current_text)
             return DeltaMessage(content=delta_text)
         # if the tool call is sended, return a empty delta message
         # to make sure the finish_reason will be send correctly.
         if self.current_tool_id > 0:
-            return DeltaMessage(content='')
+            return DeltaMessage(content="")
 
         last_pos = self.position
-        if '<|action_start|><|plugin|>' not in current_text[last_pos:]:
+        if "<|action_start|><|plugin|>" not in current_text[last_pos:]:
             return None
 
         new_delta = current_text[last_pos:]
-        text, action = new_delta.split('<|action_start|><|plugin|>')
+        text, action = new_delta.split("<|action_start|><|plugin|>")
 
         if len(text) > 0:
             self.position = self.position + len(text)
             return DeltaMessage(content=text)
 
         action = action.strip()
-        action = action.split('<|action_end|>'.strip())[0]
+        action = action.split("<|action_end|>".strip())[0]
 
         # bit mask flags for partial JSON parsing. If the name hasn't been
         # sent yet, don't allow sending
         # an incomplete string since OpenAI only ever (as far as I have
         # seen) allows sending the entire tool/ function name at once.
-        flags = Allow.ALL if self.current_tool_name_sent \
-            else Allow.ALL & ~Allow.STR
+        flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
 
         try:
             parsable_arr = action
@@ -94,7 +93,7 @@ class Internlm2ToolParser(ToolParser):
                 tool_call_arr: dict = partial_json_parser.loads(
                     parsable_arr, flags)
             except partial_json_parser.core.exceptions.MalformedJSON:
-                logger.debug('not enough tokens to parse into JSON yet')
+                logger.debug("not enough tokens to parse into JSON yet")
                 return None
 
             # if the current tool name hasn't been sent, send if available
@@ -104,12 +103,14 @@ class Internlm2ToolParser(ToolParser):
                 if function_name:
                     self.current_tool_id = self.current_tool_id + 1
                     delta = DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      type="function",
-                                      id=f"chatcmpl-tool-{random_uuid()}",
-                                      function=DeltaFunctionCall(
-                                          name=function_name).model_dump(
-                                              exclude_none=True))
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            type="function",
+                            id=f"chatcmpl-tool-{random_uuid()}",
+                            function=DeltaFunctionCall(
+                                name=function_name).model_dump(
+                                    exclude_none=True),
+                        )
                     ])
                     self.current_tool_name_sent = True
                     self.streamed_args_for_tool.append("")
@@ -139,10 +140,12 @@ class Internlm2ToolParser(ToolParser):
                                                          index(delta_text) +
                                                          len(delta_text)]
                     delta = DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      function=DeltaFunctionCall(
-                                          arguments=arguments_delta).
-                                      model_dump(exclude_none=True))
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                arguments=arguments_delta).model_dump(
+                                    exclude_none=True),
+                        )
                     ])
                     self.streamed_args_for_tool[
                         self.current_tool_id] += arguments_delta
@@ -155,10 +158,12 @@ class Internlm2ToolParser(ToolParser):
                         cur_args_json, prev_args_json)
 
                     delta = DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      function=DeltaFunctionCall(
-                                          arguments=argument_diff).model_dump(
-                                              exclude_none=True))
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                arguments=argument_diff).model_dump(
+                                    exclude_none=True),
+                        )
                     ])
                     self.streamed_args_for_tool[
                         self.current_tool_id] += argument_diff
@@ -172,8 +177,8 @@ class Internlm2ToolParser(ToolParser):
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             logger.debug(
-                "Skipping chunk as a result of tool streaming extraction "
-                "error")
+                "Skipping chunk as a result of tool streaming extraction error"
+            )
             return None
 
     def extract_tool_calls(
@@ -183,14 +188,17 @@ class Internlm2ToolParser(ToolParser):
     ) -> ExtractedToolCallInformation:
         text = model_output
         tools = request.tools
-        if '<|action_start|><|plugin|>' in text:
-            text, action = text.split('<|action_start|><|plugin|>')
-            action = action.split('<|action_end|>'.strip())[0]
-            action = action[action.find('{'):]
+        if "<|action_start|><|plugin|>" in text:
+            text, action = text.split("<|action_start|><|plugin|>")
+            action = action.split("<|action_end|>".strip())[0]
+            action = action[action.find("{"):]
             action_dict = json.loads(action)
-            name, parameters = action_dict['name'], json.dumps(
-                action_dict.get('parameters', action_dict.get('arguments',
-                                                              {})))
+            name, parameters = (
+                action_dict["name"],
+                json.dumps(
+                    action_dict.get("parameters",
+                                    action_dict.get("arguments", {}))),
+            )
 
             if not tools or name not in [t.function.name for t in tools]:
                 ExtractedToolCallInformation(tools_called=False,
@@ -204,7 +212,8 @@ class Internlm2ToolParser(ToolParser):
             return ExtractedToolCallInformation(
                 tools_called=True,
                 tool_calls=tool_calls,
-                content=text if len(text) > 0 else None)
+                content=text if len(text) > 0 else None,
+            )
 
         return ExtractedToolCallInformation(tools_called=False,
                                             tool_calls=[],

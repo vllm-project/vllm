@@ -65,7 +65,7 @@ class MockEngine:
     def add_request(self, **kwargs):
         del kwargs  # Unused
         self.add_request_calls += 1
-        print(f'Request calls: {self.add_request_calls}')
+        print(f"Request calls: {self.add_request_calls}")
 
     async def add_request_async(self, **kwargs):
         self.add_request_calls += 1
@@ -140,9 +140,11 @@ def start_engine():
     print(f"Starting engine with num_scheduler_steps={num_scheduler_steps}")
 
     return AsyncLLMEngine.from_engine_args(
-        AsyncEngineArgs(model="facebook/opt-125m",
-                        enforce_eager=True,
-                        num_scheduler_steps=num_scheduler_steps))
+        AsyncEngineArgs(
+            model="facebook/opt-125m",
+            enforce_eager=True,
+            num_scheduler_steps=num_scheduler_steps,
+        ))
 
 
 def uid() -> str:
@@ -171,7 +173,6 @@ def should_do_global_cleanup_after_test(request) -> bool:
 @pytest.mark.asyncio(scope="module")
 @pytest.mark.parametrize("stop", [None, ["a stop string"]])
 async def test_asyncio_run(async_engine, stop):
-
     scheduler_config = await async_engine.get_scheduler_config()
     num_scheduler_steps = scheduler_config.num_scheduler_steps
 
@@ -245,9 +246,12 @@ async def test_output_kinds(async_engine, stop):
         assert final_output is not None
         assert final_output.finished
 
-        return (final_output.prompt_token_ids,
-                final_output.outputs[0].token_ids,
-                final_output.outputs[0].text, output_count)
+        return (
+            final_output.prompt_token_ids,
+            final_output.outputs[0].token_ids,
+            final_output.outputs[0].text,
+            output_count,
+        )
 
     async def run_deltas(prompt: str):
         params = copy(sampling_params)
@@ -287,7 +291,8 @@ async def test_output_kinds(async_engine, stop):
     results = await asyncio.gather(
         run("common input prompt", RequestOutputKind.CUMULATIVE),
         run("common input prompt", RequestOutputKind.FINAL_ONLY),
-        run_deltas("common input prompt"))
+        run_deltas("common input prompt"),
+    )
 
     # Make sure outputs are the same
     prompt_set = set(tuple(prompt_ids) for prompt_ids, _, _, _ in results)

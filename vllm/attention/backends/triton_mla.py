@@ -26,26 +26,39 @@ class TritonMLABackend(MLACommonBackend):
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
     def __init__(
-            self,
-            num_heads: int,
-            head_size: int,
-            scale: float,
-            num_kv_heads: int,
-            alibi_slopes: Optional[List[float]],
-            sliding_window: Optional[int],
-            kv_cache_dtype: str,
-            blocksparse_params: Optional[Dict[str, Any]],
-            logits_soft_cap: Optional[float],
-            attn_type: str,
-            # MLA Specific Arguments
-            **mla_args) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads,
-                         alibi_slopes, sliding_window, kv_cache_dtype,
-                         blocksparse_params, logits_soft_cap, attn_type,
-                         **mla_args)
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]],
+        logits_soft_cap: Optional[float],
+        attn_type: str,
+        # MLA Specific Arguments
+        **mla_args,
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            blocksparse_params,
+            logits_soft_cap,
+            attn_type,
+            **mla_args,
+        )
 
         unsupported_features = [
-            alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
+            alibi_slopes,
+            sliding_window,
+            blocksparse_params,
+            logits_soft_cap,
         ]
         if any(unsupported_features):
             raise NotImplementedError(
@@ -105,9 +118,17 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
 
         # Run MQA
-        decode_attention_fwd(q, kv_c_and_k_pe_cache, kv_c_cache, o,
-                             decode_meta.block_tables,
-                             decode_meta.seq_lens_tensor, attn_logits,
-                             num_kv_splits, self.scale, PAGE_SIZE)
+        decode_attention_fwd(
+            q,
+            kv_c_and_k_pe_cache,
+            kv_c_cache,
+            o,
+            decode_meta.block_tables,
+            decode_meta.seq_lens_tensor,
+            attn_logits,
+            num_kv_splits,
+            self.scale,
+            PAGE_SIZE,
+        )
 
         return self._v_up_proj_and_o_proj(o)

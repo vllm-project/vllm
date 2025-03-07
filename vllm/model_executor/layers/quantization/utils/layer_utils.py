@@ -19,12 +19,14 @@ def update_tensor_inplace(dst: torch.Tensor, src: torch.Tensor):
 
 # Newly generated tensors need to replace existing tensors that are
 # already registered as parameters by vLLM (and won't be freed)
-def replace_parameter(mod: torch.nn.Module, name: str,
-                      new: Union[torch.Tensor, torch.nn.Parameter]) -> None:
-
+def replace_parameter(
+    mod: torch.nn.Module,
+    name: str,
+    new: Union[torch.Tensor, torch.nn.Parameter],
+) -> None:
     old = getattr(mod, name)
-    if type(old) is type(new) and old.dtype == new.dtype and \
-        old.untyped_storage().nbytes() == new.untyped_storage().nbytes():
+    if (type(old) is type(new) and old.dtype == new.dtype and
+            old.untyped_storage().nbytes() == new.untyped_storage().nbytes()):
         # If we can just update in-place to avoid re-registering
         #   can be faster if the underlying storage is the same
         update_tensor_inplace(old, new)

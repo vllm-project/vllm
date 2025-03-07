@@ -36,10 +36,12 @@ class OpenAIServingTokenization(OpenAIServing):
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
     ) -> None:
-        super().__init__(engine_client=engine_client,
-                         model_config=model_config,
-                         models=models,
-                         request_logger=request_logger)
+        super().__init__(
+            engine_client=engine_client,
+            model_config=model_config,
+            models=models,
+            request_logger=request_logger,
+        )
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -81,33 +83,39 @@ class OpenAIServingTokenization(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                (request_prompts,
-                 engine_prompts) = await self._preprocess_completion(
-                     request,
-                     tokenizer,
-                     request.prompt,
-                     add_special_tokens=request.add_special_tokens,
-                 )
+                (
+                    request_prompts,
+                    engine_prompts,
+                ) = await self._preprocess_completion(
+                    request,
+                    tokenizer,
+                    request.prompt,
+                    add_special_tokens=request.add_special_tokens,
+                )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
         input_ids: list[int] = []
         for i, engine_prompt in enumerate(engine_prompts):
-            self._log_inputs(request_id,
-                             request_prompts[i],
-                             params=None,
-                             lora_request=lora_request,
-                             prompt_adapter_request=prompt_adapter_request)
+            self._log_inputs(
+                request_id,
+                request_prompts[i],
+                params=None,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
+            )
 
             # Silently ignore prompt adapter since it does not affect
             # tokenization (Unlike in Embeddings API where an error is raised)
 
             input_ids.extend(engine_prompt["prompt_token_ids"])
 
-        return TokenizeResponse(tokens=input_ids,
-                                count=len(input_ids),
-                                max_model_len=self.max_model_len)
+        return TokenizeResponse(
+            tokens=input_ids,
+            count=len(input_ids),
+            max_model_len=self.max_model_len,
+        )
 
     async def create_detokenize(
         self,
@@ -127,11 +135,13 @@ class OpenAIServingTokenization(OpenAIServing):
 
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-        self._log_inputs(request_id,
-                         request.tokens,
-                         params=None,
-                         lora_request=lora_request,
-                         prompt_adapter_request=prompt_adapter_request)
+        self._log_inputs(
+            request_id,
+            request.tokens,
+            params=None,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
+        )
 
         # Silently ignore prompt adapter since it does not affect tokenization
         # (Unlike in Embeddings API where an error is raised)

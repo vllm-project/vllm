@@ -44,18 +44,18 @@ class DummyOutputNorm(nn.Module):
 class EAGLE(nn.Module):
     """This class implements the EAGLE draft model from the paper: https://arxiv.org/pdf/2401.15077
     Reference implementation: https://github.com/SafeAILab/EAGLE
-    
+
     Differences from reference implementation:
-    1. In reference, LlamaDecoderLayer implementation doesn't have 
+    1. In reference, LlamaDecoderLayer implementation doesn't have
        input_layernorm for 1st decoder layer (https://github.com/SafeAILab/EAGLE/blob/7d065d084443fbfd386f88839efd7193c12be869/eagle/model/cnets.py#L427).
        Following this approach, our implementation also disables
        the input_layernorm for the first decoder layer.
-    2. We allow any decoder layer to be used in EAGLE whereas in reference 
+    2. We allow any decoder layer to be used in EAGLE whereas in reference
        decoder layer is fixed to be LlamaDecoderLayer.
-    3. We have an optional token_map which reduces draft vocab to most 
-       frequently used tokens to give some additional speed-up by reducing 
-       sampling overhead. This is disabled unless the checkpoint file has 
-       explicit token_map tensor and config has an optional attribute 
+    3. We have an optional token_map which reduces draft vocab to most
+       frequently used tokens to give some additional speed-up by reducing
+       sampling overhead. This is disabled unless the checkpoint file has
+       explicit token_map tensor and config has an optional attribute
        truncated_vocab_size < vocab_size. To use this technique, one has to find
        the top-k most frequent tokens in target dataset and add that as a tensor
        in the draft checkpoint (using key token_map). Also, the draft config
@@ -72,9 +72,11 @@ class EAGLE(nn.Module):
         self.model = model_cls(vllm_config=vllm_config,
                                prefix=maybe_prefix(prefix, "model"))
 
-        self.fc = nn.Linear(config.model.hidden_size * 2,
-                            config.model.hidden_size,
-                            bias=getattr(self.config, "eagle_fc_bias", False))
+        self.fc = nn.Linear(
+            config.model.hidden_size * 2,
+            config.model.hidden_size,
+            bias=getattr(self.config, "eagle_fc_bias", False),
+        )
 
         # Modify layer normalization and residual connections as suggested
         # in the EAGLE framework: https://github.com/SafeAILab/EAGLE
@@ -124,7 +126,6 @@ class EAGLE(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings(input_ids)
 
@@ -151,7 +152,8 @@ class EAGLE(nn.Module):
             logits = -torch.inf * torch.ones(
                 size=(*_logits.shape[:-1], self.orig_vocab_size),
                 device=_logits.device,
-                dtype=_logits.dtype)
+                dtype=_logits.dtype,
+            )
 
             logits[..., self.token_map] = _logits
 
@@ -201,9 +203,8 @@ class EAGLE(nn.Module):
         if "lm_head.weight" in model_weights:
             lm_head_weight = model_weights.pop("lm_head.weight")
 
-            if self.token_map is not None and\
-                lm_head_weight.shape[0] > self.token_map.shape[0]:
-
+            if (self.token_map is not None
+                    and lm_head_weight.shape[0] > self.token_map.shape[0]):
                 lm_head_weight = lm_head_weight[self.token_map]
 
         else:

@@ -63,10 +63,12 @@ class EPTestSettings:
             ],
             distributed_backends=["mp", "ray"],
             task=task,
-            test_options=EPTestOptions(trust_remote_code=trust_remote_code,
-                                       tokenizer_mode=tokenizer_mode,
-                                       load_format=load_format,
-                                       hf_overrides=hf_overrides),
+            test_options=EPTestOptions(
+                trust_remote_code=trust_remote_code,
+                tokenizer_mode=tokenizer_mode,
+                load_format=load_format,
+                hf_overrides=hf_overrides,
+            ),
         )
 
     @staticmethod
@@ -87,10 +89,12 @@ class EPTestSettings:
             ],
             distributed_backends=["mp"],
             task=task,
-            test_options=EPTestOptions(trust_remote_code=trust_remote_code,
-                                       tokenizer_mode=tokenizer_mode,
-                                       load_format=load_format,
-                                       hf_overrides=hf_overrides),
+            test_options=EPTestOptions(
+                trust_remote_code=trust_remote_code,
+                tokenizer_mode=tokenizer_mode,
+                load_format=load_format,
+                hf_overrides=hf_overrides,
+            ),
         )
 
     def iter_params(self, model_name: str):
@@ -98,8 +102,13 @@ class EPTestSettings:
 
         for parallel_setup in self.parallel_setups:
             for distributed_backend in self.distributed_backends:
-                yield (model_name, parallel_setup, distributed_backend,
-                       self.task, opts)
+                yield (
+                    model_name,
+                    parallel_setup,
+                    distributed_backend,
+                    self.task,
+                    opts,
+                )
 
 
 # NOTE: You can adjust tp_base locally to fit the model in GPU

@@ -6,9 +6,10 @@ import torch
 
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 
-LogitsProcessor = Union[Callable[[list[int], torch.Tensor], torch.Tensor],
-                        Callable[[list[int], list[int], torch.Tensor],
-                                 torch.Tensor]]
+LogitsProcessor = Union[
+    Callable[[list[int], torch.Tensor], torch.Tensor],
+    Callable[[list[int], list[int], torch.Tensor], torch.Tensor],
+]
 """LogitsProcessor is a function that takes a list
 of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a

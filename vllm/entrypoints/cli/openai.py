@@ -66,18 +66,20 @@ def chat(system_prompt: Optional[str], model_name: str,
 
 
 def _add_query_options(
-        parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+    parser: FlexibleArgumentParser, ) -> FlexibleArgumentParser:
     parser.add_argument(
         "--url",
         type=str,
         default="http://localhost:8000/v1",
-        help="url of the running OpenAI-Compatible RESTful API server")
+        help="url of the running OpenAI-Compatible RESTful API server",
+    )
     parser.add_argument(
         "--model-name",
         type=str,
         default=None,
         help=("The model name used in prompt completion, default to "
-              "the first model in list models API call."))
+              "the first model in list models API call."),
+    )
     parser.add_argument(
         "--api-key",
         type=str,
@@ -85,12 +87,13 @@ def _add_query_options(
         help=(
             "API key for OpenAI services. If provided, this api key "
             "will overwrite the api key obtained through environment variables."
-        ))
+        ),
+    )
     return parser
 
 
 class ChatCommand(CLISubcommand):
-    """The `chat` subcommand for the vLLM CLI. """
+    """The `chat` subcommand for the vLLM CLI."""
 
     def __init__(self):
         self.name = "chat"
@@ -127,19 +130,21 @@ class ChatCommand(CLISubcommand):
         chat_parser = subparsers.add_parser(
             "chat",
             help="Generate chat completions via the running API server",
-            usage="vllm chat [options]")
+            usage="vllm chat [options]",
+        )
         _add_query_options(chat_parser)
         chat_parser.add_argument(
             "--system-prompt",
             type=str,
             default=None,
             help=("The system prompt to be added to the chat template, "
-                  "used for models that support system prompts."))
+                  "used for models that support system prompts."),
+        )
         return chat_parser
 
 
 class CompleteCommand(CLISubcommand):
-    """The `complete` subcommand for the vLLM CLI. """
+    """The `complete` subcommand for the vLLM CLI."""
 
     def __init__(self):
         self.name = "complete"
@@ -163,7 +168,8 @@ class CompleteCommand(CLISubcommand):
             "complete",
             help=("Generate text completions based on the given prompt "
                   "via the running API server"),
-            usage="vllm complete [options]")
+            usage="vllm complete [options]",
+        )
         _add_query_options(complete_parser)
         return complete_parser
 

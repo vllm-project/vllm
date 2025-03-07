@@ -37,12 +37,14 @@ def create_scheduler(
         cache_dtype="auto",
     )
     cache_config.num_gpu_blocks = 10000
-    return Scheduler(scheduler_config,
-                     model_config,
-                     cache_config,
-                     speculative_config=None,
-                     lora_config=None,
-                     log_stats=True)
+    return Scheduler(
+        scheduler_config,
+        model_config,
+        cache_config,
+        speculative_config=None,
+        lora_config=None,
+        log_stats=True,
+    )
 
 
 def create_requests(
@@ -235,21 +237,23 @@ def test_stop_via_update_from_output():
         scheduler.running.append(req)
         scheduler.scheduled_req_ids.add(req.request_id)
 
-    scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
-                                       scheduled_cached_reqs=[],
-                                       num_scheduled_tokens={
-                                           requests[0].request_id: 1,
-                                           requests[1].request_id: 2
-                                       },
-                                       total_num_scheduled_tokens=3,
-                                       scheduled_encoder_inputs={},
-                                       scheduled_spec_decode_tokens={
-                                           requests[0].request_id: [],
-                                           requests[1].request_id: [10]
-                                       },
-                                       num_common_prefix_blocks=0,
-                                       finished_req_ids=set(),
-                                       free_encoder_input_ids=[])
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=[],
+        num_scheduled_tokens={
+            requests[0].request_id: 1,
+            requests[1].request_id: 2,
+        },
+        total_num_scheduled_tokens=3,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={
+            requests[0].request_id: [],
+            requests[1].request_id: [10],
+        },
+        num_common_prefix_blocks=0,
+        finished_req_ids=set(),
+        free_encoder_input_ids=[],
+    )
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
@@ -257,12 +261,14 @@ def test_stop_via_update_from_output():
             req.request_id: i
             for i, req in enumerate(requests)
         },
-        sampled_token_ids=[[EOS_TOKEN_ID],
-                           [10,
-                            11]],  # First request hits EOS, second continues
+        sampled_token_ids=[
+            [EOS_TOKEN_ID],
+            [10, 11],
+        ],  # First request hits EOS, second continues
         spec_token_ids=None,
         logprobs=None,
-        prompt_logprobs_dict={})
+        prompt_logprobs_dict={},
+    )
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -285,21 +291,23 @@ def test_stop_via_update_from_output():
         scheduler.running.append(req)
         scheduler.scheduled_req_ids.add(req.request_id)
 
-    scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
-                                       scheduled_cached_reqs=[],
-                                       num_scheduled_tokens={
-                                           requests[0].request_id: 3,
-                                           requests[1].request_id: 2
-                                       },
-                                       total_num_scheduled_tokens=5,
-                                       scheduled_encoder_inputs={},
-                                       scheduled_spec_decode_tokens={
-                                           requests[0].request_id: [10, 42],
-                                           requests[1].request_id: [13]
-                                       },
-                                       num_common_prefix_blocks=0,
-                                       finished_req_ids=set(),
-                                       free_encoder_input_ids=[])
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=[],
+        num_scheduled_tokens={
+            requests[0].request_id: 3,
+            requests[1].request_id: 2,
+        },
+        total_num_scheduled_tokens=5,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={
+            requests[0].request_id: [10, 42],
+            requests[1].request_id: [13],
+        },
+        num_common_prefix_blocks=0,
+        finished_req_ids=set(),
+        free_encoder_input_ids=[],
+    )
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
@@ -307,11 +315,14 @@ def test_stop_via_update_from_output():
             req.request_id: i
             for i, req in enumerate(requests)
         },
-        sampled_token_ids=[[10, 42, 12],
-                           [13, 14]],  # First request hits stop token
+        sampled_token_ids=[
+            [10, 42, 12],
+            [13, 14],
+        ],  # First request hits stop token
         spec_token_ids=None,
         logprobs=None,
-        prompt_logprobs_dict={})
+        prompt_logprobs_dict={},
+    )
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -333,21 +344,23 @@ def test_stop_via_update_from_output():
         scheduler.running.append(req)
         scheduler.scheduled_req_ids.add(req.request_id)
 
-    scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
-                                       scheduled_cached_reqs=[],
-                                       num_scheduled_tokens={
-                                           requests[0].request_id: 3,
-                                           requests[1].request_id: 1
-                                       },
-                                       total_num_scheduled_tokens=4,
-                                       scheduled_encoder_inputs={},
-                                       scheduled_spec_decode_tokens={
-                                           requests[0].request_id: [10, 11],
-                                           requests[1].request_id: []
-                                       },
-                                       num_common_prefix_blocks=0,
-                                       finished_req_ids=set(),
-                                       free_encoder_input_ids=[])
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=[],
+        num_scheduled_tokens={
+            requests[0].request_id: 3,
+            requests[1].request_id: 1,
+        },
+        total_num_scheduled_tokens=4,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={
+            requests[0].request_id: [10, 11],
+            requests[1].request_id: [],
+        },
+        num_common_prefix_blocks=0,
+        finished_req_ids=set(),
+        free_encoder_input_ids=[],
+    )
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
@@ -355,11 +368,14 @@ def test_stop_via_update_from_output():
             req.request_id: i
             for i, req in enumerate(requests)
         },
-        sampled_token_ids=[[10, 11, 12],
-                           [13]],  # First request exceeds max_tokens
+        sampled_token_ids=[
+            [10, 11, 12],
+            [13],
+        ],  # First request exceeds max_tokens
         spec_token_ids=None,
         logprobs=None,
-        prompt_logprobs_dict={})
+        prompt_logprobs_dict={},
+    )
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -368,8 +384,10 @@ def test_stop_via_update_from_output():
     assert scheduler.running[0].request_id == requests[1].request_id
     assert requests[0].status == RequestStatus.FINISHED_LENGTH_CAPPED
     assert requests[0].request_id in scheduler.finished_req_ids
-    assert list(requests[0].output_token_ids) == [10, 11
-                                                  ]  # Truncated to max_tokens
+    assert list(requests[0].output_token_ids) == [
+        10,
+        11,
+    ]  # Truncated to max_tokens
     assert list(requests[1].output_token_ids) == [13]
 
     # Test case 4: Ignore EOS flag
@@ -392,7 +410,8 @@ def test_stop_via_update_from_output():
         },
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[])
+        free_encoder_input_ids=[],
+    )
 
     model_output = ModelRunnerOutput(
         req_ids=[requests[0].request_id],
@@ -400,7 +419,8 @@ def test_stop_via_update_from_output():
         sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
         spec_token_ids=None,
         logprobs=None,
-        prompt_logprobs_dict={})
+        prompt_logprobs_dict={},
+    )
 
     scheduler.update_from_output(scheduler_output, model_output)
 

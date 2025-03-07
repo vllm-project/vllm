@@ -15,7 +15,7 @@ completion = client.chat.completions.create(
     model="Qwen/Qwen2.5-3B-Instruct",
     messages=[{
         "role": "user",
-        "content": "Classify this sentiment: vLLM is wonderful!"
+        "content": "Classify this sentiment: vLLM is wonderful!",
     }],
     extra_body={"guided_choice": ["positive", "negative"]},
 )
@@ -112,7 +112,7 @@ try:
         extra_body={
             "guided_regex": "\w+@\w+\.com\n",
             "stop": ["\n"],
-            "guided_decoding_backend": "xgrammar:no-fallback"
+            "guided_decoding_backend": "xgrammar:no-fallback",
         },
     )
 except BadRequestError as e:

@@ -25,11 +25,13 @@ def round_up_to_next_block(seq_len: int, block_size: int) -> int:
     return (seq_len + block_size - 1) // block_size
 
 
-def mock_worker(cls=None,
-                vocab_size: int = 30_000,
-                max_model_len: int = 2048,
-                rank: int = 0,
-                use_spec: bool = True) -> MagicMock:
+def mock_worker(
+    cls=None,
+    vocab_size: int = 30_000,
+    max_model_len: int = 2048,
+    rank: int = 0,
+    use_spec: bool = True,
+) -> MagicMock:
     if cls is None:
         cls = Worker
 
@@ -39,7 +41,7 @@ def mock_worker(cls=None,
     worker.vocab_size = vocab_size
     worker.max_model_len = max_model_len
     worker.rank = rank
-    worker.device = 'cuda:0'
+    worker.device = "cuda:0"
     return worker
 
 
@@ -62,15 +64,17 @@ def zero_kv_cache(cache_engine: list[CacheEngine]):
         value_blocks.zero_()
 
 
-def create_worker(cls: Callable[..., T],
-                  model_name: str,
-                  block_size: int,
-                  num_gpu_blocks: int,
-                  seed: int,
-                  is_driver_worker: bool = True,
-                  enforce_eager: bool = True,
-                  model_runner_cls: Optional[ModelRunner] = None,
-                  dtype: Optional[str] = "auto") -> T:
+def create_worker(
+    cls: Callable[..., T],
+    model_name: str,
+    block_size: int,
+    num_gpu_blocks: int,
+    seed: int,
+    is_driver_worker: bool = True,
+    enforce_eager: bool = True,
+    model_runner_cls: Optional[ModelRunner] = None,
+    dtype: Optional[str] = "auto",
+) -> T:
     engine_args = EngineArgs(
         model=model_name,
         seed=seed,
@@ -99,7 +103,8 @@ def create_worker(cls: Callable[..., T],
     engine_config.cache_config.num_cpu_blocks = 0
     worker.initialize_cache(
         num_gpu_blocks=engine_config.cache_config.num_gpu_blocks,
-        num_cpu_blocks=engine_config.cache_config.num_cpu_blocks)
+        num_cpu_blocks=engine_config.cache_config.num_cpu_blocks,
+    )
 
     return worker
 
@@ -112,7 +117,6 @@ def create_seq_group_metadata_from_prompts(
     continuations: Optional[list[list[int]]] = None,
     seq_ids: Optional[list[int]] = None,
 ) -> list[SequenceGroupMetadata]:
-
     if continuations is None:
         continuations = [[] for _ in prompts]
 
@@ -148,12 +152,12 @@ def create_seq_group_metadata_from_prompts(
 
 
 def create_chunked_seq_group_metadata_from_prompt(
-        prompt: list[int],
-        num_gpu_blocks: int,
-        chunk_size: int,
-        block_size: int,
-        seq_id: Optional[int] = None) -> list[SequenceGroupMetadata]:
-
+    prompt: list[int],
+    num_gpu_blocks: int,
+    chunk_size: int,
+    block_size: int,
+    seq_id: Optional[int] = None,
+) -> list[SequenceGroupMetadata]:
     if seq_id is None:
         seq_id = 0
 
@@ -178,13 +182,15 @@ def create_chunked_seq_group_metadata_from_prompt(
                 seq_data=seq_data,
                 sampling_params=SamplingParams(temperature=0.0),
                 block_tables={i: block_allocations},
-                token_chunk_size=len(chunk_ids)))
+                token_chunk_size=len(chunk_ids),
+            ))
     return seq_group_metadata_list
 
 
 def assert_logprobs_dict_allclose(
-        actual_logprobs: list[dict[int, Logprob]],
-        expected_logprobs: list[dict[int, Logprob]]) -> None:
+    actual_logprobs: list[dict[int, Logprob]],
+    expected_logprobs: list[dict[int, Logprob]],
+) -> None:
     for single_step_actual_logprobs, single_step_expected_logprobs in zip(
             actual_logprobs, expected_logprobs):
         assert set(single_step_actual_logprobs.keys()) == set(
@@ -198,10 +204,11 @@ def assert_logprobs_dict_allclose(
 
 
 def create_sampler_output_list(
-        token_ids: torch.Tensor,
-        probs: GenericSequence[Optional[torch.Tensor]],
-        logprobs: GenericSequence[Optional[torch.Tensor]],
-        seq_ids: Optional[list[int]] = None) -> list[SamplerOutput]:
+    token_ids: torch.Tensor,
+    probs: GenericSequence[Optional[torch.Tensor]],
+    logprobs: GenericSequence[Optional[torch.Tensor]],
+    seq_ids: Optional[list[int]] = None,
+) -> list[SamplerOutput]:
     num_steps, batch_size = token_ids.shape
     token_ids_by_step = token_ids.tolist()
 
@@ -209,33 +216,36 @@ def create_sampler_output_list(
         seq_ids = list(range(batch_size))
 
     return [
-        SamplerOutput(outputs=[
-            CompletionSequenceGroupOutput(
-                samples=[
-                    SequenceOutput(
-                        output_token=token_id,
-                        parent_seq_id=seq_ids[seq_index],
-                        logprobs={token_id: Logprob(0)},
-                    )
-                ],
-                prompt_logprobs=None,
-            ) for seq_index, token_id in enumerate(token_ids_by_step[step])
-        ],
-                      sampled_token_probs=probs[step],
-                      logprobs=logprobs[step],
-                      sampled_token_ids=token_ids[step])
-        for step in range(num_steps)
+        SamplerOutput(
+            outputs=[
+                CompletionSequenceGroupOutput(
+                    samples=[
+                        SequenceOutput(
+                            output_token=token_id,
+                            parent_seq_id=seq_ids[seq_index],
+                            logprobs={token_id: Logprob(0)},
+                        )
+                    ],
+                    prompt_logprobs=None,
+                ) for seq_index, token_id in enumerate(token_ids_by_step[step])
+            ],
+            sampled_token_probs=probs[step],
+            logprobs=logprobs[step],
+            sampled_token_ids=token_ids[step],
+        ) for step in range(num_steps)
     ]
 
 
-def create_batch(batch_size,
-                 k,
-                 prompt_len: Union[int, list[int]] = 10,
-                 prev_output_token_len: int = 10,
-                 seq_ids: Optional[list[int]] = None,
-                 num_gpu_blocks: Optional[int] = None,
-                 block_size: Optional[int] = None,
-                 prefill_chunk_size: Optional[int] = None):
+def create_batch(
+    batch_size,
+    k,
+    prompt_len: Union[int, list[int]] = 10,
+    prev_output_token_len: int = 10,
+    seq_ids: Optional[list[int]] = None,
+    num_gpu_blocks: Optional[int] = None,
+    block_size: Optional[int] = None,
+    prefill_chunk_size: Optional[int] = None,
+):
     if block_size is None:
         block_size = 8
 
@@ -257,8 +267,7 @@ def create_batch(batch_size,
             seq_ids = list(range(len(prompts)))
         seq_group_metadata_list = []
         for p, sid in zip(prompts, seq_ids):
-            seq_group_metadata_list += \
-                create_chunked_seq_group_metadata_from_prompt(
+            seq_group_metadata_list += create_chunked_seq_group_metadata_from_prompt(
                 p, num_gpu_blocks, prefill_chunk_size, block_size, sid)
         seq_group_metadata_list = seq_group_metadata_list[:batch_size]
         prev_output_tokens = []
@@ -272,8 +281,13 @@ def create_batch(batch_size,
         ]
 
         seq_group_metadata_list = create_seq_group_metadata_from_prompts(
-            prompts, num_gpu_blocks, block_size, final_prompt_lens,
-            prev_output_tokens, seq_ids)
+            prompts,
+            num_gpu_blocks,
+            block_size,
+            final_prompt_lens,
+            prev_output_tokens,
+            seq_ids,
+        )
     return seq_group_metadata_list, prompts, prev_output_tokens
 
 
@@ -283,7 +297,7 @@ def maybe_enable_chunked_prefill(prefill_chunk_size, llm_kwargs):
             **{
                 "enable_chunked_prefill": True,
                 "max_num_batched_tokens": prefill_chunk_size,
-                "max_num_seqs": prefill_chunk_size
+                "max_num_seqs": prefill_chunk_size,
             })
     else:
         llm_kwargs["enable_chunked_prefill"] = False

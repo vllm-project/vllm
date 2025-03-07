@@ -33,7 +33,7 @@ class MockSSLContext(SSLContext):
 
 
 def create_file() -> str:
-    with tempfile.NamedTemporaryFile(dir='/tmp', delete=False) as f:
+    with tempfile.NamedTemporaryFile(dir="/tmp", delete=False) as f:
         return f.name
 
 

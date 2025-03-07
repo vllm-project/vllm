@@ -56,7 +56,8 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
 
 @pytest.mark.xfail(
     current_platform.is_rocm(),
-    reason="MiniCPM-V dependency xformers incompatible with ROCm")
+    reason="MiniCPM-V dependency xformers incompatible with ROCm",
+)
 @fork_new_process_for_each_test
 def test_minicpmv_lora(minicpmv_lora_files):
     llm = vllm.LLM(
@@ -79,7 +80,8 @@ def test_minicpmv_lora(minicpmv_lora_files):
 
 @pytest.mark.xfail(
     current_platform.is_rocm(),
-    reason="MiniCPM-V dependency xformers incompatible with ROCm")
+    reason="MiniCPM-V dependency xformers incompatible with ROCm",
+)
 @fork_new_process_for_each_test
 def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
     llm = vllm.LLM(
@@ -100,7 +102,8 @@ def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
 
 @pytest.mark.xfail(
     current_platform.is_rocm(),
-    reason="MiniCPM-V dependency xformers incompatible with ROCm")
+    reason="MiniCPM-V dependency xformers incompatible with ROCm",
+)
 @fork_new_process_for_each_test
 def test_minicpmv_tp4_fully_sharded_loras(minicpmv_lora_files):
     llm = vllm.LLM(

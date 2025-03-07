@@ -26,7 +26,7 @@ class GGUFConfig(QuantizationConfig):
         super().__init__()
 
     def __repr__(self) -> str:
-        return ("GGUFConfig()")
+        return "GGUFConfig()"
 
     def get_name(self) -> str:
         return "gguf"
@@ -129,17 +129,23 @@ class GGUFLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: GGUFConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, layer: torch.nn.Module,
-                       input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
-                       **extra_weight_attrs):
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: List[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
         output_size_per_partition = sum(output_partition_sizes)
 
         tensor_shape = (output_size_per_partition, input_size_per_partition)
         qweight = GGUFUninitializedParameter(requires_grad=False)
         set_weight_attrs(
-            qweight, {
+            qweight,
+            {
                 "input_dim": 1,
                 "output_dim": 0,
                 "tensor_shape": tensor_shape,
@@ -147,27 +153,33 @@ class GGUFLinearMethod(LinearMethodBase):
                 "data_container": [],
                 "shard_id": [],
                 "shard_id_map": {},
-            })
+            },
+        )
         set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("qweight", qweight)
 
-        qweight_type = Parameter(torch.empty(len(output_partition_sizes),
-                                             dtype=torch.uint8),
-                                 requires_grad=False)
+        qweight_type = Parameter(
+            torch.empty(len(output_partition_sizes), dtype=torch.uint8),
+            requires_grad=False,
+        )
         set_weight_attrs(
-            qweight_type, {
+            qweight_type,
+            {
                 "is_gguf_weight_type": True,
                 "weight_type": 0,
                 "shard_weight_type": {},
-                "ignore_warning": True
-            })
+                "ignore_warning": True,
+            },
+        )
         set_weight_attrs(qweight_type, extra_weight_attrs)
         layer.register_parameter("qweight_type", qweight_type)
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         shard_id = getattr(layer.qweight, "shard_id", None)
 
         if shard_id:
@@ -199,57 +211,78 @@ class GGUFMoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: GGUFConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       hidden_size: int, intermediate_size_per_partition: int,
-                       params_dtype: torch.dtype, **extra_weight_attrs):
-
-        tensor_shape = (num_experts, 2 * intermediate_size_per_partition,
-                        hidden_size)
-        #gate up proj
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        tensor_shape = (
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_size,
+        )
+        # gate up proj
         w13_qweight = GGUFUninitializedParameter(requires_grad=False)
         set_weight_attrs(
-            w13_qweight, {
+            w13_qweight,
+            {
                 "input_dim": 1,
                 "output_dim": 0,
                 "tensor_shape": tensor_shape,
                 "is_gguf_weight": True,
                 "data_container": [],
-            })
+            },
+        )
         set_weight_attrs(w13_qweight, extra_weight_attrs)
         layer.register_parameter("w13_qweight", w13_qweight)
 
         w13_qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
                                      requires_grad=False)
-        set_weight_attrs(w13_qweight_type, {
-            "is_gguf_weight_type": True,
-            "weight_type": 0,
-            "ignore_warning": True
-        })
+        set_weight_attrs(
+            w13_qweight_type,
+            {
+                "is_gguf_weight_type": True,
+                "weight_type": 0,
+                "ignore_warning": True,
+            },
+        )
         set_weight_attrs(w13_qweight_type, extra_weight_attrs)
         layer.register_parameter("w13_qweight_type", w13_qweight_type)
 
-        tensor_shape = (num_experts, intermediate_size_per_partition,
-                        hidden_size)
-        #gate down proj
+        tensor_shape = (
+            num_experts,
+            intermediate_size_per_partition,
+            hidden_size,
+        )
+        # gate down proj
         w2_qweight = GGUFUninitializedParameter(requires_grad=False)
         set_weight_attrs(
-            w2_qweight, {
+            w2_qweight,
+            {
                 "input_dim": 1,
                 "output_dim": 0,
                 "tensor_shape": tensor_shape,
                 "is_gguf_weight": True,
                 "data_container": [],
-            })
+            },
+        )
         set_weight_attrs(w2_qweight, extra_weight_attrs)
         layer.register_parameter("w2_qweight", w2_qweight)
 
         w2_qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
                                     requires_grad=False)
-        set_weight_attrs(w2_qweight_type, {
-            "is_gguf_weight_type": True,
-            "weight_type": 0,
-            "ignore_warning": True
-        })
+        set_weight_attrs(
+            w2_qweight_type,
+            {
+                "is_gguf_weight_type": True,
+                "weight_type": 0,
+                "ignore_warning": True,
+            },
+        )
 
         set_weight_attrs(w2_qweight_type, extra_weight_attrs)
         layer.register_parameter("w2_qweight_type", w2_qweight_type)
@@ -283,7 +316,8 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+        )
         final_hidden_states = torch.empty_like(x)
         for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
             inp = x[tok].reshape((1, ) + x.shape[1:])

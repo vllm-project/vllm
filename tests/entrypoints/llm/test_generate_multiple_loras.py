@@ -26,14 +26,16 @@ LORA_NAME = "typeof/zephyr-7b-beta-lora"
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model=MODEL_NAME,
-              tensor_parallel_size=1,
-              max_model_len=8192,
-              enable_lora=True,
-              max_loras=4,
-              max_lora_rank=64,
-              max_num_seqs=128,
-              enforce_eager=True)
+    llm = LLM(
+        model=MODEL_NAME,
+        tensor_parallel_size=1,
+        max_model_len=8192,
+        enable_lora=True,
+        max_loras=4,
+        max_lora_rank=64,
+        max_num_seqs=128,
+        enforce_eager=True,
+    )
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)

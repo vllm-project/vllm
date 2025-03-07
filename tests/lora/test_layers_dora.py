@@ -117,8 +117,8 @@ def populate_dora_loras(
 
                 # For testing, directly set the magnitude_param in the layers
                 # This wouldn't be needed in a full implementation where set_lora accepts magnitude_param
-                if hasattr(layer, "lora_magnitudes_stacked"
-                           ) and lora.magnitude_param is not None:
+                if (hasattr(layer, "lora_magnitudes_stacked")
+                        and lora.magnitude_param is not None):
                     layer.lora_magnitudes_stacked[0][
                         slot_idx, 0, :lora.magnitude_param.shape[0]].copy_(
                             lora.magnitude_param, non_blocking=True)
@@ -141,15 +141,15 @@ def apply_dora_transformation(
     DoRA differs from LoRA by normalizing the product of lora_a and lora_b
     column-wise and then scaling each column by a learned magnitude parameter.
 
-    Previously, there was a bug in the vLLM implementation where the _apply_magnitude method 
+    Previously, there was a bug in the vLLM implementation where the _apply_magnitude method
     in punica_base.py REPLACED the output with the normalized and scaled values
     instead of ADDING the DoRA contribution to the base output. This bug has been fixed.
-    
+
     The correct DoRA behavior now implemented:
     1. Compute the standard LoRA output: output = base_output + input @ (A @ B) * scaling
     2. For DoRA, we compute: output = base_output + (input @ (A @ B) * scaling) + (norm(input @ (A @ B)) * magnitude)
        where norm() normalizes each column to unit length
-    
+
     This implementation follows the fixed behavior.
 
     Args:
@@ -311,8 +311,12 @@ def test_dora_linear_replicated(dist_init, num_loras, device, stage,
             # Now add the DoRA contribution
             if test_lora.magnitude_param is not None:
                 dora_output = apply_dora_transformation(
-                    single_input, test_lora.lora_a, test_lora.lora_b,
-                    test_lora.magnitude_param, test_lora.scaling)
+                    single_input,
+                    test_lora.lora_a,
+                    test_lora.lora_b,
+                    test_lora.magnitude_param,
+                    test_lora.scaling,
+                )
                 manual_result += dora_output
 
                 # Print differences
@@ -351,14 +355,18 @@ def test_dora_linear_replicated(dist_init, num_loras, device, stage,
                                              rtol=0.1,
                                              atol=0.1)
                 print(f"  Is output all ones? {is_all_ones}")
-                assert not is_all_ones, "DoRA is still producing all-ones output, fix was not applied correctly!"
+                assert (
+                    not is_all_ones
+                ), "DoRA is still producing all-ones output, fix was not applied correctly!"
 
                 # Check if DoRA output is different from base output
                 base_diff = (test_result - base_result).abs().mean().item()
                 print(
                     f"  Average difference between base and DoRA outputs: {base_diff}"
                 )
-                assert base_diff > 0.01, "DoRA output should be different from base output"
+                assert (
+                    base_diff
+                    > 0.01), "DoRA output should be different from base output"
 
                 # Check if magnitudes in the layer match our expectations
                 has_nonzero_magnitudes = False
@@ -402,8 +410,12 @@ def test_dora_linear_replicated(dist_init, num_loras, device, stage,
 
             # Apply DoRA
             dora_contribution = apply_dora_transformation(
-                test_input, test_lora.lora_a, test_lora.lora_b,
-                test_lora.magnitude_param, test_lora.scaling)
+                test_input,
+                test_lora.lora_a,
+                test_lora.lora_b,
+                test_lora.magnitude_param,
+                test_lora.scaling,
+            )
             dora_output = base_output + dora_contribution
 
             # Create isolated mapping for just this one input to test actual layer output
@@ -425,7 +437,9 @@ def test_dora_linear_replicated(dist_init, num_loras, device, stage,
                                          all_ones,
                                          rtol=0.1,
                                          atol=0.1)
-            assert not is_all_ones, "DoRA is still producing all-ones output, fix was not applied correctly!"
+            assert (
+                not is_all_ones
+            ), "DoRA is still producing all-ones output, fix was not applied correctly!"
 
             # Check for difference from base output
             base_diff = (layer_output - base_output).abs().mean().item()
@@ -464,8 +478,13 @@ def test_dora_linear_replicated(dist_init, num_loras, device, stage,
                                    prompt_mapping,
                                    is_prefill=stage)
 
-        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
-                                       512, lora_config.lora_extra_vocab_size)
+        punica_wrapper.update_metadata(
+            lora_mapping,
+            id_to_index,
+            max_loras,
+            512,
+            lora_config.lora_extra_vocab_size,
+        )
 
         lora_result = lora_linear(torch.cat(inputs))[0]
         expected_result = linear(torch.cat(inputs))[0]
@@ -594,8 +613,12 @@ def test_dora_linear_parallel(dist_init, num_loras, orientation, fully_shard,
 
             # Apply DoRA
             dora_contribution = apply_dora_transformation(
-                test_input, test_lora.lora_a, test_lora.lora_b,
-                test_lora.magnitude_param, test_lora.scaling)
+                test_input,
+                test_lora.lora_a,
+                test_lora.lora_b,
+                test_lora.magnitude_param,
+                test_lora.scaling,
+            )
             dora_output = base_output + dora_contribution
 
             # Create isolated mapping for just this one input to test actual layer output
@@ -617,7 +640,9 @@ def test_dora_linear_parallel(dist_init, num_loras, orientation, fully_shard,
                                          all_ones,
                                          rtol=0.1,
                                          atol=0.1)
-            assert not is_all_ones, "DoRA is still producing all-ones output, fix was not applied correctly!"
+            assert (
+                not is_all_ones
+            ), "DoRA is still producing all-ones output, fix was not applied correctly!"
 
             # Check for difference from base output
             base_diff = (layer_output - base_output).abs().mean().item()
@@ -655,8 +680,13 @@ def test_dora_linear_parallel(dist_init, num_loras, orientation, fully_shard,
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
                                    is_prefill=stage)
-        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
-                                       512, lora_config.lora_extra_vocab_size)
+        punica_wrapper.update_metadata(
+            lora_mapping,
+            id_to_index,
+            max_loras,
+            512,
+            lora_config.lora_extra_vocab_size,
+        )
 
         lora_result = lora_linear(torch.cat(inputs))[0]
         expected_result = linear(torch.cat(inputs))[0]
@@ -716,7 +746,8 @@ def test_dora_vs_lora_functionality(device):
     # Check if DoRA output is all ones - which would indicate the bug is still present
     all_ones = torch.ones_like(dora_output)
     is_all_ones = torch.allclose(dora_output, all_ones, rtol=0.1, atol=0.1)
-    assert not is_all_ones, "DoRA output should not be all ones in the fixed implementation"
+    assert (not is_all_ones
+            ), "DoRA output should not be all ones in the fixed implementation"
 
     # 3. Verify the difference between LoRA and DoRA outputs
     # The outputs should be different
@@ -746,7 +777,8 @@ def test_dora_vs_lora_functionality(device):
     print(f"DoRA magnitude params mean: {magnitude_param.mean().item()}")
 
     # DoRA contribution should be larger than just LoRA contribution
-    assert dora_contrib_norm > lora_contrib_norm, "DoRA contribution should be larger than LoRA contribution"
+    assert (dora_contrib_norm > lora_contrib_norm
+            ), "DoRA contribution should be larger than LoRA contribution"
 
     # 6. Print sample values to help with debugging
     print(f"Base output (first 2 cols): {base_output[0, :2]}")

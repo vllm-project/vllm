@@ -132,7 +132,7 @@ class LoRAModel(AdapterModel):
             # Identify if there are any magnitude vectors in the tensors
             magnitude_names = [
                 name for name in tensors
-                if name.endswith('lora_magnitude_vector')
+                if name.endswith("lora_magnitude_vector")
             ]
             if not magnitude_names:
                 # If use_dora=True but no magnitude vectors, raise an error
@@ -330,9 +330,11 @@ class LoRAModel(AdapterModel):
             embeddings = safetensors.torch.load_file(
                 new_embeddings_tensor_path)
         elif os.path.isfile(new_embeddings_bin_file_path):
-            embeddings = torch.load(new_embeddings_bin_file_path,
-                                    map_location=device,
-                                    weights_only=True)
+            embeddings = torch.load(
+                new_embeddings_bin_file_path,
+                map_location=device,
+                weights_only=True,
+            )
 
         # CHLOE TODO: can pdb/print here to see what each thing should look like; then can try to call this externally w/ some random loras lol
         return cls.from_lora_tensors(
@@ -381,9 +383,11 @@ class LoRAModelManager(AdapterModelManager):
         self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
         self.long_lora_context: Optional[LongContextLoRAContext] = None
-        self.punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
-                                                 max_batches=self.max_num_seqs,
-                                                 device=self.device)
+        self.punica_wrapper = get_punica_wrapper(
+            max_num_batched_tokens,
+            max_batches=self.max_num_seqs,
+            device=self.device,
+        )
         # Scaling factor -> offset to the sin_cos_cache to it.
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
@@ -663,7 +667,8 @@ class LoRAModelManager(AdapterModelManager):
         return any(
             re.match(
                 r".*\.{target_module}$".format(target_module=target_module),
-                module_name) or target_module == module_name
+                module_name,
+            ) or target_module == module_name
             for target_module in self.supported_lora_modules)
 
     def _filter_unsupported_mm_module(self, module_name: str) -> bool:
@@ -721,9 +726,7 @@ class LoRAModelManager(AdapterModelManager):
 
     def add_adapter(self, adapter: LoRAModel) -> bool:
         logger.debug(
-            "Adding lora. Model id: %d, "
-            "int id: %d, "
-            "scaling factor: %s",
+            "Adding lora. Model id: %d, int id: %d, scaling factor: %s",
             adapter.id,
             adapter.id,
             adapter.scaling_factor,
@@ -765,8 +768,14 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         lora_config: LoRAConfig,
         device: torch.device,
     ):
-        super().__init__(model, max_num_seqs, max_num_batched_tokens,
-                         vocab_size, lora_config, device)
+        super().__init__(
+            model,
+            max_num_seqs,
+            max_num_batched_tokens,
+            vocab_size,
+            lora_config,
+            device,
+        )
         self._registered_adapters: LoRALRUCache = LoRALRUCache(
             self.capacity, self.deactivate_adapter)
         self._active_adapters: LoRALRUCache = LoRALRUCache(
@@ -779,9 +788,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
     def add_adapter(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""
         logger.debug(
-            "Adding lora. Model id: %d, "
-            "int id: %d, "
-            "scaling factor: %s",
+            "Adding lora. Model id: %d, int id: %d, scaling factor: %s",
             lora.id,
             lora.id,
             lora.scaling_factor,
@@ -823,8 +830,8 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         try:
             self._registered_adapters.pin(lora_id)
         except ValueError as err:
-            raise ValueError("Pinning failed. "
-                             f"LoRA {lora_id} is not registered.") from err
+            raise ValueError(
+                f"Pinning failed. LoRA {lora_id} is not registered.") from err
 
     def _pin_lora_in_gpu_cache(self, lora_id: int):
         if lora_id not in self._active_adapters:

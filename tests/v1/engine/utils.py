@@ -30,8 +30,8 @@ FULL_STRINGS = [
 STOP_STRINGS = ["I love working on", "company by far", "brother in"]
 PROMPT_LEN = 5
 
-PLP_APC_UNSUPPORTED_MSG = ("Prefix caching with prompt logprobs not yet "
-                           "supported on VLLM V1.")
+PLP_APC_UNSUPPORTED_MSG = (
+    "Prefix caching with prompt logprobs not yet supported on VLLM V1.")
 
 random.seed(42)
 
@@ -42,7 +42,7 @@ def _create_random_top_logprob_test_vector(
     upper: float,
 ) -> torch.Tensor:
     """Create a random vector of top logprob float values.
-    
+
     Use to create fake sample logprobs for testing.
 
     Note that a real production scenario would require
@@ -66,7 +66,7 @@ def _create_random_top_logprob_test_matrix(
     upper: float,
 ) -> torch.Tensor:
     """Create a random matrix of top logprob float values.
-    
+
     Use to create fake prompt logprobs for testing.
 
     Note that a real production scenario would require
@@ -86,11 +86,12 @@ def _create_random_top_logprob_test_matrix(
 
 
 def _create_random_top_token_test_vector(
-        num_logprobs: int,
-        lower: int,
-        upper: int,
-        sampled_token_id: int,
-        adjust_num_logprobs: bool = True) -> tuple[torch.Tensor, int]:
+    num_logprobs: int,
+    lower: int,
+    upper: int,
+    sampled_token_id: int,
+    adjust_num_logprobs: bool = True,
+) -> tuple[torch.Tensor, int]:
     """Create a random vector of top logprob token indices
 
     Use to create fake sample logprobs for testing. The sampled token
@@ -131,8 +132,8 @@ def _create_random_top_token_test_vector(
 
     # Check if the sampled_token_id occurs in choice_tensor[1:]
     if sampled_token_id in choice_tensor[1:]:
-        sampled_token_rank = (choice_tensor[1:] == sampled_token_id).nonzero(
-            as_tuple=True)[0].item()
+        sampled_token_rank = ((choice_tensor[1:] == sampled_token_id).nonzero(
+            as_tuple=True)[0].item())
     else:
         # If not found, assign a random int between num_logprobs and 50700
         sampled_token_rank = random.randint(num_logprobs, 50700)
@@ -168,9 +169,12 @@ def _create_random_top_token_test_matrix(
     num_elements = shape[0] * shape[1]
     choice_tensor = torch.randperm(upper - lower)[:num_elements] + lower
     matrix = torch.cat(
-        (torch.tensor(tokens_list, dtype=torch.int).unsqueeze(-1),
-         choice_tensor.view(shape)),
-        dim=1)
+        (
+            torch.tensor(tokens_list, dtype=torch.int).unsqueeze(-1),
+            choice_tensor.view(shape),
+        ),
+        dim=1,
+    )
 
     # Initialize the tensor for storing the ranks
     prompt_token_ranks = torch.empty(shape[0], dtype=torch.int)
@@ -237,17 +241,18 @@ def generate_dummy_sample_logprobs(
                                                  len(tokenizer.vocab) - 1,
                                                  sampled_token_id)
 
-        res.append(
-            (token_vector,
-             _create_random_top_logprob_test_vector(num_logprobs + 1, -100,
-                                                    0), sampled_token_rank))
+        res.append((
+            token_vector,
+            _create_random_top_logprob_test_vector(num_logprobs + 1, -100, 0),
+            sampled_token_rank,
+        ))
 
     # Convert tensors in the list tuples to Python lists
-    res_list_format = [
-        (log_probs_tensor.tolist(), token_ids_tensor.tolist(),
-         sampled_token_rank)
-        for log_probs_tensor, token_ids_tensor, sampled_token_rank in res
-    ]
+    res_list_format = [(
+        log_probs_tensor.tolist(),
+        token_ids_tensor.tolist(),
+        sampled_token_rank,
+    ) for log_probs_tensor, token_ids_tensor, sampled_token_rank in res]
 
     return res_list_format
 
@@ -286,18 +291,23 @@ def generate_dummy_prompt_logprobs_tensors(
         token_vector,
         prompt_token_ranks,
     ) = _create_random_top_token_test_matrix(
-        (num_prompt_logprobs, num_logprobs), 0,
-        len(tokenizer.vocab) - 1, prompt_tokens_list[1:])
+        (num_prompt_logprobs, num_logprobs),
+        0,
+        len(tokenizer.vocab) - 1,
+        prompt_tokens_list[1:],
+    )
     return LogprobsTensors(
         token_vector,
         _create_random_top_logprob_test_matrix(
             (num_prompt_logprobs, num_logprobs + 1), -100, 0),
-        prompt_token_ranks)
+        prompt_token_ranks,
+    )
 
 
 @dataclass
 class DummyOutputProcessorTestVectors:
     """Dummy test vectors for output processor tests"""
+
     tokenizer: GeneralTokenizerType
     tokenizer_group: BaseTokenizerGroup
     vllm_config: EngineArgs

@@ -15,8 +15,11 @@ class StopChecker:
     emitted, or if we have exceeded the max model len.
     """
 
-    def __init__(self, max_model_len: int,
-                 get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer]):
+    def __init__(
+        self,
+        max_model_len: int,
+        get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer],
+    ):
         # Do not use it directly, but use `self._get_max_model_len`.
         self._max_model_len = max_model_len
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
@@ -36,8 +39,8 @@ class StopChecker:
     ) -> None:
         """Stop the finished sequences.
 
-       new_char_count is the number of chars added to the
-           sequence's output text for the newly generated token
+        new_char_count is the number of chars added to the
+            sequence's output text for the newly generated token
         """
 
         # Check if the minimum number of tokens has been generated yet;
@@ -46,8 +49,8 @@ class StopChecker:
             return
 
         # Check if the sequence has generated the EOS token.
-        if ((not sampling_params.ignore_eos)
-                and seq.get_last_token_id() == seq.eos_token_id):
+        if (not sampling_params.ignore_eos
+            ) and seq.get_last_token_id() == seq.eos_token_id:
             # Remove the last EOS token unless explicitly specified
             # This prevents unintended exposure of the EOS token
             if new_char_count and (
@@ -70,8 +73,11 @@ class StopChecker:
 
         # Check if any stop strings are matched.
         stop = self.check_stop_strings(
-            seq.output_text, new_char_count, sampling_params.stop,
-            sampling_params.include_stop_str_in_output)
+            seq.output_text,
+            new_char_count,
+            sampling_params.stop,
+            sampling_params.include_stop_str_in_output,
+        )
         if stop is not None:
             stop_str, truncate_to = stop
             if truncate_to != -1:

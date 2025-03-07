@@ -4,6 +4,7 @@ This file demonstrates the example usage of disaggregated prefilling
 We will launch 2 vllm instances (GPU 0 for prefill and GPU 1 for decode),
 and then transfer the KV cache between them.
 """
+
 import os
 import time
 from multiprocessing import Event, Process
@@ -38,10 +39,12 @@ def run_prefill(prefill_done):
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
-    llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
-              kv_transfer_config=ktc,
-              max_model_len=2000,
-              gpu_memory_utilization=0.8)
+    llm = LLM(
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        kv_transfer_config=ktc,
+        max_model_len=2000,
+        gpu_memory_utilization=0.8,
+    )
 
     llm.generate(prompts, sampling_params)
     print("Prefill node is finished.")
@@ -77,10 +80,12 @@ def run_decode(prefill_done):
 
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
-    llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
-              kv_transfer_config=ktc,
-              max_model_len=2000,
-              gpu_memory_utilization=0.8)
+    llm = LLM(
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        kv_transfer_config=ktc,
+        max_model_len=2000,
+        gpu_memory_utilization=0.8,
+    )
 
     # Wait for the producer to start the pipe
     print("Waiting for prefill node to finish...")

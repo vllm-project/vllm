@@ -41,12 +41,12 @@ def test_metric_counter_prompt_tokens(
         # This test needs at least 2 prompts in a batch of different lengths to
         # verify their token count is correct despite padding.
         assert len(example_prompts) > 1, "at least 2 prompts are required"
-        assert prompt_token_counts[0] != prompt_token_counts[1], (
-            "prompts of different lengths are required")
+        assert (prompt_token_counts[0] != prompt_token_counts[1]
+                ), "prompts of different lengths are required"
         vllm_prompt_token_count = sum(prompt_token_counts)
 
         _ = vllm_model.generate_greedy(example_prompts, max_tokens)
-        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
+        stat_logger = vllm_model.model.llm_engine.stat_loggers["prometheus"]
         metric_count = stat_logger.metrics.counter_prompt_tokens.labels(
             **stat_logger.labels)._value.get()
 
@@ -71,7 +71,7 @@ def test_metric_counter_generation_tokens(
                      gpu_memory_utilization=0.4) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         tokenizer = vllm_model.model.get_tokenizer()
-        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
+        stat_logger = vllm_model.model.llm_engine.stat_loggers["prometheus"]
         metric_count = stat_logger.metrics.counter_generation_tokens.labels(
             **stat_logger.labels)._value.get()
         vllm_generation_count = 0
@@ -107,7 +107,7 @@ def test_metric_counter_generation_tokens_multi_step(
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         tokenizer = vllm_model.model.get_tokenizer()
-        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
+        stat_logger = vllm_model.model.llm_engine.stat_loggers["prometheus"]
         metric_count = stat_logger.metrics.counter_generation_tokens.labels(
             **stat_logger.labels)._value.get()
         vllm_generation_count = 0
@@ -120,25 +120,28 @@ def test_metric_counter_generation_tokens_multi_step(
 
     # The multi-step scheduling will continue to execute forward even when
     # encountering EOS, leading to slightly imprecise metrics.
-    assert abs(vllm_generation_count - metric_count) <\
-        len(example_prompts) * num_scheduler_steps, \
-        (f"generation token count: {vllm_generation_count!r}\n"
-         f"metric: {metric_count!r}")
+    assert (abs(vllm_generation_count - metric_count)
+            < len(example_prompts) * num_scheduler_steps), (
+                f"generation token count: {vllm_generation_count!r}\n"
+                f"metric: {metric_count!r}")
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize(
     "served_model_name",
-    [None, [], ["ModelName0"], ["ModelName0", "ModelName1", "ModelName2"]])
+    [None, [], ["ModelName0"], ["ModelName0", "ModelName1", "ModelName2"]],
+)
 def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
                                    served_model_name: list[str]) -> None:
-    with vllm_runner(model,
-                     dtype=dtype,
-                     disable_log_stats=False,
-                     gpu_memory_utilization=0.3,
-                     served_model_name=served_model_name) as vllm_model:
-        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            disable_log_stats=False,
+            gpu_memory_utilization=0.3,
+            served_model_name=served_model_name,
+    ) as vllm_model:
+        stat_logger = vllm_model.model.llm_engine.stat_loggers["prometheus"]
         metrics_tag_content = stat_logger.labels["model_name"]
 
     if envs.VLLM_CI_USE_S3:
@@ -242,9 +245,8 @@ def test_metric_spec_decode(
             speculative_model=model,
             num_speculative_tokens=k,
     ) as vllm_model:
-
         # Force log interval to be 0 to catch all metrics.
-        stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
+        stat_logger = vllm_model.model.llm_engine.stat_loggers["prometheus"]
         stat_logger.local_interval = 0
 
         # Note that the purpose of this test is to verify spec decode
@@ -264,9 +266,9 @@ def test_metric_spec_decode(
 
         _ = vllm_model.generate_greedy(prompts, max_tokens)
         for metric_name, is_expected in metric_name_to_expected_fn.items():
-            metric_val = getattr(
+            metric_val = (getattr(
                 stat_logger.metrics,
-                metric_name).labels(**stat_logger.labels)._value.get()
+                metric_name).labels(**stat_logger.labels)._value.get())
             assert is_expected(metric_val), (
                 f"the value of metric {metric_name} ({metric_val}) "
                 "does not meet expectation")
@@ -299,7 +301,6 @@ def test_metric_spec_decode_interval(
     engine = LLMEngine.from_engine_args(engine_args)
 
     try:
-
         engine.add_request(
             "request-id-0",
             example_prompts[0],
@@ -307,7 +308,7 @@ def test_metric_spec_decode_interval(
         )
 
         # set log internal
-        stat_logger = engine.stat_loggers['prometheus']
+        stat_logger = engine.stat_loggers["prometheus"]
         stat_logger.local_interval = log_interval
 
         # prefill
@@ -349,9 +350,9 @@ def test_metric_spec_decode_interval(
         }
 
         for metric_name, is_expected in metric_name_to_expected_fn.items():
-            metric_val = getattr(
+            metric_val = (getattr(
                 stat_logger.metrics,
-                metric_name).labels(**stat_logger.labels)._value.get()
+                metric_name).labels(**stat_logger.labels)._value.get())
             assert is_expected(metric_val), (
                 f"the value of metric {metric_name} ({metric_val}) "
                 "does not meet expectation")
@@ -367,12 +368,11 @@ def assert_metrics(model: str, engine: LLMEngine, disable_log_stats: bool,
         with pytest.raises(AttributeError):
             _ = engine.stat_loggers
     else:
-        assert (engine.stat_loggers
-                is not None), "engine.stat_loggers should be set"
+        assert engine.stat_loggers is not None, "engine.stat_loggers should be set"
         # Ensure the count bucket of request-level histogram metrics matches
         # the number of requests as a simple sanity check to ensure metrics are
         # generated
-        labels = {'model_name': model}
+        labels = {"model_name": model}
         request_histogram_metrics = [
             "vllm:e2e_request_latency_seconds",
             "vllm:request_prompt_tokens",
@@ -383,8 +383,7 @@ def assert_metrics(model: str, engine: LLMEngine, disable_log_stats: bool,
         for metric_name in request_histogram_metrics:
             metric_value = REGISTRY.get_sample_value(f"{metric_name}_count",
                                                      labels)
-            assert (
-                metric_value == num_requests), "Metrics should be collected"
+            assert metric_value == num_requests, "Metrics should be collected"
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -424,7 +423,8 @@ def test_engine_log_metrics_ray(
         logger = _RayPrometheusStatLogger(
             local_interval=0.5,
             labels=dict(model_name=engine.model_config.served_model_name),
-            vllm_config=engine.vllm_config)
+            vllm_config=engine.vllm_config,
+        )
         engine.add_logger("ray", logger)
         for i, prompt in enumerate(example_prompts):
             engine.add_request(

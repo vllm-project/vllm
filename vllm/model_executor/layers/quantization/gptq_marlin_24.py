@@ -24,14 +24,14 @@ GPTQ_MARLIN_24_MIN_THREAD_K = 128
 GPTQ_MARLIN_24_MAX_PARALLEL = 64
 
 GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES = [
-    scalar_types.uint4b8, scalar_types.uint8b128
+    scalar_types.uint4b8,
+    scalar_types.uint8b128,
 ]
 GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES = [-1, 128]
 
 
 class GPTQMarlin24Config(QuantizationConfig):
-    """Config class for Marlin24.
-    """
+    """Config class for Marlin24."""
 
     def __init__(
         self,
@@ -47,8 +47,7 @@ class GPTQMarlin24Config(QuantizationConfig):
         self.group_size = group_size
 
         # Verify
-        if quant_type is None or \
-            quant_type not in GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES:
+        if quant_type is None or quant_type not in GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES:
             raise ValueError(
                 f"Marlin_24 does not support quant_type = {quant_type}. "
                 f"Only weight_bits = {GPTQ_MARLIN_24_SUPPORTED_QUANT_TYPES} "
@@ -110,15 +109,15 @@ class GPTQMarlin24Config(QuantizationConfig):
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
-        is_marlin_24_format = (
-            hf_quant_cfg.get("checkpoint_format") == "marlin_24")
+        is_marlin_24_format = hf_quant_cfg.get(
+            "checkpoint_format") == "marlin_24"
 
         is_valid_user_quant = (user_quant is None or user_quant == "gptq"
                                or user_quant == "gptq_marlin_24")
 
         if is_marlin_24_format and is_valid_user_quant:
-            msg = ("The model is serialized in {} format. "
-                   "Using {} kernel.".format(cls.get_name(), cls.get_name()))
+            msg = "The model is serialized in {} format. Using {} kernel.".format(
+                cls.get_name(), cls.get_name())
             logger.info(msg)
             return cls.get_name()
 
@@ -203,21 +202,24 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
             packed_dim=1,
             packed_factor=self.quant_config.pack_factor,
             marlin_tile_size=self.quant_config.tile_size,
-            weight_loader=weight_loader)
+            weight_loader=weight_loader,
+        )
 
         # Meta
-        meta = PackedvLLMParameter(data=torch.empty(
-            input_size_per_partition // 8 // 2 // 2,
-            output_size_per_partition * 2,
-            device="cuda",
-            dtype=torch.int16,
-        ),
-                                   input_dim=0,
-                                   output_dim=1,
-                                   packed_dim=1,
-                                   packed_factor=1,
-                                   marlin_tile_size=2,
-                                   weight_loader=weight_loader)
+        meta = PackedvLLMParameter(
+            data=torch.empty(
+                input_size_per_partition // 8 // 2 // 2,
+                output_size_per_partition * 2,
+                device="cuda",
+                dtype=torch.int16,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=1,
+            marlin_tile_size=2,
+            weight_loader=weight_loader,
+        )
 
         # Determine if channelwise or not
         input_groups = (1 if self.quant_config.group_size == -1 else
@@ -233,7 +235,7 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
                 dtype=params_dtype,
             ),
             "weight_loader":
-            weight_loader
+            weight_loader,
         }
         if input_groups == 1:
             scales = ChannelQuantScaleParameter(output_dim=1,
@@ -248,10 +250,12 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
             output_size_per_partition //
             self.quant_config.min_n_threads) * self.quant_config.max_parallel
 
-        workspace = BasevLLMParameter(data=torch.zeros(max_workspace_size,
-                                                       device="cuda",
-                                                       dtype=torch.int),
-                                      weight_loader=weight_loader)
+        workspace = BasevLLMParameter(
+            data=torch.zeros(max_workspace_size,
+                             device="cuda",
+                             dtype=torch.int),
+            weight_loader=weight_loader,
+        )
 
         layer.register_parameter("B_24", qweight)
         layer.register_parameter("B_meta", meta)
@@ -282,10 +286,17 @@ class GPTQMarlin24LinearMethod(LinearMethodBase):
         size_k = x_2d.shape[1]
         size_n = scales.shape[1]
 
-        output_2d = ops.gptq_marlin_24_gemm(x_2d, qweight, meta, scales,
-                                            workspace,
-                                            self.quant_config.quant_type,
-                                            size_m, size_n, size_k)
+        output_2d = ops.gptq_marlin_24_gemm(
+            x_2d,
+            qweight,
+            meta,
+            scales,
+            workspace,
+            self.quant_config.quant_type,
+            size_m,
+            size_n,
+            size_k,
+        )
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
 

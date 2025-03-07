@@ -26,29 +26,41 @@ class ExllamaLinearKernel(MPLinearKernel):
     @classmethod
     def can_implement(cls,
                       c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
-        if c.has_g_idx and\
-            c.partition_weight_shape[0] != c.full_weight_shape[0]:
-            return False, "Act reordering currently not supported by Exllama, "\
-                          "when the input features are partitioned across "\
-                          "devices"
+        if c.has_g_idx and c.partition_weight_shape[0] != c.full_weight_shape[
+                0]:
+            return (
+                False,
+                "Act reordering currently not supported by Exllama, "
+                "when the input features are partitioned across "
+                "devices",
+            )
 
         if c.partition_weight_shape[1] % (32 // c.weight_type.size_bits) != 0:
-            return False, "Output features must be a multiple of the pack " \
-                            "factor (32 / num_bits) so that we can correctly " \
-                            "pack the zero points"
+            return (
+                False,
+                "Output features must be a multiple of the pack "
+                "factor (32 / num_bits) so that we can correctly "
+                "pack the zero points",
+            )
 
         if c.act_type != torch.float16:
             return False, "Exllama only supports float16 activations"
 
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
-            return False, f"Quant type ({c.weight_type}) not supported by "\
-                           "Exllama, supported types are: "\
-                           f"{cls.SUPPORTED_QUANT_TYPES}"
+            return (
+                False,
+                f"Quant type ({c.weight_type}) not supported by "
+                "Exllama, supported types are: "
+                f"{cls.SUPPORTED_QUANT_TYPES}",
+            )
 
         if c.full_weight_shape[0] % c.group_size != 0:
-            return False, f"Group size ({c.group_size}) does not evenly divide"\
-                           " the number of input features "\
-                           f"({c.full_weight_shape[0]})"
+            return (
+                False,
+                f"Group size ({c.group_size}) does not evenly divide"
+                " the number of input features "
+                f"({c.full_weight_shape[0]})",
+            )
 
         return True, None
 
@@ -69,10 +81,12 @@ class ExllamaLinearKernel(MPLinearKernel):
                 # exllama kernel adding 1 to the zero points during inference)
                 # Documentation of the bug can be found here:
                 #  https://garden.danieldk.eu/GPTQ-Checkpoint-Format
-                zeros = torch.full((groups, out_features),
-                                   c.weight_type.bias - 1,
-                                   dtype=torch.int32,
-                                   device=device)
+                zeros = torch.full(
+                    (groups, out_features),
+                    c.weight_type.bias - 1,
+                    dtype=torch.int32,
+                    device=device,
+                )
             else:
                 raise NotImplementedError(
                     "A 0 zero-point is not supported by Exllama due to "
@@ -82,8 +96,11 @@ class ExllamaLinearKernel(MPLinearKernel):
             zeros = pack_quantized_values_into_int32(zeros,
                                                      c.weight_type,
                                                      packed_dim=1)
-            setattr(layer, self.w_zp_name,
-                    torch.nn.Parameter(zeros, requires_grad=False))
+            setattr(
+                layer,
+                self.w_zp_name,
+                torch.nn.Parameter(zeros, requires_grad=False),
+            )
 
         if c.has_g_idx:
 
@@ -95,10 +112,10 @@ class ExllamaLinearKernel(MPLinearKernel):
             self._transform_param(layer, self.w_gidx_name, transform_w_g_idx)
         else:
             self.w_gidx_name = "g_idx"
-            empty_g_idx = torch.nn.Parameter(torch.empty((0, ),
-                                                         dtype=torch.int,
-                                                         device=device),
-                                             requires_grad=False)
+            empty_g_idx = torch.nn.Parameter(
+                torch.empty((0, ), dtype=torch.int, device=device),
+                requires_grad=False,
+            )
             setattr(layer, self.w_gidx_name, empty_g_idx)
 
         def transform_w_q(x):
@@ -121,10 +138,12 @@ class ExllamaLinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
-    def apply_weights(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         c = self.config
 
         x_2d = x.reshape(-1, x.shape[-1])

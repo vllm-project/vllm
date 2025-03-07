@@ -3,6 +3,7 @@
 Whenever you add an architecture to this page, please also update
 `tests/models/registry.py` with example HuggingFace models for it.
 """
+
 import importlib
 import os
 import pickle
@@ -215,7 +216,9 @@ _VLLM_MODELS = {
 # when we use par format to pack things together, sys.executable
 # might not be the target we want to run.
 _SUBPROCESS_COMMAND = [
-    sys.executable, "-m", "vllm.model_executor.models.registry"
+    sys.executable,
+    "-m",
+    "vllm.model_executor.models.registry",
 ]
 
 
@@ -289,6 +292,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
     """
     Represents a model that has not been imported in the main process.
     """
+
     module_name: str
     class_name: str
 
@@ -308,6 +312,7 @@ def _try_load_model_cls(
     model: _BaseRegisteredModel,
 ) -> Optional[Type[nn.Module]]:
     from vllm.platforms import current_platform
+
     current_platform.verify_model_arch(model_arch)
     try:
         return model.load_model_cls()
@@ -361,8 +366,10 @@ class _ModelRegistry:
         if model_arch in self.models:
             logger.warning(
                 "Model architecture %s is already registered, and will be "
-                "overwritten by the new model class %s.", model_arch,
-                model_cls)
+                "overwritten by the new model class %s.",
+                model_arch,
+                model_cls,
+            )
 
         if isinstance(model_cls, str):
             split_str = model_cls.split(":")
@@ -551,8 +558,9 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
             returned.check_returncode()
         except Exception as e:
             # wrap raised exception to provide more information
-            raise RuntimeError(f"Error raised in subprocess:\n"
-                               f"{returned.stderr.decode()}") from e
+            raise RuntimeError(
+                f"Error raised in subprocess:\n{returned.stderr.decode()}"
+            ) from e
 
         with open(output_filepath, "rb") as f:
             return pickle.load(f)
@@ -561,6 +569,7 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
 def _run() -> None:
     # Setup plugins
     from vllm.plugins import load_general_plugins
+
     load_general_plugins()
 
     fn, output_file = pickle.loads(sys.stdin.buffer.read())

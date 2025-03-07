@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer."""
+
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -96,16 +97,16 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
 
-        quant_method = quant_config.get_quant_method(
-            self, prefix=prefix) if quant_config else None
+        quant_method = (quant_config.get_quant_method(self, prefix=prefix)
+                        if quant_config else None)
         if quant_method is not None and not isinstance(
                 quant_method, UnquantizedLinearMethod):
             assert isinstance(quant_method, BaseKVCacheMethod)
             # TODO (mgoin): kv cache dtype should be specified in the FP8
             # checkpoint config and become the "auto" behavior
             if self.kv_cache_dtype == "fp8_e5m2":
-                raise ValueError("fp8_e5m2 kv-cache is not supported with "
-                                 "fp8 checkpoints.")
+                raise ValueError(
+                    "fp8_e5m2 kv-cache is not supported with fp8 checkpoints.")
             # If quantization is enabled, we make "k_scale" and "v_scale"
             # parameters so that it can be loaded from the model checkpoint.
             # The k/v_scale will then be converted back to native float32
@@ -116,18 +117,29 @@ class Attention(nn.Module):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size,
-                                        dtype,
-                                        kv_cache_dtype,
-                                        block_size,
-                                        is_attention_free,
-                                        blocksparse_params is not None,
-                                        use_mla=use_mla)
+        attn_backend = get_attn_backend(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            is_attention_free,
+            blocksparse_params is not None,
+            use_mla=use_mla,
+        )
         impl_cls = attn_backend.get_impl_cls()
-        self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
-                             alibi_slopes, sliding_window, kv_cache_dtype,
-                             blocksparse_params, logits_soft_cap, attn_type,
-                             **extra_impl_args)
+        self.impl = impl_cls(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            blocksparse_params,
+            logits_soft_cap,
+            attn_type,
+            **extra_impl_args,
+        )
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
 
@@ -135,8 +147,8 @@ class Attention(nn.Module):
         # torch.compile works by registering the attention as one giant
         # opaque custom op. For other platforms, we directly call them
         # and let torch.compile handle them.
-        self.use_direct_call = not current_platform.is_cuda_alike(
-        ) and not current_platform.is_cpu()
+        self.use_direct_call = (not current_platform.is_cuda_alike()
+                                and not current_platform.is_cpu())
 
         self.use_output = attn_backend.accept_output_buffer
         compilation_config = get_current_vllm_config().compilation_config
@@ -180,8 +192,7 @@ class Attention(nn.Module):
             if attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(key, value)
         if self.use_output:
-            output_shape = (output_shape
-                            if output_shape is not None else query.shape)
+            output_shape = output_shape if output_shape is not None else query.shape
             output = torch.empty(output_shape,
                                  dtype=query.dtype,
                                  device=query.device)
@@ -203,13 +214,15 @@ class Attention(nn.Module):
                 forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                self.impl.forward(self,
-                                  query,
-                                  key,
-                                  value,
-                                  self_kv_cache,
-                                  attn_metadata,
-                                  output=output)
+                self.impl.forward(
+                    self,
+                    query,
+                    key,
+                    value,
+                    self_kv_cache,
+                    attn_metadata,
+                    output=output,
+                )
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
@@ -266,19 +279,21 @@ class MultiHeadAttention(nn.Module):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size,
-                                        dtype,
-                                        kv_cache_dtype=None,
-                                        block_size=16,
-                                        is_attention_free=False)
+        attn_backend = get_attn_backend(
+            head_size,
+            dtype,
+            kv_cache_dtype=None,
+            block_size=16,
+            is_attention_free=False,
+        )
         backend = backend_name_to_enum(attn_backend.get_name())
         if backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
             backend = _Backend.XFORMERS
 
-        self.attn_backend = backend if backend in {
+        self.attn_backend = (backend if backend in {
             _Backend.TORCH_SDPA,
             _Backend.XFORMERS,
-        } else _Backend.TORCH_SDPA
+        } else _Backend.TORCH_SDPA)
 
     def forward(
         self,

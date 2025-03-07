@@ -42,6 +42,7 @@ from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
 try:
     from xformers import ops as xops
+
     USE_XFORMERS_OPS = True
 except ImportError:
     USE_XFORMERS_OPS = False
@@ -51,13 +52,13 @@ def get_max_pixtral_image_tokens(ctx: InputContext):
     tokenizer = cached_tokenizer_from_config(ctx.model_config)
     mm_encoder = tokenizer.instruct.mm_encoder
 
-    image_config = mm_encoder.mm_config if hasattr(
-        mm_encoder, "mm_config") else mm_encoder.image_config
+    image_config = (mm_encoder.mm_config if hasattr(mm_encoder, "mm_config")
+                    else mm_encoder.image_config)
 
     max_image_size = image_config.max_image_size
     image_patch_size = image_config.image_patch_size
 
-    return ((max_image_size // image_patch_size)**2)
+    return (max_image_size // image_patch_size)**2
 
 
 def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
@@ -138,7 +139,7 @@ def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
     image_break_id = mm_encoder.special_ids.img_break
     image_end_id = mm_encoder.special_ids.img_end
 
-    if image_token_id not in inputs['prompt_token_ids']:
+    if image_token_id not in inputs["prompt_token_ids"]:
         raise ValueError(
             f"You've passed {inputs=} without {image_token_id=}"
             " Make sure to process your input via mistral_common's"
@@ -163,10 +164,12 @@ def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
             curr_length = 0
         else:
             pass
-    return token_inputs(prompt=prompt,
-                        prompt_token_ids=prompt_token_ids,
-                        multi_modal_data=multi_modal_data,
-                        multi_modal_placeholders={"image": placeholder_ranges})
+    return token_inputs(
+        prompt=prompt,
+        prompt_token_ids=prompt_token_ids,
+        multi_modal_data=multi_modal_data,
+        multi_modal_placeholders={"image": placeholder_ranges},
+    )
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_pixtral)
@@ -260,11 +263,15 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings, [
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                [
                     self.vision_args.image_token_id,
                     self.vision_args.image_break_token_id,
                     self.vision_args.image_end_token_id,
-                ])
+                ],
+            )
         return inputs_embeds
 
     def forward(
@@ -275,8 +282,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        """Run forward pass for pixtral.
-        """
+        """Run forward pass for pixtral."""
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -288,10 +294,12 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                       vision_embeddings)
             input_ids = None
 
-        hidden_states = self.language_model.model(input_ids,
-                                                  positions,
-                                                  intermediate_tensors,
-                                                  inputs_embeds=inputs_embeds)
+        hidden_states = self.language_model.model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
 
         return hidden_states
 
@@ -313,9 +321,9 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             # if passed as list flatten lists of tensors
             flatten_images = []
             for imgs_per_req in images:
-                imgs_per_req = [
+                imgs_per_req = ([
                     imgs_per_req[i] for i in range(imgs_per_req.size(0))
-                ] if isinstance(imgs_per_req, torch.Tensor) else imgs_per_req
+                ] if isinstance(imgs_per_req, torch.Tensor) else imgs_per_req)
 
                 flatten_images.extend(imgs_per_req)
 
@@ -369,13 +377,13 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             for name, w in weights:
                 if is_vision_encoder_weights((name, w)):
                     # Load vision encoder weights directly
-                    trimmed_name = '.'.join(name.split(".")[1:])
+                    trimmed_name = ".".join(name.split(".")[1:])
                     param = vision_encoder_dict[trimmed_name]
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 elif is_vision_lang_adapter_weights((name, w)):
                     # Load vision-language adapter weights directly
-                    trimmed_name = '.'.join(name.split(".")[1:])
+                    trimmed_name = ".".join(name.split(".")[1:])
                     param = vision_lang_adapter_dict[trimmed_name]
                     with torch.no_grad():
                         default_weight_loader(param, w)
@@ -626,10 +634,10 @@ class VisionTransformer(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            images: list of N_img images of variable sizes, 
+            images: list of N_img images of variable sizes,
                 each of shape (C, H, W)
         Returns:
-            image_features: tensor of token features for 
+            image_features: tensor of token features for
                 all tokens of all images of shape (N_toks, D)
         """
         # pass images through initial convolution independently
@@ -803,12 +811,15 @@ class PixtralHFMLP(nn.Module):
             output_sizes=[config.intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj")
-        self.down_proj = RowParallelLinear(input_size=config.intermediate_size,
-                                           output_size=config.hidden_size,
-                                           bias=False,
-                                           quant_config=quant_config,
-                                           prefix=f"{prefix}.down_proj")
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            input_size=config.intermediate_size,
+            output_size=config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
         self.act_and_mul = get_act_and_mul_fn(config.hidden_act)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -918,9 +929,11 @@ class PixtralHFTransformerBlock(nn.Module):
         attention_mask: torch.Tensor,
         position_embeddings: torch.Tensor,
     ) -> torch.Tensor:
-        r, _ = self.attention.forward(self.attention_norm(hidden_states),
-                                      attention_mask=attention_mask,
-                                      position_embeddings=position_embeddings)
+        r, _ = self.attention.forward(
+            self.attention_norm(hidden_states),
+            attention_mask=attention_mask,
+            position_embeddings=position_embeddings,
+        )
         h = hidden_states + r
         r = self.feed_forward.forward(self.ffn_norm(h))
         out = h + r
@@ -945,10 +958,11 @@ class PixtralHFTransformer(nn.Module):
             num_hidden_layers = num_hidden_layers_override
 
         self.layers = nn.ModuleList([
-            PixtralHFTransformerBlock(config=config,
-                                      quant_config=quant_config,
-                                      prefix=f"{prefix}.layers.{layer_idx}")
-            for layer_idx in range(num_hidden_layers)
+            PixtralHFTransformerBlock(
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.layers.{layer_idx}",
+            ) for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(
@@ -1054,8 +1068,8 @@ class PixtralHFVisionModel(nn.Module):
         # positional embeddings
         position_ids = position_ids_in_meshgrid(
             patch_embeds_list,
-            max_width=self.config.image_size // self.config.patch_size).to(
-                self.device)
+            max_width=self.config.image_size // self.config.patch_size,
+        ).to(self.device)
         position_embedding = self.patch_positional_embedding(
             patch_embeds, position_ids)
 
@@ -1065,16 +1079,19 @@ class PixtralHFVisionModel(nn.Module):
         else:
             from transformers.models.pixtral.modeling_pixtral import (
                 generate_block_attention_mask)
+
             attention_mask = generate_block_attention_mask(
                 [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
-                patch_embeds)
+                patch_embeds,
+            )
 
         return_all_hidden_states = feature_sample_layers is not None
         out = self.transformer(
             patch_embeds,
             attention_mask,
             position_embedding,
-            return_all_hidden_states=return_all_hidden_states)
+            return_all_hidden_states=return_all_hidden_states,
+        )
 
         out = resolve_visual_encoder_outputs(out, feature_sample_layers, None,
                                              self.config.num_hidden_layers)
@@ -1106,7 +1123,7 @@ class PixtralHFVisionModel(nn.Module):
                 if layer_idx >= layer_count:
                     continue
 
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)

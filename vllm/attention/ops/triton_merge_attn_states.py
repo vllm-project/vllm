@@ -57,7 +57,7 @@ def merge_attn_states_kernel(
     max_lse = tl.maximum(p_lse, s_lse)
     p_lse = p_lse - max_lse
     s_lse = s_lse - max_lse
-    out_se = (tl.exp(p_lse) + tl.exp(s_lse))
+    out_se = tl.exp(p_lse) + tl.exp(s_lse)
 
     if OUTPUT_LSE:
         out_lse = tl.log(out_se) + max_lse
@@ -65,12 +65,16 @@ def merge_attn_states_kernel(
 
     head_arange = tl.arange(0, PADDED_HEAD_SIZE)
     head_mask = head_arange < HEAD_SIZE
-    p_out = tl.load(prefix_output + token_idx * num_heads * HEAD_SIZE +
-                    head_idx * HEAD_SIZE + head_arange,
-                    mask=head_mask)
-    s_out = tl.load(suffix_output + token_idx * num_heads * HEAD_SIZE +
-                    head_idx * HEAD_SIZE + head_arange,
-                    mask=head_mask)
+    p_out = tl.load(
+        prefix_output + token_idx * num_heads * HEAD_SIZE +
+        head_idx * HEAD_SIZE + head_arange,
+        mask=head_mask,
+    )
+    s_out = tl.load(
+        suffix_output + token_idx * num_heads * HEAD_SIZE +
+        head_idx * HEAD_SIZE + head_arange,
+        mask=head_mask,
+    )
 
     # NOTE(woosuk): Be careful with the numerical stability.
     # We should compute the scale first, and then multiply it with the output.
@@ -78,7 +82,9 @@ def merge_attn_states_kernel(
     p_scale = tl.exp(p_lse) / out_se
     s_scale = tl.exp(s_lse) / out_se
     out = p_out * p_scale + s_out * s_scale
-    tl.store(output + token_idx * num_heads * HEAD_SIZE +
-             head_idx * HEAD_SIZE + head_arange,
-             out,
-             mask=head_mask)
+    tl.store(
+        output + token_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE +
+        head_arange,
+        out,
+        mask=head_mask,
+    )

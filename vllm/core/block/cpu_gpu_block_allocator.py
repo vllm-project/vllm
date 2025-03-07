@@ -97,8 +97,11 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             gpu_block_allocator=gpu_allocator,
         )
 
-    def __init__(self, cpu_block_allocator: BlockAllocator,
-                 gpu_block_allocator: BlockAllocator):
+    def __init__(
+        self,
+        cpu_block_allocator: BlockAllocator,
+        gpu_block_allocator: BlockAllocator,
+    ):
         assert not (
             cpu_block_allocator.all_block_ids
             & gpu_block_allocator.all_block_ids
@@ -123,10 +126,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 self.allocate_mutable_block(None, Device.GPU))
         return self._null_block
 
-    def allocate_mutable_block(self,
-                               prev_block: Optional[Block],
-                               device: Device,
-                               extra_hash: Optional[int] = None) -> Block:
+    def allocate_mutable_block(
+        self,
+        prev_block: Optional[Block],
+        device: Device,
+        extra_hash: Optional[int] = None,
+    ) -> Block:
         """Allocates a new mutable block on the specified device.
 
         Args:
@@ -144,18 +149,19 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             prev_block, extra_hash=extra_hash)
 
     def allocate_immutable_blocks(
-            self,
-            prev_block: Optional[Block],
-            block_token_ids: List[List[int]],
-            device: Device,
-            extra_hash: Optional[int] = None) -> List[Block]:
-        """Allocates a new group of immutable blocks with the provided block 
+        self,
+        prev_block: Optional[Block],
+        block_token_ids: List[List[int]],
+        device: Device,
+        extra_hash: Optional[int] = None,
+    ) -> List[Block]:
+        """Allocates a new group of immutable blocks with the provided block
         token IDs on the specified device.
 
         Args:
             prev_block (Optional[Block]): The previous block in the sequence.
                 Used for prefix hashing.
-            block_token_ids (List[int]): The list of block token IDs to be 
+            block_token_ids (List[int]): The list of block token IDs to be
                 stored in the new blocks.
             device (Device): The device on which to allocate the new block.
             extra_hash (Optional[int]): The hash value of additional
@@ -163,17 +169,19 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 in the prefix caching block.
 
         Returns:
-            List[Block]: The newly allocated list of immutable blocks 
+            List[Block]: The newly allocated list of immutable blocks
                 containing the provided block token IDs.
         """
         return self._allocators[device].allocate_immutable_blocks(
             prev_block, block_token_ids, extra_hash=extra_hash)
 
-    def allocate_immutable_block(self,
-                                 prev_block: Optional[Block],
-                                 token_ids: List[int],
-                                 device: Device,
-                                 extra_hash: Optional[int] = None) -> Block:
+    def allocate_immutable_block(
+        self,
+        prev_block: Optional[Block],
+        token_ids: List[int],
+        device: Device,
+        extra_hash: Optional[int] = None,
+    ) -> Block:
         """Allocates a new immutable block with the provided token IDs on the
         specified device.
 
@@ -242,12 +250,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].get_num_total_blocks()
 
     def get_physical_block_id(self, device: Device, absolute_id: int) -> int:
-        """Returns the zero-offset block id on certain device given the 
+        """Returns the zero-offset block id on certain device given the
         absolute block id.
 
         Args:
             device (Device): The device for which to query relative block id.
-                absolute_id (int): The absolute block id for the block in 
+                absolute_id (int): The absolute block id for the block in
                 whole allocator.
 
         Returns:
@@ -258,15 +266,15 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     def swap(self, blocks: List[Block], src_device: Device,
              dst_device: Device) -> Dict[int, int]:
         """Execute the swap for the given blocks from source_device
-        on to dest_device, save the current swap mapping and append 
-        them to the accumulated `self._swap_mapping` for each 
+        on to dest_device, save the current swap mapping and append
+        them to the accumulated `self._swap_mapping` for each
         scheduling move.
 
         Args:
             blocks: List of blocks to be swapped.
             src_device (Device): Device to swap the 'blocks' from.
             dst_device (Device): Device to swap the 'blocks' to.
-        
+
         Returns:
             Dict[int, int]: Swap mapping from source_device
                 on to dest_device.
@@ -305,7 +313,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             source to destination block IDs.
 
         Returns:
-            List[Tuple[int, int]]: A list mapping source block IDs to 
+            List[Tuple[int, int]]: A list mapping source block IDs to
                 destination block IDs.
         """
         # CoW only supported on GPU

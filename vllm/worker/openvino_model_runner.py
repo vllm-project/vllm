@@ -33,12 +33,14 @@ class ModelInput(NamedTuple):
 
     @classmethod
     def empty(cls, device):
-        return ModelInput(input_tokens=torch.empty(0, device=device),
-                          input_positions=torch.empty(0, device=device),
-                          attn_metadata=None,
-                          seq_lens=[],
-                          query_lens=[],
-                          multi_modal_kwargs={})
+        return ModelInput(
+            input_tokens=torch.empty(0, device=device),
+            input_positions=torch.empty(0, device=device),
+            attn_metadata=None,
+            seq_lens=[],
+            query_lens=[],
+            multi_modal_kwargs={},
+        )
 
 
 class OpenVINOModelRunner(ModelRunnerBase):
@@ -72,16 +74,18 @@ class OpenVINOModelRunner(ModelRunnerBase):
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
-        self.multi_modal_input_mapper = self.mm_registry \
-            .create_input_mapper(self.model_config)
+        self.multi_modal_input_mapper = self.mm_registry.create_input_mapper(
+            self.model_config)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
 
     def load_model(self) -> None:
-        self.model = get_model(vllm_config=self.vllm_config,
-                               kv_cache_dtype=self.kv_cache_dtype,
-                               ov_core=self.ov_core)
+        self.model = get_model(
+            vllm_config=self.vllm_config,
+            kv_cache_dtype=self.kv_cache_dtype,
+            ov_core=self.ov_core,
+        )
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -171,14 +175,14 @@ class OpenVINOModelRunner(ModelRunnerBase):
                     assert computed_block_nums is not None
                     computed_len = len(computed_block_nums) * self.block_size
                     tokens = tokens[computed_len:]
-                elif (self.scheduler_config.chunked_prefill_enabled
-                      or not is_prompt):
+                elif self.scheduler_config.chunked_prefill_enabled or not is_prompt:
                     if seq_group_metadata.block_tables is not None:
                         # chunked prefill or decode
                         block_table = seq_group_metadata.block_tables[seq_id]
                         if self.sliding_window is not None:
                             # chunked prefill doesn't support sliding window.
-                            assert not self.scheduler_config.chunked_prefill_enabled  # noqa: E501
+                            assert (not self.scheduler_config.
+                                    chunked_prefill_enabled)  # noqa: E501
                             sliding_window_blocks = (self.sliding_window //
                                                      self.block_size)
                             block_table = block_table[-sliding_window_blocks:]
@@ -223,8 +227,8 @@ class OpenVINOModelRunner(ModelRunnerBase):
                 if seq_group_metadata.multi_modal_data:
                     # NOTE: mm_data only includes the subset of multi-modal
                     # items that intersect with the current prefill positions.
-                    mm_data, placeholder_maps = MultiModalPlaceholderMap \
-                        .from_seq_group(seq_group_metadata, positions_range)
+                    mm_data, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
+                        seq_group_metadata, positions_range)
 
                     if self.mm_registry.has_processor(self.model_config):
                         mm_kwargs = mm_data
@@ -298,8 +302,13 @@ class OpenVINOModelRunner(ModelRunnerBase):
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, OpenVINOAttentionMetadata,
-               SamplingMetadata, BatchedTensorInputs]:
+    ) -> Tuple[
+            torch.Tensor,
+            torch.Tensor,
+            OpenVINOAttentionMetadata,
+            SamplingMetadata,
+            BatchedTensorInputs,
+    ]:
         # Prepare input tensors.
         (
             input_tokens,

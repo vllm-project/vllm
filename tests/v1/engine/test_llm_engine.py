@@ -30,7 +30,8 @@ def _vllm_model(apc: bool, vllm_runner, monkeypatch):
     # env var adjustment via monkeypatch
     scope="function",
     # Prefix caching
-    params=[False, True])
+    params=[False, True],
+)
 def vllm_model(vllm_runner, request, monkeypatch):
     """VllmRunner test fixture parameterized by APC True/False."""
     with _vllm_model(request.param, vllm_runner, monkeypatch) as vllm_model:
@@ -68,7 +69,7 @@ def _get_test_sampling_params(
 
 def test_parallel_sampling(vllm_model, example_prompts) -> None:
     """Test passes if parallel sampling `n>1` yields `n` unique completions.
-    
+
     Args:
       vllm_model: VllmRunner instance under test.
       example_prompt: test fixture providing prompts for testing.
@@ -81,12 +82,12 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
     for out, n in zip(outputs, n_list):
         completion_counts: dict[str, int] = {}
         # Assert correct number of completions
-        assert len(out.outputs) == n, (
-            f"{len(out.outputs)} completions; {n} expected.")
+        assert len(
+            out.outputs) == n, f"{len(out.outputs)} completions; {n} expected."
         for idx in range(n):
             comp = out.outputs[idx]
             # Assert correct completion indices
-            assert comp.index == idx, (f"Index {comp.index}; expected {idx}.")
+            assert comp.index == idx, f"Index {comp.index}; expected {idx}."
             text = comp.text
             completion_counts[text] = completion_counts.get(text, 0) + 1
         # Assert unique completions
@@ -108,7 +109,8 @@ def test_llm_engine_refuses_prompt_logprobs_with_apc(vllm_model_apc):
     with pytest.raises(ValueError) as excinfo:
         model.generate(
             "Hello, my name is",
-            SamplingParams(temperature=0.8, top_p=0.95, prompt_logprobs=5))
+            SamplingParams(temperature=0.8, top_p=0.95, prompt_logprobs=5),
+        )
 
     # Validate exception string is correct
     assert str(excinfo.value) == PLP_APC_UNSUPPORTED_MSG

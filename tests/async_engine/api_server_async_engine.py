@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """vllm.entrypoints.api_server with some extra logging for testing."""
+
 from collections.abc import Iterable
 from typing import Any
 
@@ -50,4 +51,5 @@ if __name__ == "__main__":
         host=args.host,
         port=args.port,
         log_level="debug",
-        timeout_keep_alive=vllm.entrypoints.api_server.TIMEOUT_KEEP_ALIVE)
+        timeout_keep_alive=vllm.entrypoints.api_server.TIMEOUT_KEEP_ALIVE,
+    )

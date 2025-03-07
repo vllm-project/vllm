@@ -21,12 +21,18 @@ def query_machete_supported_act_types(zero_points: bool) -> List[ScalarType]:
     return [torch.float16, torch.bfloat16]
 
 
-def check_machete_supports_shape(in_features: int, out_featrues: int) \
-    -> Tuple[bool, Optional[str]]:
+def check_machete_supports_shape(
+        in_features: int, out_featrues: int) -> Tuple[bool, Optional[str]]:
     if in_features % MACHETE_PREPACKED_BLOCK_SHAPE[0] != 0:
-        return False, "Input features size must be divisible by "\
-            f"{MACHETE_PREPACKED_BLOCK_SHAPE[0]}"
+        return (
+            False,
+            "Input features size must be divisible by "
+            f"{MACHETE_PREPACKED_BLOCK_SHAPE[0]}",
+        )
     if out_featrues % MACHETE_PREPACKED_BLOCK_SHAPE[1] != 0:
-        return False, "Output features size must be divisible by "\
-            f"{MACHETE_PREPACKED_BLOCK_SHAPE[1]}"
+        return (
+            False,
+            "Output features size must be divisible by "
+            f"{MACHETE_PREPACKED_BLOCK_SHAPE[1]}",
+        )
     return True, None

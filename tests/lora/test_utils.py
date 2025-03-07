@@ -14,10 +14,20 @@ from vllm.utils import LRUCache
 
 def test_parse_fine_tuned_lora_name_valid():
     fixture = {
-        ("base_model.model.lm_head.lora_A.weight", "lm_head", True, False,
-         False),
-        ("base_model.model.lm_head.lora_B.weight", "lm_head", False, False,
-         False),
+        (
+            "base_model.model.lm_head.lora_A.weight",
+            "lm_head",
+            True,
+            False,
+            False,
+        ),
+        (
+            "base_model.model.lm_head.lora_B.weight",
+            "lm_head",
+            False,
+            False,
+            False,
+        ),
         (
             "base_model.model.model.embed_tokens.lora_embedding_A",
             "model.embed_tokens",

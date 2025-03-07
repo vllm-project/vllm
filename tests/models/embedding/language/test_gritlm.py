@@ -160,7 +160,7 @@ def test_gritlm_offline_embedding(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gritlm_api_server_embedding(
-        client_embedding: openai.AsyncOpenAI):
+    client_embedding: openai.AsyncOpenAI, ):
     queries, q_instruction, documents, d_instruction = get_test_data()
 
     d_rep = await run_client_embeddings(

@@ -91,15 +91,16 @@ class MarlinConfig(QuantizationConfig):
                                      user_quant) -> Optional[str]:
         # compat: autogptq >=0.8.0 use checkpoint_format: str
         # compat: autogptq <=0.7.1 is_marlin_format: bool
-        is_marlin_format = (hf_quant_cfg.get("checkpoint_format") == "marlin"
-                            or hf_quant_cfg.get("is_marlin_format", False))
+        is_marlin_format = hf_quant_cfg.get(
+            "checkpoint_format") == "marlin" or hf_quant_cfg.get(
+                "is_marlin_format", False)
 
         is_valid_user_quant = (user_quant is None or user_quant == "gptq"
                                or user_quant == "marlin")
 
         if is_marlin_format and is_valid_user_quant:
-            msg = ("The model is serialized in {} format. Using {} kernel.".
-                   format(cls.get_name(), cls.get_name()))
+            msg = "The model is serialized in {} format. Using {} kernel.".format(
+                cls.get_name(), cls.get_name())
             logger.info(msg)
             return cls.get_name()
 
@@ -107,8 +108,8 @@ class MarlinConfig(QuantizationConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["MarlinLinearMethod"]:
-        if (isinstance(layer, LinearBase) or
-            (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
+        if isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead)
+                                             and self.lm_head_quantized):
             return MarlinLinearMethod(self)
         return None
 
@@ -186,7 +187,8 @@ class MarlinLinearMethod(LinearMethodBase):
             packed_dim=1,
             packed_factor=self.quant_config.pack_factor,
             marlin_tile_size=self.quant_config.tile_size,
-            weight_loader=weight_loader)
+            weight_loader=weight_loader,
+        )
 
         # Determine if channelwise or not
         input_groups = (1 if self.quant_config.group_size == -1 else
@@ -202,7 +204,7 @@ class MarlinLinearMethod(LinearMethodBase):
                 dtype=params_dtype,
             ),
             "weight_loader":
-            weight_loader
+            weight_loader,
         }
         if input_groups == 1:
             scales = ChannelQuantScaleParameter(output_dim=1,
@@ -217,10 +219,12 @@ class MarlinLinearMethod(LinearMethodBase):
             output_size_per_partition //
             self.quant_config.min_n_threads) * self.quant_config.max_parallel
 
-        workspace = BasevLLMParameter(data=torch.zeros(max_workspace_size,
-                                                       device="cuda",
-                                                       dtype=torch.int),
-                                      weight_loader=weight_loader)
+        workspace = BasevLLMParameter(
+            data=torch.zeros(max_workspace_size,
+                             device="cuda",
+                             dtype=torch.int),
+            weight_loader=weight_loader,
+        )
 
         layer.register_parameter("B", qweight)
         layer.register_parameter("s", scales)

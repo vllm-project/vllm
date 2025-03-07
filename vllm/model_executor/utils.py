@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Utils for model executor."""
+
 from typing import Any, Dict, Optional
 
 import torch
@@ -7,6 +8,7 @@ import torch
 
 def set_random_seed(seed: int) -> None:
     from vllm.platforms import current_platform
+
     current_platform.seed_everything(seed)
 
 
@@ -27,7 +29,7 @@ def set_weight_attrs(
         return
     for key, value in weight_attrs.items():
         assert not hasattr(
-            weight, key), (f"Overwriting existing tensor attribute: {key}")
+            weight, key), f"Overwriting existing tensor attribute: {key}"
 
         # NOTE(woosuk): During weight loading, we often do something like:
         # narrowed_tensor = param.data.narrow(0, offset, len)
@@ -39,6 +41,7 @@ def set_weight_attrs(
         # we sync the param tensor after its weight loader is called.
         # TODO(woosuk): Remove this hack once we have a better solution.
         from vllm.platforms import current_platform
+
         if current_platform.is_tpu() and key == "weight_loader":
             value = _make_synced_weight_loader(value)
         setattr(weight, key, value)

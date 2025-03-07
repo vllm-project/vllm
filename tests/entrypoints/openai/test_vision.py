@@ -84,7 +84,8 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
         max_completion_tokens=10,
         logprobs=True,
         temperature=0.0,
-        top_logprobs=5)
+        top_logprobs=5,
+    )
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
@@ -139,19 +140,22 @@ async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
         max_completion_tokens=10,
         logprobs=True,
         top_logprobs=5,
-        extra_body=dict(use_beam_search=True))
+        extra_body=dict(use_beam_search=True),
+    )
     assert len(chat_completion.choices) == 2
-    assert chat_completion.choices[
-        0].message.content != chat_completion.choices[1].message.content
+    assert (chat_completion.choices[0].message.content
+            != chat_completion.choices[1].message.content)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded(
-        client: openai.AsyncOpenAI, model_name: str, image_url: str,
-        base64_encoded_image: dict[str, str]):
-
+    client: openai.AsyncOpenAI,
+    model_name: str,
+    image_url: str,
+    base64_encoded_image: dict[str, str],
+):
     messages = [{
         "role":
         "user",
@@ -161,7 +165,7 @@ async def test_single_chat_session_image_base64encoded(
                 "image_url": {
                     "url":
                     f"data:image/jpeg;base64,{base64_encoded_image[image_url]}"
-                }
+                },
             },
             {
                 "type": "text",
@@ -177,7 +181,8 @@ async def test_single_chat_session_image_base64encoded(
         max_completion_tokens=10,
         logprobs=True,
         temperature=0.0,
-        top_logprobs=5)
+        top_logprobs=5,
+    )
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
@@ -207,9 +212,11 @@ async def test_single_chat_session_image_base64encoded(
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded_beamsearch(
-        client: openai.AsyncOpenAI, model_name: str, image_url: str,
-        base64_encoded_image: dict[str, str]):
-
+    client: openai.AsyncOpenAI,
+    model_name: str,
+    image_url: str,
+    base64_encoded_image: dict[str, str],
+):
     messages = [{
         "role":
         "user",
@@ -219,7 +226,7 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
                 "image_url": {
                     "url":
                     f"data:image/jpeg;base64,{base64_encoded_image[image_url]}"
-                }
+                },
             },
             {
                 "type": "text",
@@ -232,10 +239,11 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
         messages=messages,
         n=2,
         max_completion_tokens=10,
-        extra_body=dict(use_beam_search=True))
+        extra_body=dict(use_beam_search=True),
+    )
     assert len(chat_completion.choices) == 2
-    assert chat_completion.choices[
-        0].message.content != chat_completion.choices[1].message.content
+    assert (chat_completion.choices[0].message.content
+            != chat_completion.choices[1].message.content)
 
 
 @pytest.mark.asyncio
@@ -302,7 +310,6 @@ async def test_chat_streaming_image(client: openai.AsyncOpenAI,
     [TEST_IMAGE_URLS[:i] for i in range(2, len(TEST_IMAGE_URLS))])
 async def test_multi_image_input(client: openai.AsyncOpenAI, model_name: str,
                                  image_urls: list[str]):
-
     messages = [{
         "role":
         "user",

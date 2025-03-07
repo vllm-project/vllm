@@ -28,8 +28,28 @@ from vllm.utils import FlexibleArgumentParser
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_TP_SIZES = [1]
 DEFAULT_BATCH_SIZES = [
-    1, 16, 32, 64, 128, 192, 256, 320, 384, 448, 512, 640, 768, 896, 1024,
-    2048, 3072, 4096, 5120, 6144, 7168, 8192
+    1,
+    16,
+    32,
+    64,
+    128,
+    192,
+    256,
+    320,
+    384,
+    448,
+    512,
+    640,
+    768,
+    896,
+    1024,
+    2048,
+    3072,
+    4096,
+    5120,
+    6144,
+    7168,
+    8192,
 ]
 DEFAULT_HIDDEN_SIZES = [1024, 2048, 4096, 8192, 16384]
 DEFAULT_LORA_RANKS = [16]
@@ -55,7 +75,6 @@ def make_rand_lora_weight_tensor(k: int,
                                  num_loras: int,
                                  dtype: torch.dtype,
                                  device: str = "cuda") -> torch.Tensor:
-
     # LoRA weights column major
     return torch.rand((num_loras, n, k), dtype=dtype).to(device)
 
@@ -113,9 +132,13 @@ def make_prompt_lora_mapping(num_prompts: int, num_active_loras: int,
                         device=device)
 
 
-def make_token_lora_mapping(num_tokens: int, num_prompts: int,
-                            prompt_lora_mapping: torch.Tensor,
-                            seq_len_tensor: torch.Tensor, device: str):
+def make_token_lora_mapping(
+    num_tokens: int,
+    num_prompts: int,
+    prompt_lora_mapping: torch.Tensor,
+    seq_len_tensor: torch.Tensor,
+    device: str,
+):
     """
     Make token_lora_mapping from prompt_lora_mapping and seq_lens_tensor
     """
@@ -134,11 +157,15 @@ def make_token_lora_mapping(num_tokens: int, num_prompts: int,
     return torch.tensor(token_lora_mapping, dtype=torch.long, device=device)
 
 
-def ref_group_gemm(ref_out: torch.Tensor, input: torch.Tensor,
-                   lora_weights: list[torch.Tensor],
-                   seq_lens_cpu: torch.Tensor,
-                   prompt_lora_mapping_cpu: torch.Tensor, scaling: float,
-                   add_inputs: Optional[bool]):
+def ref_group_gemm(
+    ref_out: torch.Tensor,
+    input: torch.Tensor,
+    lora_weights: list[torch.Tensor],
+    seq_lens_cpu: torch.Tensor,
+    prompt_lora_mapping_cpu: torch.Tensor,
+    scaling: float,
+    add_inputs: Optional[bool],
+):
     """
     Torch group gemm reference implementation to test correctness of
     benchmarking operations.
@@ -167,6 +194,7 @@ class OpType(Enum):
     """
     LoRA Ops to benchmark and its properties.
     """
+
     SGMV_SHRINK = auto()
     BGMV_SHRINK = auto()
     SGMV_EXPAND = auto()
@@ -175,13 +203,13 @@ class OpType(Enum):
 
     @staticmethod
     def from_str(s: str) -> "OpType":
-        if s.lower() == 'sgmv_shrink':
+        if s.lower() == "sgmv_shrink":
             return OpType.SGMV_SHRINK
-        if s.lower() == 'sgmv_expand':
+        if s.lower() == "sgmv_expand":
             return OpType.SGMV_EXPAND
-        if s.lower() == 'bgmv_shrink':
+        if s.lower() == "bgmv_shrink":
             return OpType.BGMV_SHRINK
-        if s.lower() == 'bgmv_expand':
+        if s.lower() == "bgmv_expand":
             return OpType.BGMV_EXPAND
         if s.lower() == "bgmv_expand_slice":
             return OpType.BGMV_EXPAND_SLICE
@@ -198,7 +226,9 @@ class OpType(Enum):
 
     def is_decode_op(self) -> bool:
         return self in [
-            OpType.BGMV_SHRINK, OpType.BGMV_EXPAND, OpType.BGMV_EXPAND_SLICE
+            OpType.BGMV_SHRINK,
+            OpType.BGMV_EXPAND,
+            OpType.BGMV_EXPAND_SLICE,
         ]
 
     def is_expand_slice_fn(self) -> bool:
@@ -241,9 +271,14 @@ class OpType(Enum):
             return torch.float32, op_dtype, op_dtype
 
     def matmul_shapes(
-            self, batch_size: int, seq_length: int, hidden_size: int,
-            lora_rank: int, num_loras: int,
-            num_slices: int) -> tuple[tuple[int], tuple[int], tuple[int]]:
+        self,
+        batch_size: int,
+        seq_length: int,
+        hidden_size: int,
+        lora_rank: int,
+        num_loras: int,
+        num_slices: int,
+    ) -> tuple[tuple[int], tuple[int], tuple[int]]:
         """
         Given num_slices, return the shapes of the A, B, and C matrices
         in A x B = C, for the op_type
@@ -284,22 +319,28 @@ class OpType(Enum):
             return emulate_bgmv_expand_slice
         raise ValueError(f"Unrecognized optype {self}")
 
-    def run_ref_group_gemm(self, output: torch.Tensor, input: torch.Tensor,
-                           lora_weights: list[torch.Tensor],
-                           **kwargs) -> Callable:
+    def run_ref_group_gemm(
+        self,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        lora_weights: list[torch.Tensor],
+        **kwargs,
+    ) -> Callable:
         """Each benchmark operation expected the input, lora_weights and outputs
-           in a slightly different format. Refer to self.matmul_shapes().
-           run_ref_group_gemm accounts for those differences in executing a
-           reference group gemm for correctness testing.
+        in a slightly different format. Refer to self.matmul_shapes().
+        run_ref_group_gemm accounts for those differences in executing a
+        reference group gemm for correctness testing.
         """
         w_dtype = lora_weights[0].dtype
         num_slices = len(lora_weights)
         if self == OpType.SGMV_SHRINK:
             for slice_idx in range(num_slices):
-                ref_group_gemm(ref_out=output[slice_idx, :],
-                               input=input,
-                               lora_weights=lora_weights[slice_idx],
-                               **kwargs)
+                ref_group_gemm(
+                    ref_out=output[slice_idx, :],
+                    input=input,
+                    lora_weights=lora_weights[slice_idx],
+                    **kwargs,
+                )
         if self == OpType.SGMV_EXPAND:
             hidden_size = lora_weights[0].shape[1]
             for slice_idx in range(num_slices):
@@ -308,19 +349,24 @@ class OpType(Enum):
                     ref_out=output[:, slice_offset:slice_offset + hidden_size],
                     input=input[slice_idx].clone().to(dtype=w_dtype),
                     lora_weights=lora_weights[slice_idx],
-                    **kwargs)
+                    **kwargs,
+                )
         if self == OpType.BGMV_SHRINK:
             assert num_slices == 1
-            ref_group_gemm(ref_out=output,
-                           input=input,
-                           lora_weights=lora_weights[0],
-                           **kwargs)
+            ref_group_gemm(
+                ref_out=output,
+                input=input,
+                lora_weights=lora_weights[0],
+                **kwargs,
+            )
         if self == OpType.BGMV_EXPAND:
             assert num_slices == 1
-            ref_group_gemm(ref_out=output,
-                           input=input.clone().to(dtype=w_dtype),
-                           lora_weights=lora_weights[0],
-                           **kwargs)
+            ref_group_gemm(
+                ref_out=output,
+                input=input.clone().to(dtype=w_dtype),
+                lora_weights=lora_weights[0],
+                **kwargs,
+            )
         if self == OpType.BGMV_EXPAND_SLICE:
             hidden_size = lora_weights[0].shape[1]
             for slice_idx in range(num_slices):
@@ -329,7 +375,8 @@ class OpType(Enum):
                     ref_out=output[:, slice_offset:slice_offset + hidden_size],
                     input=input[slice_idx].clone().to(dtype=w_dtype),
                     lora_weights=lora_weights[slice_idx],
-                    **kwargs)
+                    **kwargs,
+                )
         raise ValueError(f"Unrecognized optype {self}")
 
 
@@ -338,6 +385,7 @@ class BenchmarkContext:
     """
     LoRA benchmark context
     """
+
     batch_size: int
     hidden_size: int
     num_loras: int
@@ -365,14 +413,14 @@ class BenchmarkContext:
         m, k, n = op_type.mkn(self.batch_size, self.seq_length,
                               self.hidden_size, self.lora_rank)
         desc = {
-            'bs': self.batch_size,
-            'sl': self.seq_length,
-            'm': m,
-            'k': k,
-            'n': n,
-            'num_loras': self.num_loras,
-            'sort_by_lora': self.sort_by_lora_id,
-            'num_slices': self.num_slices,
+            "bs": self.batch_size,
+            "sl": self.seq_length,
+            "m": m,
+            "k": k,
+            "n": n,
+            "num_loras": self.num_loras,
+            "sort_by_lora": self.sort_by_lora_id,
+            "num_slices": self.num_slices,
         }
         return json.dumps(desc)
 
@@ -382,6 +430,7 @@ class BenchmarkTensors:
     """
     Input/Output tensors used for benchmarks
     """
+
     # matmul tensors
     input: torch.Tensor
     lora_weights_lst: list[torch.Tensor]
@@ -401,15 +450,25 @@ class BenchmarkTensors:
     def make(ctx: BenchmarkContext,
              op_type: OpType,
              device: str = "cuda") -> "BenchmarkTensors":
-
         # Make input / output matmul tensors.
         a_shape, b_shape, c_shape = op_type.matmul_shapes(
-            ctx.batch_size, ctx.seq_length, ctx.hidden_size, ctx.lora_rank,
-            ctx.num_loras, ctx.num_slices)
+            ctx.batch_size,
+            ctx.seq_length,
+            ctx.hidden_size,
+            ctx.lora_rank,
+            ctx.num_loras,
+            ctx.num_slices,
+        )
         a_type, b_type, c_type = op_type.matmul_dtypes(ctx.dtype)
-        input_tensor, lora_weights, output_tensor = \
-            make_rand_tensors(a_shape, b_shape, c_shape, a_type, b_type, c_type,
-                              num_slices = ctx.num_slices)
+        input_tensor, lora_weights, output_tensor = make_rand_tensors(
+            a_shape,
+            b_shape,
+            c_shape,
+            a_type,
+            b_type,
+            c_type,
+            num_slices=ctx.num_slices,
+        )
 
         # Make metadata tensors.
         # Keep the metadata tensors in the CPU for further processing if needed.
@@ -421,22 +480,32 @@ class BenchmarkTensors:
         seq_len_tensor = torch.randint(ctx.seq_length, ctx.seq_length + 1,
                                        (ctx.batch_size, ))
         # Prepare seq_start_loc tensor
-        seq_start_loc_tensor = torch.cumsum(torch.tensor(
-            [0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
-                                            dim=0)
+        seq_start_loc_tensor = torch.cumsum(
+            torch.tensor([0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
+            dim=0,
+        )
         assert total_tokens == seq_len_tensor.sum()
         # Prepare prompt lora indices tensor
         prompt_lora_indices_tensor = make_prompt_lora_mapping(
             ctx.batch_size, ctx.num_active_loras, ctx.sort_by_lora_id, "cpu")
         # Prepare token lora indices tensor
         token_lora_indices_tensor = make_token_lora_mapping(
-            total_tokens, ctx.batch_size, prompt_lora_indices_tensor,
-            seq_len_tensor, "cpu")
+            total_tokens,
+            ctx.batch_size,
+            prompt_lora_indices_tensor,
+            seq_len_tensor,
+            "cpu",
+        )
 
-        return BenchmarkTensors(input_tensor, lora_weights, output_tensor,
-                                seq_len_tensor, seq_start_loc_tensor,
-                                prompt_lora_indices_tensor,
-                                token_lora_indices_tensor)
+        return BenchmarkTensors(
+            input_tensor,
+            lora_weights,
+            output_tensor,
+            seq_len_tensor,
+            seq_start_loc_tensor,
+            prompt_lora_indices_tensor,
+            token_lora_indices_tensor,
+        )
 
     def sanity_check(self) -> None:
         """
@@ -497,8 +566,9 @@ class BenchmarkTensors:
         prompt_lora_mapping = torch.unique_consecutive(
             self.prompt_lora_mapping)
 
-        assert torch.sum(seq_lens) == torch.sum(self.seq_lens), \
-         f"dont match - new {torch.sum(seq_lens)} vs {torch.sum(self.seq_lens)}"
+        assert torch.sum(seq_lens) == torch.sum(
+            self.seq_lens
+        ), f"dont match - new {torch.sum(seq_lens)} vs {torch.sum(self.seq_lens)}"
 
         self.prompt_lora_mapping = prompt_lora_mapping.to(
             dtype=self.prompt_lora_mapping.dtype)
@@ -513,8 +583,11 @@ class BenchmarkTensors:
         num_seqs, num_tokens, max_seq_len, num_slices = self.metadata()
 
         # Sanity check matrix shapes.
-        i_shape, lw_shape, o_shape = self.input.shape, self.lora_weights_lst[
-            0].shape, self.output.shape
+        i_shape, lw_shape, o_shape = (
+            self.input.shape,
+            self.lora_weights_lst[0].shape,
+            self.output.shape,
+        )
         # Expected input shape [num_tokens, hidden_size]
         assert len(i_shape) == 2
         assert i_shape[0] == num_tokens
@@ -528,20 +601,19 @@ class BenchmarkTensors:
         assert o_shape == (num_slices, num_tokens, lora_rank)
 
         return {
-            'inputs': self.input,
-            'lora_a_weights': self.lora_weights_lst,
-            'output_tensor': self.output,
-            'b_seq_start_loc': self.seq_start_loc,
-            'seq_len_tensor': self.seq_lens,
-            'lora_indices_tensor': self.prompt_lora_mapping,
-            'batches': num_seqs,
-            'max_seq_length': max_seq_len,
-            'token_nums': num_tokens,
-            'scaling': 1.0,
+            "inputs": self.input,
+            "lora_a_weights": self.lora_weights_lst,
+            "output_tensor": self.output,
+            "b_seq_start_loc": self.seq_start_loc,
+            "seq_len_tensor": self.seq_lens,
+            "lora_indices_tensor": self.prompt_lora_mapping,
+            "batches": num_seqs,
+            "max_seq_length": max_seq_len,
+            "token_nums": num_tokens,
+            "scaling": 1.0,
         }
 
     def as_sgmv_expand_kwargs(self, add_inputs: bool) -> dict[str, Any]:
-
         self.convert_to_sgmv_benchmark_tensors()
         self.sanity_check()
         self.to_device(self.input.device)
@@ -549,8 +621,11 @@ class BenchmarkTensors:
         num_seqs, num_tokens, max_seq_len, num_slices = self.metadata()
 
         # Sanity check matrix shapes.
-        i_shape, lw_shape, o_shape = self.input.shape, self.lora_weights_lst[
-            0].shape, self.output.shape
+        i_shape, lw_shape, o_shape = (
+            self.input.shape,
+            self.lora_weights_lst[0].shape,
+            self.output.shape,
+        )
         # Expected input shape : [num_slices, num_tokens, lora_rank]
         assert len(i_shape) == 3
         assert i_shape[0] == num_slices
@@ -565,17 +640,17 @@ class BenchmarkTensors:
         assert o_shape == (num_tokens, hidden_size * num_slices)
 
         return {
-            'inputs': self.input,
-            'lora_b_weights': self.lora_weights_lst,
-            'output_tensor': self.output,
-            'b_seq_start_loc': self.seq_start_loc,
-            'seq_len_tensor': self.seq_lens,
-            'lora_indices_tensor': self.prompt_lora_mapping,
-            'batches': num_seqs,
-            'max_seq_length': max_seq_len,
-            'token_nums': num_tokens,
-            'offset_start': 0,
-            'add_inputs': add_inputs,
+            "inputs": self.input,
+            "lora_b_weights": self.lora_weights_lst,
+            "output_tensor": self.output,
+            "b_seq_start_loc": self.seq_start_loc,
+            "seq_len_tensor": self.seq_lens,
+            "lora_indices_tensor": self.prompt_lora_mapping,
+            "batches": num_seqs,
+            "max_seq_length": max_seq_len,
+            "token_nums": num_tokens,
+            "offset_start": 0,
+            "add_inputs": add_inputs,
         }
 
     def as_bgmv_shrink_kwargs(self) -> dict[str, Any]:
@@ -584,8 +659,11 @@ class BenchmarkTensors:
 
         _, num_tokens, _, _ = self.metadata()
         # Sanity check shapes
-        i_shape, lw_shape, o_shape = self.input.shape, self.lora_weights_lst[
-            0].shape, self.output.shape
+        i_shape, lw_shape, o_shape = (
+            self.input.shape,
+            self.lora_weights_lst[0].shape,
+            self.output.shape,
+        )
         # Expected input shape [num_tokens, hidden_size]
         assert len(i_shape) == 2
         assert i_shape[0] == num_tokens
@@ -599,11 +677,11 @@ class BenchmarkTensors:
         assert o_shape == (num_tokens, lora_rank)
 
         return {
-            'inputs': self.input,
-            'lora_a_weights': self.lora_weights_lst[0],
-            'output_tensor': self.output,
-            'lora_indices_tensor': self.token_lora_mapping,
-            'scaling': 1.0
+            "inputs": self.input,
+            "lora_a_weights": self.lora_weights_lst[0],
+            "output_tensor": self.output,
+            "lora_indices_tensor": self.token_lora_mapping,
+            "scaling": 1.0,
         }
 
     def as_bgmv_expand_kwargs(self, add_inputs: bool):
@@ -612,8 +690,11 @@ class BenchmarkTensors:
 
         _, num_tokens, _, _ = self.metadata()
         # Sanity check shapes
-        i_shape, lw_shape, o_shape = self.input.shape, self.lora_weights_lst[
-            0].shape, self.output.shape
+        i_shape, lw_shape, o_shape = (
+            self.input.shape,
+            self.lora_weights_lst[0].shape,
+            self.output.shape,
+        )
         # Expected input shape [num_tokens, lora_rank]
         assert len(i_shape) == 2
         assert i_shape[0] == num_tokens
@@ -627,19 +708,21 @@ class BenchmarkTensors:
         assert o_shape == (num_tokens, hidden_size)
 
         return {
-            'inputs': self.input,
-            'lora_b_weights': self.lora_weights_lst[0],
-            'output_tensor': self.output,
-            'lora_indices_tensor': self.token_lora_mapping,
-            'add_inputs': add_inputs
+            "inputs": self.input,
+            "lora_b_weights": self.lora_weights_lst[0],
+            "output_tensor": self.output,
+            "lora_indices_tensor": self.token_lora_mapping,
+            "add_inputs": add_inputs,
         }
 
     def as_bgmv_expand_slice_kwargs(self, add_inputs: bool) -> dict[str, Any]:
-
         _, num_tokens, _, num_slices = self.metadata()
         # Sanity check shapes
-        i_shape, lw_shape, o_shape = self.input.shape, self.lora_weights_lst[
-            0].shape, self.output.shape
+        i_shape, lw_shape, o_shape = (
+            self.input.shape,
+            self.lora_weights_lst[0].shape,
+            self.output.shape,
+        )
         # Expected input shape [num_slices, num_tokens, lora_rank]
         assert len(i_shape) == 3
         assert i_shape[0] == num_slices
@@ -658,15 +741,15 @@ class BenchmarkTensors:
         kwargs_list = []
         for i in range(num_slices):
             kwargs_list.append({
-                'inputs': self.input[i],
-                'lora_b_weights': self.lora_weights_lst[i],
-                'output_tensor': self.output,
-                'lora_indices_tensor': self.token_lora_mapping,
-                'slice_offset': i * hidden_size,
-                'slice_size': hidden_size,
-                'add_inputs': add_inputs,
+                "inputs": self.input[i],
+                "lora_b_weights": self.lora_weights_lst[i],
+                "output_tensor": self.output,
+                "lora_indices_tensor": self.token_lora_mapping,
+                "slice_offset": i * hidden_size,
+                "slice_size": hidden_size,
+                "add_inputs": add_inputs,
             })
-        return {'kwargs_list': kwargs_list}
+        return {"kwargs_list": kwargs_list}
 
     def bench_fn_kwargs(self,
                         op_type: OpType,
@@ -709,7 +792,8 @@ class BenchmarkTensors:
             seq_lens_cpu=seq_lens_cpu,
             prompt_lora_mapping_cpu=prompt_lora_mapping_cpu,
             scaling=1.0,
-            add_inputs=expand_fn_add_inputs)
+            add_inputs=expand_fn_add_inputs,
+        )
 
         rtol, atol = {
             torch.float16: (6e-2, 6e-2),
@@ -720,13 +804,14 @@ class BenchmarkTensors:
         return torch.allclose(ref_output, self.output, rtol=rtol, atol=atol)
 
 
-def bench_optype(ctx: BenchmarkContext,
-                 arg_pool_size: int,
-                 op_type: OpType,
-                 cuda_graph_nops: Optional[int] = None,
-                 expand_fn_add_inputs: Optional[bool] = None,
-                 test_correctness: bool = False) -> TMeasurement:
-
+def bench_optype(
+    ctx: BenchmarkContext,
+    arg_pool_size: int,
+    op_type: OpType,
+    cuda_graph_nops: Optional[int] = None,
+    expand_fn_add_inputs: Optional[bool] = None,
+    test_correctness: bool = False,
+) -> TMeasurement:
     assert arg_pool_size >= 1
     if op_type.is_shrink_fn():
         assert expand_fn_add_inputs is None
@@ -734,8 +819,9 @@ def bench_optype(ctx: BenchmarkContext,
         assert expand_fn_add_inputs is not None
 
     # BenchmarkContext -> BenchmarkTensors
-    bench_tensors : list[BenchmarkTensors] = \
-        [BenchmarkTensors.make(ctx, op_type) for _ in range(arg_pool_size)]
+    bench_tensors: list[BenchmarkTensors] = [
+        BenchmarkTensors.make(ctx, op_type) for _ in range(arg_pool_size)
+    ]
     for bt in bench_tensors:
         bt.sanity_check()
 
@@ -768,38 +854,46 @@ def bench_optype(ctx: BenchmarkContext,
 
     describe_args = (f"add_inputs={expand_fn_add_inputs}"
                      if expand_fn_add_inputs is not None else "")
-    description = (
-        f"{op_type.name}({describe_args}) ({bench_tensors[0].io_types()})")
+    description = f"{op_type.name}({describe_args}) ({bench_tensors[0].io_types()})"
 
     cuda_graph_params = None
     if cuda_graph_nops:
         cuda_graph_params = CudaGraphBenchParams(cuda_graph_nops)
     timer = None
-    with Bench(cuda_graph_params,
-               ctx.bench_label(), ctx.bench_sublabel(op_type), description,
-               op_type.bench_fn(), **kwargs) as bench:
+    with Bench(
+            cuda_graph_params,
+            ctx.bench_label(),
+            ctx.bench_sublabel(op_type),
+            description,
+            op_type.bench_fn(),
+            **kwargs,
+    ) as bench:
         timer = bench.run()
     return timer
 
 
-def bench_torch_mm(ctx: BenchmarkContext,
-                   arg_pool_size: int,
-                   op_type: OpType,
-                   cuda_graph_nops: Optional[int] = None) -> TMeasurement:
+def bench_torch_mm(
+    ctx: BenchmarkContext,
+    arg_pool_size: int,
+    op_type: OpType,
+    cuda_graph_nops: Optional[int] = None,
+) -> TMeasurement:
     """
     Benchmark basic torch.mm as a roofline.
 
     When all the input tokens have the same LoRA ID, the LoRA kernels are just
-    a matmul. This torch.mm benchmark serves as a roofline for that case. 
+    a matmul. This torch.mm benchmark serves as a roofline for that case.
 
     input op_type is used in determining the m, k, n dimensions for the matmul.
     """
 
-    batch_size, hidden_size, lora_rank, seq_length, dtype = (ctx.batch_size,
-                                                             ctx.hidden_size,
-                                                             ctx.lora_rank,
-                                                             ctx.seq_length,
-                                                             ctx.dtype)
+    batch_size, hidden_size, lora_rank, seq_length, dtype = (
+        ctx.batch_size,
+        ctx.hidden_size,
+        ctx.lora_rank,
+        ctx.seq_length,
+        ctx.dtype,
+    )
 
     m, k, n = op_type.mkn(batch_size, seq_length, hidden_size, lora_rank)
     # For a fairer comparison.
@@ -813,7 +907,7 @@ def bench_torch_mm(ctx: BenchmarkContext,
         Cs.append(torch.rand((m, n), dtype=dtype).to("cuda"))
 
     # Make torch.mm kwargs
-    mm_kwargs = {'input': ArgPool(As), 'mat2': ArgPool(Bs), 'out': ArgPool(Cs)}
+    mm_kwargs = {"input": ArgPool(As), "mat2": ArgPool(Bs), "out": ArgPool(Cs)}
 
     description = (
         f"single-lora roofline using torch.mm ({dtype_to_str(dtype)}"
@@ -822,9 +916,14 @@ def bench_torch_mm(ctx: BenchmarkContext,
     cuda_graph_params = None
     if cuda_graph_nops:
         cuda_graph_params = CudaGraphBenchParams(cuda_graph_nops)
-    with Bench(cuda_graph_params, ctx.bench_label(),
-               ctx.bench_sublabel(op_type), description, torch.mm,
-               **mm_kwargs) as bench:
+    with Bench(
+            cuda_graph_params,
+            ctx.bench_label(),
+            ctx.bench_sublabel(op_type),
+            description,
+            torch.mm,
+            **mm_kwargs,
+    ) as bench:
         return bench.run()
 
 
@@ -862,7 +961,6 @@ def print_timers(timers: list[TMeasurement],
 
 
 def run(args: argparse.Namespace, bench_ctxs: list[BenchmarkContext]):
-
     if args.cuda_graph_nops is not None:
         assert args.cuda_graph_nops > 0
         print(f"Benchmarking {args.cuda_graph_nops} invocations inside a CUDA "
@@ -888,18 +986,26 @@ def run(args: argparse.Namespace, bench_ctxs: list[BenchmarkContext]):
                         num_slices)
                     # Benchmark torch.mm as a roofline
                     seq_len_timers.append(
-                        bench_torch_mm(_ctx, args.arg_pool_size, bench_op,
-                                       args.cuda_graph_nops))
+                        bench_torch_mm(
+                            _ctx,
+                            args.arg_pool_size,
+                            bench_op,
+                            args.cuda_graph_nops,
+                        ))
 
                     # Benchmark bench_op
-                    expand_fn_add_inputs = [
-                        None
-                    ] if bench_op.is_shrink_fn() else args.expand_fn_add_inputs
+                    expand_fn_add_inputs = ([None] if bench_op.is_shrink_fn()
+                                            else args.expand_fn_add_inputs)
                     for add_input_arg in expand_fn_add_inputs:
                         seq_len_timers.append(
-                            bench_optype(_ctx, args.arg_pool_size, bench_op,
-                                         args.cuda_graph_nops, add_input_arg,
-                                         args.test_correctness))
+                            bench_optype(
+                                _ctx,
+                                args.arg_pool_size,
+                                bench_op,
+                                args.cuda_graph_nops,
+                                add_input_arg,
+                                args.test_correctness,
+                            ))
 
             print_timers(seq_len_timers)
             timers.extend(seq_len_timers)
@@ -923,25 +1029,35 @@ def run(args: argparse.Namespace, bench_ctxs: list[BenchmarkContext]):
 
 def as_benchmark_contexts(hidden_sizes: list[int], lora_ranks: list[int],
                           args: argparse.Namespace) -> list[BenchmarkContext]:
-
     ctxs: list[BenchmarkContext] = []
-    for batch_size, hidden_size, lora_rank, num_loras, sort_by_lora_id in product(  # noqa
-            args.batch_sizes, list(hidden_sizes), lora_ranks, args.num_loras,
-            args.sort_by_lora_id):
+    for (
+            batch_size,
+            hidden_size,
+            lora_rank,
+            num_loras,
+            sort_by_lora_id,
+    ) in product(  # noqa
+            args.batch_sizes,
+            list(hidden_sizes),
+            lora_ranks,
+            args.num_loras,
+            args.sort_by_lora_id,
+    ):
         ctxs.append(
             BenchmarkContext(
                 batch_size=batch_size,
                 hidden_size=hidden_size,
                 lora_rank=lora_rank,
                 num_loras=num_loras,
-                num_active_loras=args.num_active_loras
-                if args.num_active_loras else num_loras,
+                num_active_loras=(args.num_active_loras
+                                  if args.num_active_loras else num_loras),
                 # To be filled based on the OpType to benchmark
                 seq_length=None,
                 sort_by_lora_id=sort_by_lora_id,
                 dtype=args.dtype,
                 # To be filled based on the OpType to benchmark
-                num_slices=None))
+                num_slices=None,
+            ))
 
     return ctxs
 
@@ -964,15 +1080,20 @@ def run_range_bench(args: argparse.Namespace):
     print(args)
 
     hidden_sizes = list(
-        range(args.hidden_sizes_start, args.hidden_sizes_end + 1,
-              args.hidden_sizes_increment))
+        range(
+            args.hidden_sizes_start,
+            args.hidden_sizes_end + 1,
+            args.hidden_sizes_increment,
+        ))
     lora_ranks = list(
-        range(args.lora_ranks_start, args.lora_ranks_end + 1,
-              args.lora_ranks_increment))
+        range(
+            args.lora_ranks_start,
+            args.lora_ranks_end + 1,
+            args.lora_ranks_increment,
+        ))
 
-    print("Range bench :\n"
-          f" Hidden Sizes {hidden_sizes}"
-          f" LoRA Ranks {lora_ranks}")
+    print(
+        f"Range bench :\n Hidden Sizes {hidden_sizes} LoRA Ranks {lora_ranks}")
 
     # Get all benchmarking contexts
     bench_contexts: list[BenchmarkContext] = as_benchmark_contexts(
@@ -1008,7 +1129,7 @@ def run_model_bench(args: argparse.Namespace):
     run(args, bench_contexts)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
     def to_torch_dtype(dt):
         if dt == "torch.float16":
@@ -1018,14 +1139,15 @@ if __name__ == '__main__':
         raise ValueError("unsupported dtype")
 
     def get_bool(s: str) -> bool:
-        return s.lower() in ['true', '1']
+        return s.lower() in ["true", "1"]
 
     def add_common_command_args(p: argparse.ArgumentParser):
         p.add_argument(
             "--dtype",
             type=to_torch_dtype,
             required=True,
-            help="Available options are ['torch.float16', 'torch.bfloat16']")
+            help="Available options are ['torch.float16', 'torch.bfloat16']",
+        )
 
         p.add_argument(
             "--arg-pool-size",
@@ -1033,7 +1155,8 @@ if __name__ == '__main__':
             default=32,
             help="Run profiles with a pool of input/output/meta tensors instead"
             "of simply reusing the same tensors for all runs. A bigger arg-pool"
-            "mitigates hardware caching effects during benchmarking.")
+            "mitigates hardware caching effects during benchmarking.",
+        )
 
         p.add_argument(
             "--cuda-graph-nops",
@@ -1042,24 +1165,29 @@ if __name__ == '__main__':
                   "with the given number of operations in a graph."
                   "Note that the measurement returned is the time "
                   "taken for N consecutive executions of the benchmarking "
-                  "functions, where N is the value of this argument."))
+                  "functions, where N is the value of this argument."),
+        )
         p.add_argument("--num-loras",
                        nargs="+",
                        type=int,
                        default=DEFAULT_NUM_LORAS)
-        p.add_argument("--num-active-loras",
-                       type=int,
-                       default=None,
-                       help="Active LoRAs. When None, all LoRAs are active")
-        p.add_argument("--sort-by-lora-id",
-                       nargs="+",
-                       type=get_bool,
-                       default=DEFAULT_SORT_BY_LORA_IDS)
+        p.add_argument(
+            "--num-active-loras",
+            type=int,
+            default=None,
+            help="Active LoRAs. When None, all LoRAs are active",
+        )
+        p.add_argument(
+            "--sort-by-lora-id",
+            nargs="+",
+            type=get_bool,
+            default=DEFAULT_SORT_BY_LORA_IDS,
+        )
         p.add_argument("--op-types",
                        nargs="+",
                        type=OpType.from_str,
                        default=list(OpType))
-        p.add_argument('--seq-lengths',
+        p.add_argument("--seq-lengths",
                        nargs="+",
                        type=int,
                        default=DEFAULT_SEQ_LENGTHS)
@@ -1067,22 +1195,26 @@ if __name__ == '__main__':
                        nargs="+",
                        type=int,
                        default=DEFAULT_BATCH_SIZES)
-        p.add_argument("--expand-fn-add-inputs",
-                       nargs="+",
-                       type=get_bool,
-                       default=DEFAULT_EXPAND_FN_ADD_INPUTS)
         p.add_argument(
-            '-o',
-            '--output-directory',
+            "--expand-fn-add-inputs",
+            nargs="+",
+            type=get_bool,
+            default=DEFAULT_EXPAND_FN_ADD_INPUTS,
+        )
+        p.add_argument(
+            "-o",
+            "--output-directory",
             type=str,
             help=("Output directory to store a the list of benchmarking"
-                  "TMeasurement objects as a pickle file"))
+                  "TMeasurement objects as a pickle file"),
+        )
 
         p.add_argument(
             "--test-correctness",
-            action='store_true',
+            action="store_true",
             help=("When enabled, the benchmarking functions are tested"
-                  "for correctness before the actual benchmarking"))
+                  "for correctness before the actual benchmarking"),
+        )
 
     parser = FlexibleArgumentParser(
         description=f"""
@@ -1098,7 +1230,8 @@ Benchmark LoRA kernels:
     range_bench example:
         python3 benchmarks/kernels/benchmark_lora.py range_bench  --arg-pool-size 32 --batch-sizes 1 16 32 --dtype torch.float16   --num-loras 1 4 --op-types bgmv_shrink bgmv_expand sgmv_shrink sgmv_expand bgmv_expand_slice --seq-lengths 1 16 --sort-by-lora-id 1 --cuda-graph-nops 32 --hidden-sizes-start 1024 --hidden-sizes-end 4096 --hidden-sizes-increment 1024 --lora-ranks-start 8 --lora-ranks-end 24 --lora-ranks-increment 8 
             """,  # noqa: E501
-        formatter_class=argparse.RawTextHelpFormatter)
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
 
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 
@@ -1129,11 +1262,13 @@ Benchmark LoRA kernels:
     range_parser.set_defaults(func=run_range_bench)
 
     model_parser = subparsers.add_parser("model_bench")
-    model_parser.add_argument("--models",
-                              nargs="+",
-                              type=str,
-                              default=DEFAULT_MODELS,
-                              choices=WEIGHT_SHAPES.keys())
+    model_parser.add_argument(
+        "--models",
+        nargs="+",
+        type=str,
+        default=DEFAULT_MODELS,
+        choices=WEIGHT_SHAPES.keys(),
+    )
     model_parser.add_argument("--tp-sizes",
                               nargs="+",
                               type=int,

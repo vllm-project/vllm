@@ -58,13 +58,13 @@ def server_with_lora_modules_json(zephyr_lora_files):
     lora_module_1 = {
         "name": "zephyr-lora",
         "path": zephyr_lora_files,
-        "base_model_name": MODEL_NAME
+        "base_model_name": MODEL_NAME,
     }
 
     lora_module_2 = {
         "name": "zephyr-lora2",
         "path": zephyr_lora_files,
-        "base_model_name": MODEL_NAME
+        "base_model_name": MODEL_NAME,
     }
 
     args = [
@@ -121,13 +121,14 @@ async def test_static_lora_lineage(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 async def test_dynamic_lora_lineage(client: openai.AsyncOpenAI,
                                     zephyr_lora_files):
-
-    response = await client.post("load_lora_adapter",
-                                 cast_to=str,
-                                 body={
-                                     "lora_name": "zephyr-lora-3",
-                                     "lora_path": zephyr_lora_files
-                                 })
+    response = await client.post(
+        "load_lora_adapter",
+        cast_to=str,
+        body={
+            "lora_name": "zephyr-lora-3",
+            "lora_path": zephyr_lora_files
+        },
+    )
     # Ensure adapter loads before querying /models
     assert "success" in response
 
@@ -142,12 +143,14 @@ async def test_dynamic_lora_lineage(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 async def test_dynamic_lora_not_found(client: openai.AsyncOpenAI):
     with pytest.raises(openai.NotFoundError):
-        await client.post("load_lora_adapter",
-                          cast_to=str,
-                          body={
-                              "lora_name": "notfound",
-                              "lora_path": "/not/an/adapter"
-                          })
+        await client.post(
+            "load_lora_adapter",
+            cast_to=str,
+            body={
+                "lora_name": "notfound",
+                "lora_path": "/not/an/adapter"
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -158,21 +161,27 @@ async def test_dynamic_lora_invalid_files(client: openai.AsyncOpenAI,
     (invalid_files / "adapter_config.json").write_text("this is not json")
 
     with pytest.raises(openai.BadRequestError):
-        await client.post("load_lora_adapter",
-                          cast_to=str,
-                          body={
-                              "lora_name": "invalid-json",
-                              "lora_path": str(invalid_files)
-                          })
+        await client.post(
+            "load_lora_adapter",
+            cast_to=str,
+            body={
+                "lora_name": "invalid-json",
+                "lora_path": str(invalid_files)
+            },
+        )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("test_name,config_change,expected_error",
                          BADREQUEST_CASES)
-async def test_dynamic_lora_badrequests(client: openai.AsyncOpenAI, tmp_path,
-                                        zephyr_lora_files, test_name: str,
-                                        config_change: dict,
-                                        expected_error: str):
+async def test_dynamic_lora_badrequests(
+    client: openai.AsyncOpenAI,
+    tmp_path,
+    zephyr_lora_files,
+    test_name: str,
+    config_change: dict,
+    expected_error: str,
+):
     # Create test directory
     test_dir = tmp_path / test_name
 
@@ -192,29 +201,33 @@ async def test_dynamic_lora_badrequests(client: openai.AsyncOpenAI, tmp_path,
 
     # Test loading the adapter
     with pytest.raises(openai.BadRequestError, match=expected_error):
-        await client.post("load_lora_adapter",
-                          cast_to=str,
-                          body={
-                              "lora_name": test_name,
-                              "lora_path": str(test_dir)
-                          })
+        await client.post(
+            "load_lora_adapter",
+            cast_to=str,
+            body={
+                "lora_name": test_name,
+                "lora_path": str(test_dir)
+            },
+        )
 
 
 @pytest.mark.asyncio
 async def test_multiple_lora_adapters(client: openai.AsyncOpenAI, tmp_path,
                                       zephyr_lora_files):
-    """Validate that many loras can be dynamically registered and inferenced 
+    """Validate that many loras can be dynamically registered and inferenced
     with concurrently"""
 
     # This test file configures the server with --max-cpu-loras=2 and this test
     # will concurrently load 10 adapters, so it should flex the LRU cache
     async def load_and_run_adapter(adapter_name: str):
-        await client.post("load_lora_adapter",
-                          cast_to=str,
-                          body={
-                              "lora_name": adapter_name,
-                              "lora_path": str(zephyr_lora_files)
-                          })
+        await client.post(
+            "load_lora_adapter",
+            cast_to=str,
+            body={
+                "lora_name": adapter_name,
+                "lora_path": str(zephyr_lora_files),
+            },
+        )
         for _ in range(3):
             await client.completions.create(
                 model=adapter_name,
@@ -236,7 +249,6 @@ async def test_multiple_lora_adapters(client: openai.AsyncOpenAI, tmp_path,
 @pytest.mark.asyncio
 async def test_loading_invalid_adapters_does_not_break_others(
         client: openai.AsyncOpenAI, tmp_path, zephyr_lora_files):
-
     invalid_files = tmp_path / "invalid_files"
     invalid_files.mkdir()
     (invalid_files / "adapter_config.json").write_text("this is not json")
@@ -267,20 +279,24 @@ async def test_loading_invalid_adapters_does_not_break_others(
     # Run a bunch of bad adapter loads
     for _ in range(25):
         with suppress(openai.NotFoundError):
-            await client.post("load_lora_adapter",
-                              cast_to=str,
-                              body={
-                                  "lora_name": "notfound",
-                                  "lora_path": "/not/an/adapter"
-                              })
+            await client.post(
+                "load_lora_adapter",
+                cast_to=str,
+                body={
+                    "lora_name": "notfound",
+                    "lora_path": "/not/an/adapter"
+                },
+            )
     for _ in range(25):
         with suppress(openai.BadRequestError):
-            await client.post("load_lora_adapter",
-                              cast_to=str,
-                              body={
-                                  "lora_name": "invalid",
-                                  "lora_path": str(invalid_files)
-                              })
+            await client.post(
+                "load_lora_adapter",
+                cast_to=str,
+                body={
+                    "lora_name": "invalid",
+                    "lora_path": str(invalid_files)
+                },
+            )
 
     # Ensure all the running requests with lora adapters succeeded
     stop_good_requests_event.set()
@@ -289,12 +305,14 @@ async def test_loading_invalid_adapters_does_not_break_others(
         assert not isinstance(r, Exception), f"Got exception {r}"
 
     # Ensure we can load another adapter and run it
-    await client.post("load_lora_adapter",
-                      cast_to=str,
-                      body={
-                          "lora_name": "valid",
-                          "lora_path": zephyr_lora_files
-                      })
+    await client.post(
+        "load_lora_adapter",
+        cast_to=str,
+        body={
+            "lora_name": "valid",
+            "lora_path": zephyr_lora_files
+        },
+    )
     await client.completions.create(
         model="valid",
         prompt=["Hello there", "Foo bar bazz buzz"],

@@ -42,8 +42,9 @@ class MultiModalHasher:
             return obj.tobytes()
 
         logger.warning(
-            "No serialization method found for %s. "
-            "Falling back to pickle.", type(obj))
+            "No serialization method found for %s. Falling back to pickle.",
+            type(obj),
+        )
 
         return pickle.dumps(obj)
 

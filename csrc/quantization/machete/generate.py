@@ -288,12 +288,12 @@ def generate_sch_sig(schedule_config: ScheduleConfig) -> str:
     cluster_shape = (f"{schedule_config.cluster_shape_mnk[0]}" +
                      f"x{schedule_config.cluster_shape_mnk[1]}" +
                      f"x{schedule_config.cluster_shape_mnk[2]}")
-    kernel_schedule = VLLMKernelScheduleTag[schedule_config.kernel_schedule]\
-        .split("::")[-1]
+    kernel_schedule = VLLMKernelScheduleTag[
+        schedule_config.kernel_schedule].split("::")[-1]
     epilogue_schedule = EpilogueScheduleTag[
         schedule_config.epilogue_schedule].split("::")[-1]
-    tile_scheduler = TileSchedulerTag[schedule_config.tile_scheduler]\
-        .split("::")[-1]
+    tile_scheduler = TileSchedulerTag[schedule_config.tile_scheduler].split(
+        "::")[-1]
 
     return (f"{tile_shape}_{cluster_shape}_{kernel_schedule}" +
             f"_{epilogue_schedule}_{tile_scheduler}")
@@ -323,7 +323,7 @@ def generate_type_signature(kernel_types: TypeConfig):
 
 def generate_type_option_name(kernel_types: TypeConfig):
     return ", ".join([
-        f"{field.name.replace('b_', 'with_')+'_type'}=" +
+        f"{field.name.replace('b_', 'with_') + '_type'}=" +
         VLLMDataTypeNames[getattr(kernel_types, field.name)]
         for field in fields(TypeConfig)
     ])
@@ -376,7 +376,7 @@ template_globals = {
     "gen_type_sig": generate_type_signature,
     "unique_schedules": unique_schedules,
     "unsigned_type_with_bitwidth": unsigned_type_with_bitwidth,
-    "gen_type_option_name": generate_type_option_name
+    "gen_type_option_name": generate_type_option_name,
 }
 
 
@@ -401,9 +401,8 @@ def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
 
     prepack_types = []
     for impl_config in impl_configs:
-        convert_type = impl_config.types.a \
-             if impl_config.types.b_group_scale == DataType.void \
-             else impl_config.types.b_group_scale
+        convert_type = (impl_config.types.a if impl_config.types.b_group_scale
+                        == DataType.void else impl_config.types.b_group_scale)
         prepack_types.append(
             PrepackTypeConfig(
                 a=impl_config.types.a,
@@ -463,7 +462,7 @@ def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
 
     for part, file_impls in enumerate(files_impls):
         sources.append((
-            f"machete_mm_impl_part{part+1}",
+            f"machete_mm_impl_part{part + 1}",
             mm_impl_template.render(impl_configs=file_impls),
         ))
 
@@ -541,10 +540,11 @@ def generate():
         for a in (DataType.f16, DataType.bf16))
 
     impl_configs += [
-        ImplConfig(x[0], x[1], x[2])
-        for x in zip(GPTQ_kernel_type_configs,
-                     itertools.repeat(get_unique_schedules(default_heuristic)),
-                     itertools.repeat(default_heuristic))
+        ImplConfig(x[0], x[1], x[2]) for x in zip(
+            GPTQ_kernel_type_configs,
+            itertools.repeat(get_unique_schedules(default_heuristic)),
+            itertools.repeat(default_heuristic),
+        )
     ]
 
     AWQ_kernel_type_configs = list(
@@ -561,10 +561,11 @@ def generate():
         for a in (DataType.f16, DataType.bf16))
 
     impl_configs += [
-        ImplConfig(x[0], x[1], x[2])
-        for x in zip(AWQ_kernel_type_configs,
-                     itertools.repeat(get_unique_schedules(default_heuristic)),
-                     itertools.repeat(default_heuristic))
+        ImplConfig(x[0], x[1], x[2]) for x in zip(
+            AWQ_kernel_type_configs,
+            itertools.repeat(get_unique_schedules(default_heuristic)),
+            itertools.repeat(default_heuristic),
+        )
     ]
 
     # Stored as "condition": ((tile_shape_mn), (cluster_shape_mnk))
@@ -592,7 +593,7 @@ def generate():
         "M > 32 && K <= 6144 && N <= 6144": ((128, 16), (1, 1, 1)),
         # Broken for QQQ types
         # TODO (LucasWilkinson): Investigate further
-        #"M > 32 && K >= 16384 && N >= 12288": ((256, 64), (2, 1, 1)),
+        # "M > 32 && K >= 16384 && N >= 12288": ((256, 64), (2, 1, 1)),
         "M > 32": ((128, 64), (2, 1, 1)),
         #### M = 17-32
         "M > 16 && K <= 12288 && N <= 8192": ((128, 32), (2, 1, 1)),
@@ -634,10 +635,11 @@ def generate():
     ]
 
     impl_configs += [
-        ImplConfig(x[0], x[1], x[2])
-        for x in zip(QQQ_kernel_types,
-                     itertools.repeat(get_unique_schedules(qqq_heuristic)),
-                     itertools.repeat(qqq_heuristic))
+        ImplConfig(x[0], x[1], x[2]) for x in zip(
+            QQQ_kernel_types,
+            itertools.repeat(get_unique_schedules(qqq_heuristic)),
+            itertools.repeat(qqq_heuristic),
+        )
     ]
 
     output_dir = os.path.join(SCRIPT_DIR, "generated")

@@ -58,9 +58,11 @@ TokensTextLogprobs = tuple[list[int], str, Optional[Union[list[dict[int,
 # * Optional list of top sample logprobs for each sampled token
 #
 # Assumes prompt logprobs were not requested.
-TextTextLogprobs = tuple[list[str], str, Optional[Union[list[dict[str, float]],
-                                                        list[dict[str,
-                                                                  Logprob]]]]]
+TextTextLogprobs = tuple[
+    list[str],
+    str,
+    Optional[Union[list[dict[str, float]], list[dict[str, Logprob]]]],
+]
 
 # Representation of generated sequence as a tuple of
 # * Token ID list
@@ -70,18 +72,25 @@ TextTextLogprobs = tuple[list[str], str, Optional[Union[list[dict[str, float]],
 #
 # Allows prompt logprobs to be requested.
 TokensTextLogprobsPromptLogprobs = tuple[
-    list[int], str, Optional[Union[list[dict[int, float]], SampleLogprobs]],
-    Optional[Union[list[Optional[dict[int, float]]], PromptLogprobs]]]
+    list[int],
+    str,
+    Optional[Union[list[dict[int, float]], SampleLogprobs]],
+    Optional[Union[list[Optional[dict[int, float]]], PromptLogprobs]],
+]
 
 
 def check_logprobs_close(
     *,
-    outputs_0_lst: Sequence[Union[TokensTextLogprobs,
-                                  TokensTextLogprobsPromptLogprobs,
-                                  TextTextLogprobs]],
-    outputs_1_lst: Sequence[Union[TokensTextLogprobs,
-                                  TokensTextLogprobsPromptLogprobs,
-                                  TextTextLogprobs]],
+    outputs_0_lst: Sequence[Union[
+        TokensTextLogprobs,
+        TokensTextLogprobsPromptLogprobs,
+        TextTextLogprobs,
+    ]],
+    outputs_1_lst: Sequence[Union[
+        TokensTextLogprobs,
+        TokensTextLogprobsPromptLogprobs,
+        TextTextLogprobs,
+    ]],
     name_0: str,
     name_1: str,
     num_outputs_0_skip_tokens: int = 0,
@@ -148,8 +157,7 @@ def check_logprobs_close(
             ) = outputs_1
 
             # Test prompt logprobs closeness
-            if (prompt_logprobs_0 is not None
-                    and prompt_logprobs_1 is not None):
+            if prompt_logprobs_0 is not None and prompt_logprobs_1 is not None:
                 # Both sequences' prompt logprobs lists are not `None``
                 # (although individual list elements may be `None`);
                 # for each token's logprobs:
@@ -169,16 +177,15 @@ def check_logprobs_close(
                         # the seq 1 token's logprobs must not be `None`
                         assert logprobs_elem_1 is not None, fail_msg
                         # Logprobs check: top-k token choices must be the same
-                        assert (set(logprobs_elem_0.keys()) == set(
-                            logprobs_elem_1.keys())), fail_msg
+                        assert set(logprobs_elem_0.keys()) == set(
+                            logprobs_elem_1.keys()), fail_msg
             else:
                 # Both sequence logprobs lists must be `None`
                 fail_msg = (f"Prompt logprobs test:"
                             f"\n{name_0}:\tlogprobs\t{prompt_logprobs_0}"
                             f"\n{name_1}:\tlogprobs\t{prompt_logprobs_1}")
 
-                assert (prompt_logprobs_0 is None
-                        and prompt_logprobs_1 is None), fail_msg
+                assert prompt_logprobs_0 is None and prompt_logprobs_1 is None, fail_msg
         else:
             raise ValueError(f"Outputs tuple must have 3 or 4 elements but "
                              f"{len(outputs_0)} elements were provided: "
@@ -201,7 +208,6 @@ def check_logprobs_close(
         # Loop through generated tokens.
         for idx, (output_id_0,
                   output_id_1) in enumerate(zip(output_ids_0, output_ids_1)):
-
             is_tok_mismatch = output_id_0 != output_id_1
 
             # If generated tokens don't match

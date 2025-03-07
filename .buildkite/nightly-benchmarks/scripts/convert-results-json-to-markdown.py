@@ -66,17 +66,15 @@ def read_markdown(file):
 
 def results_to_json(latency, throughput, serving):
     return json.dumps({
-        'latency': latency.to_dict(),
-        'throughput': throughput.to_dict(),
-        'serving': serving.to_dict()
+        "latency": latency.to_dict(),
+        "throughput": throughput.to_dict(),
+        "serving": serving.to_dict(),
     })
 
 
 if __name__ == "__main__":
-
     # collect results
     for test_file in results_folder.glob("*.json"):
-
         with open(test_file) as f:
             raw_result = json.loads(f.read())
 
@@ -188,34 +186,33 @@ if __name__ == "__main__":
 
     # get markdown tables
     latency_md_table = tabulate(latency_results,
-                                headers='keys',
-                                tablefmt='pipe',
+                                headers="keys",
+                                tablefmt="pipe",
                                 showindex=False)
     serving_md_table = tabulate(serving_results,
-                                headers='keys',
-                                tablefmt='pipe',
+                                headers="keys",
+                                tablefmt="pipe",
                                 showindex=False)
     throughput_md_table = tabulate(throughput_results,
-                                   headers='keys',
-                                   tablefmt='pipe',
+                                   headers="keys",
+                                   tablefmt="pipe",
                                    showindex=False)
 
     # document the result
     with open(results_folder / "benchmark_results.md", "w") as f:
-
         results = read_markdown("../.buildkite/nightly-benchmarks/" +
                                 "performance-benchmarks-descriptions.md")
         results = results.format(
             latency_tests_markdown_table=latency_md_table,
             throughput_tests_markdown_table=throughput_md_table,
             serving_tests_markdown_table=serving_md_table,
-            benchmarking_results_in_json_string=processed_results_json)
+            benchmarking_results_in_json_string=processed_results_json,
+        )
         f.write(results)
 
     # document benchmarking results in json
     with open(results_folder / "benchmark_results.json", "w") as f:
-
-        results = latency_results.to_dict(
-            orient='records') + throughput_results.to_dict(
-                orient='records') + serving_results.to_dict(orient='records')
+        results = (latency_results.to_dict(orient="records") +
+                   throughput_results.to_dict(orient="records") +
+                   serving_results.to_dict(orient="records"))
         f.write(json.dumps(results))

@@ -72,12 +72,14 @@ def _test_processing_correctness(
         "image":
         partial(random_image, rng, min_wh=128, max_wh=256),
         "video":
-        partial(random_video,
-                rng,
-                min_frames=2,
-                max_frames=8,
-                min_wh=128,
-                max_wh=256),
+        partial(
+            random_video,
+            rng,
+            min_frames=2,
+            max_frames=8,
+            min_wh=128,
+            max_wh=256,
+        ),
         "audio":
         partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
     }
@@ -123,8 +125,8 @@ def _test_processing_correctness(
             hf_processor_mm_kwargs={},
         )
 
-        assert baseline_result == cached_result, (
-            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+        assert (baseline_result == cached_result
+                ), f"Failed ({batch_idx=}, {prompt=}, {mm_data=})"
 
         baseline_tokenized_result = baseline_processor.apply(
             tokenizer.encode(prompt, **tokenizer_encode_kwargs),
@@ -132,8 +134,8 @@ def _test_processing_correctness(
             hf_processor_mm_kwargs={},
         )
 
-        assert baseline_result == baseline_tokenized_result, (
-            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+        assert (baseline_result == baseline_tokenized_result
+                ), f"Failed ({batch_idx=}, {prompt=}, {mm_data=})"
 
         cached_tokenized_result = cached_processor.apply(
             tokenizer.encode(prompt, **tokenizer_encode_kwargs),
@@ -141,8 +143,8 @@ def _test_processing_correctness(
             hf_processor_mm_kwargs={},
         )
 
-        assert cached_result == cached_tokenized_result, (
-            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+        assert (cached_result == cached_tokenized_result
+                ), f"Failed ({batch_idx=}, {prompt=}, {mm_data=})"
 
 
 # yapf: disable

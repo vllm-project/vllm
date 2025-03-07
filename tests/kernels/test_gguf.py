@@ -108,10 +108,15 @@ def test_mmvq(hidden_size: int, dtype: torch.dtype,
         GGMLQuantizationType.Q4_0,
         GGMLQuantizationType.Q5_0,
         GGMLQuantizationType.Q8_0,
-    ])
+    ],
+)
 @torch.inference_mode()
-def test_mmq(num_tokens: int, hidden_size: int, dtype: torch.dtype,
-             quant_type: GGMLQuantizationType):
+def test_mmq(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    quant_type: GGMLQuantizationType,
+):
     current_platform.seed_everything(0)
 
     tensors = get_gguf_sample_tensors(hidden_size, quant_type)

@@ -231,12 +231,12 @@ class InputRegistry:
     """
 
     def __init__(self) -> None:
-        self._dummy_factories_by_model_type = \
-            ClassRegistry[nn.Module, DummyDataFactory]()
-        self._dummy_encoder_factories_by_model_type = \
-            ClassRegistry[nn.Module, DummyDataFactory]()
-        self._input_processors_by_model_type = \
-            ClassRegistry[nn.Module, InputProcessor]()
+        self._dummy_factories_by_model_type = ClassRegistry[nn.Module,
+                                                            DummyDataFactory]()
+        self._dummy_encoder_factories_by_model_type = ClassRegistry[
+            nn.Module, DummyDataFactory]()
+        self._input_processors_by_model_type = ClassRegistry[nn.Module,
+                                                             InputProcessor]()
 
     def _default_dummy_data_factory(
         self,
@@ -271,7 +271,9 @@ class InputRegistry:
                 logger.warning(
                     "Model class %s already has dummy data "
                     "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    model_cls,
+                    self,
+                )
 
             self._dummy_factories_by_model_type[model_cls] = factory
 
@@ -280,8 +282,8 @@ class InputRegistry:
         return wrapper
 
     def _get_dummy_data_factory(self, model_cls: type[nn.Module]):
-        return self._dummy_factories_by_model_type \
-            .get(model_cls, self._default_dummy_data_factory)
+        return self._dummy_factories_by_model_type.get(
+            model_cls, self._default_dummy_data_factory)
 
     def register_dummy_encoder_data(self, factory: DummyDataFactory):
         """
@@ -296,7 +298,9 @@ class InputRegistry:
                 logger.warning(
                     "Model class %s already has dummy encoder data "
                     "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    model_cls,
+                    self,
+                )
 
             self._dummy_encoder_factories_by_model_type[model_cls] = factory
 
@@ -305,8 +309,8 @@ class InputRegistry:
         return wrapper
 
     def _get_dummy_encoder_data_factory(self, model_cls: type[nn.Module]):
-        return self._dummy_encoder_factories_by_model_type \
-            .get(model_cls, self._default_dummy_data_factory)
+        return self._dummy_encoder_factories_by_model_type.get(
+            model_cls, self._default_dummy_data_factory)
 
     def dummy_data_for_profiling(
         self,
@@ -347,9 +351,12 @@ class InputRegistry:
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
                 dummy_factory, overrides=model_config.mm_processor_kwargs)
 
-            dummy_data = dummy_factory(InputContext(model_config), seq_len,
-                                       _MultiModalCounts(mm_counts),
-                                       **mm_processor_kwargs)
+            dummy_data = dummy_factory(
+                InputContext(model_config),
+                seq_len,
+                _MultiModalCounts(mm_counts),
+                **mm_processor_kwargs,
+            )
 
         # Having more tokens is over-conservative but otherwise fine
         num_tokens = dummy_data.seq_data.prompt_token_ids
@@ -363,8 +370,8 @@ class InputRegistry:
                     f"Expected at least {seq_len} dummy tokens for profiling, "
                     f"but found {len(num_tokens)} tokens instead.")
 
-        if (dummy_data.multi_modal_data is not None and
-                not isinstance(dummy_data.multi_modal_data, MultiModalKwargs)):
+        if dummy_data.multi_modal_data is not None and not isinstance(
+                dummy_data.multi_modal_data, MultiModalKwargs):
             for k, v in dummy_data.multi_modal_data.items():
                 num_items = len(v) if isinstance(v, list) else 1
                 num_expected = mm_counts[k]
@@ -397,7 +404,9 @@ class InputRegistry:
                 logger.warning(
                     "Model class %s already has input processor "
                     "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    model_cls,
+                    self,
+                )
 
             self._input_processors_by_model_type[model_cls] = processor
 
@@ -406,8 +415,8 @@ class InputRegistry:
         return wrapper
 
     def _get_model_input_processor(self, model_cls: type[nn.Module]):
-        return self._input_processors_by_model_type \
-            .get(model_cls, self._default_input_processor)
+        return self._input_processors_by_model_type.get(
+            model_cls, self._default_input_processor)
 
     def _ensure_mm_kwargs(
         self,

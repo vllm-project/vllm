@@ -97,27 +97,34 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         layer.orig_dtype = params_dtype
 
         # WEIGHT
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=torch.float8_e4m3fn),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=torch.float8_e4m3fn,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE
-        weight_scale = ChannelQuantScaleParameter(data=torch.empty(
-            (sum(output_partition_sizes), 1), dtype=torch.float32),
-                                                  output_dim=0,
-                                                  weight_loader=weight_loader)
+        weight_scale = ChannelQuantScaleParameter(
+            data=torch.empty((sum(output_partition_sizes), 1),
+                             dtype=torch.float32),
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
         weight_scale[:] = torch.finfo(torch.float32).min
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE UPPER BOUND
-        input_scale_ub = torch.nn.Parameter(torch.tensor(
-            (self.quant_config.input_scale_ub), dtype=torch.float32),
-                                            requires_grad=False)
+        input_scale_ub = torch.nn.Parameter(
+            torch.tensor((self.quant_config.input_scale_ub),
+                         dtype=torch.float32),
+            requires_grad=False,
+        )
         layer.input_scale_ub = input_scale_ub
 
     def process_weights_after_loading(self, layer: Module) -> None:
@@ -129,11 +136,10 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         weight = layer.weight
 
         if current_platform.is_rocm():
-            weight, weight_scale, input_scale = \
-                normalize_e4m3fn_to_e4m3fnuz(
-                    weight=weight,
-                    weight_scale=layer.weight_scale,
-                    input_scale=None)
+            weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                weight=weight,
+                weight_scale=layer.weight_scale,
+                input_scale=None)
             if input_scale is not None:
                 layer.input_scale = Parameter(input_scale, requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
@@ -144,11 +150,12 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
             # Activations not quantized for marlin.
             del layer.input_scale_ub
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if self.quant_config.use_marlin:
             return apply_fp8_marlin_linear(
                 input=x,
@@ -157,7 +164,8 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                 workspace=layer.workspace,
                 size_n=layer.output_size_per_partition,
                 size_k=layer.input_size_per_partition,
-                bias=bias)
+                bias=bias,
+            )
 
         return apply_fp8_linear(
             input=x,
@@ -167,4 +175,5 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
             input_scale_ub=layer.input_scale_ub,
             bias=bias,
             cutlass_fp8_supported=self.cutlass_fp8_supported,
-            use_per_token_if_dynamic=True)
+            use_per_token_if_dynamic=True,
+        )

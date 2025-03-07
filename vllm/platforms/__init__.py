@@ -20,6 +20,7 @@ def vllm_version_matches_substr(substr: str) -> bool:
     Check to see if the vLLM version matches a substring.
     """
     from importlib.metadata import PackageNotFoundError, version
+
     try:
         vllm_version = version("vllm")
     except PackageNotFoundError as e:
@@ -39,6 +40,7 @@ def tpu_platform_plugin() -> Optional[str]:
         # we assume that libtpu is installed if and only if the machine
         # has TPUs.
         import libtpu  # noqa: F401
+
         is_tpu = True
         logger.debug("Confirmed TPU platform is available.")
     except Exception as e:
@@ -53,6 +55,7 @@ def cuda_platform_plugin() -> Optional[str]:
     logger.debug("Checking if CUDA platform is available.")
     try:
         from vllm.utils import import_pynvml
+
         pynvml = import_pynvml()
         pynvml.nvmlInit()
         try:
@@ -84,8 +87,8 @@ def cuda_platform_plugin() -> Optional[str]:
         import os
 
         def cuda_is_jetson() -> bool:
-            return os.path.isfile("/etc/nv_tegra_release") \
-                or os.path.exists("/sys/class/tegra-firmware")
+            return os.path.isfile("/etc/nv_tegra_release") or os.path.exists(
+                "/sys/class/tegra-firmware")
 
         if cuda_is_jetson():
             logger.debug("Confirmed CUDA platform is available on Jetson.")
@@ -101,14 +104,15 @@ def rocm_platform_plugin() -> Optional[str]:
     logger.debug("Checking if ROCm platform is available.")
     try:
         import amdsmi
+
         amdsmi.amdsmi_init()
         try:
             if len(amdsmi.amdsmi_get_processor_handles()) > 0:
                 is_rocm = True
                 logger.debug("Confirmed ROCm platform is available.")
             else:
-                logger.debug("ROCm platform is not available because"
-                             " no GPU is found.")
+                logger.debug(
+                    "ROCm platform is not available because no GPU is found.")
         finally:
             amdsmi.amdsmi_shut_down()
     except Exception as e:
@@ -123,7 +127,8 @@ def hpu_platform_plugin() -> Optional[str]:
     logger.debug("Checking if HPU platform is available.")
     try:
         from importlib import util
-        is_hpu = util.find_spec('habana_frameworks') is not None
+
+        is_hpu = util.find_spec("habana_frameworks") is not None
         if is_hpu:
             logger.debug("Confirmed HPU platform is available.")
         else:
@@ -144,7 +149,8 @@ def xpu_platform_plugin() -> Optional[str]:
         import intel_extension_for_pytorch  # noqa: F401
         import oneccl_bindings_for_pytorch  # noqa: F401
         import torch
-        if hasattr(torch, 'xpu') and torch.xpu.is_available():
+
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
             is_xpu = True
             logger.debug("Confirmed XPU platform is available.")
     except Exception as e:
@@ -164,6 +170,7 @@ def cpu_platform_plugin() -> Optional[str]:
                          " vLLM is built with CPU.")
         if not is_cpu:
             import sys
+
             is_cpu = sys.platform.startswith("darwin")
             if is_cpu:
                 logger.debug("Confirmed CPU platform is available"
@@ -181,6 +188,7 @@ def neuron_platform_plugin() -> Optional[str]:
     logger.debug("Checking if Neuron platform is available.")
     try:
         import transformers_neuronx  # noqa: F401
+
         is_neuron = True
         logger.debug("Confirmed Neuron platform is available because"
                      " transformers_neuronx is found.")
@@ -207,19 +215,19 @@ def openvino_platform_plugin() -> Optional[str]:
 
 
 builtin_platform_plugins = {
-    'tpu': tpu_platform_plugin,
-    'cuda': cuda_platform_plugin,
-    'rocm': rocm_platform_plugin,
-    'hpu': hpu_platform_plugin,
-    'xpu': xpu_platform_plugin,
-    'cpu': cpu_platform_plugin,
-    'neuron': neuron_platform_plugin,
-    'openvino': openvino_platform_plugin,
+    "tpu": tpu_platform_plugin,
+    "cuda": cuda_platform_plugin,
+    "rocm": rocm_platform_plugin,
+    "hpu": hpu_platform_plugin,
+    "xpu": xpu_platform_plugin,
+    "cpu": cpu_platform_plugin,
+    "neuron": neuron_platform_plugin,
+    "openvino": openvino_platform_plugin,
 }
 
 
 def resolve_current_platform_cls_qualname() -> str:
-    platform_plugins = load_plugins_by_group('vllm.platform_plugins')
+    platform_plugins = load_plugins_by_group("vllm.platform_plugins")
 
     activated_plugins = []
 
@@ -263,14 +271,14 @@ def resolve_current_platform_cls_qualname() -> str:
 
 
 _current_platform = None
-_init_trace: str = ''
+_init_trace: str = ""
 
 if TYPE_CHECKING:
     current_platform: Platform
 
 
 def __getattr__(name: str):
-    if name == 'current_platform':
+    if name == "current_platform":
         # lazy init current_platform.
         # 1. out-of-tree platform plugins need `from vllm.platforms import
         #    Platform` so that they can inherit `Platform` class. Therefore,
@@ -298,6 +306,9 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    'Platform', 'PlatformEnum', 'current_platform', 'CpuArchEnum',
-    "_init_trace"
+    "Platform",
+    "PlatformEnum",
+    "current_platform",
+    "CpuArchEnum",
+    "_init_trace",
 ]

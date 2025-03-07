@@ -20,32 +20,33 @@ from .utils import _get_lora_b_ptr
 
 @triton.jit
 def _sgmv_expand_kernel(
-        input_ptr,
-        lora_ptr,
-        out_ptr,
-        N,
-        K,
-        b_seq_start_loc,
-        seq_lens,
-        lora_indices,
-        slice_start_loc,
-        input_d0_stride,
-        input_d1_stride,
-        input_d2_stride,  # 1
-        ls_d0_ptr,
-        ls_d1_ptr,
-        ls_d2_ptr,  # 1
-        output_d0_stride,
-        output_d1_stride,  # 1
-        output_hs_ptr,
-        BLOCK_M: tl.constexpr,
-        BLOCK_N: tl.constexpr,
-        BLOCK_K: tl.constexpr,
-        EVEN_K: tl.constexpr,
-        ADD_INPUTS: tl.constexpr,
-        CAST_TYPE: tl.constexpr,
-        SLICE_NUM: tl.constexpr,
-        SAME_STRIDE: tl.constexpr):
+    input_ptr,
+    lora_ptr,
+    out_ptr,
+    N,
+    K,
+    b_seq_start_loc,
+    seq_lens,
+    lora_indices,
+    slice_start_loc,
+    input_d0_stride,
+    input_d1_stride,
+    input_d2_stride,  # 1
+    ls_d0_ptr,
+    ls_d1_ptr,
+    ls_d2_ptr,  # 1
+    output_d0_stride,
+    output_d1_stride,  # 1
+    output_hs_ptr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    ADD_INPUTS: tl.constexpr,
+    CAST_TYPE: tl.constexpr,
+    SLICE_NUM: tl.constexpr,
+    SAME_STRIDE: tl.constexpr,
+):
     """
 
     Similar to the 'sgmv_expand' operator, but with an added parameter
@@ -145,13 +146,13 @@ def _sgmv_expand(
             corresponding to each batch. An index of -1 means no lora should be
             applied.
         batches (int): batch size
-        max_seq_length (int): The max sequence lengths of the sequences in the 
+        max_seq_length (int): The max sequence lengths of the sequences in the
             batch.
-        token_nums (int): The token numbers in the batch. Used to verify if the 
+        token_nums (int): The token numbers in the batch. Used to verify if the
             token numbers in the inputs matches the one in the metadata.
-        offset_start (int, optional): Offset start for output_tensor. 
+        offset_start (int, optional): Offset start for output_tensor.
             Defaults to 0.
-        add_inputs (bool, optional): Whether to add the input tensor to the 
+        add_inputs (bool, optional): Whether to add the input tensor to the
             output tensor. Defaults to False.
     """
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
@@ -164,10 +165,16 @@ def _sgmv_expand(
     assert b_seq_start_loc.size(0) == batches
     assert lora_indices_tensor.size(0) == batches
     assert output_tensor.is_contiguous()
-    (slice_start_tensor, lora_ptr_tensor, lora_strides_d0_tensor,
-     lora_strides_d1_tensor, lora_strides_d2_tensor, hidden_sizes_tensor,
-     same_stride, MAX_N) = _get_lora_b_ptr(lora_b_weights, offset_start,
-                                           b_seq_start_loc.device)
+    (
+        slice_start_tensor,
+        lora_ptr_tensor,
+        lora_strides_d0_tensor,
+        lora_strides_d1_tensor,
+        lora_strides_d2_tensor,
+        hidden_sizes_tensor,
+        same_stride,
+        MAX_N,
+    ) = _get_lora_b_ptr(lora_b_weights, offset_start, b_seq_start_loc.device)
 
     # TODO tuning this config
     K = lora_b_weights[0].shape[-1]  # K= rank

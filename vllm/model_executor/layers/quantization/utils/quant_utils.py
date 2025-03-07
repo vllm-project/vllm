@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """This file is used for /tests and /benchmarks"""
+
 from types import MappingProxyType
 from typing import List, Mapping, Optional, Tuple
 
@@ -18,8 +19,10 @@ SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 def _normalize_quant_group_shape(x: torch.Tensor, group_shape: Tuple[int,
                                                                      int]):
     # -1 means full extent
-    return (group_shape[0] if group_shape[0] > 0 else x.shape[-2],
-            group_shape[1] if group_shape[1] > 0 else x.shape[-1])
+    return (
+        group_shape[0] if group_shape[0] > 0 else x.shape[-2],
+        group_shape[1] if group_shape[1] > 0 else x.shape[-1],
+    )
 
 
 # Useful when treating N-dimensional group scaling as extended numpy-style
@@ -40,9 +43,8 @@ def group_broadcast(t, shape):
     for i, s in enumerate(shape):
         if t.shape[i] != s and t.shape[i] != 1:
             assert s % t.shape[i] == 0
-            t = t.unsqueeze(i + 1)\
-                .expand(*t.shape[:i+1], s // t.shape[i], *t.shape[i+1:])\
-                .flatten(i, i + 1)
+            t = (t.unsqueeze(i + 1).expand(*t.shape[:i + 1], s // t.shape[i],
+                                           *t.shape[i + 1:]).flatten(i, i + 1))
     return t
 
 
@@ -60,9 +62,9 @@ def scaled_quantize(
     quant_dtype: torch.dtype,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     group_shape = _normalize_quant_group_shape(x, group_shape)
-    assert quant_dtype.is_floating_point, \
-        "currently `scaled_quantize` only supports floating point dtypes " \
-        "but could be extended to support other dtypes"
+    assert quant_dtype.is_floating_point, (
+        "currently `scaled_quantize` only supports floating point dtypes "
+        "but could be extended to support other dtypes")
 
     finfo = torch.finfo(quant_dtype)
 
@@ -84,11 +86,11 @@ def scaled_quantize(
 
     # Apply scale and convert form:
     # (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) to (M, N)
-    x_scl_sat = (x_blkd_permd * scale.unsqueeze(-1))\
-        .clamp(min=finfo.min, max=finfo.max)\
-        .reshape(blk_m, blk_n, group_shape[0], group_shape[1])\
-        .permute(0, 2, 1, 3)\
-        .reshape(x.shape)
+    x_scl_sat = ((x_blkd_permd * scale.unsqueeze(-1)).clamp(
+        min=finfo.min,
+        max=finfo.max).reshape(blk_m, blk_n, group_shape[0],
+                               group_shape[1]).permute(0, 2, 1,
+                                                       3).reshape(x.shape))
 
     return x_scl_sat.to(quant_dtype).contiguous(), scale.float().reciprocal()
 
@@ -172,9 +174,9 @@ def unpack_quantized_values_into_int32(w_q: torch.Tensor,
 
 
 def is_layer_skipped(
-    prefix: str,
-    ignored_layers: List[str],
-    fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
+        prefix: str,
+        ignored_layers: List[str],
+        fused_mapping: Mapping[str, List[str]] = MappingProxyType({}),
 ) -> bool:
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
@@ -213,10 +215,12 @@ def get_pack_factor(num_bits):
     return 32 // num_bits
 
 
-def permute_rows(q_w: torch.Tensor,
-                 w_ref: torch.Tensor,
-                 group_size: int,
-                 test_perm: Optional[torch.Tensor] = None):
+def permute_rows(
+    q_w: torch.Tensor,
+    w_ref: torch.Tensor,
+    group_size: int,
+    test_perm: Optional[torch.Tensor] = None,
+):
     assert q_w.shape == w_ref.shape
 
     orig_device = q_w.device
@@ -241,16 +245,18 @@ def permute_rows(q_w: torch.Tensor,
     )
 
 
-def quantize_weights(w: torch.Tensor,
-                     quant_type: ScalarType,
-                     group_size: Optional[int],
-                     zero_points: bool = False,
-                     ref_zero_points_after_scales: bool = False):
-    assert quant_type.is_integer(), \
-        "Floating point quantization may work but has not been tested"
-    assert not zero_points or group_size is not None, \
-        "to have group zero points, group_size must be provided "\
-        "(-1 group_size is channelwise)"
+def quantize_weights(
+    w: torch.Tensor,
+    quant_type: ScalarType,
+    group_size: Optional[int],
+    zero_points: bool = False,
+    ref_zero_points_after_scales: bool = False,
+):
+    assert (quant_type.is_integer()
+            ), "Floating point quantization may work but has not been tested"
+    assert not zero_points or group_size is not None, (
+        "to have group zero points, group_size must be provided "
+        "(-1 group_size is channelwise)")
 
     orig_device = w.device
     orig_type = w.dtype
@@ -280,14 +286,15 @@ def quantize_weights(w: torch.Tensor,
         if zero_points:
             assert not quant_type.is_signed() and quant_type.max() > 0
             w_s = (max_val - min_val).clamp(min=1e-5) / quant_type.max()
-            maybe_w_zp = torch.round(torch.abs(min_val / w_s)) \
-                .clamp(min_q_val, max_q_val).int()
+            maybe_w_zp = (torch.round(torch.abs(min_val / w_s)).clamp(
+                min_q_val, max_q_val).int())
         else:
             # If the bias is such that there are no possible negative/positive
             #  values, set the max value to inf to avoid divide by 0
             w_s = torch.max(
                 abs(max_val / (max_q_val if max_q_val != 0 else torch.inf)),
-                abs(min_val / (min_q_val if min_q_val != 0 else torch.inf)))
+                abs(min_val / (min_q_val if min_q_val != 0 else torch.inf)),
+            )
 
     # Quantize
     w_q = torch.round(w / w_s).int() + (maybe_w_zp if zero_points else 0)
@@ -330,16 +337,19 @@ def quantize_weights(w: torch.Tensor,
     )
 
 
-def gptq_quantize_weights(w: torch.Tensor,
-                          quant_type: ScalarType,
-                          group_size: int,
-                          act_order: bool,
-                          test_perm: Optional[torch.Tensor] = None):
+def gptq_quantize_weights(
+    w: torch.Tensor,
+    quant_type: ScalarType,
+    group_size: int,
+    act_order: bool,
+    test_perm: Optional[torch.Tensor] = None,
+):
     size_k, _ = w.shape
 
     assert w.is_floating_point(), "w must be float"
-    assert quant_type in SUPPORTED_GPTQ_QUANT_TYPES, \
-        f"Unsupported gptq type = {quant_type}"
+    assert (
+        quant_type
+        in SUPPORTED_GPTQ_QUANT_TYPES), f"Unsupported gptq type = {quant_type}"
     assert group_size in SUPPORTED_GROUP_SIZES + [
         size_k
     ], f"Unsupported groupsize = {group_size}"
@@ -368,8 +378,9 @@ def qqq_quantize_weights(w: torch.Tensor, num_bits: int, group_size: int):
     size_k, size_n = w.shape
 
     assert w.is_floating_point(), "w must be float"
-    assert num_bits in MARLIN_QQQ_SUPPORTED_NUM_BITS, \
-           f"Unsupported num_bits = {num_bits}"
+    assert (
+        num_bits
+        in MARLIN_QQQ_SUPPORTED_NUM_BITS), f"Unsupported num_bits = {num_bits}"
     assert group_size in SUPPORTED_GROUP_SIZES + [
         size_k
     ], f"Unsupported groupsize = {group_size}"
@@ -433,7 +444,7 @@ def qqq_quantize_weights(w: torch.Tensor, num_bits: int, group_size: int):
 
         s_group = torch.tensor([], dtype=torch.half)
         # div 2 ** (8 - self.bits)) to offset right shift in unpacking
-        s_channel /= (2**(8 - num_bits))
+        s_channel /= 2**(8 - num_bits)
         s_channel = s_channel.reshape(-1, size_n).contiguous().to(torch.float)
 
     return (
@@ -519,7 +530,8 @@ def unpack_cols(
     pack_factor = get_pack_factor(num_bits)
     assert size_n % pack_factor == 0
     assert packed_q_w.shape == (
-        size_k, size_n // pack_factor
+        size_k,
+        size_n // pack_factor,
     ), "packed_q_w.shape = {} size_k = {}, size_n = {} pack_Factor = {}".format(
         packed_q_w.shape, size_k, size_n, pack_factor)
 

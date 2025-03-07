@@ -79,17 +79,19 @@ class Top1Proposer(SpeculativeProposer):
             maybe_sampler_output, transposed = self._worker.sampler_output(
                 execute_model_req=nonzero_execute_model_req,
                 sample_len=proposal_len,
-                seq_ids_with_bonus_token_in_last_step=\
-                    seq_ids_with_bonus_token_in_last_step,
+                seq_ids_with_bonus_token_in_last_step=
+                seq_ids_with_bonus_token_in_last_step,
             )
             (
                 proposal_lens,
                 maybe_sampler_output,
                 nonzero_proposal_len_indices,
-            ) = self._remove_no_proposal_seqs(proposal_lens,
-                                              maybe_sampler_output,
-                                              nonzero_proposal_len_indices,
-                                              transposed)
+            ) = self._remove_no_proposal_seqs(
+                proposal_lens,
+                maybe_sampler_output,
+                nonzero_proposal_len_indices,
+                transposed,
+            )
         else:
             # If no sequences can be speculated, set sampler output to None.
             maybe_sampler_output = None
@@ -106,11 +108,12 @@ class Top1Proposer(SpeculativeProposer):
             sampler_transposed=transposed,
         )
 
-        proposals = SpeculativeProposals(proposal_token_ids=proposal_tokens,
-                                         proposal_probs=proposal_probs,
-                                         proposal_lens=proposal_lens,
-                                         no_proposals=maybe_sampler_output
-                                         is None)
+        proposals = SpeculativeProposals(
+            proposal_token_ids=proposal_tokens,
+            proposal_probs=proposal_probs,
+            proposal_lens=proposal_lens,
+            no_proposals=maybe_sampler_output is None,
+        )
         return proposals
 
     def _split_by_proposal_len(
@@ -158,8 +161,12 @@ class Top1Proposer(SpeculativeProposer):
         )
 
     @staticmethod
-    def _remove_no_proposal_seqs(proposal_lens, maybe_sampler_output,
-                                 nonzero_proposal_len_indices, transposed):
+    def _remove_no_proposal_seqs(
+        proposal_lens,
+        maybe_sampler_output,
+        nonzero_proposal_len_indices,
+        transposed,
+    ):
         """Remove sequences from nonzero_proposal_len_indices and reset
         their proposal_len to 0 the draft worker does not provide a proposal
         (maybe_sampler_output=None). This can avoid scoring overheads.
@@ -171,8 +178,11 @@ class Top1Proposer(SpeculativeProposer):
         # because it seems not straightforward for draft workers outputting
         # transposed sampler outputs to handle the case of no proposal.
         if maybe_sampler_output is None or transposed:
-            return (proposal_lens, maybe_sampler_output,
-                    nonzero_proposal_len_indices)
+            return (
+                proposal_lens,
+                maybe_sampler_output,
+                nonzero_proposal_len_indices,
+            )
 
         new_proposal_lens: List[int] = []
         new_nonzero_proposal_len_indices: List[int] = []
@@ -210,8 +220,11 @@ class Top1Proposer(SpeculativeProposer):
         # We assume sampler_output will not be a list of all Nones.
         # In this case this function should not be called.
         assert new_maybe_sampler_output
-        return (new_proposal_lens, new_maybe_sampler_output,
-                new_nonzero_proposal_len_indices)
+        return (
+            new_proposal_lens,
+            new_maybe_sampler_output,
+            new_nonzero_proposal_len_indices,
+        )
 
     def _merge_outputs(
         self,

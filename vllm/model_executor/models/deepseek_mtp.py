@@ -107,8 +107,10 @@ class DeepSeekMultiTokenPredictor(nn.Module):
                 cache_config=vllm_config.cache_config,
                 quant_config=vllm_config.quant_config,
             )
-            for idx in range(self.mtp_start_layer_idx,
-                             self.mtp_start_layer_idx + self.num_mtp_layers)
+            for idx in range(
+                self.mtp_start_layer_idx,
+                self.mtp_start_layer_idx + self.num_mtp_layers,
+            )
         })
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -121,7 +123,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        current_step_idx = (spec_step_idx % self.num_mtp_layers)
+        current_step_idx = spec_step_idx % self.num_mtp_layers
         return self.layers[str(self.mtp_start_layer_idx + current_step_idx)](
             input_ids,
             positions,
@@ -136,12 +138,14 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        current_step_idx = (spec_step_idx % self.num_mtp_layers)
+        current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx +
                                     current_step_idx)]
-        logits = self.logits_processor(mtp_layer.shared_head.head,
-                                       mtp_layer.shared_head(hidden_states),
-                                       sampling_metadata)
+        logits = self.logits_processor(
+            mtp_layer.shared_head.head,
+            mtp_layer.shared_head(hidden_states),
+            sampling_metadata,
+        )
         return logits
 
 
@@ -165,9 +169,13 @@ class DeepSeekMTP(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions,
-                                   previous_hidden_states, inputs_embeds,
-                                   spec_step_idx)
+        hidden_states = self.model(
+            input_ids,
+            positions,
+            previous_hidden_states,
+            inputs_embeds,
+            spec_step_idx,
+        )
         return hidden_states
 
     def compute_logits(
@@ -198,7 +206,8 @@ class DeepSeekMTP(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts)
+            num_experts=self.config.n_routed_experts,
+        )
 
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
@@ -209,7 +218,7 @@ class DeepSeekMTP(nn.Module):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
@@ -219,7 +228,7 @@ class DeepSeekMTP(nn.Module):
                 # name will be updated to mlp.experts[0].gate_up_proj, which
                 # will then be updated below in expert_params_mapping
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if (("mlp.experts." in name) and name not in params_dict):
+                if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
@@ -239,11 +248,13 @@ class DeepSeekMTP(nn.Module):
 
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(param,
-                                  loaded_weight,
-                                  name,
-                                  shard_id=shard_id,
-                                  expert_id=expert_id)
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
@@ -263,7 +274,11 @@ class DeepSeekMTP(nn.Module):
         Add .mtp_block for modules in transformer layer block for spec layer
         """
         spec_layer_weight_names = [
-            "embed_tokens", "enorm", "hnorm", "eh_proj", "shared_head"
+            "embed_tokens",
+            "enorm",
+            "hnorm",
+            "eh_proj",
+            "shared_head",
         ]
         spec_layer_weight = False
         for weight_name in spec_layer_weight_names:
@@ -272,6 +287,8 @@ class DeepSeekMTP(nn.Module):
                 break
         if not spec_layer_weight:
             # treat rest weights as weights for transformer layer block
-            name = name.replace(f"model.layers.{spec_layer}.",
-                                f"model.layers.{spec_layer}.mtp_block.")
+            name = name.replace(
+                f"model.layers.{spec_layer}.",
+                f"model.layers.{spec_layer}.mtp_block.",
+            )
         return name

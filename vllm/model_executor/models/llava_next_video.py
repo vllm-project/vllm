@@ -153,10 +153,10 @@ class LlavaNextVideoDummyInputsBuilder(
         processor = self.info.get_hf_processor()
         video_token = processor.video_token
 
-        target_width, target_height = \
-            self.info.get_image_size_with_most_features()
-        target_num_frames = \
-            self.info.get_num_frames_with_most_features(seq_len)
+        target_width, target_height = self.info.get_image_size_with_most_features(
+        )
+        target_num_frames = self.info.get_num_frames_with_most_features(
+            seq_len)
 
         mm_data = {
             "video":
@@ -246,9 +246,9 @@ class LlavaNextVideoPooler(nn.Module):
         ori_height = int(ori_width * self.image_size // self.image_size)
 
         batch_size, _, dim = image_features.shape
-        image_features_spatial = image_features \
-            .view(batch_size, ori_height, ori_height, dim) \
-            .permute(0, 3, 1, 2)
+        image_features_spatial = image_features.view(batch_size, ori_height,
+                                                     ori_height,
+                                                     dim).permute(0, 3, 1, 2)
         image_features_spatial = self.pool(image_features_spatial)
 
         return image_features_spatial.flatten(2).transpose(1, 2).contiguous()
@@ -256,8 +256,13 @@ class LlavaNextVideoPooler(nn.Module):
 
 class LlavaNextMultiModalProjector(nn.Module):
 
-    def __init__(self, vision_hidden_size: int, text_hidden_size: int,
-                 projector_hidden_act: str, multimodal_projector_bias: bool):
+    def __init__(
+        self,
+        vision_hidden_size: int,
+        text_hidden_size: int,
+        projector_hidden_act: str,
+        multimodal_projector_bias: bool,
+    ):
         super().__init__()
 
         self.linear_1 = nn.Linear(vision_hidden_size,
@@ -297,13 +302,15 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             config,
             quant_config,
             require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"))
+            prefix=maybe_prefix(prefix, "vision_tower"),
+        )
         self.vision_resampler = LlavaNextVideoPooler(config)
         self.multi_modal_projector = LlavaNextMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act,
-            multimodal_projector_bias=config.multimodal_projector_bias)
+            multimodal_projector_bias=config.multimodal_projector_bias,
+        )
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
@@ -323,7 +330,6 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _validate_video_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
-
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
 
@@ -346,7 +352,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         """
         A legal video input should have the following dimensions:
         {
-            "pixel_values_videos" : 
+            "pixel_values_videos" :
                 List[b, Tensor(nb_frames, nb_channels, height, width)]
         }
         """
@@ -356,7 +362,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         if not (is_list_of(pixel_values,
-                           (torch.Tensor))  # different shape videos 
+                           (torch.Tensor))  # different shape videos
                 or isinstance(pixel_values,
                               torch.Tensor)):  # same shape videos
             raise ValueError("Incorrect type of pixel values. "
@@ -381,7 +387,6 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         image_features = vision_tower(pixel_values)
@@ -401,7 +406,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         if isinstance(video_pixels, torch.Tensor):
             # TODO: support multiple videos per input
             b, num_videos, num_frames, c, h, w = video_pixels.shape
-            assert (num_videos == 1)
+            assert num_videos == 1
             stacked_pixels = video_pixels.view(b * num_videos * num_frames, c,
                                                h, w)
             stacked_embeddings = self._video_pixels_to_features(
@@ -437,8 +442,11 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.config.video_token_index)
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                self.config.video_token_index,
+            )
         return inputs_embeds
 
     def forward(
@@ -466,10 +474,12 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                       vision_embeddings)
             input_ids = None
 
-        hidden_states = self.language_model.model(input_ids,
-                                                  positions,
-                                                  intermediate_tensors,
-                                                  inputs_embeds=inputs_embeds)
+        hidden_states = self.language_model.model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
 
         return hidden_states
 

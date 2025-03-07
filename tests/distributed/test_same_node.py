@@ -28,8 +28,7 @@ if __name__ == "__main__":
         test_result = all(in_the_same_node_as(pg, source_rank=0))
 
         expected = os.environ.get("VLLM_TEST_SAME_HOST", "1") == "1"
-        assert test_result == expected, \
-            f"Expected {expected}, got {test_result}"
+        assert test_result == expected, f"Expected {expected}, got {test_result}"
         if pg == dist.group.WORLD:
             print("Same node test passed! when using torch distributed!")
         else:

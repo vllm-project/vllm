@@ -10,17 +10,26 @@ from vllm.platforms import current_platform
 
 TEST_MODELS = [
     ("facebook/opt-125m", {}),
-    ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", {
-        "dtype": torch.float16,
-        "quantization": "compressed-tensors"
-    }),
-    ("neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic", {
-        "dtype": torch.float16,
-        "quantization": "compressed-tensors"
-    }),
-    ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {
-        "quantization": "compressed-tensors"
-    }),
+    (
+        "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
+        {
+            "dtype": torch.float16,
+            "quantization": "compressed-tensors"
+        },
+    ),
+    (
+        "neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic",
+        {
+            "dtype": torch.float16,
+            "quantization": "compressed-tensors"
+        },
+    ),
+    (
+        "neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8",
+        {
+            "quantization": "compressed-tensors"
+        },
+    ),
     ("meta-llama/Llama-3.2-1B-Instruct", {}),
 ]
 
@@ -41,19 +50,28 @@ if is_quant_method_supported("gptq"):
     }))
 
 if is_quant_method_supported("gptq_marlin"):
-    TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", {
-        "quantization": "gptq_marlin"
-    }))
+    TEST_MODELS.append((
+        "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
+        {
+            "quantization": "gptq_marlin"
+        },
+    ))
 
 if is_quant_method_supported("gptq_marlin_24"):
-    TEST_MODELS.append(("alexm-nm/tinyllama-24-marlin24-4bit-g128", {
-        "quantization": "gptq_marlin_24"
-    }))
+    TEST_MODELS.append((
+        "alexm-nm/tinyllama-24-marlin24-4bit-g128",
+        {
+            "quantization": "gptq_marlin_24"
+        },
+    ))
 
 if is_quant_method_supported("marlin"):
-    TEST_MODELS.append(("robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-marlin", {
-        "quantization": "marlin"
-    }))
+    TEST_MODELS.append((
+        "robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-marlin",
+        {
+            "quantization": "marlin"
+        },
+    ))
 
 if not current_platform.is_rocm() and is_quant_method_supported("awq"):
     TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {
@@ -77,12 +95,14 @@ def check_full_graph_support(model,
         "The future of AI is",
     ]
     sampling_params = SamplingParams(temperature=0)
-    llm = LLM(model=model,
-              enforce_eager=True,
-              tensor_parallel_size=tp_size,
-              disable_custom_all_reduce=True,
-              compilation_config=optimization_level,
-              **model_kwargs)
+    llm = LLM(
+        model=model,
+        enforce_eager=True,
+        tensor_parallel_size=tp_size,
+        disable_custom_all_reduce=True,
+        compilation_config=optimization_level,
+        **model_kwargs,
+    )
 
     outputs = llm.generate(prompts, sampling_params)
 

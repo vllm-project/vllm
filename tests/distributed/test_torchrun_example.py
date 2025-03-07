@@ -21,11 +21,13 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # set different `gpu_memory_utilization` and `swap_space` for different ranks,
 # to test if all ranks agree on the same kv cache configuration.
-llm = LLM(model="facebook/opt-125m",
-          tensor_parallel_size=2,
-          distributed_executor_backend="external_launcher",
-          gpu_memory_utilization=random.uniform(0.7, 0.9),
-          swap_space=random.randint(1, 4))
+llm = LLM(
+    model="facebook/opt-125m",
+    tensor_parallel_size=2,
+    distributed_executor_backend="external_launcher",
+    gpu_memory_utilization=random.uniform(0.7, 0.9),
+    swap_space=random.randint(1, 4),
+)
 
 outputs = llm.generate(prompts, sampling_params)
 

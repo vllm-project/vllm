@@ -23,6 +23,7 @@ class ArgPool:
     For every invocation during a benchmarking run, it will choose a
     different value from the list.
     """
+
     values: Iterable[Any]
 
     def __getitem__(self, index):
@@ -53,10 +54,16 @@ class Bench:
         def n_args(self):
             return self.n
 
-    def __init__(self, cuda_graph_params: Optional[CudaGraphBenchParams],
-                 label: str, sub_label: str, description: str, fn: Callable,
-                 *args, **kwargs):
-
+    def __init__(
+        self,
+        cuda_graph_params: Optional[CudaGraphBenchParams],
+        label: str,
+        sub_label: str,
+        description: str,
+        fn: Callable,
+        *args,
+        **kwargs,
+    ):
         self.cuda_graph_params = cuda_graph_params
         self.use_cuda_graph = self.cuda_graph_params is not None
         self.label = label
@@ -142,7 +149,7 @@ class Bench:
 
     def run_cudagrah(self) -> TMeasurement:
         assert self.use_cuda_graph
-        globals = {'g': self.g}
+        globals = {"g": self.g}
 
         return TBenchmark.Timer(
             stmt="g.replay()",
@@ -162,15 +169,15 @@ class Bench:
 
         has_arg_pool = self.args_iterator.n_args > 1
         if has_arg_pool:
-            setup = '''
+            setup = """
                     args_iterator.reset()
                     args_it = args_iterator.__next__()
-                    '''
-            stmt = '''
+                    """
+            stmt = """
                     args, kwargs = next(args_it)
                     fn(*args, **kwargs)
-                    '''
-            globals = {'fn': self.fn, 'args_iterator': self.args_iterator}
+                    """
+            globals = {"fn": self.fn, "args_iterator": self.args_iterator}
         else:
             # no arg pool. Just use the args and kwargs directly
             self.args_iterator.reset()
@@ -178,10 +185,10 @@ class Bench:
             args, kwargs = next(args_it)
 
             setup = ""
-            stmt = '''
+            stmt = """
                     fn(*args, **kwargs)
-                   '''
-            globals = {'fn': self.fn, 'args': args, 'kwargs': kwargs}
+                   """
+            globals = {"fn": self.fn, "args": args, "kwargs": kwargs}
 
         return TBenchmark.Timer(
             stmt=stmt,

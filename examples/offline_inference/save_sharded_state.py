@@ -21,6 +21,7 @@ llm = LLM(
     tensor_parallel_size=8,
 )
 """
+
 import dataclasses
 import os
 import shutil
@@ -39,10 +40,12 @@ parser.add_argument("--output",
 parser.add_argument("--file-pattern",
                     type=str,
                     help="string pattern of saved filenames")
-parser.add_argument("--max-file-size",
-                    type=str,
-                    default=5 * 1024**3,
-                    help="max size (in bytes) of each safetensors file")
+parser.add_argument(
+    "--max-file-size",
+    type=str,
+    default=5 * 1024**3,
+    help="max size (in bytes) of each safetensors file",
+)
 
 
 def main(args):
@@ -65,8 +68,10 @@ def main(args):
     for file in os.listdir(model_path):
         if os.path.splitext(file)[1] not in (".bin", ".pt", ".safetensors"):
             if os.path.isdir(os.path.join(model_path, file)):
-                shutil.copytree(os.path.join(model_path, file),
-                                os.path.join(args.output, file))
+                shutil.copytree(
+                    os.path.join(model_path, file),
+                    os.path.join(args.output, file),
+                )
             else:
                 shutil.copy(os.path.join(model_path, file), args.output)
 

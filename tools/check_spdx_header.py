@@ -7,7 +7,7 @@ SPDX_HEADER_PREFIX = "# SPDX-License-Identifier:"
 
 
 def check_spdx_header(file_path):
-    with open(file_path, encoding='UTF-8') as file:
+    with open(file_path, encoding="UTF-8") as file:
         lines = file.readlines()
         if not lines:
             # Empty file like __init__.py
@@ -19,15 +19,15 @@ def check_spdx_header(file_path):
 
 
 def add_header(file_path):
-    with open(file_path, 'r+', encoding='UTF-8') as file:
+    with open(file_path, "r+", encoding="UTF-8") as file:
         lines = file.readlines()
         file.seek(0, 0)
         if lines and lines[0].startswith("#!"):
             file.write(lines[0])
-            file.write(SPDX_HEADER + '\n')
+            file.write(SPDX_HEADER + "\n")
             file.writelines(lines[1:])
         else:
-            file.write(SPDX_HEADER + '\n')
+            file.write(SPDX_HEADER + "\n")
             file.writelines(lines)
 
 

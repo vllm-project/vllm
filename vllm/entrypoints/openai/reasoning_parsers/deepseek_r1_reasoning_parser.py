@@ -20,7 +20,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
     """
     Reasoning parser for DeepSeek R1 model.
 
-    The DeepSeek R1 model uses <think>...</think> tokens to denote reasoning 
+    The DeepSeek R1 model uses <think>...</think> tokens to denote reasoning
     text. This parser extracts the reasoning content from the model output.
     """
 
@@ -39,8 +39,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
 
         self.think_start_token_id = self.vocab.get(self.think_start_token)
         self.think_end_token_id = self.vocab.get(self.think_end_token)
-        if (self.think_start_token_id is None
-                or self.think_end_token_id is None):
+        if self.think_start_token_id is None or self.think_end_token_id is None:
             raise RuntimeError(
                 "DeepSeek R1 reasoning parser could not locate think start/end "
                 "tokens in the tokenizer!")
@@ -77,8 +76,10 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 end_index = delta_text.find(self.think_end_token)
                 reasoning_content = delta_text[:end_index]
                 content = delta_text[end_index + len(self.think_end_token):]
-                return DeltaMessage(reasoning_content=reasoning_content,
-                                    content=content if content else None)
+                return DeltaMessage(
+                    reasoning_content=reasoning_content,
+                    content=content if content else None,
+                )
             elif self.think_end_token_id in previous_token_ids:
                 # <think> in previous, </think> in previous,
                 # reasoning content continues
@@ -96,8 +97,10 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                                                len(self.think_start_token
                                                    ):end_index]
                 content = delta_text[end_index + len(self.think_end_token):]
-                return DeltaMessage(reasoning_content=reasoning_content,
-                                    content=content if content else None)
+                return DeltaMessage(
+                    reasoning_content=reasoning_content,
+                    content=content if content else None,
+                )
             else:
                 # <think> in delta, no </think> in delta,
                 # reasoning content continues
@@ -112,8 +115,10 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 end_index = delta_text.find(self.think_end_token)
                 reasoning_content = delta_text[:end_index]
                 content = delta_text[end_index + len(self.think_end_token):]
-                return DeltaMessage(reasoning_content=reasoning_content,
-                                    content=content if content else None)
+                return DeltaMessage(
+                    reasoning_content=reasoning_content,
+                    content=content if content else None,
+                )
             elif self.think_end_token_id in previous_token_ids:
                 # </think> in previous, thinking content ends
                 return DeltaMessage(content=delta_text)
@@ -124,7 +129,6 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
-
         # DeepSeek R1 doesn't generate <think> now.
         # Thus we assume the reasoning content is always at the start.
         # Ref https://huggingface.co/deepseek-ai/DeepSeek-R1/commit/8a58a132790c9935686eb97f042afa8013451c9f

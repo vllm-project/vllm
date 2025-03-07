@@ -28,8 +28,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 NORM2FN = {
-    'rms_norm': RMSNorm,
-    'layer_norm': nn.LayerNorm,
+    "rms_norm": RMSNorm,
+    "layer_norm": nn.LayerNorm,
 }
 
 
@@ -44,10 +44,12 @@ class InternVisionEmbeddings(nn.Module):
 
         self.class_embedding = nn.Parameter(torch.randn(1, 1, self.embed_dim))
 
-        self.patch_embedding = nn.Conv2d(in_channels=3,
-                                         out_channels=self.embed_dim,
-                                         kernel_size=self.patch_size,
-                                         stride=self.patch_size)
+        self.patch_embedding = nn.Conv2d(
+            in_channels=3,
+            out_channels=self.embed_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+        )
 
         self.num_patches = (self.image_size // self.patch_size)**2
         self.num_positions = self.num_patches + 1
@@ -57,12 +59,15 @@ class InternVisionEmbeddings(nn.Module):
 
     def _get_pos_embed(self, pos_embed: torch.Tensor, H: int, W: int):
         target_dtype = pos_embed.dtype
-        pos_embed = pos_embed.float().reshape(
-            1, self.image_size // self.patch_size,
-            self.image_size // self.patch_size, -1).permute(0, 3, 1, 2)
+        pos_embed = (pos_embed.float().reshape(
+            1,
+            self.image_size // self.patch_size,
+            self.image_size // self.patch_size,
+            -1,
+        ).permute(0, 3, 1, 2))
         pos_embed = F.interpolate(pos_embed,
                                   size=(H, W),
-                                  mode='bicubic',
+                                  mode="bicubic",
                                   align_corners=False)
         return pos_embed.reshape(1, -1, H * W).permute(0, 2,
                                                        1).to(target_dtype)
@@ -111,7 +116,7 @@ class InternVisionPatchModel(nn.Module):
     ) -> torch.FloatTensor:
         if pixel_values is None and pixel_embeds is None:
             raise ValueError(
-                'You have to specify pixel_values or pixel_embeds')
+                "You have to specify pixel_values or pixel_embeds")
 
         if pixel_embeds is not None:
             hidden_states = pixel_embeds
@@ -120,7 +125,7 @@ class InternVisionPatchModel(nn.Module):
                 hidden_states = self.embeddings(pixel_values)
             else:
                 raise ValueError(
-                    f'wrong pixel_values size: {pixel_values.shape}')
+                    f"wrong pixel_values size: {pixel_values.shape}")
 
         return hidden_states
 
@@ -144,9 +149,9 @@ class InternParallelAttention(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
-                f'embed_dim must be divisible by num_heads '
-                f'(got `embed_dim`: {self.embed_dim} and `num_heads`:'
-                f' {self.num_heads}).')
+                f"embed_dim must be divisible by num_heads "
+                f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
+                f" {self.num_heads}).")
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -169,12 +174,16 @@ class InternParallelAttention(nn.Module):
         self.qk_normalization = config.qk_normalization
 
         if self.qk_normalization:
-            self.q_norm = RMSNorm(self.dummy_dim,
-                                  eps=config.layer_norm_eps,
-                                  var_hidden_size=self.embed_dim)
-            self.k_norm = RMSNorm(self.dummy_dim,
-                                  eps=config.layer_norm_eps,
-                                  var_hidden_size=self.embed_dim)
+            self.q_norm = RMSNorm(
+                self.dummy_dim,
+                eps=config.layer_norm_eps,
+                var_hidden_size=self.embed_dim,
+            )
+            self.k_norm = RMSNorm(
+                self.dummy_dim,
+                eps=config.layer_norm_eps,
+                var_hidden_size=self.embed_dim,
+            )
 
         self.proj = RowParallelLinear(
             self.dummy_dim,
@@ -229,9 +238,9 @@ class InternSdpaAttention(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
-                f'embed_dim must be divisible by num_heads '
-                f'(got `embed_dim`: {self.embed_dim} and `num_heads`:'
-                f' {self.num_heads}).')
+                f"embed_dim must be divisible by num_heads "
+                f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
+                f" {self.num_heads}).")
 
         # Additional dummy heads are used to enable TP for common GPU counts.
         self.dummy_dim = (num_dummy_heads + self.num_heads) * self.head_dim
@@ -244,12 +253,16 @@ class InternSdpaAttention(nn.Module):
         self.qk_normalization = config.qk_normalization
 
         if self.qk_normalization:
-            self.q_norm = RMSNorm(self.dummy_dim,
-                                  eps=config.layer_norm_eps,
-                                  var_hidden_size=self.embed_dim)
-            self.k_norm = RMSNorm(self.dummy_dim,
-                                  eps=config.layer_norm_eps,
-                                  var_hidden_size=self.embed_dim)
+            self.q_norm = RMSNorm(
+                self.dummy_dim,
+                eps=config.layer_norm_eps,
+                var_hidden_size=self.embed_dim,
+            )
+            self.k_norm = RMSNorm(
+                self.dummy_dim,
+                eps=config.layer_norm_eps,
+                var_hidden_size=self.embed_dim,
+            )
 
         self.proj = nn.Linear(self.dummy_dim, self.embed_dim)
 
@@ -291,16 +304,20 @@ class InternMLP(nn.Module):
 
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-        self.fc1 = ColumnParallelLinear(config.hidden_size,
-                                        config.intermediate_size,
-                                        bias=True,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.fc1")
-        self.fc2 = RowParallelLinear(config.intermediate_size,
-                                     config.hidden_size,
-                                     bias=True,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.fc2")
+        self.fc1 = ColumnParallelLinear(
+            config.hidden_size,
+            config.intermediate_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fc1",
+        )
+        self.fc2 = RowParallelLinear(
+            config.intermediate_size,
+            config.hidden_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fc2",
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
@@ -326,10 +343,12 @@ class InternVisionEncoderLayer(nn.Module):
         self.intermediate_size = config.intermediate_size
         self.norm_type = config.norm_type
 
-        self.attn = self._init_attn(config,
-                                    quant_config,
-                                    num_dummy_heads=num_dummy_heads,
-                                    prefix=f"{prefix}.attn")
+        self.attn = self._init_attn(
+            config,
+            quant_config,
+            num_dummy_heads=num_dummy_heads,
+            prefix=f"{prefix}.attn",
+        )
 
         self.mlp = InternMLP(config,
                              quant_config=quant_config,
@@ -357,10 +376,12 @@ class InternVisionEncoderLayer(nn.Module):
         num_heads = config.num_attention_heads
 
         if (num_heads + num_dummy_heads) % tp_size == 0:
-            return InternParallelAttention(config,
-                                           quant_config=quant_config,
-                                           num_dummy_heads=num_dummy_heads,
-                                           prefix=prefix)
+            return InternParallelAttention(
+                config,
+                quant_config=quant_config,
+                num_dummy_heads=num_dummy_heads,
+                prefix=prefix,
+            )
 
         return InternSdpaAttention(config, num_dummy_heads=num_dummy_heads)
 
@@ -398,15 +419,15 @@ class InternVisionEncoder(nn.Module):
             num_hidden_layers = num_hidden_layers_override
 
         self.layers = nn.ModuleList([
-            InternVisionEncoderLayer(config,
-                                     quant_config,
-                                     num_dummy_heads=num_dummy_heads,
-                                     prefix=f"{prefix}.layers.{layer_idx}")
-            for layer_idx in range(num_hidden_layers)
+            InternVisionEncoderLayer(
+                config,
+                quant_config,
+                num_dummy_heads=num_dummy_heads,
+                prefix=f"{prefix}.layers.{layer_idx}",
+            ) for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(self, inputs_embeds: torch.Tensor):
-
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
@@ -448,7 +469,7 @@ class InternVisionModel(nn.Module):
     ) -> torch.FloatTensor:
         if pixel_values is None and pixel_embeds is None:
             raise ValueError(
-                'You have to specify pixel_values or pixel_embeds')
+                "You have to specify pixel_values or pixel_embeds")
 
         if pixel_embeds is not None:
             hidden_states = pixel_embeds
@@ -457,7 +478,7 @@ class InternVisionModel(nn.Module):
                 hidden_states = self.embeddings(pixel_values)
             else:
                 raise ValueError(
-                    f'wrong pixel_values size: {pixel_values.shape}')
+                    f"wrong pixel_values size: {pixel_values.shape}")
 
         encoder_outputs = self.encoder(inputs_embeds=hidden_states)
 

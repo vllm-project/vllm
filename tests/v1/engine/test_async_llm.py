@@ -19,13 +19,17 @@ if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
                 allow_module_level=True)
 
-TEXT_ENGINE_ARGS = AsyncEngineArgs(model="meta-llama/Llama-3.2-1B-Instruct",
-                                   enforce_eager=True,
-                                   disable_log_requests=True)
+TEXT_ENGINE_ARGS = AsyncEngineArgs(
+    model="meta-llama/Llama-3.2-1B-Instruct",
+    enforce_eager=True,
+    disable_log_requests=True,
+)
 
-VISION_ENGINE_ARGS = AsyncEngineArgs(model="Qwen/Qwen2-VL-2B-Instruct",
-                                     enforce_eager=True,
-                                     disable_log_requests=True)
+VISION_ENGINE_ARGS = AsyncEngineArgs(
+    model="Qwen/Qwen2-VL-2B-Instruct",
+    enforce_eager=True,
+    disable_log_requests=True,
+)
 
 TEXT_PROMPT = "Hello my name is Robert and"
 
@@ -38,36 +42,39 @@ VISION_PROMPT = {
     "prompt": VISION_PROMPT_TEMPLATE,
     "multi_modal_data": {
         "image": ImageAsset("stop_sign").pil_image
-    }
+    },
 }
 
 
-async def generate(engine: AsyncLLM,
-                   request_id: str,
-                   prompt: PromptType,
-                   output_kind: RequestOutputKind,
-                   max_tokens: int,
-                   prompt_logprobs: Optional[int] = None) -> tuple[int, str]:
+async def generate(
+    engine: AsyncLLM,
+    request_id: str,
+    prompt: PromptType,
+    output_kind: RequestOutputKind,
+    max_tokens: int,
+    prompt_logprobs: Optional[int] = None,
+) -> tuple[int, str]:
     # Ensure generate doesn't complete too fast for cancellation test.
     await asyncio.sleep(0.2)
 
     count = 0
-    sampling_params = SamplingParams(max_tokens=max_tokens,
-                                     ignore_eos=True,
-                                     output_kind=output_kind,
-                                     temperature=0,
-                                     prompt_logprobs=prompt_logprobs)
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        ignore_eos=True,
+        output_kind=output_kind,
+        temperature=0,
+        prompt_logprobs=prompt_logprobs,
+    )
     async for out in engine.generate(request_id=request_id,
                                      prompt=prompt,
                                      sampling_params=sampling_params):
-
         num_tokens = len(out.outputs[0].token_ids)
         if output_kind == RequestOutputKind.DELTA:
             count += num_tokens
         else:
             count = num_tokens
 
-        await asyncio.sleep(0.)
+        await asyncio.sleep(0.0)
 
     return count, request_id
 
@@ -85,21 +92,25 @@ async def test_async_llm_refuses_prompt_logprobs_with_apc(
     # have to change all the tests.
     monkeypatch.setenv("VLLM_USE_V1", "1")
     # Create AsyncLLM engine with APC
-    apc_engine_args = AsyncEngineArgs(model="facebook/opt-125m",
-                                      enable_prefix_caching=True,
-                                      gpu_memory_utilization=0.8,
-                                      disable_log_requests=True)
+    apc_engine_args = AsyncEngineArgs(
+        model="facebook/opt-125m",
+        enable_prefix_caching=True,
+        gpu_memory_utilization=0.8,
+        disable_log_requests=True,
+    )
     engine = AsyncLLM.from_engine_args(apc_engine_args)
     try:
         with pytest.raises(ValueError) as excinfo:
             # Issue a request with prompt logprobs enabled, which should fail
             await asyncio.create_task(
-                generate(engine,
-                         "request-0",
-                         TEXT_PROMPT,
-                         output_kind,
-                         10,
-                         prompt_logprobs=5))
+                generate(
+                    engine,
+                    "request-0",
+                    TEXT_PROMPT,
+                    output_kind,
+                    10,
+                    prompt_logprobs=5,
+                ))
         # Validate exception string is correct
         assert str(excinfo.value) == PLP_APC_UNSUPPORTED_MSG
     finally:
@@ -109,13 +120,16 @@ async def test_async_llm_refuses_prompt_logprobs_with_apc(
 
 @pytest.mark.parametrize(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
-@pytest.mark.parametrize("engine_args_and_prompt",
-                         [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
-                          (VISION_ENGINE_ARGS, VISION_PROMPT)])
+@pytest.mark.parametrize(
+    "engine_args_and_prompt",
+    [(TEXT_ENGINE_ARGS, TEXT_PROMPT), (VISION_ENGINE_ARGS, VISION_PROMPT)],
+)
 @pytest.mark.asyncio
-async def test_load(monkeypatch, output_kind: RequestOutputKind,
-                    engine_args_and_prompt: tuple[AsyncEngineArgs,
-                                                  PromptType]):
+async def test_load(
+    monkeypatch,
+    output_kind: RequestOutputKind,
+    engine_args_and_prompt: tuple[AsyncEngineArgs, PromptType],
+):
     # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
     # so that in the future when we switch, we don't have to change all the
     # tests.
@@ -136,8 +150,13 @@ async def test_load(monkeypatch, output_kind: RequestOutputKind,
         for request_id in request_ids:
             tasks.append(
                 asyncio.create_task(
-                    generate(engine, request_id, prompt, output_kind,
-                             NUM_EXPECTED_TOKENS)))
+                    generate(
+                        engine,
+                        request_id,
+                        prompt,
+                        output_kind,
+                        NUM_EXPECTED_TOKENS,
+                    )))
 
         # Confirm that we got all the EXPECTED tokens from the requests.
         done, pending = await asyncio.wait(tasks,
@@ -155,14 +174,16 @@ async def test_load(monkeypatch, output_kind: RequestOutputKind,
 
 @pytest.mark.parametrize(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
-@pytest.mark.parametrize("engine_args_and_prompt",
-                         [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
-                          (VISION_ENGINE_ARGS, VISION_PROMPT)])
+@pytest.mark.parametrize(
+    "engine_args_and_prompt",
+    [(TEXT_ENGINE_ARGS, TEXT_PROMPT), (VISION_ENGINE_ARGS, VISION_PROMPT)],
+)
 @pytest.mark.asyncio
-async def test_abort(monkeypatch, output_kind: RequestOutputKind,
-                     engine_args_and_prompt: tuple[AsyncEngineArgs,
-                                                   PromptType]):
-
+async def test_abort(
+    monkeypatch,
+    output_kind: RequestOutputKind,
+    engine_args_and_prompt: tuple[AsyncEngineArgs, PromptType],
+):
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
         engine_args, prompt = engine_args_and_prompt
@@ -181,8 +202,13 @@ async def test_abort(monkeypatch, output_kind: RequestOutputKind,
         for request_id in request_ids:
             tasks.append(
                 asyncio.create_task(
-                    generate(engine, request_id, prompt, output_kind,
-                             NUM_EXPECTED_TOKENS)))
+                    generate(
+                        engine,
+                        request_id,
+                        prompt,
+                        output_kind,
+                        NUM_EXPECTED_TOKENS,
+                    )))
 
         # API server cancels requests when they disconnect.
         for idx in REQUEST_IDS_TO_ABORT:

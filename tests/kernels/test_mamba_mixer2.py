@@ -23,14 +23,15 @@ from vllm.utils import update_environment_variables
         (64, 2),
         (64, 4),  # hidden_size be divisible by num_gpus
         (100, 5),  # and n_groups must divide hidden_size
-    ])
+    ],
+)
 @pytest.mark.parametrize("dtype", [torch.float16])
 def test_mixer2_gated_norm_multi_gpu(
     batch_size: int,
     seq_len: int,
     hidden_size_n_groups: tuple[int, int],
     dtype: torch.dtype,
-    device: str = 'cuda',
+    device: str = "cuda",
 ):
     hidden_size, n_groups = hidden_size_n_groups
     num_processes = 2
@@ -38,17 +39,19 @@ def test_mixer2_gated_norm_multi_gpu(
     def run_torch_spawn(fn, nprocs):
         # need to use torch.mp.spawn otherwise will have problems with
         # torch.distributed and cuda
-        torch.multiprocessing.spawn(fn,
-                                    args=(
-                                        num_processes,
-                                        batch_size,
-                                        seq_len,
-                                        hidden_size,
-                                        n_groups,
-                                        dtype,
-                                        device,
-                                    ),
-                                    nprocs=nprocs)
+        torch.multiprocessing.spawn(
+            fn,
+            args=(
+                num_processes,
+                batch_size,
+                seq_len,
+                hidden_size,
+                n_groups,
+                dtype,
+                device,
+            ),
+            nprocs=nprocs,
+        )
 
     run_torch_spawn(mixer2_gated_norm_tensor_parallel, 2)
 
@@ -71,11 +74,11 @@ def mixer2_gated_norm_tensor_parallel(
     torch.set_default_dtype(dtype)
 
     update_environment_variables({
-        'RANK': str(local_rank),
-        'LOCAL_RANK': str(local_rank),
-        'WORLD_SIZE': str(world_size),
-        'MASTER_ADDR': 'localhost',
-        'MASTER_PORT': '12345',
+        "RANK": str(local_rank),
+        "LOCAL_RANK": str(local_rank),
+        "WORLD_SIZE": str(world_size),
+        "MASTER_ADDR": "localhost",
+        "MASTER_PORT": "12345",
     })
 
     # initialize distributed
@@ -96,14 +99,18 @@ def mixer2_gated_norm_tensor_parallel(
 
     # create gated-norm without TP to compute reference
     # - utilize mock patching to disable TP when
-    with (unittest.mock.patch(
-            "vllm.model_executor.layers.mamba.mamba_mixer2."
-            "get_tensor_model_parallel_world_size",
-            return_value=1),
-          unittest.mock.patch(
-              "vllm.model_executor.layers.mamba.mamba_mixer2."
-              "get_tensor_model_parallel_rank",
-              return_value=0)):
+    with (
+            unittest.mock.patch(
+                "vllm.model_executor.layers.mamba.mamba_mixer2."
+                "get_tensor_model_parallel_world_size",
+                return_value=1,
+            ),
+            unittest.mock.patch(
+                "vllm.model_executor.layers.mamba.mamba_mixer2."
+                "get_tensor_model_parallel_rank",
+                return_value=0,
+            ),
+    ):
         mixer_single_gpu = Mixer2RMSNormGated(
             full_hidden_size=hidden_size,
             full_n_groups=n_groups,
@@ -118,7 +125,9 @@ def mixer2_gated_norm_tensor_parallel(
         gate_states[..., local_rank * N:(local_rank + 1) * N],
     )
     ref_output = mixer_single_gpu(hidden_states, gate_states)
-    torch.allclose(output,
-                   ref_output[..., local_rank * N:(local_rank + 1) * N],
-                   atol=1e-3,
-                   rtol=1e-3)
+    torch.allclose(
+        output,
+        ref_output[..., local_rank * N:(local_rank + 1) * N],
+        atol=1e-3,
+        rtol=1e-3,
+    )

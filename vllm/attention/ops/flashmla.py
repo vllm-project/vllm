@@ -12,6 +12,7 @@ logger = init_logger(__name__)
 if current_platform.is_cuda():
     try:
         import vllm._flashmla_C  # noqa: F401
+
         _flashmla_C_AVAILABLE = True
     except ImportError:
         _flashmla_C_AVAILABLE = False
@@ -28,10 +29,13 @@ def is_flashmla_supported() -> Tuple[bool, Optional[str]]:
     if current_platform.get_device_capability()[0] != 9:
         return False, "FlashMLA is only supported on Hopper devices."
     if not _flashmla_C_AVAILABLE:
-        return False, "vllm._flashmla_C is not available, likely was not "\
-            "compiled due to insufficient nvcc version or a supported arch "\
-            "(only sm90a currently) was not in the list of target arches to "\
-            "compile for."
+        return (
+            False,
+            "vllm._flashmla_C is not available, likely was not "
+            "compiled due to insufficient nvcc version or a supported arch "
+            "(only sm90a currently) was not in the list of target arches to "
+            "compile for.",
+        )
     return True, None
 
 
@@ -47,7 +51,7 @@ def get_mla_metadata(
         num_heads_k: num_heads_k.
 
     Return:
-        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), 
+        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize),
                                  dtype torch.int32.
         num_splits: (batch_size + 1), dtype torch.int32.
     """
@@ -74,10 +78,10 @@ def flash_mla_with_kvcache(
         block_table: (batch_size, max_num_blocks_per_seq), torch.int32.
         cache_seqlens: (batch_size), torch.int32.
         head_dim_v: Head_dim of v.
-        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize), 
+        tile_scheduler_metadata: (num_sm_parts, TileSchedulerMetaDataSize),
                                  torch.int32, return by get_mla_metadata.
         num_splits: (batch_size + 1), torch.int32, return by get_mla_metadata.
-        softmax_scale: float. The scaling of QK^T before applying softmax. 
+        softmax_scale: float. The scaling of QK^T before applying softmax.
                        Default to 1 / sqrt(head_dim).
         causal: bool. Whether to apply causal attention mask.
 

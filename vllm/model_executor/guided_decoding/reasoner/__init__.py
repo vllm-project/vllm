@@ -23,8 +23,10 @@ def get_reasoner(tokenizer: PreTrainedTokenizer,
         # Raise a warning for unknown reasoning backend and return None
         # We cannot raise an error here because some reasoning models
         # may not have a corresponding Reasoner class.
-        logger.warning("Unknown reasoning backend %s for structured outputs ",
-                       reasoning_backend)
+        logger.warning(
+            "Unknown reasoning backend %s for structured outputs ",
+            reasoning_backend,
+        )
         return None
 
 

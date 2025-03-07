@@ -58,9 +58,11 @@ def maybe_assert_ngram_worker(llm):
     if (llm.llm_engine.speculative_config is not None
             and llm.llm_engine.speculative_config.ngram_prompt_lookup_max > 0):
         from vllm.spec_decode.ngram_worker import NGramWorker
+
         assert isinstance(
             llm.llm_engine.model_executor.driver_worker.proposer_worker,
-            NGramWorker)
+            NGramWorker,
+        )
 
 
 def get_output_from_llm_generator(
@@ -95,8 +97,7 @@ def check_logprobs_correctness(
                                      TokensTextLogprobsPromptLogprobs]],
     disable_logprobs: bool = False,
 ):
-    """Compare sampled and prompt logprobs between baseline and spec decoding
-    """
+    """Compare sampled and prompt logprobs between baseline and spec decoding"""
     if not disable_logprobs:
         return check_logprobs_close(
             outputs_0_lst=baseline_outputs,
@@ -119,9 +120,11 @@ def check_logprobs_correctness(
             assert len(spec_output) == 4
             spec_prompt_logprobs = spec_output[3]
             baseline_prompt_logprobs = baseline_output[3]
-            _check_logprobs_when_output_disabled(spec_prompt_logprobs,
-                                                 baseline_prompt_logprobs,
-                                                 is_prompt_logprobs=True)
+            _check_logprobs_when_output_disabled(
+                spec_prompt_logprobs,
+                baseline_prompt_logprobs,
+                is_prompt_logprobs=True,
+            )
 
 
 def _check_logprobs_when_output_disabled(
@@ -141,7 +144,6 @@ def _check_logprobs_when_output_disabled(
     # For each generated position of the sequence.
     for pos, (spec_pos_logprobs, baseline_pos_logprobs) in enumerate(
             zip(spec_logprobs, baseline_logprobs)):
-
         # First prompt logprob is expected to be None
         if is_prompt_logprobs and baseline_pos_logprobs is None:
             assert spec_pos_logprobs is None
@@ -164,23 +166,23 @@ def _check_logprobs_when_output_disabled(
 
 
 def run_equality_correctness_test(
-        vllm_runner,
-        common_llm_kwargs,
-        per_test_common_llm_kwargs,
-        baseline_llm_kwargs,
-        test_llm_kwargs,
-        batch_size: int,
-        max_output_len: int,
-        seed: Optional[int] = 0,
-        temperature: float = 0.0,
-        disable_seed: bool = False,
-        ignore_eos: bool = True,
-        ensure_all_accepted: bool = False,
-        expected_acceptance_rate: Optional[float] = None,
-        logprobs: Optional[int] = None,
-        prompt_logprobs: Optional[int] = None,
-        disable_logprobs: bool = False):
-
+    vllm_runner,
+    common_llm_kwargs,
+    per_test_common_llm_kwargs,
+    baseline_llm_kwargs,
+    test_llm_kwargs,
+    batch_size: int,
+    max_output_len: int,
+    seed: Optional[int] = 0,
+    temperature: float = 0.0,
+    disable_seed: bool = False,
+    ignore_eos: bool = True,
+    ensure_all_accepted: bool = False,
+    expected_acceptance_rate: Optional[float] = None,
+    logprobs: Optional[int] = None,
+    prompt_logprobs: Optional[int] = None,
+    disable_logprobs: bool = False,
+):
     org_args = {
         **common_llm_kwargs,
         **per_test_common_llm_kwargs,
@@ -198,12 +200,14 @@ def run_equality_correctness_test(
     if disable_seed:
         seed = None
 
-    sampling_params = SamplingParams(temperature=temperature,
-                                     max_tokens=max_output_len,
-                                     seed=seed,
-                                     ignore_eos=ignore_eos,
-                                     logprobs=logprobs,
-                                     prompt_logprobs=prompt_logprobs)
+    sampling_params = SamplingParams(
+        temperature=temperature,
+        max_tokens=max_output_len,
+        seed=seed,
+        ignore_eos=ignore_eos,
+        logprobs=logprobs,
+        prompt_logprobs=prompt_logprobs,
+    )
 
     with vllm_runner(**org_args) as vllm_model:
         org_outputs = vllm_model.generate_w_logprobs(prompts, sampling_params)
@@ -212,7 +216,7 @@ def run_equality_correctness_test(
         if ensure_all_accepted or expected_acceptance_rate is not None:
             # Force log interval to be 0 to catch all metrics.
             stat_logger = vllm_model.model.llm_engine.stat_loggers[
-                'prometheus']
+                "prometheus"]
             stat_logger.local_interval = -100
 
         sd_outputs = vllm_model.generate_w_logprobs(prompts, sampling_params)
@@ -232,26 +236,30 @@ def run_equality_correctness_test(
                 assert acceptance_rate >= expected_acceptance_rate - 1e-2
 
     # Only pass token entries, not the logprobs
-    check_outputs_equal(outputs_0_lst=[out[0:2] for out in org_outputs],
-                        outputs_1_lst=[out[0:2] for out in sd_outputs],
-                        name_0="org",
-                        name_1="sd")
+    check_outputs_equal(
+        outputs_0_lst=[out[0:2] for out in org_outputs],
+        outputs_1_lst=[out[0:2] for out in sd_outputs],
+        name_0="org",
+        name_1="sd",
+    )
 
     # Check logprobs if requested
     if logprobs is not None or prompt_logprobs is not None:
         check_logprobs_correctness(sd_outputs, org_outputs, disable_logprobs)
 
 
-def run_equality_correctness_test_tp(model,
-                                     common_llm_kwargs,
-                                     per_test_common_llm_kwargs,
-                                     baseline_llm_kwargs,
-                                     test_llm_kwargs,
-                                     batch_size: int,
-                                     max_output_len: int,
-                                     seed: int = 0,
-                                     temperature: float = 0.0,
-                                     logprobs: Optional[int] = None):
+def run_equality_correctness_test_tp(
+    model,
+    common_llm_kwargs,
+    per_test_common_llm_kwargs,
+    baseline_llm_kwargs,
+    test_llm_kwargs,
+    batch_size: int,
+    max_output_len: int,
+    seed: int = 0,
+    temperature: float = 0.0,
+    logprobs: Optional[int] = None,
+):
     """Helper method that compares the outputs of both the baseline LLM and
     the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
     the same when temperature is zero.
@@ -271,12 +279,14 @@ def run_equality_correctness_test_tp(model,
                                 max_wait_seconds=max_wait_seconds) as server:
             client = server.get_client()
 
-            completion = client.completions.create(model=model,
-                                                   prompt=prompts,
-                                                   max_tokens=max_output_len,
-                                                   seed=seed,
-                                                   temperature=temperature,
-                                                   logprobs=logprobs)
+            completion = client.completions.create(
+                model=model,
+                prompt=prompts,
+                max_tokens=max_output_len,
+                seed=seed,
+                temperature=temperature,
+                logprobs=logprobs,
+            )
 
             results.append({
                 "test":

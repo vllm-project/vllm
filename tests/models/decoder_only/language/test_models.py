@@ -3,6 +3,7 @@
 
 Run `pytest tests/models/test_models.py`.
 """
+
 import pytest
 
 from ...utils import check_logprobs_close
@@ -58,8 +59,9 @@ from ...utils import check_logprobs_close
         pytest.param(
             "ehristoforu/Falcon3-MoE-2x7B-Insruct",  # mixtral
             marks=[pytest.mark.cpu_model],
-        )
-    ])
+        ),
+    ],
+)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -72,11 +74,10 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-
     with hf_runner(model, dtype=dtype) as hf_model:
         if model.startswith("THUDM/chatglm3"):
-            hf_model.model.get_output_embeddings = lambda: \
-                hf_model.model.transformer.output_layer
+            hf_model.model.get_output_embeddings = (
+                lambda: hf_model.model.transformer.output_layer)
 
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)

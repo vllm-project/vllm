@@ -68,7 +68,7 @@ def compute_encoder_budget(
     model_config: "ModelConfig",
     scheduler_config: "SchedulerConfig",
 ) -> tuple[int, int]:
-    """Compute the encoder cache budget based on the model and scheduler 
+    """Compute the encoder cache budget based on the model and scheduler
     configurations.
 
     Args:
@@ -76,9 +76,9 @@ def compute_encoder_budget(
         scheduler_config: Scheduler configuration.
 
     Returns:
-        - Compute budget for encoder execution, in unit of number of tokens 
+        - Compute budget for encoder execution, in unit of number of tokens
             in the input sequence.
-        - Space budget for encoder cache size, in unit of number of tokens 
+        - Space budget for encoder cache size, in unit of number of tokens
             in the input sequence.
     """
 
@@ -98,7 +98,7 @@ def _compute_encoder_budget_multimodal(
     model_config: "ModelConfig",
     scheduler_config: "SchedulerConfig",
 ) -> tuple[int, int]:
-    """Compute the encoder cache budget based on the model and scheduler 
+    """Compute the encoder cache budget based on the model and scheduler
     configurations for a multimodal model.
 
     Args:
@@ -106,14 +106,16 @@ def _compute_encoder_budget_multimodal(
         scheduler_config: Scheduler configuration.
 
     Returns:
-        - Compute budget for encoder execution, in unit of number of tokens 
+        - Compute budget for encoder execution, in unit of number of tokens
             in the input sequence.
-        - Space budget for encoder cache size, in unit of number of tokens 
+        - Space budget for encoder cache size, in unit of number of tokens
             in the input sequence.
     """
 
-    max_tokens_by_modality_dict = MULTIMODAL_REGISTRY.get_max_tokens_per_item_by_nonzero_modality(  # noqa: E501
-        model_config)
+    max_tokens_by_modality_dict = (
+        MULTIMODAL_REGISTRY.
+        get_max_tokens_per_item_by_nonzero_modality(  # noqa: E501
+            model_config))
 
     if not max_tokens_by_modality_dict:
         logger.warning(

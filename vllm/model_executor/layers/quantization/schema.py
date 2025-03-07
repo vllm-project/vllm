@@ -47,8 +47,8 @@ class KVCacheQuantSchema(BaseModel):
                     f"Expected {num_hidden_layers} layers, got "
                     f"{len(layer_maps)}.")
             for i in range(tp_size):
-                assert i in self.scaling_factor, (
-                    f"KV cache scales map for TP rank {i} not found.")
+                assert (i in self.scaling_factor
+                        ), f"KV cache scales map for TP rank {i} not found."
         return self
 
     @model_validator(mode="after")
