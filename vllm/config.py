@@ -1859,10 +1859,13 @@ class SpeculativeConfig:
     disable_logprobs: bool = True
 
     # required configuration params passed from engine
-    target_model_config: ModelConfig
-    target_parallel_config: ParallelConfig
-    enable_chunked_prefill: bool
-    disable_log_stats: bool
+    target_model_config: ModelConfig = field(default=None,
+                                             init=True)  # type: ignore
+    target_parallel_config: ParallelConfig = field(default=None,
+                                                   init=True)  # type: ignore
+    enable_chunked_prefill: bool = field(default=None,
+                                         init=True)  # type: ignore
+    disable_log_stats: bool = field(default=None, init=True)  # type: ignore
 
     # params generated in the post-init stage
     draft_model_config: ModelConfig = field(default=None,
@@ -2156,16 +2159,17 @@ class SpeculativeConfig:
                 "rejection_sampler or typical_acceptance_sampler. Instead it "
                 f"is {self.acceptance_method}")
 
-        if (self.typical_acceptance_sampler_posterior_threshold < 0
-                or self.typical_acceptance_sampler_posterior_alpha < 0):
-            raise ValueError(
-                "Expected typical_acceptance_sampler_posterior_threshold "
-                "and typical_acceptance_sampler_posterior_alpha to be > 0. "
-                "Instead found "
-                f"typical_acceptance_sampler_posterior_threshold = "
-                f"{self.typical_acceptance_sampler_posterior_threshold} and "
-                f"typical_acceptance_sampler_posterior_alpha = "
-                f"{self.typical_acceptance_sampler_posterior_alpha}")
+        if self.acceptance_method == "typical_acceptance_sampler":
+            if (self.typical_acceptance_sampler_posterior_threshold < 0
+                    or self.typical_acceptance_sampler_posterior_alpha < 0):
+                raise ValueError(
+                    "Expected typical_acceptance_sampler_posterior_threshold "
+                    "and typical_acceptance_sampler_posterior_alpha to be > 0."
+                    " Instead found "
+                    f"typical_acceptance_sampler_posterior_threshold = "
+                    f"{self.typical_acceptance_sampler_posterior_threshold} "
+                    f"and typical_acceptance_sampler_posterior_alpha = "
+                    f"{self.typical_acceptance_sampler_posterior_alpha}")
 
         if (self.disable_by_batch_size is not None
                 and self.disable_by_batch_size < 2):
