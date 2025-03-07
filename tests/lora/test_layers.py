@@ -632,6 +632,7 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
         linear, lora_linear = create_random_linear_replicated_layer()
+        assert torch.equal(linear.weight, lora_linear.weight)
         lora_linear.set_mapping(punica_wrapper)
         lora_dict, _ = populate_loras(
             id_to_index,
@@ -757,6 +758,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
         linear, lora_linear = create_random_linear_parallel_layer()
+        assert torch.equal(linear.weight, lora_linear.weight)
         lora_linear.set_mapping(punica_wrapper)
         lora_dict, _ = populate_loras(
             id_to_index,
@@ -904,6 +906,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
         id_to_index = get_random_id_to_index(num_loras, max_loras)
 
         linear, lora_linear = create_column_parallel_packed_layer()
+        assert torch.equal(linear.weight, lora_linear.weight)
         lora_linear.set_mapping(punica_wrapper)
         lora_dict, sublora_dict = populate_loras(
             id_to_index,
