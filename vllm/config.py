@@ -2002,7 +2002,7 @@ class SpeculativeConfig:
 
                 # Detect proposer type or EAGLE prefix to replace hf_config for
                 # EAGLE draft_model
-                if (self.proposer == "ealge"
+                if (self.proposer == "eagle"
                         or "eagle-" in self.draft_model_config.model.lower()):
                     if self.enable_chunked_prefill:
                         raise ValueError(
