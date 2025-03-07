@@ -307,8 +307,9 @@ def initialize_ray_cluster(
     # Create placement group for worker processes
     if envs.VLLM_RAY_PG_NAME:
         # the placement group is specified by the user
-        logger.info("Looking for the placement group %s",
-                    envs.VLLM_RAY_PG_NAME)
+        logger.info(
+            "Looking for the placement group specified by"
+            " VLLM_RAY_PG_NAME: %s", envs.VLLM_RAY_PG_NAME)
         current_placement_group = ray.util.get_placement_group(
             envs.VLLM_RAY_PG_NAME)
     else:
