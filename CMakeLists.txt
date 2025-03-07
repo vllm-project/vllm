@@ -409,7 +409,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C2X=1")
     message(STATUS "Building scaled_mm_c2x for archs: ${SCALED_MM_2X_ARCHS}")
   else()
-    if (SCALED_MM_2X_ARCHS)
+    if (SCALED_MM_3X_ARCHS)
       message(STATUS "Not building scaled_mm_c2x as all archs are already built"
                      " for and covered by scaled_mm_c3x")
     else()
