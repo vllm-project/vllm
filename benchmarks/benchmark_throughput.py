@@ -168,6 +168,7 @@ def run_vllm(
     requests: list[SampleRequest],
     n: int,
     engine_args: EngineArgs,
+    disable_detokenize: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
@@ -194,6 +195,7 @@ def run_vllm(
                 top_p=1.0,
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
+                detokenize=not disable_detokenize,
             ))
     lora_requests: Optional[list[LoRARequest]] = None
     if engine_args.enable_lora:
@@ -232,6 +234,7 @@ async def run_vllm_async(
     n: int,
     engine_args: AsyncEngineArgs,
     disable_frontend_multiprocessing: bool = False,
+    disable_detokenize: bool = False,
 ) -> float:
     from vllm import SamplingParams
 
@@ -262,6 +265,7 @@ async def run_vllm_async(
                     top_p=1.0,
                     ignore_eos=True,
                     max_tokens=request.expected_output_len,
+                    detokenize=not disable_detokenize,
                 ))
             lora_requests.append(request.lora_request)
 
@@ -288,6 +292,7 @@ def run_hf(
     n: int,
     max_batch_size: int,
     trust_remote_code: bool,
+    disable_detokenize: bool = False,
 ) -> float:
     llm = AutoModelForCausalLM.from_pretrained(
         model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
@@ -327,8 +332,9 @@ def run_hf(
             use_cache=True,
             max_new_tokens=max_output_len,
         )
-        # Include the decoding time.
-        tokenizer.batch_decode(llm_outputs, skip_special_tokens=True)
+        if not disable_detokenize:
+            # Include the decoding time.
+            tokenizer.batch_decode(llm_outputs, skip_special_tokens=True)
         pbar.update(len(batch))
 
         # Clear the batch.
@@ -440,14 +446,17 @@ def main(args: argparse.Namespace):
                     args.n,
                     AsyncEngineArgs.from_cli_args(args),
                     args.disable_frontend_multiprocessing,
+                    args.disable_detokenize,
                 ))
         else:
             elapsed_time = run_vllm(requests, args.n,
-                                    EngineArgs.from_cli_args(args))
+                                    EngineArgs.from_cli_args(args),
+                                    args.disable_detokenize)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
-                              args.hf_max_batch_size, args.trust_remote_code)
+                              args.hf_max_batch_size, args.trust_remote_code,
+                              args.disable_detokenize)
     elif args.backend == "mii":
         elapsed_time = run_mii(requests, args.model, args.tensor_parallel_size,
                                args.output_len)
@@ -526,6 +535,11 @@ if __name__ == "__main__":
                         action='store_true',
                         default=False,
                         help="Disable decoupled async engine frontend.")
+    parser.add_argument(
+        "--disable-detokenize",
+        action="store_true",
+        help=("Do not detokenize the response (i.e. do not include "
+              "detokenization time in the measurement)"))
     # LoRA
     parser.add_argument(
         "--lora-path",
