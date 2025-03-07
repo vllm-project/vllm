@@ -150,6 +150,7 @@ class IterationStats:
                 LoRARequestStates.scheduled_request(lora_stats, req_id)
             elif event.type == EngineCoreEventType.PREEMPTED:
                 self.num_preempted_reqs += 1
+                LoRARequestStates.preempted_request(lora_stats, req_id)
 
     def update_from_finished_request(self, finish_reason: "FinishReason",
                                      num_prompt_tokens: int,
@@ -223,6 +224,13 @@ class LoRARequestStates:
             return
         lora_stats.waiting_requests.remove(request_id)
         lora_stats.running_requests.add(request_id)
+
+    @staticmethod
+    def preempted_request(lora_stats: Optional[LoRAStats], request_id: str):
+        if lora_stats is None:
+            return
+        lora_stats.running_requests.remove(request_id)
+        lora_stats.waiting_requests.add(request_id)
 
     def update_iteration_stats(self,
                                iteration_stats: Optional[IterationStats]):
