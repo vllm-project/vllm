@@ -5,17 +5,16 @@ from typing import Optional
 
 import torch
 
+import vllm._custom_ops as ops
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, moe_align_block_size, try_get_optimal_moe_config)
-from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import direct_register_custom_op
 
 
 def get_scalar_type(num_bits: int, has_zp: bool):
     if has_zp:
-        assert num_bits == 4
-        return scalar_types.uint4
+        return scalar_types.uint4 if num_bits == 4 else scalar_types.uint8
     else:
         return scalar_types.uint4b8 if num_bits == 4 else scalar_types.uint8b128
 
@@ -30,6 +29,7 @@ def single_marlin_moe(
     g_idx: Optional[torch.Tensor] = None,
     sort_indices: Optional[torch.Tensor] = None,
     w_zeros: Optional[torch.Tensor] = None,
+    workspace: Optional[torch.Tensor] = None,
     num_bits: int = 8,
     is_k_full: bool = True,
 ) -> torch.Tensor:
@@ -62,7 +62,7 @@ def single_marlin_moe(
     assert gating_output.shape[1] == w.shape[0], "Number of experts mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w.is_contiguous(), "Expert weights must be contiguous"
-    assert hidden_states.dtype == torch.float16
+    assert hidden_states.dtype in [torch.float16, torch.bfloat16]
     assert num_bits in [4, 8]
 
     M, K = hidden_states.shape
@@ -83,39 +83,36 @@ def single_marlin_moe(
 
     block_size_m = config['BLOCK_SIZE_M']
 
-    sorted_token_ids, _, _ = moe_align_block_size(topk_ids, block_size_m, E)
+    sorted_token_ids, expert_ids, num_tokens_post_padded = \
+        moe_align_block_size(topk_ids, block_size_m, E)
 
-    max_workspace_size = (N // 64) * 16
-    workspace = torch.zeros(max_workspace_size,
-                            dtype=torch.int,
-                            device=hidden_states.device,
-                            requires_grad=False)
+    if workspace is None:
+        max_workspace_size = (max(2 * N, K) // 64) * \
+            (sorted_token_ids.size(0) // block_size_m)
+        device = hidden_states.device
+        sms = torch.cuda.get_device_properties(device).multi_processor_count
+        max_workspace_size = min(max_workspace_size,sms)
+        workspace = torch.zeros(max_workspace_size, dtype=torch.int,
+                                device=device, requires_grad=False)
 
-    has_zero_point = w_zeros is not None
-    if w_zeros is None:
-        w_zeros = torch.empty((0, 0),
-                              dtype=hidden_states.dtype,
-                              device=hidden_states.device,
-                              requires_grad=False)
+    scalar_type = get_scalar_type(num_bits, w_zeros is not None)
 
-    if g_idx is None:
-        g_idx = torch.empty((0, 0),
-                            dtype=torch.int32,
-                            device=hidden_states.device,
-                            requires_grad=False)
-
-    if sort_indices is None:
-        sort_indices = torch.empty((0),
-                                   dtype=torch.int32,
-                                   device=hidden_states.device,
-                                   requires_grad=False)
-
-    scalar_type = get_scalar_type(num_bits, has_zero_point)
-
-    intermediate_cache = torch.ops._moe_C.marlin_gemm_moe(
-        hidden_states, w, sorted_token_ids, topk_weights, topk_ids, scales,
-        w_zeros, g_idx, sort_indices, workspace, scalar_type.id, M, N, K,
-        is_k_full, E, topk, block_size_m, True, False)
+    intermediate_cache = ops.moe_wna16_marlin_gemm(
+        hidden_states, None,
+        w, scales, w_zeros, g_idx, sort_indices, workspace,
+        sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights,
+        moe_block_size=block_size_m,
+        top_k=topk,
+        mul_topk_weights=False,
+        b_q_type=scalar_type,
+        size_m=M,
+        size_n=2 * N,
+        size_k=K,
+        is_k_full=is_k_full,
+        use_atomic_add=False,
+        use_fp32_reduce=True,
+        is_zp_float=False
+    ).view(-1, topk, 2 * N)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
@@ -159,6 +156,7 @@ def fused_marlin_moe(
     sort_indices2: Optional[torch.Tensor] = None,
     w1_zeros: Optional[torch.Tensor] = None,
     w2_zeros: Optional[torch.Tensor] = None,
+    workspace: Optional[torch.Tensor] = None,
     num_bits: int = 8,
     is_k_full: bool = True,
 ) -> torch.Tensor:
@@ -200,22 +198,8 @@ def fused_marlin_moe(
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
-    assert hidden_states.dtype == torch.float16
+    assert hidden_states.dtype in [torch.float16, torch.bfloat16]
     assert num_bits in [4, 8]
-
-    has_no_act_order = (g_idx1 is None and g_idx2 is None
-                        and sort_indices1 is None and sort_indices2 is None)
-    has_all_act_order = (g_idx1 is not None and g_idx2 is not None
-                         and sort_indices1 is not None
-                         and sort_indices2 is not None)
-    assert has_no_act_order or has_all_act_order, (
-        "g_idx and sorted_indices "
-        "must be all not None or must be all None")
-
-    has_no_zp = w1_zeros is None and w2_zeros is None
-    has_all_zp = w1_zeros is not None and w2_zeros is not None
-    assert has_no_zp or has_all_zp, ("zero points must be both not None or "
-                                     "must be both None")
 
     M, K = hidden_states.shape
     E = w1.shape[0]
@@ -234,44 +218,20 @@ def fused_marlin_moe(
 
     block_size_m = config["BLOCK_SIZE_M"]
 
-    sorted_token_ids, _, _ = moe_align_block_size(topk_ids, block_size_m, E)
+    sorted_token_ids, expert_ids, num_tokens_post_padded = \
+        moe_align_block_size(topk_ids, block_size_m, E)
 
-    max_workspace_size = (max(2 * N, K) // 64) * 16
-    workspace = torch.zeros(max_workspace_size,
-                            dtype=torch.int,
-                            device=current_platform.device_type,
-                            requires_grad=False)
+    if workspace is None:
+        max_workspace_size = (max(2 * N, K) // 64) * \
+            (sorted_token_ids.size(0) // block_size_m)
+        device = hidden_states.device
+        sms = torch.cuda.get_device_properties(device).multi_processor_count
+        max_workspace_size = min(max_workspace_size,sms)
+        workspace = torch.zeros(max_workspace_size, dtype=torch.int,
+                                device=device, requires_grad=False)
 
-    if has_no_zp:
-        w1_zeros = torch.empty((0, 0),
-                               dtype=hidden_states.dtype,
-                               device=hidden_states.device,
-                               requires_grad=False)
-        w2_zeros = torch.empty((0, 0),
-                               dtype=hidden_states.dtype,
-                               device=hidden_states.device,
-                               requires_grad=False)
-
-    if has_no_act_order:
-        g_idx1 = torch.empty((0, 0),
-                             dtype=torch.int32,
-                             device=hidden_states.device,
-                             requires_grad=False)
-        g_idx2 = torch.empty((0, 0),
-                             dtype=torch.int32,
-                             device=hidden_states.device,
-                             requires_grad=False)
-        sort_indices1 = torch.empty((0),
-                                    dtype=torch.int32,
-                                    device=hidden_states.device,
-                                    requires_grad=False)
-        sort_indices2 = torch.empty((0, 0),
-                                    dtype=torch.int32,
-                                    device=hidden_states.device,
-                                    requires_grad=False)
-
-    scalar_type1 = get_scalar_type(num_bits, has_all_zp)
-    scalar_type2 = get_scalar_type(num_bits, has_all_zp)
+    scalar_type1 = get_scalar_type(num_bits, w1_zeros is not None)
+    scalar_type2 = get_scalar_type(num_bits, w2_zeros is not None)
 
     intermediate_cache2 = torch.empty(
         (M * topk_ids.shape[1], N),
@@ -279,54 +239,42 @@ def fused_marlin_moe(
         dtype=hidden_states.dtype,
     )
 
-    intermediate_cache1 = torch.ops._moe_C.marlin_gemm_moe(
-        hidden_states,
-        w1,
-        sorted_token_ids,
-        topk_weights,
-        topk_ids,
-        w1_scale,
-        w1_zeros,
-        g_idx1,
-        sort_indices1,
-        workspace,
-        scalar_type1.id,
-        M,
-        2 * N,
-        K,
-        is_k_full,
-        E,
-        topk,
-        block_size_m,
-        True,
-        False,
+    intermediate_cache1 = ops.moe_wna16_marlin_gemm(
+        hidden_states, None,
+        w1, w1_scale, w1_zeros, g_idx1, sort_indices1, workspace,
+        sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights,
+        moe_block_size=block_size_m,
+        top_k=topk,
+        mul_topk_weights=False,
+        b_q_type=scalar_type1,
+        size_m=M,
+        size_n=2 * N,
+        size_k=K,
+        is_k_full=is_k_full,
+        use_atomic_add=False,
+        use_fp32_reduce=True,
+        is_zp_float=False
     )
 
     torch.ops._C.silu_and_mul(intermediate_cache2,
                               intermediate_cache1.view(-1, 2 * N))
 
-    intermediate_cache3 = torch.ops._moe_C.marlin_gemm_moe(
-        intermediate_cache2,
-        w2,
-        sorted_token_ids,
-        topk_weights,
-        topk_ids,
-        w2_scale,
-        w2_zeros,
-        g_idx2,
-        sort_indices2,
-        workspace,
-        scalar_type2.id,
-        M,
-        K,
-        N,
-        is_k_full,
-        E,
-        topk,
-        block_size_m,
-        False,
-        True,
-    )
+    intermediate_cache3 = ops.moe_wna16_marlin_gemm(
+        intermediate_cache2, None,
+        w2, w2_scale, w2_zeros, g_idx2, sort_indices2, workspace,
+        sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights,
+        moe_block_size=block_size_m,
+        top_k=1,
+        mul_topk_weights=True,
+        b_q_type=scalar_type2,
+        size_m=M * topk,
+        size_n=K,
+        size_k=N,
+        is_k_full=is_k_full,
+        use_atomic_add=False,
+        use_fp32_reduce=True,
+        is_zp_float=False
+    ).view(-1, topk, K)
 
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                      dim=1)
@@ -347,6 +295,7 @@ def fused_marlin_moe_fake(
     sort_indices2: Optional[torch.Tensor] = None,
     w1_zeros: Optional[torch.Tensor] = None,
     w2_zeros: Optional[torch.Tensor] = None,
+    workspace: Optional[torch.Tensor] = None,
     num_bits: int = 8,
     is_k_full: bool = True,
 ) -> torch.Tensor:

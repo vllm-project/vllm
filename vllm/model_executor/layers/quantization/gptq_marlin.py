@@ -153,12 +153,7 @@ class GPTQMarlinConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, FusedMoE):
-            if layer.local_num_experts > 32:
-                # For MoEs with many experts the moe_wna16 kernel is faster
-                return MoeWNA16Config.from_config(
-                    self.full_config).get_quant_method(layer, prefix)
-            else:
-                return GPTQMarlinMoEMethod(self)
+            return GPTQMarlinMoEMethod(self)
         return get_linear_quant_method(self, layer, prefix,
                                        GPTQMarlinLinearMethod)
 
@@ -493,6 +488,11 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
                                  w2_g_idx_sort_indices)
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
+        device = layer.w13_qweight.device
+        sms = torch.cuda.get_device_properties(device).multi_processor_count
+        layer.workspace = torch.zeros((sms,), dtype=torch.int,
+                                      device=device, requires_grad=False)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 
         # Process act_order
@@ -626,4 +626,5 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             sort_indices1=layer.w13_g_idx_sort_indices,
             sort_indices2=layer.w2_g_idx_sort_indices,
             num_bits=self.quant_config.quant_type.size_bits,
+            workspace=layer.workspace,
             is_k_full=self.is_k_full).to(orig_dtype)

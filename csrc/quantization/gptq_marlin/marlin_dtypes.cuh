@@ -5,7 +5,11 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
-namespace marlin {
+#ifndef MARLIN_NAMESPACE_NAME
+#define MARLIN_NAMESPACE_NAME marlin
+#endif
+
+namespace MARLIN_NAMESPACE_NAME {
 
 template <typename scalar_t>
 class ScalarType {};
@@ -74,6 +78,6 @@ class ScalarType<nv_bfloat16> {
 #endif
 };
 
-}  // namespace marlin
+}  // namespace MARLIN_NAMESPACE_NAME
 
 #endif

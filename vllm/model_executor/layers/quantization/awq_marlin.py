@@ -136,12 +136,7 @@ class AWQMarlinConfig(QuantizationConfig):
                     self.full_config).get_quant_method(layer, prefix)
             return AWQMarlinLinearMethod(self)
         elif isinstance(layer, FusedMoE):
-            if layer.local_num_experts > 32:
-                # For MoEs with many experts the moe_wna16 kernel is faster
-                return MoeWNA16Config.from_config(
-                    self.full_config).get_quant_method(layer, prefix)
-            else:
-                return AWQMoEMethod(self)
+            return AWQMoEMethod(self)
         return None
 
     @classmethod
@@ -391,6 +386,11 @@ class AWQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
 
+        device = layer.w13_qweight.device
+        sms = torch.cuda.get_device_properties(device).multi_processor_count
+        layer.workspace = torch.zeros((sms,), dtype=torch.int,
+                                      device=device, requires_grad=False)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.w13_qweight.shape[0]
         device = layer.w13_qweight.device
@@ -500,5 +500,6 @@ class AWQMoEMethod(FusedMoEMethodBase):
             topk_ids,
             w1_zeros=layer.w13_qzeros,
             w2_zeros=layer.w2_qzeros,
+            workspace=layer.workspace,
             num_bits=self.quant_config.weight_bits,
         )
