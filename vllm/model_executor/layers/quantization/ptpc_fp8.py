@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear)
+    Fp8LinearOp)
 from vllm.platforms import current_platform
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -93,6 +93,8 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         super().__init__(quant_config=quant_config)
         # Force weight quantization
         self.quant_config.is_checkpoint_fp8_serialized = False
+        self.fp8_linear = Fp8LinearOp(cutlass_fp8_supported=False,
+                                      use_per_token_if_dynamic=True)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data,
@@ -115,11 +117,9 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return apply_fp8_linear(input=x,
-                                weight=layer.weight,
-                                weight_scale=layer.weight_scale,
-                                input_scale=None,
-                                input_scale_ub=None,
-                                bias=bias,
-                                cutlass_fp8_supported=False,
-                                use_per_token_if_dynamic=True)
+        return self.fp8_linear.apply(input=x,
+                                     weight=layer.weight,
+                                     weight_scale=layer.weight_scale,
+                                     input_scale=None,
+                                     input_scale_ub=None,
+                                     bias=bias)
