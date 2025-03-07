@@ -972,6 +972,8 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         Returns:
             - output
             - bias
+
+        TODO: does not yet support DoRA
         """
         # Set up backprop all-reduce.
         if self.base_layer.input_is_parallel:
