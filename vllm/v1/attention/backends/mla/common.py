@@ -659,66 +659,13 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             self.vllm_flash_attn_version == 3
             and current_platform.get_device_capability()[0] == 9)
 
-    def _flash_attn_varlen_diff_headdims(self,
-                                         q,
-                                         k,
-                                         v,
-                                         return_softmax_lse=False,
-                                         softmax_scale=None,
-                                         **kwargs):
-        maybe_padded_v = v
         if self._pad_v:
-            maybe_padded_v = torch.nn.functional.pad(
-                v, [0, q.shape[-1] - v.shape[-1]], value=0)
-
-        if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN:
-            attn_out = self.triton_fa_func(
-                q,
-                k,
-                maybe_padded_v,
-                sm_scale=softmax_scale,
-                **kwargs,
-            )
-        elif is_vllm_fa:
-            attn_out = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=maybe_padded_v,
-                return_softmax_lse=return_softmax_lse,
-                softmax_scale=softmax_scale,
-                **kwargs,
-            )
+            self.pad_v = lambda v: torch.nn.functional.pad(
+                v, [0, self.qk_head_dim - v.shape[-1]], value=0)
+            self.unpad_o = lambda o: o[..., :self.v_head_dim]
         else:
-            # Use return_attn_probs instead of return_softmax_lse for RoCM
-            attn_out = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=maybe_padded_v,
-                return_attn_probs=return_softmax_lse,
-                softmax_scale=softmax_scale,
-                **kwargs,
-            )
-
-        # Unpack the output if there is multiple results,
-        # triton always returns (output, softmax_lse),
-        # vllm_flash_attn returns (output, softmax_lse) when
-        #  `return_softmax_lse = True`
-        # flash_attn (RoCM) returns (output, softmax_lse, ...) when
-        #  `return_attn_probs = True`
-        rest = None
-        if isinstance(attn_out, tuple):
-            attn_out, *rest = attn_out
-
-        # unpad if necessary
-        if self._pad_v:
-            attn_out = attn_out[..., :v.shape[-1]]
-
-        # Remain consistent with old `flash_attn_varlen_func` where there
-        # is only one output tensor if `return_softmax_lse` is False.
-        if return_softmax_lse:
-            assert rest is not None
-            return attn_out, rest[0]
-        return attn_out
+            self.pad_v = lambda v: v
+            self.unpad_o = lambda o: o
 
     def _v_up_proj_and_o_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
@@ -962,20 +909,20 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                           dim=-1)
+            v = self.pad_v(v)
 
-            attn_output, attn_softmax_lse = \
-                self._flash_attn_varlen_diff_headdims(
-                    q=q,
-                    k=k,
-                    v=v,
-                    cu_seqlens_q=prefill_metadata.query_start_loc,
-                    cu_seqlens_k=prefill_metadata.chunked_context.cu_seq_lens[i],
-                    max_seqlen_q=prefill_metadata.max_query_len,
-                    max_seqlen_k=prefill_metadata.chunked_context.max_seq_lens[i],
-                    softmax_scale=self.scale,
-                    causal=False,  # Context is unmasked
-                    return_softmax_lse=True,
-                )
+            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.chunked_context.cu_seq_lens[i],
+                max_seqlen_q=prefill_metadata.max_query_len,
+                max_seqlen_k=prefill_metadata.chunked_context.max_seq_lens[i],
+                softmax_scale=self.scale,
+                causal=False,  # Context is unmasked
+                return_softmax_lse=True,
+            )
 
             if output is None:
                 output = attn_output
@@ -1013,8 +960,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+        v = self.pad_v(v)
 
-        output = self._flash_attn_varlen_diff_headdims(
+        output = self.flash_attn_varlen_func(
             q=q,
             k=k,
             v=v,
@@ -1040,6 +988,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 suffix_output=suffix_output,
                 suffix_lse=suffix_lse,
             )
+
+        output = self.unpad_o(output)
 
         return self.o_proj(output.flatten(start_dim=-2))[0]
 
