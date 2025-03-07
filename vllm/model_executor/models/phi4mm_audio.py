@@ -396,26 +396,8 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         else:
             raise NotImplementedError
 
-    def post_init(self, init_model_config):
-
-        pretrained_speech_encoder_path = init_model_config.get(
-            "pretrained_speech_encoder_path", None)
-        if pretrained_speech_encoder_path:
-            model_state = torch.load(pretrained_speech_encoder_path,
-                                     map_location="cpu")
-            encoder_state_dict = {}
-            for k, v in model_state.items():
-                if "encoder." in k:
-                    tmp_k = k.replace("encoder.", "")
-                    encoder_state_dict[tmp_k] = v
-
-            if hasattr(self, "encoder_embedding"):
-                del self.encoder_embedding
-            self.load_state_dict(encoder_state_dict)
-
-        if not hasattr(self, "encoder_embedding"):
-            self.encoder_embedding = MeanVarianceNormLayer(
-                self.encoder_embedding_config["input_size"])
+        self.encoder_embedding = MeanVarianceNormLayer(
+            self.encoder_embedding_config["input_size"])
 
     def compute_lens_change(self, feature_lens):
         """feature_lens: int
@@ -1168,14 +1150,6 @@ class AudioEmbedding(nn.Module):
             self.conv_ds = NemoConvSubsampling(**default_nemo_conv_settings, )
         else:
             self.conv_ds = None
-
-        enable_gradient_checkpointing = kwargs.get(
-            "enable_gradient_checkpointing", False)
-        if enable_gradient_checkpointing:
-            self.encoder.gradient_checkpointing_enable()
-
-            if self.qformer:
-                self.qformer.enable_gradient_checkpointing()
 
         projection_cls = kwargs.get("projection_cls", "linear")
         if projection_cls == "linear":

@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, SiglipVisionConfig
 from transformers.utils import logging
 
 from vllm.config import VllmConfig
@@ -34,8 +34,8 @@ from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .interfaces import SupportsLoRA, SupportsMultiModal
 from .phi4mm_audio import AudioEmbedding
+from .siglip import SiglipVisionModel
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
-from .vision_siglip_navit import get_siglip_vision_model
 
 # <|endoftext10|> (see vocab.json in hf model)
 _IMAGE_PLACEHOLDER_TOKEN_ID = 200010
@@ -339,6 +339,24 @@ def preprocess(images, dynamic_hd_size, vit_resolution, vit_patch_size):
     return data
 
 
+def get_siglip_vision_model(**kwargs):
+    siglip_vision_config = {
+        "hidden_size": 1152,
+        "image_size": 448,
+        "intermediate_size": 4304,
+        "model_type": "siglip_vision_model",
+        "num_attention_heads": 16,
+        "num_hidden_layers": 27,
+        "patch_size": 14,
+    }
+
+    model_config = SiglipVisionConfig(**siglip_vision_config, **kwargs)
+
+    vision_model = SiglipVisionModel(model_config).vision_model
+
+    return vision_model
+
+
 class Phi4MMImageEncoder(nn.Module):
     """Image embedding."""
 
@@ -368,8 +386,7 @@ class Phi4MMImageEncoder(nn.Module):
             self.layer_idx = -2
             self.type_feature = 'patch'
 
-        self.img_processor = get_siglip_vision_model(
-            _flash_attn_2_enabled=True)
+        self.img_processor = get_siglip_vision_model()
 
         pe_weight = self.img_processor.embeddings.position_embedding.weight
         L, D = pe_weight.size()
