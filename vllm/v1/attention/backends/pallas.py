@@ -12,8 +12,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import CommonAttentionState
 
 # These are the 2 tunable parameters of the paged attention Pallas kernel.
-NUM_QUERIES_PER_BLOCK = 32
-NUM_KV_PAGES_PER_BLOCK = 128
+NUM_QUERIES_PER_BLOCK = 16
+NUM_KV_PAGES_PER_BLOCK = 256
 
 
 class PallasAttentionBackend(AttentionBackend):
