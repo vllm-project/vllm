@@ -122,7 +122,7 @@ SingleProcess AUTOTUNE benchmarking takes 2.0428 seconds and 7.5727 seconds prec
 
 It means, for a matrix multiplication with shape `8x2048x3072`, `torch.compile` tries triton template with various configs, and it is much faster than the default code (which dispatches to cublas library).
 
-Unfortunately, because auto-tuning takes quite a long time (even though it can be cached for later use), for the sake of user-friendliness, we turn it off by default. If you want to have max performance, it is recommended to try it, by compiling specific shapes.
+Unfortunately, because auto-tuning takes quite a long time (from seconds to minutes, depending on the model size and the batch size), even though it can be cached for later use, for the sake of user-friendliness, we turn it off by default. If you want to have max performance, it is recommended to try it, by compiling specific shapes.
 
 ## Cudagraph Capture
 
