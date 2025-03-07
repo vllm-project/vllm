@@ -145,72 +145,10 @@ class MultiModalProfiler(Generic[_I]):
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         )
 
-    def create_encoder_dummy_data(
+    def get_and_validate_mm_inputs(
         self,
         seq_len: int,
-        mm_inputs: MultiModalEncDecInputs,
-        total_placeholders_by_modality: Mapping[str, int],
-    ) -> DummyData:
-        # Avoid circular import
-        from vllm.sequence import SequenceData
-
-        # For encoder-decoder models, use encoder prompt token ids instead of
-        # decoder prompt to construct dummy seq_data for encoder profiling.
-        encoder_prompt_token_ids = mm_inputs["encoder_prompt_token_ids"]
-        encoder_prompt_token_ids.extend(
-            [0] * (seq_len - len(encoder_prompt_token_ids)))
-
-        return DummyData(
-            seq_data=SequenceData.from_seqs(encoder_prompt_token_ids),
-            multi_modal_data=None,
-            multi_modal_placeholders=None,
-        )
-
-    def create_decoder_dummy_data(
-        self,
-        seq_len: int,
-        mm_inputs: MultiModalInputs,
-        total_placeholders_by_modality: Mapping[str, int],
-    ) -> DummyData:
-        # Avoid circular import
-        from vllm.sequence import SequenceData
-
-        prompt_token_ids = mm_inputs["prompt_token_ids"]
-        total_len = len(prompt_token_ids)
-
-        # V0 does not support chunked prefill.
-        if total_len > seq_len and not envs.VLLM_USE_V1:
-            logger.warning(
-                "The context length (%d) of the model is too short "
-                "to hold the multi-modal embeddings in the worst case "
-                "(%d tokens in total, out of which %s are reserved for "
-                "multi-modal embeddings). This may cause certain "
-                "multi-modal inputs to fail during inference, even when "
-                "the input text is short. To avoid this, you should "
-                "increase `max_model_len`, reduce `max_num_seqs`, "
-                "and/or reduce `mm_counts`.", seq_len, total_len,
-                total_placeholders_by_modality)
-
-            return DummyData(
-                seq_data=SequenceData.from_prompt_token_counts((0, seq_len)),
-                multi_modal_data=None,
-                multi_modal_placeholders=None,
-            )
-
-        prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
-
-        return DummyData(
-            seq_data=SequenceData.from_seqs(prompt_token_ids),
-            multi_modal_data=mm_inputs["mm_kwargs"],
-            multi_modal_placeholders=mm_inputs["mm_placeholders"],
-        )
-
-    def get_dummy_data(
-        self,
-        seq_len: int,
-        is_encoder_data: bool = False,
-    ) -> DummyData:
-
+    ) -> tuple[MultiModalInputs, Mapping[str, int]]:
         mm_counts = self.get_mm_limits()
 
         info = self.processing_info
@@ -241,18 +179,68 @@ class MultiModalProfiler(Generic[_I]):
                 f"{total_placeholders_by_modality} placeholder tokens, which "
                 f"is not the expected {expected_placeholders_by_modality} "
                 "tokens.")
+        return mm_inputs, total_placeholders_by_modality
 
-        if is_encoder_data:
-            mm_inputs = cast(MultiModalEncDecInputs, mm_inputs)
-            dummy_data = self.create_encoder_dummy_data(
-                seq_len,
-                mm_inputs,
-                total_placeholders_by_modality,
+    def get_encoder_dummy_data(
+        self,
+        seq_len: int,
+    ) -> DummyData:
+        # Avoid circular import
+        from vllm.sequence import SequenceData
+
+        mm_inputs, _ = self.get_and_validate_mm_inputs(seq_len)
+        mm_inputs = cast(MultiModalEncDecInputs, mm_inputs)
+
+        # For encoder-decoder models, use encoder prompt token ids instead of
+        # decoder prompt to construct dummy seq_data for encoder profiling.
+        encoder_prompt_token_ids = mm_inputs["encoder_prompt_token_ids"]
+
+        total_len = len(encoder_prompt_token_ids)
+        num_tokens_to_pad = max(total_len, seq_len) - total_len
+        encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
+
+        return DummyData(
+            seq_data=SequenceData.from_seqs(encoder_prompt_token_ids),
+            multi_modal_data=None,
+            multi_modal_placeholders=None,
+        )
+
+    def get_decoder_dummy_data(
+        self,
+        seq_len: int,
+    ) -> DummyData:
+        # Avoid circular import
+        from vllm.sequence import SequenceData
+
+        (mm_inputs, total_placeholders_by_modality
+         ) = self.get_and_validate_mm_inputs(seq_len)
+
+        prompt_token_ids = mm_inputs["prompt_token_ids"]
+        total_len = len(prompt_token_ids)
+
+        # V0 does not support chunked prefill.
+        if total_len > seq_len and not envs.VLLM_USE_V1:
+            logger.warning(
+                "The context length (%d) of the model is too short "
+                "to hold the multi-modal embeddings in the worst case "
+                "(%d tokens in total, out of which %s are reserved for "
+                "multi-modal embeddings). This may cause certain "
+                "multi-modal inputs to fail during inference, even when "
+                "the input text is short. To avoid this, you should "
+                "increase `max_model_len`, reduce `max_num_seqs`, "
+                "and/or reduce `mm_counts`.", seq_len, total_len,
+                total_placeholders_by_modality)
+
+            return DummyData(
+                seq_data=SequenceData.from_prompt_token_counts((0, seq_len)),
+                multi_modal_data=None,
+                multi_modal_placeholders=None,
             )
-        else:
-            dummy_data = self.create_decoder_dummy_data(
-                seq_len,
-                mm_inputs,
-                total_placeholders_by_modality,
-            )
-        return dummy_data
+
+        prompt_token_ids.extend([0] * (seq_len - len(prompt_token_ids)))
+
+        return DummyData(
+            seq_data=SequenceData.from_seqs(prompt_token_ids),
+            multi_modal_data=mm_inputs["mm_kwargs"],
+            multi_modal_placeholders=mm_inputs["mm_placeholders"],
+        )
