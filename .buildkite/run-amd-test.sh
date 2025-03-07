@@ -72,6 +72,10 @@ HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
 
+# environment variables
+SKIP_ROCM_ATIER_MODEL_TEST_CASES="True"
+echo $SKIP_ROCM_ATIER_MODEL_TEST_CASES
+
 commands=$@
 echo "Commands:$commands"
 #ignore certain kernels tests
@@ -94,15 +98,6 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_sampler.py \
   --ignore=kernels/test_cascade_flash_attn.py \
   --ignore=kernels/test_mamba_mixer2.py"
-fi
-
-#ignore certain Model tests
-if [[ $commands == *" models/decoder_only/language "* ]]; then
-  commands=${commands//" models/decoder_only/language "/" models/decoder_only/language \
-  --ignore=models/decoder_only/language/test_mistral.py \
-  --ignore=models/decoder_only/language/test_phimoe.py \
-  --ignore=models/decoder_only/language/test_granite.py \
-  --ignore=models/decoder_only/language/test_models.py "}
 fi
 
 #ignore certain Entrypoints tests
