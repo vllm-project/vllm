@@ -29,7 +29,10 @@ from vllm.v1.attention.backends.pallas import (NUM_KV_PAGES_PER_BLOCK,
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
+from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput, SamplerOutput
+from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.sampler import Sampler
+from vllm.v1.sample.tpu_metadata import TPUSupportedSamplingMetadata
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -42,6 +45,8 @@ logger = init_logger(__name__)
 # FIXME(woosuk): Find a more reliable way to prevent possible bugs.
 _PAD_SLOT_ID = 1_000_000_000
 INVALID_TOKEN_ID = -1
+# Smallest output size
+MIN_NUM_SEQS = 8
 
 
 class TPUModelRunner:
@@ -277,6 +282,9 @@ class TPUModelRunner:
                 req_data.num_computed_tokens)
             self.input_batch.block_table.append_row(req_data.new_block_ids,
                                                     req_index)
+        # Check if the batch has changed. If not, we can skip copying the
+        # sampling metadata from CPU to GPU.
+        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -294,6 +302,9 @@ class TPUModelRunner:
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
+
+        if batch_changed:
+            self.input_batch.refresh_sampling_metadata()
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
     def get_model(self) -> nn.Module:
@@ -546,6 +557,9 @@ class TPUModelRunner:
     ) -> ModelRunnerOutput:
         # Update cached state
         self._update_states(scheduler_output)
+        # TODO (NickLucche) something before this point (likely _update_state)
+        # is causing a small recompilation on 2nd runs. Optimize.
+        # xm.mark_step()
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -556,7 +570,6 @@ class TPUModelRunner:
 
         # Prepare inputs
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -576,6 +589,20 @@ class TPUModelRunner:
             input_ids = self.input_ids
             inputs_embeds = None
 
+        sampling_metadata = self.input_batch.sampling_metadata
+        num_reqs = self.input_batch.num_reqs
+        # Indices at which we sample (positions of last token in the sequence).
+        # logits_indices = logits_indices[:num_reqs]
+        padded_do_sample_indices = _pad_indices_do_sample(
+            logits_indices, num_reqs)
+        # NOTE (NickLucche) here we sync with TPU: if there's any shape
+        # mismatch in pre-processing, it will trigger a small recompilation
+        # of the code thus far. Forward graph remains untouched.
+        tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
+            from_sampling_metadata(sampling_metadata, padded_do_sample_indices,
+                                    num_reqs, self.device)
+        # Make mypy happy
+        sampling_metadata = cast(SamplingMetadata, tpu_sampling_metadata)
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
@@ -584,14 +611,12 @@ class TPUModelRunner:
                 kv_caches=self.kv_caches,
                 inputs_embeds=inputs_embeds,
             )
-        hidden_states = hidden_states[:total_num_scheduled_tokens]
-        num_reqs = self.input_batch.num_reqs
-        logits_indices = logits_indices[:num_reqs]
-        hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states, None)
-        selected_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
+        xm.mark_step()  # break model graph
+        selected_token_ids = self.model.sample_from_hidden(
+            hidden_states, sampling_metadata)
 
-        # Then, let's update the cache state.
+        # Update the cache state concurrently. Code above will not block until
+        # we use `selected_token_ids`. Add mark_step if post-processing changes
         request_seq_lens: list[tuple[int, CachedRequestState, int]] = []
         for i, req_id in zip(range(num_reqs), self.input_batch.req_ids):
             assert req_id is not None
@@ -608,7 +633,6 @@ class TPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        # num_reqs entries should be non-None
         assert all(
             req_id is not None for req_id in
             self.input_batch.req_ids[:num_reqs]), "req_ids contains None"
@@ -620,7 +644,11 @@ class TPUModelRunner:
 
         max_gen_len = selected_token_ids.shape[-1]
         if max_gen_len == 1:
+            # ModelWrapper returns reqs output + padding. Remove padding
+            # here to keep dynamic op outside of main graph.
             valid_sampled_token_ids = selected_token_ids.tolist()
+            valid_sampled_token_ids = valid_sampled_token_ids[:num_reqs]
+
             for i, req_state, seq_len in request_seq_lens:
                 token_id = valid_sampled_token_ids[i][0]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
@@ -677,11 +705,8 @@ class TPUModelRunner:
                                    fullgraph=True,
                                    dynamic=False)
 
-    def _dummy_run(
-        self,
-        kv_caches,
-        num_tokens: int,
-    ) -> None:
+    @torch.no_grad()
+    def _dummy_run(self, kv_caches, num_tokens: int) -> None:
         if self.is_multimodal_model:
             input_ids = None
             inputs_embeds = torch.zeros((num_tokens, self.hidden_size),
@@ -730,13 +755,10 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
-            assert self.model is not None
-            self.model(
-                input_ids=input_ids,
-                positions=position_ids,
-                kv_caches=kv_caches,
-                inputs_embeds=inputs_embeds,
-            )
+            self.model(input_ids=input_ids,
+                       positions=position_ids,
+                       kv_caches=kv_caches,
+                       inputs_embeds=inputs_embeds)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -746,13 +768,41 @@ class TPUModelRunner:
         start = time.perf_counter()
         num_tokens = 16
         while True:
-            self._dummy_run(self.kv_caches, num_tokens)
             logger.info("  -- num_tokens: %d", num_tokens)
+            self._dummy_run(self.kv_caches, num_tokens)
             xm.mark_step()
-            xm.wait_device_ops()
             if num_tokens >= self.max_num_tokens:
                 break
             num_tokens *= 2
+        xm.wait_device_ops()
+        end = time.perf_counter()
+        logger.info("Compilation finished in in %.2f [secs].", end - start)
+
+        logger.info("Compiling sampling with different input shapes.")
+        start = time.perf_counter()
+        num_tokens = 16
+        num_reqs_to_sample = MIN_NUM_SEQS
+        hsize = self.model_config.get_hidden_size()
+        device = self.device
+        # Compile sampling step for different model+sampler outputs in
+        # [MIN_NUM_SEQS, pad(max_num_reqs)]
+        while True:
+            dummy_hidden = torch.randn((num_tokens, hsize), device=device)
+            while True:
+                # To allow sampling, trace with all supported sampling args.
+                sampling_meta = TPUSupportedSamplingMetadata.\
+                    get_default_sampling_params(num_reqs_to_sample, device)
+                logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
+                            num_reqs_to_sample)
+                self.model.sample_from_hidden(dummy_hidden, sampling_meta)
+                xm.mark_step()
+                if num_reqs_to_sample >= self.max_num_reqs:
+                    break
+                num_reqs_to_sample *= 2
+            if num_tokens >= self.max_num_tokens:
+                break
+            num_tokens *= 2
+        xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
 
@@ -800,6 +850,13 @@ class ModelWrapperV1(nn.Module):
     def __init__(self, model: nn.Module):
         super().__init__()
         self.model = model
+        self.sampler = Sampler()
+
+    def sample(
+            self, logits: torch.Tensor,
+            sampling_metadata: TPUSupportedSamplingMetadata) -> SamplerOutput:
+        sampler_out = self.sampler(logits, sampling_metadata)
+        return sampler_out
 
     def forward(
         self,
@@ -808,7 +865,7 @@ class ModelWrapperV1(nn.Module):
         kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Executes the forward pass of the model and samples the next token.
+        """Executes the forward pass of the model.
 
         Args:
             input_ids: The input token IDs of shape [num_tokens].
@@ -819,7 +876,6 @@ class ModelWrapperV1(nn.Module):
                 hidden_size]. It is used for multimodal models.
         """
 
-        assert self.model is not None
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -828,12 +884,32 @@ class ModelWrapperV1(nn.Module):
 
         return hidden_states
 
-    def compute_logits(
+    def sample_from_hidden(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata,
-    ) -> Optional[torch.Tensor]:
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+        sampling_metadata: TPUSupportedSamplingMetadata,
+    ) -> torch.Tensor:
+        """
+        Sample with xla-friendly function. This function is to be traced 
+        separately from `forward` for lighter compilation overhead.
+        """
+        # Tensor `sample_hidden_states` is of fixed pre-compiled size.
+        sample_hidden_states = \
+            hidden_states[sampling_metadata.indices_do_sample]
+        logits = self.compute_logits(sample_hidden_states)
+        # Greedy sampling can't be run without branching the graph on Sampler.
+        # Therefore do_argmax/all_greedy is checked here in a xla-friendly way.
+        # NOTE do_argmax is a scalar, this is just an optimized if/else.
+        out_tokens = torch.where(sampling_metadata.do_argmax,
+                        torch.argmax(logits, dim=-1, keepdim=True),
+                        self.sample(logits, sampling_metadata)\
+                                            .sampled_token_ids)
+        return out_tokens
+
+    def compute_logits(self,
+                       hidden_states: torch.Tensor) -> Optional[torch.Tensor]:
+        # SamplingMetadata here for pruning output in LogitsProcessor, disabled
+        logits = self.model.compute_logits(hidden_states, None)
         return logits
 
     def get_multimodal_embeddings(self, *args, **kwargs):
@@ -851,3 +927,24 @@ def _get_padded_token_len(x: int) -> int:
     if x <= 16:
         return 16
     return 1 << (x - 1).bit_length()
+
+
+def _pad_indices_do_sample(indices_do_sample: torch.Tensor,
+                           num_do_sample: int) -> torch.Tensor:
+    # `num_do_sample` \in [1, max_num_seqs]
+    # Find closest power of two for padding size.
+    if num_do_sample < MIN_NUM_SEQS:
+        padded_do_sample = MIN_NUM_SEQS
+    else:
+        lower = 1 << (num_do_sample.bit_length() - 1)
+        upper = lower << 1
+        padded_do_sample = lower \
+            if (num_do_sample - lower) < (upper - num_do_sample) else upper
+    if num_do_sample < padded_do_sample:
+        padded_indices = torch.zeros(padded_do_sample,
+                                     dtype=indices_do_sample.dtype,
+                                     device=indices_do_sample.device)
+        padded_indices[:num_do_sample] = indices_do_sample[:num_do_sample]
+        indices_do_sample = padded_indices
+
+    return indices_do_sample
