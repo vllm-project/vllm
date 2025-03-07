@@ -4,7 +4,8 @@
 import functools
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
+from functools import partial
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import triton
@@ -13,7 +14,7 @@ import triton.language as tl
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    _normalize_quant_group_shape, scaled_dequantize)
+    scaled_dequantize)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED, CUTLASS_FP8_SUPPORTED, apply_fp8_linear)
 from vllm.platforms import current_platform
@@ -101,46 +102,43 @@ direct_register_custom_op(
 )
 
 
-# Unify the interface between `apply_w8a8_block_fp8_linear` and
-# `apply_fp8_linear`
-# NOTE(lucas): this is quite messy, we should think through this more formally
-def apply_fp8_linear_generic(
-    input: torch.Tensor,
+def create_fp8_linear(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     input_group_shape: Tuple[int, int],
     weight_group_shape: Tuple[int, int],
-    input_scale: Optional[torch.Tensor] = None,  # static scale if one
+    input_scale: Optional[torch.Tensor] = None,
     cutlass_fp8_supported: bool = CUTLASS_FP8_SUPPORTED,
     cutlass_block_fp8_supported: bool = CUTLASS_BLOCK_FP8_SUPPORTED,
-) -> torch.Tensor:
-    # View input as 2D matrix for fp8 methods
-    input = input.view(-1, input.shape[-1])
+) -> Callable:
+    if weight_group_shape == (128, 128) and input_group_shape == (1, 128):
+        shape_supported_by_cutlass = (weight.shape[0] % 128 == 0
+                                      and weight.shape[1] % 128 == 0)
+        if cutlass_block_fp8_supported and shape_supported_by_cutlass and \
+            current_platform.is_cuda():
+            # cutlass_scaled_mm blockwise requires N major scales
+            return partial(ops.cutlass_scaled_mm,
+                           b=weight.T,
+                           out_dtype=weight.dtype,
+                           scale_a=input_scale,
+                           scale_b=weight_scale.T.contiguous())
+        else:
+            return partial(
+                apply_w8a8_block_fp8_linear,
+                weight=weight,
+                block_size=list(weight_group_shape),
+                weight_scale=weight_scale,
+                cutlass_block_fp8_supported=cutlass_block_fp8_supported)
 
-    weight_group_shape = _normalize_quant_group_shape(\
-        weight, weight_group_shape)
-    input_group_shape = _normalize_quant_group_shape(input, input_group_shape)
-
-    def is_dim_blocked(dim, shape, group_shape):
-        return group_shape < shape[dim] and group_shape > 1
-
-    if is_dim_blocked(0, weight.shape, weight_group_shape[0])\
-     and is_dim_blocked(1, weight.shape, weight_group_shape[1]) and\
-     input_group_shape == (1, weight_group_shape[1]):
-        return apply_w8a8_block_fp8_linear(
-            input,
-            weight,
-            list(weight_group_shape),
-            weight_scale,
-            cutlass_block_fp8_supported=cutlass_block_fp8_supported)
     else:
         # Despite having linear in the it doesn't conform to
         # `torch.nn.functional.linear` which is defined as `input @ weight.T`
         # so we explicitly transpose the weight matrix here
-        return apply_fp8_linear(input, weight.T, weight_scale.T,
-                    cutlass_fp8_supported=cutlass_fp8_supported,
-                         use_per_token_if_dynamic=\
-                             (input_group_shape == (1, input.shape[1])))
+        return partial(apply_fp8_linear,
+                       weight=weight.T,
+                       weight_scale=weight_scale.T,
+                       cutlass_fp8_supported=cutlass_fp8_supported,
+                       use_per_token_if_dynamic=(input_group_shape == (1, -1)))
 
 
 def input_to_float8(

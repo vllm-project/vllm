@@ -248,7 +248,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
   # Please keep this in sync with FetchContent_Declare line below.
-  set(CUTLASS_REVISION "v3.8.0" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_REVISION "df18f5e4f5de76bed8be1de8e4c245f2f5ec3020" CACHE STRING "CUTLASS revision to use")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -266,7 +266,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
         # Please keep this in sync with CUTLASS_REVISION line above.
-        GIT_TAG v3.8.0
+        GIT_TAG df18f5e4f5de76bed8be1de8e4c245f2f5ec3020
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.

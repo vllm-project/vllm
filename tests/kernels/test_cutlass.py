@@ -85,8 +85,6 @@ def cutlass_fp8_gemm_helper(m: int,
 
     # make scales M-major for blockwise quant, doesn't affect 1D scales
     scale_a = scale_a.t().contiguous().t()
-    # make scales K-major for blockwise quant, doesn't affect 1D scales
-    scale_b = scale_b.t().contiguous().t()
 
     if use_bias:
         bias = torch.rand((n, ), device=device, dtype=out_dtype) * 10
