@@ -53,12 +53,8 @@ def test_fused_moe(
     dtype: torch.dtype,
     padding: bool,
 ):
-    if padding:
-        padding_size = 128
-        envs.VLLM_ROCM_MOE_PADDING = True
-    else:
-        padding_size = 0
-        envs.VLLM_ROCM_MOE_PADDING = False
+    envs.VLLM_ROCM_MOE_PADDING = padding
+
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -97,7 +93,7 @@ def test_fused_moe(
 
     with mock.patch(
             'vllm.model_executor.layers.fused_moe.fused_moe.padding_size',
-            padding_size):
+            128 if padding else 0):
         triton_output = fused_moe(a,
                                   w1,
                                   w2,
@@ -226,8 +222,9 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
 
 @pytest.mark.parametrize("dtype",
                          [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("padding", [True, False])
 @torch.inference_mode()
-def test_mixtral_moe(dtype: torch.dtype):
+def test_mixtral_moe(dtype: torch.dtype, padding: bool):
     """Make sure our Mixtral MoE implementation agrees with the one from
     huggingface."""
 
@@ -243,6 +240,8 @@ def test_mixtral_moe(dtype: torch.dtype):
         tp_size=1,
         dp_size=1,
     ).cuda()
+
+    envs.VLLM_ROCM_MOE_PADDING = padding
 
     # Load the weights
     vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
@@ -270,7 +269,10 @@ def test_mixtral_moe(dtype: torch.dtype):
 
     # Run forward passes for both MoE blocks
     hf_states, _ = hf_moe.forward(hf_inputs)
-    vllm_states = vllm_moe.forward(vllm_inputs)
+    with mock.patch(
+            'vllm.model_executor.layers.fused_moe.fused_moe.padding_size',
+            128 if padding else 0):
+        vllm_states = vllm_moe.forward(vllm_inputs)
 
     mixtral_moe_tol = {
         torch.float32: 1e-3,
