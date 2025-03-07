@@ -174,7 +174,7 @@ def sample_sonnet_requests(
 ) -> list[tuple[str, str, int, int, None]]:
     assert (
         input_len > prefix_len
-    ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
+    ), "'args.sonnet-input-len' must be greater than 'args.sonnet-prefix-len'."
 
     # Load the dataset.
     with open(dataset_path, encoding='utf-8') as f:
