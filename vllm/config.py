@@ -1789,7 +1789,7 @@ class SpeculativeConfig:
     Configuration for speculative decoding.
     Configurable parameters include:
     - Top-level Speculative Decoding Control:
-        - num_speculative_tokens (Optional[int]): The number of speculative
+        - num_speculative_tokens (int): The number of speculative
             tokens, if provided. It will default to the number in the draft
             model config if present, otherwise, it is required.
         - proposer (Optional[str]): The name of the speculative method to use.
@@ -1856,8 +1856,8 @@ class SpeculativeConfig:
             stage times in speculative decoding.
     """
     # speculative configs from cli args
-    num_speculative_tokens: Optional[int] = field(default=None,
-                                                  init=True)  # type: ignore
+    num_speculative_tokens: int = field(default=None,
+                                        init=True)  # type: ignore
     model: Optional[str] = None
     proposer: Optional[str] = None
     quantization: Optional[str] = None
@@ -1973,83 +1973,88 @@ class SpeculativeConfig:
             self.ngram_prompt_lookup_max = 0
             self.ngram_prompt_lookup_min = 0
 
-            self.draft_model_config = ModelConfig(
-                model=self.model,
-                task="draft",
-                tokenizer=self.target_model_config.tokenizer,
-                tokenizer_mode=self.target_model_config.tokenizer_mode,
-                trust_remote_code=self.target_model_config.trust_remote_code,
-                allowed_local_media_path=self.target_model_config.
-                allowed_local_media_path,
-                dtype=self.target_model_config.dtype,
-                seed=self.target_model_config.seed,
-                revision=self.revision,
-                code_revision=self.code_revision,
-                tokenizer_revision=self.target_model_config.tokenizer_revision,
-                max_model_len=None,
-                spec_target_max_model_len=self.target_model_config.
-                max_model_len,
-                quantization=self.quantization,
-                enforce_eager=self.target_model_config.enforce_eager,
-                max_seq_len_to_capture=self.target_model_config.
-                max_seq_len_to_capture,
-                max_logprobs=self.target_model_config.max_logprobs,
-                hf_overrides=SpeculativeConfig.hf_config_override,
-            )
+            if self.model is not None:
+                self.draft_model_config = ModelConfig(
+                    model=self.model,
+                    task="draft",
+                    tokenizer=self.target_model_config.tokenizer,
+                    tokenizer_mode=self.target_model_config.tokenizer_mode,
+                    trust_remote_code=self.target_model_config.
+                    trust_remote_code,
+                    allowed_local_media_path=self.target_model_config.
+                    allowed_local_media_path,
+                    dtype=self.target_model_config.dtype,
+                    seed=self.target_model_config.seed,
+                    revision=self.revision,
+                    code_revision=self.code_revision,
+                    tokenizer_revision=self.target_model_config.
+                    tokenizer_revision,
+                    max_model_len=None,
+                    spec_target_max_model_len=self.target_model_config.
+                    max_model_len,
+                    quantization=self.quantization,
+                    enforce_eager=self.target_model_config.enforce_eager,
+                    max_seq_len_to_capture=self.target_model_config.
+                    max_seq_len_to_capture,
+                    max_logprobs=self.target_model_config.max_logprobs,
+                    hf_overrides=SpeculativeConfig.hf_config_override,
+                )
 
-            # Detect proposer type or EAGLE prefix to replace hf_config for
-            # EAGLE draft_model
-            if (self.proposer == "ealge"
-                    or "eagle-" in self.draft_model_config.model.lower()):
-                if self.enable_chunked_prefill:
-                    raise ValueError(
-                        "Chunked prefill and EAGLE are not compatible.")
+                # Detect proposer type or EAGLE prefix to replace hf_config for
+                # EAGLE draft_model
+                if (self.proposer == "ealge"
+                        or "eagle-" in self.draft_model_config.model.lower()):
+                    if self.enable_chunked_prefill:
+                        raise ValueError(
+                            "Chunked prefill and EAGLE are not compatible.")
 
-                from vllm.transformers_utils.configs.eagle import EAGLEConfig
-                if isinstance(self.draft_model_config.hf_config, EAGLEConfig):
-                    pass
-                else:
-                    eagle_config = EAGLEConfig(
-                        self.draft_model_config.hf_config)
-                    self.draft_model_config.hf_config = eagle_config
+                    from vllm.transformers_utils.configs.eagle import (
+                        EAGLEConfig)
+                    if isinstance(self.draft_model_config.hf_config,
+                                  EAGLEConfig):
+                        pass
+                    else:
+                        eagle_config = EAGLEConfig(
+                            self.draft_model_config.hf_config)
+                        self.draft_model_config.hf_config = eagle_config
 
-            if (self.num_speculative_tokens is not None
-                    and hasattr(self.draft_model_config.hf_config,
-                                "num_lookahead_tokens")):
-                self.draft_model_config.hf_config.num_lookahead_tokens = \
-                self.num_speculative_tokens
+                if (self.num_speculative_tokens is not None
+                        and hasattr(self.draft_model_config.hf_config,
+                                    "num_lookahead_tokens")):
+                    self.draft_model_config.hf_config.num_lookahead_tokens = \
+                    self.num_speculative_tokens
 
-            n_predict = getattr(self.draft_model_config.hf_config, "n_predict",
-                                None)
-            if n_predict is not None:
-                if self.num_speculative_tokens is None:
-                    # Default to max value defined in draft model config.
-                    self.num_speculative_tokens = n_predict
-                elif self.num_speculative_tokens > n_predict and \
-                        self.num_speculative_tokens % n_predict != 0:
-                    # Ensure divisibility for MTP module reuse.
-                    raise ValueError(
-                        f"num_speculative_tokens:{self.num_speculative_tokens}"
-                        f" must be divisible by {n_predict=}")
+                n_predict = getattr(self.draft_model_config.hf_config,
+                                    "n_predict", None)
+                if n_predict is not None:
+                    if self.num_speculative_tokens is None:
+                        # Default to max value defined in draft model config.
+                        self.num_speculative_tokens = n_predict
+                    elif self.num_speculative_tokens > n_predict and \
+                            self.num_speculative_tokens % n_predict != 0:
+                        # Ensure divisibility for MTP module reuse.
+                        raise ValueError(
+                            f"num_speculative_tokens:{self.num_speculative_tokens}"
+                            f" must be divisible by {n_predict=}")
 
-            self.draft_tensor_parallel_size = \
-                SpeculativeConfig._verify_and_get_draft_tp(
-                    self.target_parallel_config,
-                    self.draft_tensor_parallel_size,
-                    self.draft_model_config.hf_config
-            )
+                self.draft_tensor_parallel_size = \
+                    SpeculativeConfig._verify_and_get_draft_tp(
+                        self.target_parallel_config,
+                        self.draft_tensor_parallel_size,
+                        self.draft_model_config.hf_config
+                )
 
-            self.draft_model_config.max_model_len = (
-                SpeculativeConfig._maybe_override_draft_max_model_len(
-                    self.max_model_len,
-                    self.draft_model_config.max_model_len,
-                    self.target_model_config.max_model_len,
-                ))
+                self.draft_model_config.max_model_len = (
+                    SpeculativeConfig._maybe_override_draft_max_model_len(
+                        self.max_model_len,
+                        self.draft_model_config.max_model_len,
+                        self.target_model_config.max_model_len,
+                    ))
 
-            self.draft_parallel_config = (
-                SpeculativeConfig.create_draft_parallel_config(
-                    self.target_parallel_config,
-                    self.draft_tensor_parallel_size))
+                self.draft_parallel_config = (
+                    SpeculativeConfig.create_draft_parallel_config(
+                        self.target_parallel_config,
+                        self.draft_tensor_parallel_size))
 
         if self.acceptance_method == "typical_acceptance_sampler":
             if self.typical_acceptance_sampler_posterior_threshold is None:
@@ -2179,15 +2184,17 @@ class SpeculativeConfig:
                 f"is {self.acceptance_method}")
 
         if self.acceptance_method == "typical_acceptance_sampler" and (
-                self.typical_acceptance_sampler_posterior_threshold < 0
-                or self.typical_acceptance_sampler_posterior_alpha < 0):
+            (self.typical_acceptance_sampler_posterior_threshold is not None
+             and self.typical_acceptance_sampler_posterior_threshold < 0) or
+            (self.typical_acceptance_sampler_posterior_alpha is not None
+             and self.typical_acceptance_sampler_posterior_alpha < 0)):
             raise ValueError(
                 "Expected typical_acceptance_sampler_posterior_threshold "
-                "and typical_acceptance_sampler_posterior_alpha to be > 0. "
-                "Instead found "
+                "and typical_acceptance_sampler_posterior_alpha to be > 0."
+                " Instead found "
                 f"typical_acceptance_sampler_posterior_threshold = "
-                f"{self.typical_acceptance_sampler_posterior_threshold} and "
-                f"typical_acceptance_sampler_posterior_alpha = "
+                f"{self.typical_acceptance_sampler_posterior_threshold} "
+                f"and typical_acceptance_sampler_posterior_alpha = "
                 f"{self.typical_acceptance_sampler_posterior_alpha}")
 
         if (self.disable_by_batch_size is not None
@@ -2207,7 +2214,8 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        if self.ngram_prompt_lookup_max > 0:
+        if (self.ngram_prompt_lookup_max is not None
+                and self.ngram_prompt_lookup_max > 0):
             draft_model = "[ngram]"
         else:
             draft_model = self.draft_model_config.model
