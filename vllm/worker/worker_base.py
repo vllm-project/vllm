@@ -208,7 +208,7 @@ class LoRANotSupportedWorkerBase(WorkerBase):
         raise ValueError(f"{type(self)} does not support LoRA")
 
 
-class ModelExecutionError(RuntimeError):
+class ModelExecutionV0Error(RuntimeError):
     """Custom RuntimeError with input data for model execution
     
     In a nutshell, this object is useful for custom handling of exception for
@@ -453,7 +453,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 **kwargs,
             )
         except BaseException as err:
-            raise ModelExecutionError(
+            raise ModelExecutionV0Error(
                 f"Model execution failure,"
                 f"reason: {repr(err)}",
                 model_input=model_input) from err
@@ -515,7 +515,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 **kwargs,
             )
         except BaseException as err:
-            raise ModelExecutionError(
+            raise ModelExecutionV0Error(
                 f"Model execution failure,"
                 f"reason: {repr(err)}",
                 model_input=model_input) from err

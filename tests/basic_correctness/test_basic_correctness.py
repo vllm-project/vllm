@@ -11,10 +11,10 @@ import pytest
 
 from vllm import LLM
 from vllm.platforms import current_platform
-from vllm.v1.engine.core import ModelExecutionV1Error
+from vllm.v1.engine.core import ModelExecutionError
 from vllm.v1.engine.core_client import EngineCoreClient, InprocClient
 from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
-from vllm.worker.worker_base import ModelExecutionError
+from vllm.worker.worker_base import ModelExecutionV0Error
 
 from ..conftest import VllmRunner
 from ..models.utils import check_outputs_equal
@@ -190,9 +190,9 @@ def test_failed_model_execution(vllm_runner) -> None:
             ]
             vllm_model.generate_greedy(prompts, 200, use_tqdm=False)
         if is_v1:
-            assert isinstance(exc_info.value, ModelExecutionV1Error)
+            assert isinstance(exc_info.value, ModelExecutionError)
             assert exc_info.value.scheduler_output is not None
         else:
-            assert isinstance(exc_info.value, ModelExecutionError)
+            assert isinstance(exc_info.value, ModelExecutionV0Error)
             assert exc_info.value.model_input is not None
         assert "Mocked Critical Error" in str(exc_info.value)

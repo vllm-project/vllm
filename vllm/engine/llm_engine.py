@@ -34,7 +34,7 @@ from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
 from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
-from vllm.logging_utils.dump_input import dump_engine_exception
+from vllm.logging_utils.dump_input import dump_engine_exception_v0
 from vllm.logits_process import get_bad_words_logits_processors
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
@@ -1418,11 +1418,10 @@ class LLMEngine:
                 raise
             except BaseException as err:
                 stats = self._get_stats(scheduler_outputs=scheduler_outputs)
-                dump_engine_exception(
+                dump_engine_exception_v0(
                     err=err,
                     config=self.vllm_config,
                     use_cached_outputs=self.use_cached_outputs,
-                    engine_version=0,
                     stats=stats,
                     execute_model_req=execute_model_req,
                 )

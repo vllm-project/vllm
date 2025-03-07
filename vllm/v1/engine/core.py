@@ -37,7 +37,7 @@ logger = init_logger(__name__)
 POLLING_TIMEOUT_S = 2.5
 
 
-class ModelExecutionV1Error(RuntimeError):
+class ModelExecutionError(RuntimeError):
     """Custom RuntimeError with input data for model execution
     
     In a nutshell, this object is useful for custom handling of exception for
@@ -182,11 +182,11 @@ class EngineCore:
         try:
             output = self.model_executor.execute_model(scheduler_output)
         except BaseException as err:
-            err = ModelExecutionV1Error(
+            err = ModelExecutionError(
                 f"Model execution failure,"
                 f"reason: {repr(err)}",
                 scheduler_output=scheduler_output)
-            dump_engine_exception(err, self.vllm_config, 1)
+            dump_engine_exception(err, self.vllm_config)
             raise err
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
