@@ -32,6 +32,8 @@ class MyLLM(LLM):
         # stop ray from manipulating CUDA_VISIBLE_DEVICES
         # at the top-level
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        pg = ray.util.get_current_placement_group()
+        os.environ['VLLM_RAY_PG_NAME'] = pg.name
         super().__init__(*args, **kwargs)
 
 
@@ -50,7 +52,7 @@ documentation https://docs.ray.io/en/latest/ .
 os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
 ray.init()
 
-pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2)
+pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2, name="inference")
 ray.get(pg_inference.ready())
 scheduling_inference = PlacementGroupSchedulingStrategy(
     placement_group=pg_inference,
