@@ -24,12 +24,12 @@ def prepare_object_to_dump(obj) -> str:
             for k, v in obj.items()})
         return f'{{{dict_str}}}'
     elif isinstance(obj, list):
-        return f'[{', '.join([prepare_object_to_dump(v) for v in obj])}]'
+        return f"[{', '.join([prepare_object_to_dump(v) for v in obj])}]"
     elif isinstance(obj, set):
-        return f'[{', '.join([prepare_object_to_dump(v) for v in list(obj)])}]'
+        return f"[{', '.join([prepare_object_to_dump(v) for v in list(obj)])}]"
         # return [prepare_object_to_dump(v) for v in list(obj)]
     elif isinstance(obj, tuple):
-        return f'[{', '.join([prepare_object_to_dump(v) for v in obj])}]'
+        return f"[{', '.join([prepare_object_to_dump(v) for v in obj])}]"
     elif isinstance(obj, enum.Enum):
         return repr(obj)
     elif isinstance(obj, torch.Tensor):
