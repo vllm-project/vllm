@@ -139,37 +139,36 @@ class PunicaWrapperBase(PunicaWrapperABC):
         device: Union[torch.device, str],
         **kwargs,
     ):
-        self._token_lora_indices = torch.empty(max_num_batched_tokens,
-                                               dtype=torch.long,
-                                               device=device)
-        self._sampler_indices = torch.empty(max_num_batched_tokens,
-                                            dtype=torch.long,
-                                            device=device)
-        self._sampler_indices_padded = torch.empty(max_num_batched_tokens,
-                                                   dtype=torch.long,
-                                                   device=device)
-        self._embeddings_indices = torch.empty(2,
-                                               max_num_batched_tokens,
-                                               dtype=torch.long,
-                                               device=device)
-        self._long_lora_indices = torch.empty(max_num_batched_tokens,
-                                              dtype=torch.long,
-                                              device=device)
+        self._token_lora_indices = torch.empty(
+            max_num_batched_tokens, dtype=torch.long, device=device
+        )
+        self._sampler_indices = torch.empty(
+            max_num_batched_tokens, dtype=torch.long, device=device
+        )
+        self._sampler_indices_padded = torch.empty(
+            max_num_batched_tokens, dtype=torch.long, device=device
+        )
+        self._embeddings_indices = torch.empty(
+            2, max_num_batched_tokens, dtype=torch.long, device=device
+        )
+        self._long_lora_indices = torch.empty(
+            max_num_batched_tokens, dtype=torch.long, device=device
+        )
 
         # 5 is the number of indices tensors.
         # base_indices, sampler_indices, sampler_indices_padded,
         # embeddings_indices,long_lora_indices
         self.indices_len: List[Optional[int]] = [None] * 5
         # these attributes are the information required for sgmv kernel
-        self._seq_start_locs = torch.empty(max_batches,
-                                           dtype=torch.long,
-                                           device=device)
-        self._seq_lengths = torch.empty(max_batches,
-                                        dtype=torch.long,
-                                        device=device)
-        self._lora_indices_per_batch = torch.empty(max_batches,
-                                                   dtype=torch.long,
-                                                   device=device)
+        self._seq_start_locs = torch.empty(
+            max_batches, dtype=torch.long, device=device
+        )
+        self._seq_lengths = torch.empty(
+            max_batches, dtype=torch.long, device=device
+        )
+        self._lora_indices_per_batch = torch.empty(
+            max_batches, dtype=torch.long, device=device
+        )
         self.device: torch.device = device
         self.max_length: int = 0
         self.token_nums: int = 0
@@ -202,22 +201,23 @@ class PunicaWrapperBase(PunicaWrapperABC):
             self.device,
             long_lora_context,
         )
-        self._token_lora_indices[:base_indices.shape[0]].copy_(base_indices)
-        self._sampler_indices[:sampler_indices.shape[0]].copy_(sampler_indices)
-        self._sampler_indices_padded[:sampler_indices_padded.shape[0]].copy_(
-            sampler_indices_padded)
-        self._embeddings_indices[:embeddings_indices.
-                                 shape[0], :embeddings_indices.shape[1]].copy_(
-                                     embeddings_indices)
+        self._token_lora_indices[: base_indices.shape[0]].copy_(base_indices)
+        self._sampler_indices[: sampler_indices.shape[0]].copy_(sampler_indices)
+        self._sampler_indices_padded[: sampler_indices_padded.shape[0]].copy_(
+            sampler_indices_padded
+        )
+        self._embeddings_indices[
+            : embeddings_indices.shape[0], : embeddings_indices.shape[1]
+        ].copy_(embeddings_indices)
         if long_lora_offsets_tensor is not None:
-            self._long_lora_indices[:long_lora_offsets_tensor.shape[0]].copy_(
-                long_lora_offsets_tensor)
+            self._long_lora_indices[: long_lora_offsets_tensor.shape[0]].copy_(
+                long_lora_offsets_tensor
+            )
         else:
             self._long_lora_indices.zero_()
         self.indices_len[:] = indices_len
 
     def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:
-
         (
             b_seq_start_tensor,
             seq_length_tensor,
@@ -228,11 +228,13 @@ class PunicaWrapperBase(PunicaWrapperABC):
             no_lora,
         ) = compute_meta(token_lora_tensor)
 
-        self._seq_start_locs[:b_seq_start_tensor.shape[0]].copy_(
-            b_seq_start_tensor)
-        self._seq_lengths[:seq_length_tensor.shape[0]].copy_(seq_length_tensor)
-        self._lora_indices_per_batch[:lora_indices_tensor.shape[0]].copy_(
-            lora_indices_tensor)
+        self._seq_start_locs[: b_seq_start_tensor.shape[0]].copy_(
+            b_seq_start_tensor
+        )
+        self._seq_lengths[: seq_length_tensor.shape[0]].copy_(seq_length_tensor)
+        self._lora_indices_per_batch[: lora_indices_tensor.shape[0]].copy_(
+            lora_indices_tensor
+        )
         self.batch_size = batch_size
         self.max_length = max_length
         self.token_nums = token_nums
@@ -265,7 +267,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
                 bias = bias.view(-1, bias.shape[-1])
                 bias = bias[indices]
                 bias[indices == -1] = 0
-                output[:, offset_left:offset_left + slice] += bias
+                output[:, offset_left : offset_left + slice] += bias
             offset_left += slice
 
         return output.view_as(org_output)
@@ -294,7 +296,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             magnitudes = lora_magnitudes_stacked[slice_idx]
             if magnitudes is not None:
                 # Get slice of output to normalize
-                slice_output = output[:, offset_left:offset_left + slice]
+                slice_output = output[:, offset_left : offset_left + slice]
                 # Store original output for this slice
                 original_slice = slice_output.clone()
 
@@ -306,8 +308,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
                 magnitudes = magnitudes.view(-1, magnitudes.shape[-1])
                 selected_magnitudes = magnitudes[indices]
                 # Create a mask for valid LoRA positions (indices != -1)
-                valid_mask = (indices
-                              != -1).view(-1, 1).expand_as(selected_magnitudes)
+                valid_mask = (
+                    (indices != -1).view(-1, 1).expand_as(selected_magnitudes)
+                )
 
                 # Apply magnitudes only where valid, otherwise use zeros
                 masked_magnitudes = torch.where(
@@ -318,8 +321,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
 
                 # Calculate DoRA contribution and add to the original output (not replace)
                 dora_contribution = normalized * masked_magnitudes
-                output[:, offset_left:offset_left +
-                       slice] = (original_slice + dora_contribution)
+                output[:, offset_left : offset_left + slice] = (
+                    original_slice + dora_contribution
+                )
 
             offset_left += slice
 
@@ -341,9 +345,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
             6. token_nums: The token numbers in the batch.
         """
         return (
-            self._seq_start_locs[:self.batch_size],
-            self._seq_lengths[:self.batch_size],
-            self._lora_indices_per_batch[:self.batch_size],
+            self._seq_start_locs[: self.batch_size],
+            self._seq_lengths[: self.batch_size],
+            self._lora_indices_per_batch[: self.batch_size],
             self.batch_size,
             self.max_length,
             self.token_nums,
@@ -403,7 +407,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         long_lora_context: Optional["LongContextLoRAContext"] = None,
         **kwargs,
     ):
-
         self._update_base_metadata(
             mapping,
             lora_index_to_id,

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Based on:
-Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
-Punica: Multi-Tenant LoRA Serving. 
+Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
+Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
@@ -49,7 +49,7 @@ def _bgmv_shrink_kernel(
     offset_k = tl.arange(0, BLOCK_K) + pid_sk * BLOCK_K
     a_ptr = input_ptr + cur_batch * xm_stride
     b_ptr = lora_ptr + l0_stride * lora_index
-    accumulator = tl.zeros((BLOCK_N, ), dtype=tl.float32)
+    accumulator = tl.zeros((BLOCK_N,), dtype=tl.float32)
     for k in range(0, K, BLOCK_K * SPLIT_K):
         current_k = k + offset_k
         current_k_c = tl.max_contiguous(current_k, BLOCK_K)
@@ -61,8 +61,9 @@ def _bgmv_shrink_kernel(
         b_ptr_mask = (offset_n[:, None] < N) & (current_k[None, :] < K)
 
         tiled_b = tl.load(
-            b_ptr + offset_n[:, None] * lora_k_stride +
-            current_k[None, :] * lora_n_stride,
+            b_ptr
+            + offset_n[:, None] * lora_k_stride
+            + current_k[None, :] * lora_n_stride,
             mask=b_ptr_mask,
             other=0.0,
         )  # [BLOCK_N,BLOCK_K]

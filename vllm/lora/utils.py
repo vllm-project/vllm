@@ -5,8 +5,12 @@ import re
 from typing import List, Optional, Set, Tuple, Type, Union
 
 import huggingface_hub
-from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
-                                   HFValidationError, RepositoryNotFoundError)
+from huggingface_hub.utils import (
+    EntryNotFoundError,
+    HfHubHTTPError,
+    HFValidationError,
+    RepositoryNotFoundError,
+)
 from torch import nn
 from transformers import PretrainedConfig
 
@@ -15,8 +19,11 @@ from vllm.logger import init_logger
 from vllm.lora.fully_sharded_layers import (
     ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLoRA, QKVParallelLinearWithShardedLoRA,
-    RowParallelLinearWithShardedLoRA)
+    MergedQKVParallelLinearWithShardedLoRA,
+    QKVParallelLinearWithShardedLoRA,
+    RowParallelLinearWithShardedLoRA,
+)
+
 # being imported for _all_lora_classes below
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -65,18 +72,20 @@ def from_layer(
     for lora_cls in _all_lora_classes:
         # specifying kwargs so they can be easily accessed in decorator
         if lora_cls.can_replace_layer(
-                source_layer=layer,
-                lora_config=lora_config,
-                packed_modules_list=packed_modules_list,
-                model_config=model_config,
+            source_layer=layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
         ):
             ret = lora_cls(layer)
             ret.create_lora_weights(max_loras, lora_config, model_config)
             return ret
 
     # The Case for HFCompatibleLinear
-    if (hasattr(layer, "get_lora_class")
-            and layer.__class__.__name__ == "HFCompatibleLinear"):
+    if (
+        hasattr(layer, "get_lora_class")
+        and layer.__class__.__name__ == "HFCompatibleLinear"
+    ):
         lora_cls = layer.get_lora_class(lora_config.fully_sharded_loras)
         ret = lora_cls(layer)
         ret.create_lora_weights(max_loras, lora_config, model_config)
@@ -102,8 +111,9 @@ def from_layer_logits_processor(
     return ret
 
 
-def replace_submodule(model: nn.Module, module_name: str,
-                      new_module: nn.Module) -> nn.Module:
+def replace_submodule(
+    model: nn.Module, module_name: str, new_module: nn.Module
+) -> nn.Module:
     """Replace a submodule in a model with a new module."""
     parent = model.get_submodule(".".join(module_name.split(".")[:-1]))
     target_name = module_name.split(".")[-1]
@@ -112,8 +122,7 @@ def replace_submodule(model: nn.Module, module_name: str,
 
 
 def parse_fine_tuned_lora_name(
-        name: str,
-        weights_mapper: Optional[WeightsMapper] = None
+    name: str, weights_mapper: Optional[WeightsMapper] = None
 ) -> Tuple[str, bool, bool]:
     """Parse the name of lora weights.
 
@@ -140,8 +149,9 @@ def parse_fine_tuned_lora_name(
         name = "base_model.model." + name
 
     parts = name.split(".")
-    if parts[-1] == "weight" and (parts[-2] == "lora_A"
-                                  or parts[-2] == "lora_B"):
+    if parts[-1] == "weight" and (
+        parts[-2] == "lora_A" or parts[-2] == "lora_B"
+    ):
         new_name = ".".join(parts[2:-2])
         return new_name, parts[-2] == "lora_A", False, False
 
@@ -160,8 +170,9 @@ def parse_fine_tuned_lora_name(
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
-def is_regex_target_modules(load_modules: Union[str, List[str]],
-                            expected_lora_modules: List[str]) -> bool:
+def is_regex_target_modules(
+    load_modules: Union[str, List[str]], expected_lora_modules: List[str]
+) -> bool:
     """
     PEFT supports passing `target_modules` in the form of regular expressions,
     such as `model.*(q_proj|k_proj|v_proj)$`. This function is mainly used to
@@ -199,7 +210,7 @@ def get_supported_lora_modules(model: nn.Module) -> List[str]:
     supported_lora_modules: Set[str] = set()
     # step1: traverse the model to get all the linear subfixes.
     for name, module in model.named_modules():
-        if isinstance(module, (LinearBase, )):
+        if isinstance(module, (LinearBase,)):
             supported_lora_modules.add(name.split(".")[-1])
     # step 2: get the embedding modules if the model's mbedding_modules
     # is not empty.
@@ -241,12 +252,13 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     # If the path does not exist locally, assume it's a Hugging Face repo.
     try:
         local_snapshot_path = huggingface_hub.snapshot_download(
-            repo_id=lora_path)
+            repo_id=lora_path
+        )
     except (
-            HfHubHTTPError,
-            RepositoryNotFoundError,
-            EntryNotFoundError,
-            HFValidationError,
+        HfHubHTTPError,
+        RepositoryNotFoundError,
+        EntryNotFoundError,
+        HFValidationError,
     ):
         # Handle errors that may occur during the download
         # Return original path instead instead of throwing error here
