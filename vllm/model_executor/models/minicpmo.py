@@ -203,7 +203,7 @@ class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
         mm_config = self.ctx.get_mm_config()
         max_images = mm_config.get_limit_per_prompt("image")
         max_videos = mm_config.get_limit_per_prompt("video")
-        max_audios = mm_config.get_limit_per_prompt("audios")
+        max_audios = mm_config.get_limit_per_prompt("audio")
 
         # count <image_idx></image_idx> tokens
         # which are not in get_max_image_tokens
