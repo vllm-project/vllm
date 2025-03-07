@@ -174,7 +174,7 @@ def sample_sonnet_requests(
 ) -> list[tuple[str, str, int, int, None]]:
     assert (
         input_len > prefix_len
-    ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
+    ), "'args.sonnet-input-len' must be greater than 'args.sonnet-prefix-len'."
 
     # Load the dataset.
     with open(dataset_path, encoding='utf-8') as f:
@@ -560,7 +560,6 @@ async def benchmark(
     tokenizer: PreTrainedTokenizerBase,
     input_requests: list[tuple[str, int, int]],
     logprobs: Optional[int],
-    best_of: int,
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
@@ -592,7 +591,6 @@ async def benchmark(
         prompt_len=test_prompt_len,
         output_len=test_output_len,
         logprobs=logprobs,
-        best_of=best_of,
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
     )
@@ -619,7 +617,6 @@ async def benchmark(
                                          prompt_len=test_prompt_len,
                                          output_len=test_output_len,
                                          logprobs=logprobs,
-                                         best_of=best_of,
                                          multi_modal_content=test_mm_content,
                                          ignore_eos=ignore_eos)
         profile_output = await request_func(request_func_input=profile_input)
@@ -668,7 +665,6 @@ async def benchmark(
                                               prompt_len=prompt_len,
                                               output_len=output_len,
                                               logprobs=logprobs,
-                                              best_of=best_of,
                                               multi_modal_content=mm_content,
                                               ignore_eos=ignore_eos)
         tasks.append(
@@ -686,7 +682,6 @@ async def benchmark(
             prompt_len=test_prompt_len,
             output_len=test_output_len,
             logprobs=logprobs,
-            best_of=best_of,
         )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
@@ -958,7 +953,6 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer,
             input_requests=input_requests,
             logprobs=args.logprobs,
-            best_of=args.best_of,
             request_rate=args.request_rate,
             burstiness=args.burstiness,
             disable_tqdm=args.disable_tqdm,
@@ -983,7 +977,6 @@ def main(args: argparse.Namespace):
         result_json["backend"] = backend
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
-        result_json["best_of"] = args.best_of
         result_json["num_prompts"] = args.num_prompts
 
         # Metadata
@@ -1080,13 +1073,6 @@ if __name__ == "__main__":
         type=str,
         help=
         "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
-    )
-    parser.add_argument(
-        "--best-of",
-        type=int,
-        default=1,
-        help="Generates `best_of` sequences per prompt and "
-        "returns the best one.",
     )
     parser.add_argument("--use-beam-search", action="store_true")
     parser.add_argument(
