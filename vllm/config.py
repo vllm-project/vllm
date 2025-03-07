@@ -2030,7 +2030,7 @@ class SpeculativeConfig:
                     # Ensure divisibility for MTP module reuse.
                     raise ValueError(
                         f"num_speculative_tokens:{self.num_speculative_tokens}"
-                        f"must be divisible by {n_predict=}")
+                        f" must be divisible by {n_predict=}")
 
             self.draft_tensor_parallel_size = \
                 SpeculativeConfig._verify_and_get_draft_tp(
