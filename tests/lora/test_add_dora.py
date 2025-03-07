@@ -69,8 +69,9 @@ async def requests_processing_time(llm,
     for dora_request in dora_requests:
         dora_int_id = dora_request.lora_int_id
         generator = llm.generate(
-            prompt=TextPrompt(prompt=f"hello {dora_int_id}",
-                              multi_modal_data=None),  # type: ignore
+            prompt=TextPrompt(
+                prompt=f"hello {dora_int_id}",
+                multi_modal_data=None),  # type: ignore
             sampling_params=sampling_params,
             lora_request=dora_request,
             request_id=f"test{dora_int_id}",
@@ -152,12 +153,12 @@ async def test_add_dora():
         time_cold_start = await requests_processing_time(
             llm, cold_run_requests)
 
-    print(f"time hot-start {time_with_add_dora} vs "
-          f"time cold-start {time_cold_start} ")
+    print(
+        f"time hot-start {time_with_add_dora} vs time cold-start {time_cold_start}")
 
     assert time_with_add_dora < time_cold_start, (
         f"time_with_add_dora={time_with_add_dora}, "
-        f"time_cold_start={time_cold_start}"
+        f"time_cold_start={time_cold_start}. "
         "The engine request processing time with DoRA pre-loading "
         "must be less than the version that does on-demand DoRA loading.")
 
@@ -196,9 +197,8 @@ def test_dora_validation():
             is not None), "magnitude_param should not be None for DoRA"
 
     # Validate that magnitude_param matches the output dimension
-    assert (
-        layer_weights.magnitude_param.shape[0] == layer_weights.lora_b.shape[1]
-    ), "magnitude_param shape should match output dimension (lora_b.shape[1])"
+    assert (layer_weights.magnitude_param.shape[0] == layer_weights.lora_b.shape[1]), \
+        "magnitude_param shape should match output dimension (lora_b.shape[1])"
 
     # Test with incorrect magnitude dimension to verify validation would fail
     with pytest.raises(AssertionError):

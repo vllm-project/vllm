@@ -13,12 +13,11 @@ from huggingface_hub import snapshot_download
 
 import vllm
 from vllm.config import LoRAConfig
-from vllm.distributed import (cleanup_dist_env_and_memory,
-                              init_distributed_environment,
-                              initialize_model_parallel)
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               RowParallelLinear)
+from vllm.distributed import (
+    cleanup_dist_env_and_memory, init_distributed_environment,
+    initialize_model_parallel)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear, MergedColumnParallelLinear, RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -278,8 +277,7 @@ def long_context_lora_files_16k_1():
 
 @pytest.fixture(scope="session")
 def dora_files():
-    return snapshot_download(
-        repo_id="makcedward/Llama-3.2-1B-Instruct-DoRA-Adapter")
+    return snapshot_download(repo_id="makcedward/Llama-3.2-1B-Instruct-DoRA-Adapter")
 
 
 @pytest.fixture(scope="session")

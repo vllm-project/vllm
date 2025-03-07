@@ -147,7 +147,8 @@ def apply_dora_transformation(
     
     The correct DoRA behavior now implemented:
     1. Compute the standard LoRA output: output = base_output + input @ (A @ B) * scaling
-    2. For DoRA, we compute: output = base_output + (input @ (A @ B) * scaling) + (norm(input @ (A @ B)) * magnitude)
+    2. For DoRA, we compute:
+       output = base_output + (input @ (A @ B) * scaling) + (norm(input @ (A @ B)) * magnitude)
        where norm() normalizes each column to unit length
     
     This implementation follows the fixed behavior.
