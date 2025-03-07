@@ -3,6 +3,8 @@
 
 Run `pytest tests/kernels/test_moe.py`.
 """
+import unittest.mock as mock
+
 import pytest
 import torch
 from torch.nn import Parameter
@@ -40,6 +42,7 @@ TOP_KS = [2, 6]
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("padding", [True, False])
 def test_fused_moe(
     m: int,
     n: int,
@@ -48,7 +51,14 @@ def test_fused_moe(
     topk: int,
     ep_size: int,
     dtype: torch.dtype,
+    padding: bool,
 ):
+    if padding:
+        padding_size = 128
+        envs.VLLM_ROCM_MOE_PADDING = True
+    else:
+        padding_size = 0
+        envs.VLLM_ROCM_MOE_PADDING = False
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -85,14 +95,17 @@ def test_fused_moe(
         w2 = F.pad(w2, (0, 128), "constant", 0)
         torch.cuda.empty_cache()
 
-    triton_output = fused_moe(a,
-                              w1,
-                              w2,
-                              score,
-                              topk,
-                              global_num_experts=e,
-                              expert_map=e_map,
-                              renormalize=False)
+    with mock.patch(
+            'vllm.model_executor.layers.fused_moe.fused_moe.padding_size',
+            padding_size):
+        triton_output = fused_moe(a,
+                                  w1,
+                                  w2,
+                                  score,
+                                  topk,
+                                  global_num_experts=e,
+                                  expert_map=e_map,
+                                  renormalize=False)
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
     torch.testing.assert_close(iterative_output,
                                torch_output,
