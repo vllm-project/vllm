@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
+
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.base import PlaceholderRange
@@ -17,20 +22,20 @@ class NewRequestData:
     req_id: str
     prompt_token_ids: list[int]
     prompt: Optional[str]
-    mm_inputs: list["MultiModalKwargs"]
+    mm_inputs: list[MultiModalKwargs]
     mm_hashes: list[str]
-    mm_positions: list["PlaceholderRange"]
-    sampling_params: "SamplingParams"
+    mm_positions: list[PlaceholderRange]
+    sampling_params: SamplingParams
     block_ids: list[int]
     num_computed_tokens: int
-    lora_request: Optional["LoRARequest"]
+    lora_request: Optional[LoRARequest]
 
     @classmethod
     def from_request(
         cls,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
-    ) -> "NewRequestData":
+    ) -> NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
@@ -60,11 +65,11 @@ class CachedRequestData:
     @classmethod
     def from_request(
         cls,
-        request: "Request",
+        request: Request,
         resumed_from_preemption: bool,
         new_token_ids: list[int],
         new_block_ids: list[int],
-    ) -> "CachedRequestData":
+    ) -> CachedRequestData:
         return cls(
             req_id=request.request_id,
             resumed_from_preemption=resumed_from_preemption,
@@ -111,3 +116,9 @@ class SchedulerOutput:
     # list of (req_id, encoder_input_index) tuples.
     # Used to free the encoder cache.
     free_encoder_input_ids: list[tuple[str, int]]
+
+    # Dict of request ids to their index within the batch
+    # for filling the next token bitmask
+    structured_output_request_ids: dict[str, int]
+    # the bitmask for the whole batch
+    grammar_bitmask: Optional[npt.NDArray[np.int32]]
