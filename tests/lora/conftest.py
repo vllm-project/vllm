@@ -209,8 +209,7 @@ def jamba_lora_files():
         safetensors.torch.save_file(tensors, lora_path)
 
     adapter_path = snapshot_download(
-        repo_id=
-        "hf-100/Jamba-1.5-mini-Spellbound-StoryWriter-0.1-6583896-ckpt53-lora")
+        repo_id="hf-100/Jamba-1.5-mini-Spellbound-StoryWriter-0.1-6583896-ckpt53-lora")
 
     remove_unnecessary_weights(adapter_path)
     return adapter_path
