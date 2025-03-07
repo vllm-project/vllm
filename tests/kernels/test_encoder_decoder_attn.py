@@ -18,7 +18,7 @@ from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
 from vllm.attention.selector import (_Backend, _cached_get_attn_backend,
                                      global_force_attn_backend_context_manager)
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.platforms import current_platform
 
@@ -129,12 +129,21 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
     '''
 
     scale = float(1.0 / (test_pt.head_size**0.5))
+
+    cache_config = CacheConfig(
+        block_size=128,
+        gpu_memory_utilization=0.9,
+        swap_space=0,
+        cache_dtype="auto",
+    )
+    cache_config.use_v1 = False
     attn = Attention(
         test_pt.num_heads,
         test_pt.head_size,
         scale=scale,
         prefix=f"{test_pt.attn_type}",
         attn_type=test_pt.attn_type,
+        cache_config=cache_config,
     )
     if test_pt.num_blocks is None or test_pt.num_heads is None:
         # Caller does not require a KV cache
