@@ -209,6 +209,8 @@ class Processor:
         sampling_params = params.clone()
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
+        sampling_params.update_from_tokenizer(
+            self.tokenizer.get_lora_tokenizer(lora_request))
 
         # Multimodal related.
         # Compute MM hashes (if enabled)
