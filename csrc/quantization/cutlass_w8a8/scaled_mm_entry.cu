@@ -133,7 +133,7 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
 #endif
 
   // Guard against compilation issues for sm90 kernels
-#if defined ENABLE_SCALED_MM_SM90 && ENABLE_SCALED_MM_S90
+#if defined ENABLE_SCALED_MM_SM90 && ENABLE_SCALED_MM_SM90
   if (version_num >= 90 && version_num < 100) {
     // Hopper
     cutlass_scaled_mm_sm90(c, a, b, a_scales, b_scales, bias);
