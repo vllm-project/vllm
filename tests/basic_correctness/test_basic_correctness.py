@@ -63,6 +63,9 @@ def test_models(
         pytest.skip(
             f"{backend} does not support gemma2 with full context length.")
 
+    if backend == "FLASH_ATTN" and os.getenv("VLLM_USE_V1", None) == "1":
+        backend = "FLASH_ATTN_VLLM_V1"
+
     os.environ["VLLM_ATTENTION_BACKEND"] = backend
 
     # 5042 tokens for gemma2

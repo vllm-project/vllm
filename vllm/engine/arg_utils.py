@@ -1180,10 +1180,10 @@ class EngineArgs:
                 use_v1 = True
             else:
                 logger.info(
-                    "===================================================\n\n"
-                    "Detected EngineConfig is compatible with VLLM V1. "
-                    "Set VLLM_USE_V1=1 before launch to enable V1.\n\n"
-                    "===================================================")
+                    "===============================================================================================\n\n"  # noqa: E501
+                    "Detected EngineConfig is compatible with VLLM V1. Set VLLM_USE_V1=1 before launch to enable V1.\n\n"  # noqa: E501
+                    "==============================================================================================="
+                )  # noqa: E501
 
         if envs.is_set("VLLM_USE_V1"):
             assert use_v1 == envs.VLLM_USE_V1
@@ -1494,6 +1494,16 @@ class EngineArgs:
                               recommend_to_remove=False)
             return False
 
+        # TODO: remove FLASH_ATTN_VLLM_V1 and PALLAS_VLLM_V1 and unify env var.
+        V1_BACKENDS = [
+            "FLASH_ATTN_VLLM_V1", "PALLAS_VLLM_V1", "TRITON_MLA", "FLASHMLA"
+        ]
+        if (envs.is_set("VLLM_ATTENTION_BACKEND")
+                and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
+            name = f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}"
+            _raise_or_warning(feature_name=name, recommend_to_remove=True)
+            return False
+
         #############################################################
         # Experimental Features allow users
         # to opt into this and log a warning if they do.
@@ -1541,14 +1551,6 @@ class EngineArgs:
                 return False
 
         #############################################################
-        V1_BACKENDS = [
-            "FLASH_ATTN_VLLM_V1", "PALLAS_VLLM_V1", "TRITON_MLA", "FLASHMLA"
-        ]
-        if (envs.is_set("VLLM_ATTENTION_BACKEND")
-                and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
-            name = f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}"
-            _raise_or_warning(feature_name=name, recommend_to_remove=True)
-            return False
 
         return True
 
