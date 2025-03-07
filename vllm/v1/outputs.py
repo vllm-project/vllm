@@ -80,3 +80,13 @@ class ModelRunnerOutput:
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
+
+
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+    req_ids=[],
+    req_id_to_index={},
+    sampled_token_ids=[],
+    spec_token_ids=None,
+    logprobs=None,
+    prompt_logprobs_dict={},
+)

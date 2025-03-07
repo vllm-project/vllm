@@ -146,7 +146,7 @@ class EngineCore:
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
-        if not self.scheduler.has_unfinished_requests():
+        if not self.scheduler.has_requests():
             return EngineCoreOutputs(
                 outputs=[], scheduler_stats=self.scheduler.make_stats())
         scheduler_output = self.scheduler.schedule()
@@ -315,7 +315,7 @@ class EngineCoreProc(EngineCore):
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
-            while not self.scheduler.has_unfinished_requests():
+            while not self.scheduler.has_requests():
                 logger.debug("EngineCore busy loop waiting.")
                 req = self.input_queue.get()
                 self._handle_client_request(*req)

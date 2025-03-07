@@ -657,6 +657,12 @@ class Scheduler:
     def has_unfinished_requests(self) -> bool:
         return self.get_num_unfinished_requests() > 0
 
+    def has_finished_requests(self) -> bool:
+        return len(self.finished_req_ids) > 0
+
+    def has_requests(self):
+        return self.has_unfinished_requests() or self.has_finished_requests()
+
     def get_num_unscheduled_requests(self) -> int:
         """Number of requests that are not being processed by the executor."""
         return self.get_num_unfinished_requests() - len(self.scheduled_req_ids)
