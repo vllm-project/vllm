@@ -3,7 +3,6 @@
 
 Run `pytest tests/models/test_mamba.py`.
 """
-
 import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -79,11 +78,10 @@ def test_models(
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
         vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert (
-            hf_output_str == vllm_output_str
-        ), f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}"
-        assert (hf_output_ids == vllm_output_ids
-                ), f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}"
+        assert hf_output_str == vllm_output_str, (
+            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
+        assert hf_output_ids == vllm_output_ids, (
+            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -134,7 +132,7 @@ def test_chunked_prefill_with_parallel_sampling(vllm_runner, example_prompts,
             dtype=dtype,
             enable_chunked_prefill=True,
             max_num_batched_tokens=30,
-            max_num_seqs=10,  # forces prefill chunks with decoding
+            max_num_seqs=10  # forces prefill chunks with decoding
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
@@ -143,14 +141,9 @@ def test_chunked_prefill_with_parallel_sampling(vllm_runner, example_prompts,
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
-def test_chunked_prefill(
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    chunked_prefill_token_size: int,
-) -> None:
+def test_chunked_prefill(vllm_runner, example_prompts, model: str, dtype: str,
+                         max_tokens: int,
+                         chunked_prefill_token_size: int) -> None:
     """
     Checks exact match decode between huggingface model and vllm runner with
     chunked prefill.
@@ -160,13 +153,11 @@ def test_chunked_prefill(
 
     non_chunked = generate_greedy(model, example_prompts, max_tokens)
 
-    with vllm_runner(
-            model,
-            dtype=dtype,
-            enable_chunked_prefill=True,
-            max_num_batched_tokens=max_num_batched_tokens,
-            max_num_seqs=max_num_seqs,
-    ) as vllm_model:
+    with vllm_runner(model,
+                     dtype=dtype,
+                     enable_chunked_prefill=True,
+                     max_num_batched_tokens=max_num_batched_tokens,
+                     max_num_seqs=max_num_seqs) as vllm_model:
         chunked = vllm_model.generate_greedy(example_prompts,
                                              max_tokens=max_tokens)
 
@@ -188,8 +179,9 @@ def test_parallel_sampling(
     dtype: str,
     max_tokens: int,
 ) -> None:
+
     # Numerical differences produce slightly different output for these
-    if "state-spaces" in model:
+    if 'state-spaces' in model:
         example_prompts.pop(0)
         example_prompts.pop(0)
         example_prompts.pop(0)

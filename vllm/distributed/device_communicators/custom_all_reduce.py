@@ -48,15 +48,14 @@ def is_weak_contiguous(inp: torch.Tensor):
 
 
 class CustomAllreduce:
+
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
 
     # max_size: max supported allreduce size
-    def __init__(
-        self,
-        group: ProcessGroup,
-        device: Union[int, str, torch.device],
-        max_size=8192 * 1024,
-    ) -> None:
+    def __init__(self,
+                 group: ProcessGroup,
+                 device: Union[int, str, torch.device],
+                 max_size=8192 * 1024) -> None:
         """
         Args:
             group: the process group to work on. If None, it will use the
@@ -77,8 +76,8 @@ class CustomAllreduce:
 
         self.group = group
 
-        assert (dist.get_backend(group) != dist.Backend.NCCL
-                ), "CustomAllreduce should be attached to a non-NCCL group."
+        assert dist.get_backend(group) != dist.Backend.NCCL, (
+            "CustomAllreduce should be attached to a non-NCCL group.")
 
         if not all(in_the_same_node_as(group, source_rank=0)):
             # No need to initialize custom allreduce for multi-node case.
@@ -99,9 +98,7 @@ class CustomAllreduce:
                 "Custom allreduce is disabled due to an unsupported world"
                 " size: %d. Supported world sizes: %s. To silence this "
                 "warning, specify disable_custom_all_reduce=True explicitly.",
-                world_size,
-                str(CustomAllreduce._SUPPORTED_WORLD_SIZES),
-            )
+                world_size, str(CustomAllreduce._SUPPORTED_WORLD_SIZES))
             return
 
         if isinstance(device, int):
@@ -134,7 +131,6 @@ class CustomAllreduce:
         # this checks hardware and driver support for NVLink
         assert current_platform.is_cuda()
         from vllm.platforms.cuda import CudaPlatform
-
         cuda_platform: CudaPlatform = current_platform
         full_nvlink = cuda_platform.is_full_nvlink(physical_device_ids)
         if world_size > 2 and not full_nvlink:
@@ -205,11 +201,9 @@ class CustomAllreduce:
         return pointers
 
     @staticmethod
-    def free_shared_buffer(
-        pointers: List[int],
-        group: Optional[ProcessGroup] = None,
-        rank: Optional[int] = None,
-    ) -> None:
+    def free_shared_buffer(pointers: List[int],
+                           group: Optional[ProcessGroup] = None,
+                           rank: Optional[int] = None) -> None:
         if rank is None:
             rank = dist.get_rank(group=group)
         lib = CudaRTLibrary()
@@ -218,7 +212,7 @@ class CustomAllreduce:
     @contextmanager
     def capture(self):
         """
-        The main responsibility of this context manager is the
+        The main responsibility of this context manager is the 
         `register_graph_buffers` call at the end of the context.
         It records all the buffer addresses used in the CUDA graph.
         """
@@ -265,15 +259,13 @@ class CustomAllreduce:
             return inp_size < self.max_size
         return False
 
-    def all_reduce(
-        self,
-        inp: torch.Tensor,
-        *,
-        out: torch.Tensor = None,
-        registered: bool = False,
-    ):
+    def all_reduce(self,
+                   inp: torch.Tensor,
+                   *,
+                   out: torch.Tensor = None,
+                   registered: bool = False):
         """Performs an out-of-place all reduce.
-
+        
         If registered is True, this assumes inp's pointer is already
         IPC-registered. Otherwise, inp is first copied into a pre-registered
         buffer.

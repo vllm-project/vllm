@@ -35,8 +35,7 @@ class DummyLoRAManager:
             magnitude_param = torch.rand(
                 [weight.shape[0]],  # Match output dimension
                 dtype=weight.dtype,
-                device=self._device,
-            )
+                device=self._device)
 
         lora = LoRALayerWeights(
             module_name,
@@ -300,6 +299,7 @@ def generate_data_for_nslices(
 
     lora_weights_lst = []
     if op_type == "shrink":
+
         inputs_tensor = torch.rand((total_tokens, hidden_size),
                                    dtype=dtype).to(device)
 

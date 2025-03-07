@@ -131,12 +131,8 @@ class PlaceholderRange(TypedDict):
     """The length of the placeholder."""
 
 
-NestedTensors = Union[
-    list["NestedTensors"],
-    list[torch.Tensor],
-    torch.Tensor,
-    tuple[torch.Tensor, ...],
-]
+NestedTensors = Union[list["NestedTensors"], list[torch.Tensor], torch.Tensor,
+                      tuple[torch.Tensor, ...]]
 """
 Uses a list instead of a tensor if the dimensions of each element do not match.
 """
@@ -150,11 +146,11 @@ def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
         return isinstance(a, torch.Tensor) and torch.equal(b, a)
 
     if isinstance(a, list):
-        return isinstance(b, list) and all(
-            nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
+        return (isinstance(b, list)
+                and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b)))
     if isinstance(b, list):
-        return isinstance(a, list) and all(
-            nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a))
+        return (isinstance(a, list)
+                and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a)))
 
     # Both a and b are scalars
     return a == b
@@ -238,7 +234,7 @@ class BaseMultiModalField(ABC):
         """
         Construct :class:`MultiModalFieldElem` instances to represent
         the provided data.
-
+        
         This is the inverse of :meth:`reduce_data`.
         """
         raise NotImplementedError
@@ -297,7 +293,6 @@ class MultiModalFlatField(BaseMultiModalField):
         :func:`MultiModalFieldConfig.flat`
         :func:`MultiModalFieldConfig.flat_from_sizes`
     """
-
     slices: Sequence[slice]
 
     def build_elems(
@@ -329,7 +324,6 @@ class MultiModalSharedField(BaseMultiModalField):
     See also:
         :func:`MultiModalFieldConfig.shared`
     """
-
     batch_size: int
 
     def build_elems(
@@ -391,7 +385,7 @@ class MultiModalFieldConfig:
         Example:
 
             .. code-block::
-
+        
                 Given:
                     slices: [slice(0, 3), slice(3, 7), slice(7, 9)]
 
@@ -423,7 +417,7 @@ class MultiModalFieldConfig:
         Example:
 
             .. code-block::
-
+        
                 Given:
                     size_per_item: [3, 4, 2]
 
@@ -434,7 +428,7 @@ class MultiModalFieldConfig:
                     Element 1: [AAA]
                     Element 2: [BBBB]
                     Element 3: [CC]
-
+    
         See also:
             :func:`MultiModalFieldConfig.flat`
         """
@@ -463,7 +457,7 @@ class MultiModalFieldConfig:
         Example:
 
             .. code-block::
-
+        
                 Given:
                     batch_size: 4
 
@@ -673,8 +667,8 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
             return False
 
         ks = self.keys()
-        return ks == other.keys() and all(
-            nested_tensors_equal(self[k], other[k]) for k in ks)
+        return (ks == other.keys()
+                and all(nested_tensors_equal(self[k], other[k]) for k in ks))
 
     def _validate_modality(self, method_name: str, modality: str) -> None:
         if not self._items_by_modality:

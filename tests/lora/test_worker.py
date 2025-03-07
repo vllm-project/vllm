@@ -62,12 +62,10 @@ def test_worker_apply_lora(sql_lora_files):
         parallel_config=ParallelConfig(1, 1, False),
         scheduler_config=SchedulerConfig("generate", 32, 32, 32),
         device_config=DeviceConfig("cuda"),
-        cache_config=CacheConfig(
-            block_size=16,
-            gpu_memory_utilization=1.0,
-            swap_space=0,
-            cache_dtype="auto",
-        ),
+        cache_config=CacheConfig(block_size=16,
+                                 gpu_memory_utilization=1.0,
+                                 swap_space=0,
+                                 cache_dtype="auto"),
         lora_config=LoRAConfig(max_lora_rank=8, max_cpu_loras=32,
                                max_loras=32),
     )

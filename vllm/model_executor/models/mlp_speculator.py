@@ -73,7 +73,8 @@ class MLPSpeculator(nn.Module):
         self.n_predict = config.n_predict
         self.vocab_size = config.vocab_size
         self.emb_dim = config.emb_dim
-        self.inner_dim = config.inner_dim if config.inner_dim != 0 else config.emb_dim
+        self.inner_dim = config.inner_dim if config.inner_dim != 0 \
+            else config.emb_dim
 
         self.max_speculative_tokens = config.num_lookahead_tokens
 
@@ -87,8 +88,7 @@ class MLPSpeculator(nn.Module):
             embedding = VocabParallelEmbedding(
                 config.vocab_size,
                 self.inner_dim,
-                org_num_embeddings=config.vocab_size,
-            )
+                org_num_embeddings=config.vocab_size)
             self.emb = nn.ModuleList([embedding] * self.max_speculative_tokens)
 
             # the initial projection from the base model may
@@ -107,19 +107,17 @@ class MLPSpeculator(nn.Module):
 
         else:
             self.emb = nn.ModuleList([
-                VocabParallelEmbedding(
-                    config.vocab_size,
-                    self.inner_dim,
-                    org_num_embeddings=config.vocab_size,
-                ) for _ in range(self.max_speculative_tokens)
+                VocabParallelEmbedding(config.vocab_size,
+                                       self.inner_dim,
+                                       org_num_embeddings=config.vocab_size)
+                for _ in range(self.max_speculative_tokens)
             ])
 
             self.proj = nn.ModuleList([
-                nn.Linear(
-                    (self.emb_dim if i == 0 else self.inner_dim),
-                    self.inner_dim,
-                    bias=False,
-                ) for i in range(self.max_speculative_tokens)
+                nn.Linear((self.emb_dim if i == 0 else self.inner_dim),
+                          self.inner_dim,
+                          bias=False)
+                for i in range(self.max_speculative_tokens)
             ])
 
             self.head = nn.ModuleList([
@@ -168,6 +166,7 @@ class MLPSpeculator(nn.Module):
         next_tokens = []
 
         for head_index in range(num_predict_tokens):
+
             # Project and predict
             z = self.emb[head_index](last_tokens)  # b k d
             states = self.proj[head_index](previous_hidden_states)

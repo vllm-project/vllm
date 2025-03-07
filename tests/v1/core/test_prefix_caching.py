@@ -125,9 +125,9 @@ def test_prefill():
         b.ref_cnt == 0
         for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ])
-    assert (len([
+    assert len([
         b for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ]) == 5)
+    ]) == 5
 
     manager.free(req2)
 

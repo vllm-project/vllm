@@ -35,13 +35,10 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
     """
 
     @classmethod
-    def maybe_wrap_worker(
-        cls,
-        worker,
-        draft_tensor_parallel_size: int,
-        target_tensor_parallel_size: int,
-    ):
-        """Wrap the worker in a SmallerTpProposerWorker if necessary."""
+    def maybe_wrap_worker(cls, worker, draft_tensor_parallel_size: int,
+                          target_tensor_parallel_size: int):
+        """Wrap the worker in a SmallerTpProposerWorker if necessary.
+        """
         if draft_tensor_parallel_size == target_tensor_parallel_size:
             return worker
 
@@ -187,13 +184,11 @@ class SmallerTpProposerWorker(ProposerWorkerBase):
 
         with self._patch_tensor_parallel_group():
             weight_loader = getattr(
-                self._worker.worker.model_runner.model_runner.model.lm_head.
-                weight,
+                self._worker.worker.model_runner.model_runner.model.\
+                    lm_head.weight,
                 "weight_loader",
-                default_weight_loader,
-            )
+                default_weight_loader)
             weight_loader(
-                self._worker.worker.model_runner.model_runner.model.lm_head.
-                weight,
-                lm_head_weight,
-            )
+                self._worker.worker.model_runner.model_runner.model.\
+                    lm_head.weight,
+                lm_head_weight)

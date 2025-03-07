@@ -52,12 +52,10 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
                                      max_tokens=16 * (dp_rank + 1))
 
     # Create an LLM.
-    llm = LLM(
-        model="ibm-research/PowerMoE-3b",
-        tensor_parallel_size=GPUs_per_dp_rank,
-        enforce_eager=True,
-        enable_expert_parallel=True,
-    )
+    llm = LLM(model="ibm-research/PowerMoE-3b",
+              tensor_parallel_size=GPUs_per_dp_rank,
+              enforce_eager=True,
+              enable_expert_parallel=True)
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
     for output in outputs:
@@ -69,15 +67,13 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
 
 if __name__ == "__main__":
     from multiprocessing import Process
-
     dp_master_ip = "127.0.0.1"
     dp_master_port = get_open_port()
     procs = []
     for i in range(DP_size):
-        proc = Process(
-            target=main,
-            args=(DP_size, i, dp_master_ip, dp_master_port, GPUs_per_dp_rank),
-        )
+        proc = Process(target=main,
+                       args=(DP_size, i, dp_master_ip, dp_master_port,
+                             GPUs_per_dp_rank))
         proc.start()
         procs.append(proc)
     for proc in procs:

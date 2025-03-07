@@ -15,7 +15,8 @@ from vllm.worker.worker_base import DelegateWorkerBase
 
 
 class MedusaWorker(NonLLMProposerWorkerBase, DelegateWorkerBase):
-    """Worker for Medusa."""
+    """Worker for Medusa.
+    """
 
     def __init__(self, *args, **kwargs):
         DelegateWorkerBase.__init__(self, *args, **kwargs)
@@ -63,19 +64,13 @@ class MedusaWorker(NonLLMProposerWorkerBase, DelegateWorkerBase):
         generators = self.model_runner.get_generators(
             execute_model_req.finished_requests_ids)
         sampling_metadata = SamplingMetadata.prepare(
-            seq_group_metadata_list,
-            seq_lens,
-            query_lens,
-            self.device,
-            self.model_runner.pin_memory,
-            generators,
-        )
+            seq_group_metadata_list, seq_lens, query_lens, self.device,
+            self.model_runner.pin_memory, generators)
 
         model_outputs = self.model_runner.model.generate_proposals(
             previous_hidden_states=execute_model_req.previous_hidden_states.
             hidden_states,
-            sampling_metadata=sampling_metadata,
-        )
+            sampling_metadata=sampling_metadata)
 
         return model_outputs, False
 
@@ -98,8 +93,7 @@ class MedusaWorker(NonLLMProposerWorkerBase, DelegateWorkerBase):
                     context_len = seq_data.get_num_computed_tokens()
                     seq_len = min(
                         seq_data_len,
-                        context_len + seq_group_metadata.token_chunk_size,
-                    )
+                        context_len + seq_group_metadata.token_chunk_size)
                     seq_lens.append(seq_len)
                     query_lens.append(seq_len - context_len)
                 else:
@@ -130,7 +124,7 @@ class MedusaWorker(NonLLMProposerWorkerBase, DelegateWorkerBase):
         if any([
                 execute_model_req.blocks_to_swap_in,
                 execute_model_req.blocks_to_swap_out,
-                execute_model_req.blocks_to_copy,
+                execute_model_req.blocks_to_copy
         ]):
             raise NotImplementedError(
                 "MedusaWorker does not support cache operations")

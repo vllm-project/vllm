@@ -128,7 +128,6 @@ def test_stateless_process_group(worker):
         port2 = get_open_port()
     WORLD_SIZE = 4
     from multiprocessing import get_context
-
     ctx = get_context("fork")
     processes = []
     for i in range(WORLD_SIZE):

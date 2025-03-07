@@ -14,13 +14,13 @@ from vllm.utils import FlexibleArgumentParser
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description="Benchmark the latency of processing a single batch of "
-        "requests till completion.")
-    parser.add_argument("filename", type=str)
+        description='Benchmark the latency of processing a single batch of '
+        'requests till completion.')
+    parser.add_argument('filename', type=str)
 
     args = parser.parse_args()
 
-    with open(args.filename, "rb") as f:
+    with open(args.filename, 'rb') as f:
         data = pickle.load(f)
         raw_results: list[TMeasurement] = data["results"]
 
@@ -50,16 +50,14 @@ if __name__ == "__main__":
     for axs_idx, (shape, data) in enumerate(results.items()):
         plt.sca(axs[axs_idx])
         df = pd.DataFrame(data)
-        sns.lineplot(
-            data=df,
-            x="batch_size",
-            y="median",
-            hue="kernel",
-            style="kernel",
-            markers=True,
-            dashes=False,
-            palette="Dark2",
-        )
+        sns.lineplot(data=df,
+                     x="batch_size",
+                     y="median",
+                     hue="kernel",
+                     style="kernel",
+                     markers=True,
+                     dashes=False,
+                     palette="Dark2")
         plt.title(f"Shape: {shape}")
         plt.ylabel("time (median, s)")
     plt.tight_layout()

@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class NewRequestData:
+
     req_id: str
     prompt_token_ids: list[int]
     prompt: Optional[str]
@@ -46,6 +47,7 @@ class NewRequestData:
 
 @dataclass
 class CachedRequestData:
+
     req_id: str
     # If resumed_from_preemption is False, new_block_ids will be appended to
     # the request's block IDs. If True, new_block_ids will be used as the
@@ -74,6 +76,7 @@ class CachedRequestData:
 
 @dataclass
 class SchedulerOutput:
+
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
     # need to re-send it every scheduling step.

@@ -30,38 +30,33 @@ def test_stop_reason(vllm_model, example_prompts):
     llm = vllm_model.model
 
     # test stop token
-    outputs = llm.generate(
-        example_prompts,
-        sampling_params=SamplingParams(
-            ignore_eos=True,
-            seed=SEED,
-            max_tokens=MAX_TOKENS,
-            stop_token_ids=[stop_token_id],
-        ),
-    )
+    outputs = llm.generate(example_prompts,
+                           sampling_params=SamplingParams(
+                               ignore_eos=True,
+                               seed=SEED,
+                               max_tokens=MAX_TOKENS,
+                               stop_token_ids=[stop_token_id]))
     for output in outputs:
         output = output.outputs[0]
         assert output.finish_reason == "stop"
         assert output.stop_reason == stop_token_id
 
     # test stop string
-    outputs = llm.generate(
-        example_prompts,
-        sampling_params=SamplingParams(ignore_eos=True,
-                                       seed=SEED,
-                                       max_tokens=MAX_TOKENS,
-                                       stop="."),
-    )
+    outputs = llm.generate(example_prompts,
+                           sampling_params=SamplingParams(
+                               ignore_eos=True,
+                               seed=SEED,
+                               max_tokens=MAX_TOKENS,
+                               stop="."))
     for output in outputs:
         output = output.outputs[0]
         assert output.finish_reason == "stop"
         assert output.stop_reason == STOP_STR
 
     # test EOS token
-    outputs = llm.generate(
-        example_prompts,
-        sampling_params=SamplingParams(seed=SEED, max_tokens=MAX_TOKENS),
-    )
+    outputs = llm.generate(example_prompts,
+                           sampling_params=SamplingParams(
+                               seed=SEED, max_tokens=MAX_TOKENS))
     for output in outputs:
         output = output.outputs[0]
         assert output.finish_reason == "length" or (

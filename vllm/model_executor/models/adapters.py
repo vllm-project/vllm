@@ -137,8 +137,8 @@ def as_embedding_model(cls: _T) -> _T:
         default_normalize=True,
         default_softmax=False,
     )
-    ModelForEmbedding.__name__ = _get_pooling_model_name(
-        cls.__name__, "ForEmbedding")
+    ModelForEmbedding.__name__ = \
+        _get_pooling_model_name(cls.__name__, "ForEmbedding")
 
     return ModelForEmbedding  # type: ignore
 
@@ -188,14 +188,13 @@ def as_classification_model(cls: _T) -> _T:
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
 
-            self.score = RowParallelLinear(
-                config.hidden_size,
-                config.num_labels,
-                quant_config=quant_config,
-                input_is_parallel=False,
-                bias=False,
-                prefix=maybe_prefix(prefix, "score"),
-            )
+            self.score = RowParallelLinear(config.hidden_size,
+                                           config.num_labels,
+                                           quant_config=quant_config,
+                                           input_is_parallel=False,
+                                           bias=False,
+                                           prefix=maybe_prefix(
+                                               prefix, "score"))
 
         def forward(
             self,
@@ -210,8 +209,9 @@ def as_classification_model(cls: _T) -> _T:
             logits, _ = self.score(hidden_states)
             return logits
 
-    ModelForClassification.__name__ = _get_pooling_model_name(
-        cls.__name__, "ForClassification")
+
+    ModelForClassification.__name__ = \
+        _get_pooling_model_name(cls.__name__, "ForClassification")
 
     return ModelForClassification  # type: ignore
 
@@ -240,7 +240,7 @@ def as_reward_model(cls: _T) -> _T:
         default_softmax=False,
     )
 
-    ModelForReward.__name__ = _get_pooling_model_name(cls.__name__,
-                                                      "ForReward")
+    ModelForReward.__name__ = \
+        _get_pooling_model_name(cls.__name__, "ForReward")
 
     return ModelForReward  # type: ignore

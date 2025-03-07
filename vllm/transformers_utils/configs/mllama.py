@@ -4,11 +4,11 @@ from transformers.models.mllama import configuration_mllama as mllama_hf_config
 
 
 class MllamaTextConfig(mllama_hf_config.MllamaTextConfig):
-    """
+    '''
     Use this class to override is_encoder_decoder:
     - transformers regards mllama as is_encoder_decoder=False
     - vllm needs is_encoder_decoder=True to enable cross-attention
-    """
+    '''
 
     def __init__(
         self,

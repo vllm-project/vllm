@@ -49,13 +49,11 @@ def test_get_prompt_logprobs(
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
     ) as vllm_model:
-        vllm_sampling_params = SamplingParams(
-            max_tokens=max_tokens,
-            logprobs=num_top_logprobs,
-            prompt_logprobs=num_top_logprobs,
-            temperature=0.0,
-            detokenize=detokenize,
-        )
+        vllm_sampling_params = SamplingParams(max_tokens=max_tokens,
+                                              logprobs=num_top_logprobs,
+                                              prompt_logprobs=num_top_logprobs,
+                                              temperature=0.0,
+                                              detokenize=detokenize)
         vllm_results = vllm_model.model.generate(
             example_prompts, sampling_params=vllm_sampling_params)
 
@@ -83,7 +81,7 @@ def test_get_prompt_logprobs(
                 "The output text from the top logprob for each token position "
                 "should be the same as the output text in the result.")
         else:
-            assert output_text == ""
+            assert output_text == ''
             assert output_string_from_most_likely_tokens_lst == ([None] *
                                                                  max_tokens)
 
@@ -102,22 +100,18 @@ def test_get_prompt_logprobs(
         vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
         for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
             for token_id, logprob in vllm_prompt_logprob_dict.items():
-                torch.testing.assert_close(
-                    logprob.logprob,
-                    hf_logprob[0][i][token_id].item(),
-                    atol=1e-2,
-                    rtol=1e-2,
-                )
+                torch.testing.assert_close(logprob.logprob,
+                                           hf_logprob[0][i][token_id].item(),
+                                           atol=1e-2,
+                                           rtol=1e-2)
         vllm_sample_logprobs = vllm_result.outputs[0].logprobs
         for i, top_logprobs in enumerate(vllm_sample_logprobs):
             for token_id, sample_logprob in top_logprobs.items():
                 logprob = sample_logprob.logprob
-                torch.testing.assert_close(
-                    logprob,
-                    hf_logprob[i][-1][token_id].item(),
-                    atol=1e-2,
-                    rtol=1e-2,
-                )
+                torch.testing.assert_close(logprob,
+                                           hf_logprob[i][-1][token_id].item(),
+                                           atol=1e-2,
+                                           rtol=1e-2)
                 if detokenize:
                     assert isinstance(sample_logprob.decoded_token, str), (
                         "The token should be decoded by the time it is returned"
@@ -149,13 +143,8 @@ def test_max_logprobs():
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
 @pytest.mark.parametrize("detokenize", [True, False])
-def test_none_logprobs(
-    vllm_runner,
-    model,
-    chunked_prefill_token_size: int,
-    detokenize: bool,
-    example_prompts,
-):
+def test_none_logprobs(vllm_runner, model, chunked_prefill_token_size: int,
+                       detokenize: bool, example_prompts):
     max_num_seqs = 256
     enable_chunked_prefill = False
     max_num_batched_tokens = None
@@ -171,12 +160,10 @@ def test_none_logprobs(
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
     ) as vllm_model:
-        sampling_params_logprobs_none = SamplingParams(
-            max_tokens=max_tokens,
-            logprobs=None,
-            temperature=0.0,
-            detokenize=detokenize,
-        )
+        sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
+                                                       logprobs=None,
+                                                       temperature=0.0,
+                                                       detokenize=detokenize)
         results_logprobs_none = vllm_model.model.generate(
             example_prompts, sampling_params=sampling_params_logprobs_none)
 

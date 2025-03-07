@@ -18,20 +18,16 @@ MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME",
 REVISION_ROBERTA = os.environ.get("REVISION", "main")
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Xformers backend is not supported on ROCm.",
-)
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Xformers backend is not supported on ROCm.")
 def test_model_loading_with_params(vllm_runner):
     """
     Test parameter weight loading with tp>1.
     """
-    with vllm_runner(
-            model_name=MODEL_NAME,
-            revision=REVISION,
-            dtype="float16",
-            max_model_len=MAX_MODEL_LEN,
-    ) as vllm_model:
+    with vllm_runner(model_name=MODEL_NAME,
+                     revision=REVISION,
+                     dtype="float16",
+                     max_model_len=MAX_MODEL_LEN) as vllm_model:
         output = vllm_model.encode("Write a short story about a robot that"
                                    " dreams for the first time.\n")
 
@@ -62,20 +58,16 @@ def test_model_loading_with_params(vllm_runner):
         assert output
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Xformers backend is not supported on ROCm.",
-)
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Xformers backend is not supported on ROCm.")
 def test_roberta_model_loading_with_params(vllm_runner):
     """
     Test parameter weight loading with tp>1.
     """
-    with vllm_runner(
-            model_name=MODEL_NAME_ROBERTA,
-            revision=REVISION_ROBERTA,
-            dtype="float16",
-            max_model_len=MAX_MODEL_LEN,
-    ) as vllm_model:
+    with vllm_runner(model_name=MODEL_NAME_ROBERTA,
+                     revision=REVISION_ROBERTA,
+                     dtype="float16",
+                     max_model_len=MAX_MODEL_LEN) as vllm_model:
         output = vllm_model.encode("Write a short story about a robot that"
                                    " dreams for the first time.\n")
 
@@ -105,10 +97,8 @@ def test_roberta_model_loading_with_params(vllm_runner):
         assert output
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Xformers backend is not supported on ROCm.",
-)
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Xformers backend is not supported on ROCm.")
 def test_facebook_roberta_model_loading_with_params(vllm_runner):
     """
     Test loading roberta-base model with no lm_head.

@@ -14,13 +14,11 @@ class DeviceCommunicatorBase:
     communication backend), the `device_group` will also be given.
     """
 
-    def __init__(
-        self,
-        cpu_group: ProcessGroup,
-        device: Optional[torch.device] = None,
-        device_group: Optional[ProcessGroup] = None,
-        unique_name: str = "",
-    ):
+    def __init__(self,
+                 cpu_group: ProcessGroup,
+                 device: Optional[torch.device] = None,
+                 device_group: Optional[ProcessGroup] = None,
+                 unique_name: str = ""):
         self.device = device or torch.device("cpu")
         self.cpu_group = cpu_group
         self.device_group = device_group
@@ -73,9 +71,8 @@ class DeviceCommunicatorBase:
         NOTE: `dst` is the local rank of the destination rank.
         """
         world_size = self.world_size
-        assert (
-            -input_.dim() <= dim < input_.dim()
-        ), f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()

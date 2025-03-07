@@ -18,9 +18,9 @@ def is_activation_quantization_format(format: str) -> bool:
 
 
 def should_ignore_layer(
-        layer_name: Optional[str],
-        ignore: Iterable[str] = tuple(),
-        fused_mapping: Mapping[str, List[str]] = MappingProxyType({}),
+    layer_name: Optional[str],
+    ignore: Iterable[str] = tuple(),
+    fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
 ) -> bool:
     if layer_name is None:
         return False
@@ -81,10 +81,10 @@ def check_equal_or_regex_match(layer_name: str,
 
 
 def find_matched_target(
-        layer_name: Optional[str],
-        module: Module,
-        targets: Iterable[str],
-        fused_mapping: Mapping[str, List[str]] = MappingProxyType({}),
+    layer_name: Optional[str],
+    module: Module,
+    targets: Iterable[str],
+    fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
 ) -> str:
     """
     Helper function to look up which "target" in the compressed-tensors
@@ -170,12 +170,10 @@ def _is_equal_or_regex_match(value: str,
 
 
 def _match_fused_layer(
-    layer_name: str,
-    target_layers: Iterable[str],
-    fused_mapping: Mapping[str, List[str]],
-) -> Optional[str]:
+        layer_name: str, target_layers: Iterable[str],
+        fused_mapping: Mapping[str, List[str]]) -> Optional[str]:
     """
-    Match a fused layer name to its corresponding individual layer in
+    Match a fused layer name to its corresponding individual layer in 
     target_layers. Returns first value in fused_mapping which matches targets
 
     Implements an "all" matching strategy where a fused layer matches iff

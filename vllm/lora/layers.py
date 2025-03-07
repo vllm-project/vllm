@@ -94,8 +94,8 @@ class BaseLayerWithLoRA(nn.Module):
         ...
 
     def slice_magnitude_param(
-        self,
-        magnitude_param: Union[torch.Tensor, List[Union[torch.Tensor, None]]],
+        self, magnitude_param: Union[torch.Tensor, List[Union[torch.Tensor,
+                                                              None]]]
     ) -> Union[torch.Tensor, List[Union[torch.Tensor, None]]]:
         """Slice magnitude param if splitting with tensor parallelism."""
         ...
@@ -156,6 +156,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         lora_config: LoRAConfig,
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
+
         if self.base_layer.num_added_embeddings_per_partition > 0:
             # We can start adding lora weights
             self.embeddings_weights = self.base_layer.weight.data[
@@ -267,12 +268,10 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 full_lora_a_embeddings.shape[1],
                 -1,
             )
-        self.punica_wrapper.add_lora_embedding(
-            full_output,
-            full_lora_a_embeddings,
-            self.lora_b_stacked,
-            add_input=True,
-        )
+        self.punica_wrapper.add_lora_embedding(full_output,
+                                               full_lora_a_embeddings,
+                                               self.lora_b_stacked,
+                                               add_input=True)
         return full_output.view_as(full_output_org)
 
     @classmethod
@@ -411,6 +410,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                                0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
                                    lora_b.T, non_blocking=True)
         if lora_bias is not None:
+
             self.lora_bias_stacked = cast(Tuple[torch.Tensor, ...],
                                           self.lora_bias_stacked)
             assert len(self.lora_bias_stacked)
@@ -469,7 +469,8 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         # Matrix multiply.
         output = self.apply(input_, bias)
 
-        output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
+        output_bias = (self.base_layer.bias
+                       if self.base_layer.skip_bias_add else None)
 
         if not self.base_layer.return_bias:
             return output
@@ -523,11 +524,8 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
             left_weight = lora_b[:, tp_rank * shard_size:(tp_rank + 1) *
                                  shard_size]
-            right_weight = lora_b[
-                :,
-                offset + tp_rank * shard_size:offset +
-                (tp_rank + 1) * shard_size,
-            ]
+            right_weight = lora_b[:, offset + tp_rank * shard_size:offset +
+                                  (tp_rank + 1) * shard_size]
             lora_b = torch.cat([left_weight, right_weight], dim=1)
         # Applicable to cases where the base_layer is
         # ColumnParallelLinear.
@@ -586,7 +584,8 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         if not self.base_layer.return_bias:
             return output
 
-        output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
+        output_bias = (self.base_layer.bias
+                       if self.base_layer.skip_bias_add else None)
         return output, output_bias
 
     @classmethod
@@ -944,6 +943,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         self.n_slices = 1
 
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
+
         shard_size = self.input_size
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
@@ -973,7 +973,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             - output
             - bias
 
-        TODO: does not yet support DoRA, not sure how best to do so for this class?
+        TODO: does not yet support DoRA
         """
         # Set up backprop all-reduce.
         if self.base_layer.input_is_parallel:
@@ -1128,8 +1128,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             self.sharded_to_full_mapping_gpu = torch.tensor(
                 self.sharded_to_full_mapping,
                 device=self.device,
-                dtype=torch.long,
-            )
+                dtype=torch.long)
         else:
             self.sharded_to_full_mapping_gpu = None
 

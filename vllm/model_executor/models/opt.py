@@ -18,7 +18,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only OPT model compatible with HuggingFace weights."""
-
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -75,8 +74,8 @@ class OPTAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
-        tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
-        )
+        tensor_model_parallel_world_size = (
+            get_tensor_model_parallel_world_size())
         total_num_heads = num_heads
         assert num_heads % tensor_model_parallel_world_size == 0
         self.num_heads = total_num_heads // tensor_model_parallel_world_size
@@ -98,14 +97,12 @@ class OPTAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            scale=self.scaling,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              scale=self.scaling,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -142,8 +139,7 @@ class OPTDecoderLayer(nn.Module):
 
         self.self_attn_layer_norm = nn.LayerNorm(
             self.embed_dim,
-            elementwise_affine=config.layer_norm_elementwise_affine,
-        )
+            elementwise_affine=config.layer_norm_elementwise_affine)
         self.fc1 = ColumnParallelLinear(
             self.embed_dim,
             config.ffn_dim,
@@ -161,8 +157,7 @@ class OPTDecoderLayer(nn.Module):
         )
         self.final_layer_norm = nn.LayerNorm(
             self.embed_dim,
-            elementwise_affine=config.layer_norm_elementwise_affine,
-        )
+            elementwise_affine=config.layer_norm_elementwise_affine)
 
     def forward(
         self,
@@ -218,24 +213,20 @@ class OPTDecoder(nn.Module):
 
         # Project out & in will be replicated if they exist.
         if config.word_embed_proj_dim != config.hidden_size:
-            self.project_out = ReplicatedLinear(
-                config.hidden_size,
-                config.word_embed_proj_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.project_out",
-            )
+            self.project_out = ReplicatedLinear(config.hidden_size,
+                                                config.word_embed_proj_dim,
+                                                bias=False,
+                                                quant_config=quant_config,
+                                                prefix=f"{prefix}.project_out")
         else:
             self.project_out = None
 
         if config.word_embed_proj_dim != config.hidden_size:
-            self.project_in = ReplicatedLinear(
-                config.word_embed_proj_dim,
-                config.hidden_size,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.project_in",
-            )
+            self.project_in = ReplicatedLinear(config.word_embed_proj_dim,
+                                               config.hidden_size,
+                                               bias=False,
+                                               quant_config=quant_config,
+                                               prefix=f"{prefix}.project_in")
         else:
             self.project_in = None
 
@@ -246,8 +237,7 @@ class OPTDecoder(nn.Module):
         if config.do_layer_norm_before and not config._remove_final_layer_norm:
             self.final_layer_norm = nn.LayerNorm(
                 config.hidden_size,
-                elementwise_affine=config.layer_norm_elementwise_affine,
-            )
+                elementwise_affine=config.layer_norm_elementwise_affine)
         else:
             self.final_layer_norm = None
 
@@ -255,8 +245,7 @@ class OPTDecoder(nn.Module):
             config.num_hidden_layers,
             lambda prefix: OPTDecoderLayer(
                 config, cache_config, quant_config, prefix=prefix),
-            prefix=f"{prefix}.layers",
-        )
+            prefix=f"{prefix}.layers")
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -305,8 +294,9 @@ class OPTModel(nn.Module):
                                   cache_config,
                                   quant_config,
                                   prefix=f"{prefix}.decoder")
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.decoder.get_input_embeddings(input_ids)
@@ -318,18 +308,16 @@ class OPTModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        return self.decoder(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
+        return self.decoder(input_ids,
+                            positions,
+                            intermediate_tensors,
+                            inputs_embeds=inputs_embeds)
 
 
 class OPTForCausalLM(nn.Module, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -398,7 +386,7 @@ class OPTForCausalLM(nn.Module, SupportsPP):
             if name.startswith("decoder."):
                 name = "model." + name
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)

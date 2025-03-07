@@ -13,8 +13,9 @@ from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
                                         get_adapter, list_adapters,
                                         remove_adapter, set_adapter_mapping)
 from vllm.config import PromptAdapterConfig
-from vllm.prompt_adapter.layers import (  # yapf: disable
-    PromptAdapterMapping, VocabParallelEmbeddingWithPromptAdapter)
+from vllm.prompt_adapter.layers import (
+    VocabParallelEmbeddingWithPromptAdapter)  # yapf: disable
+from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.utils import load_peft_weights
 
 logger = logging.getLogger(__name__)
@@ -49,11 +50,11 @@ def convert_mapping(
     """Converts PromptAdapterMapping to index tensors.
 
     Args:
-        mapping: PromptAdapterMapping mapping rows in a
+        mapping: PromptAdapterMapping mapping rows in a 
                 batch to PromptAdapter ids.
-        prompt_adapter_index_to_id: List mapping PromptAdapter
+        prompt_adapter_index_to_id: List mapping PromptAdapter 
                 ids to PromptAdapter indices.
-
+        
     Returns:
         pa_indices: Tensor of shape [batch_size] mapping batch rows to
             PromptAdapter indices.
@@ -63,10 +64,10 @@ def convert_mapping(
         for idx, id_ in enumerate(prompt_adapter_index_to_id)
         if id_ is not None
     }
-    pa_indices = [
+    pa_indices = ([
         id_to_index.get(id_, -1) if id_ > 0 else -1
         for id_ in mapping.index_mapping
-    ]
+    ])
 
     pa_embedding_mapping = convert_to_embedding_indices(pa_indices)
     pa_indices = torch.tensor(pa_indices)
@@ -75,12 +76,10 @@ def convert_mapping(
 
 class PromptAdapterModel(AdapterModel):
 
-    def __init__(
-        self,
-        prompt_adapter_id=None,
-        num_virtual_tokens=None,
-        prompt_embedding=None,
-    ) -> None:
+    def __init__(self,
+                 prompt_adapter_id=None,
+                 num_virtual_tokens=None,
+                 prompt_embedding=None) -> None:
         self.id = prompt_adapter_id
         self.prompt_embedding = prompt_embedding
         self.num_virtual_tokens = num_virtual_tokens
@@ -94,10 +93,11 @@ class PromptAdapterModel(AdapterModel):
         config: PromptAdapterConfig,
         device: str = "cuda",
     ) -> "PromptAdapterModel":
+
         if num_virtual_tokens > config.max_prompt_adapter_token:
             raise ValueError(
-                f"num_virtual_tokens ({num_virtual_tokens}) should be <= "
-                f"max_prompt_adapter_token({config.max_prompt_adapter_token})")
+                f'num_virtual_tokens ({num_virtual_tokens}) should be <= '
+                f'max_prompt_adapter_token({config.max_prompt_adapter_token})')
 
         adapters_weights = load_peft_weights(adapter_model_path, device)
         prompt_embedding = adapters_weights["prompt_embeddings"].to(
@@ -134,7 +134,7 @@ class PromptAdapterModelManager(AdapterModelManager):
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
         self.prompt_adapter_config = prompt_adapter_config
         self.model.prompt_adapter_manager = self
-        self.adapter_type = "PromptAdapter"
+        self.adapter_type = 'PromptAdapter'
 
         self.base_indices = torch.tensor([-1])
         self.base_embedding_indices = torch.tensor([])
@@ -159,25 +159,21 @@ class PromptAdapterModelManager(AdapterModelManager):
         self,
         prompt_adapter_id: int,
     ) -> bool:
-        """Move PromptAdapter into a GPU buffer
-        to be used in the forward pass."""
+        """Move PromptAdapter into a GPU buffer 
+            to be used in the forward pass."""
         if prompt_adapter_id in self._active_adapters:
             return False
         first_free_slot = next(
             ((i, prompt_adapter_id) for i, prompt_adapter_id in enumerate(
                 self.prompt_adapter_index_to_id) if prompt_adapter_id is None),
-            None,
-        )
+            None)
         if first_free_slot is None:
             raise ValueError("No free prompt_adapter slots")
         index, _ = first_free_slot
         self._active_adapters[prompt_adapter_id] = None
-        prompt_adapter_model = self._registered_adapters[prompt_adapter_id]
-        logger.debug(
-            "Activating prompt_adapter. int id: %d, slot index: %d",
-            prompt_adapter_model.id,
-            index,
-        )
+        prompt_adapter_model = (self._registered_adapters[prompt_adapter_id])
+        logger.debug("Activating prompt_adapter. int id: %d, slot index: %d",
+                     prompt_adapter_model.id, index)
         self.prompt_adapter_index_to_id[index] = prompt_adapter_model.id
         for _, v in self.modules.items():
             v.set_prompt_adapter(index, prompt_adapter_model.prompt_embedding)
@@ -307,8 +303,8 @@ class LRUCachePromptAdapterModelManager(PromptAdapterModelManager):
         self,
         prompt_adapter_id: int,
     ) -> bool:
-        if (prompt_adapter_id not in self._active_adapters
-                and len(self._active_adapters) >= self.prompt_adapter_slots):
+        if prompt_adapter_id not in self._active_adapters and len(
+                self._active_adapters) >= self.prompt_adapter_slots:
             self._active_adapters.remove_oldest()
         result = super().activate_adapter(prompt_adapter_id)
         # We always touch to update the LRU cache order
@@ -344,20 +340,18 @@ class LRUCachePromptAdapterModelManager(PromptAdapterModelManager):
 
 
 def create_prompt_adapter_manager(
-    model: nn.Module,
-    max_num_seqs: int,
-    max_num_batched_tokens: int,
-    prompt_adapter_config: PromptAdapterConfig,
-    prompt_adapter_manager_cls: Type[
-        PromptAdapterModelManager] = PromptAdapterModelManager,
-    **kwargs,
-) -> PromptAdapterModelManager:
+        model: nn.Module,
+        max_num_seqs: int,
+        max_num_batched_tokens: int,
+        prompt_adapter_config: PromptAdapterConfig,
+        prompt_adapter_manager_cls: Type[
+            PromptAdapterModelManager] = PromptAdapterModelManager,
+        **kwargs) -> PromptAdapterModelManager:
     """Create a PromptAdapterModel for a given model."""
     prompt_adapter_manager = prompt_adapter_manager_cls(
         model=model,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         prompt_adapter_config=prompt_adapter_config,
-        **kwargs,
-    )
+        **kwargs)
     return prompt_adapter_manager

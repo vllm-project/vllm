@@ -62,7 +62,8 @@ def kernel_paged_attention_2d(
         cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
         cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx +
                                               1)
-        cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
+        cur_batch_query_len = cur_batch_in_all_stop_index \
+            - cur_batch_in_all_start_index
         if cur_batch_query_len > 1:
             return
     else:
@@ -98,6 +99,7 @@ def kernel_paged_attention_2d(
 
     # iterate through tiles
     for j in range(0, num_blocks):
+
         physical_block_idx = tl.load(block_tables_ptr + block_table_offset + j)
 
         offs_n = tl.arange(0, BLOCK_SIZE)
@@ -176,11 +178,9 @@ def kernel_paged_attention_2d(
     output_offset = (cur_batch_in_all_start_index * output_stride_0 +
                      query_head_idx * output_stride_1)
 
-    tl.store(
-        output_ptr + output_offset + tl.arange(0, HEAD_SIZE_PADDED),
-        acc,
-        mask=dim_mask,
-    )
+    tl.store(output_ptr + output_offset + tl.arange(0, HEAD_SIZE_PADDED),
+             acc,
+             mask=dim_mask)
 
 
 def chunked_prefill_paged_decode(
@@ -201,6 +201,7 @@ def chunked_prefill_paged_decode(
     sliding_window=None,
     sm_scale=None,
 ):
+
     if sm_scale is None:
         sm_scale = 1.0 / (query.shape[1]**0.5)
 

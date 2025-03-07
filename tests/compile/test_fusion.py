@@ -20,15 +20,8 @@ from .backend import TestBackend
 
 class TestModel(torch.nn.Module):
 
-    def __init__(
-        self,
-        hidden_size: int,
-        eps: float,
-        static: bool,
-        cutlass_fp8_enabled: bool,
-        *args,
-        **kwargs,
-    ):
+    def __init__(self, hidden_size: int, eps: float, static: bool,
+                 cutlass_fp8_enabled: bool, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cutlass_fp8_enabled = cutlass_fp8_enabled
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(3)]
@@ -46,25 +39,21 @@ class TestModel(torch.nn.Module):
         resid = torch.sqrt(x)
         y = self.norm[0](x)
 
-        x2 = apply_fp8_linear(
-            y,
-            self.w[0],
-            self.wscale[0],
-            self.scale[0],
-            use_per_token_if_dynamic=True,
-            cutlass_fp8_supported=self.cutlass_fp8_enabled,
-        )
+        x2 = apply_fp8_linear(y,
+                              self.w[0],
+                              self.wscale[0],
+                              self.scale[0],
+                              use_per_token_if_dynamic=True,
+                              cutlass_fp8_supported=self.cutlass_fp8_enabled)
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = apply_fp8_linear(
-            y2,
-            self.w[1],
-            self.wscale[1],
-            self.scale[1],
-            use_per_token_if_dynamic=True,
-            cutlass_fp8_supported=self.cutlass_fp8_enabled,
-        )
+        x3 = apply_fp8_linear(y2,
+                              self.w[1],
+                              self.wscale[1],
+                              self.scale[1],
+                              use_per_token_if_dynamic=True,
+                              cutlass_fp8_supported=self.cutlass_fp8_enabled)
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
 

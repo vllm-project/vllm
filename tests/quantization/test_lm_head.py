@@ -20,7 +20,7 @@ MODELS_QUANT = [
     ("ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head", True),
     ("ModelCloud/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit-10-25-2024", False),
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", False),
-    ("neuralmagic/Meta-Llama-3-8B-Instruct-FP8", False),
+    ("neuralmagic/Meta-Llama-3-8B-Instruct-FP8", False)
 ]
 
 
@@ -36,14 +36,9 @@ def test_lm_head(
         def check_model(model):
             lm_head_layer = model.lm_head
             if lm_head_quantized:
-                assert isinstance(
-                    lm_head_layer.quant_method,
-                    (
-                        GPTQLinearMethod,
-                        GPTQMarlinLinearMethod,
-                        MarlinLinearMethod,
-                    ),
-                )
+                assert isinstance(lm_head_layer.quant_method,
+                                  (GPTQLinearMethod, GPTQMarlinLinearMethod,
+                                   MarlinLinearMethod))
             else:
                 assert isinstance(lm_head_layer.quant_method,
                                   UnquantizedEmbeddingMethod)

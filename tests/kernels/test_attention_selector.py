@@ -16,7 +16,8 @@ from vllm.utils import STR_FLASH_ATTN_VAL, STR_INVALID_VAL
 
 @pytest.fixture(autouse=True)
 def clear_cache():
-    """Clear lru cache to ensure each test case runs without caching."""
+    """Clear lru cache to ensure each test case runs without caching.
+    """
     _cached_get_attn_backend.cache_clear()
 
 
@@ -41,11 +42,9 @@ def test_env(name: str, device: str, monkeypatch):
                                        False)
         assert backend.get_name() == "ROCM_FLASH"
     elif device == "openvino":
-        with (
-                patch("vllm.attention.selector.current_platform",
-                      OpenVinoPlatform()),
-                patch.dict("sys.modules", {"openvino": Mock()}),
-        ):
+        with patch("vllm.attention.selector.current_platform",
+                   OpenVinoPlatform()), patch.dict('sys.modules',
+                                                   {'openvino': Mock()}):
             backend = get_attn_backend(16, torch.float16, torch.float16, 16,
                                        False)
         assert backend.get_name() == "OPENVINO"
@@ -83,7 +82,7 @@ def test_flash_attn(monkeypatch):
     assert backend.get_name() != STR_FLASH_ATTN_VAL
 
     # flash-attn is not installed
-    with patch.dict("sys.modules", {"vllm_flash_attn": None}):
+    with patch.dict('sys.modules', {'vllm_flash_attn': None}):
         backend = get_attn_backend(16, torch.float16, None, 16, False)
         assert backend.get_name() != STR_FLASH_ATTN_VAL
 

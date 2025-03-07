@@ -60,10 +60,8 @@ class MMInputCacheClient:
 
     def cache_hit_ratio(self, steps):
         if self.mm_cache_total > 0 and self.mm_cache_total % steps == 0:
-            logger.debug(
-                "MMInputMapper: cache_hit_ratio = %.2f ",
-                self.mm_cache_hits / self.mm_cache_total,
-            )
+            logger.debug("MMInputMapper: cache_hit_ratio = %.2f ",
+                         self.mm_cache_hits / self.mm_cache_total)
 
     # NOTE: process_inputs only supports image inputs since all multimodal
     # models with other modalities have migrated to use merged preprocessor.

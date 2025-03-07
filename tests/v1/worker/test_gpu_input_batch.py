@@ -26,7 +26,7 @@ def _compare_objs(obj1, obj2):
     attrs = inspect.getmembers(obj1, lambda a: not (inspect.isroutine(a)))
     attr_names = set([
         a[0] for a in attrs
-        if not (a[0].startswith("__") and a[0].endswith("__"))
+        if not (a[0].startswith('__') and a[0].endswith('__'))
     ])
     for attr_name in attr_names:
         a = getattr(obj1, attr_name)
@@ -34,8 +34,8 @@ def _compare_objs(obj1, obj2):
 
         is_same = False
         if isinstance(a, torch.Tensor):
-            if a.numel() == 0 or b.numel() == 0:
-                is_same = a.numel() == 0 and b.numel() == 0
+            if (a.numel() == 0 or b.numel() == 0):
+                is_same = (a.numel() == 0 and b.numel() == 0)
             elif torch.allclose(a, b):
                 is_same = True
         elif isinstance(a, np.ndarray):
@@ -46,8 +46,8 @@ def _compare_objs(obj1, obj2):
             is_same = True  # if we make it here must be same
         elif a == b:
             is_same = True
-        assert is_same, (f"Attribute {attr_name} is different"
-                         f" in {obj1} and {obj2}: {a} != {b}")
+        assert is_same, f"Attribute {attr_name} is different"\
+            f" in {obj1} and {obj2}: {a} != {b}"
 
 
 def _remove_requests(
@@ -118,8 +118,7 @@ def _construct_expected_sampling_metadata(
         temperature[index_in_input_batch] = req.sampling_params.temperature
         min_tokens[index_in_input_batch] = (
             req.sampling_params.min_tokens,
-            req.sampling_params.all_stop_token_ids,
-        )
+            req.sampling_params.all_stop_token_ids)
         logit_bias[index_in_input_batch] = req.sampling_params.logit_bias
         if req.sampling_params.allowed_token_ids:
             allowed_token_ids_mask[index_in_input_batch][
@@ -130,12 +129,12 @@ def _construct_expected_sampling_metadata(
                                  device=device),
         all_greedy=False,
         all_random=True,
-        top_p=(None if all(x == 1.0 for x in top_p) else torch.tensor(
-            top_p, dtype=torch.float, device=device)),
-        top_k=(None if all(x == 0 for x in top_k) else torch.tensor(
-            top_k, dtype=torch.int, device=device)),
-        min_p=(None if all(x == 0.0 for x in min_p) else torch.tensor(
-            min_p, dtype=torch.float, device=device)),
+        top_p=None if all(x == 1.0 for x in top_p) else torch.tensor(
+            top_p, dtype=torch.float, device=device),
+        top_k=None if all(x == 0 for x in top_k) else torch.tensor(
+            top_k, dtype=torch.int, device=device),
+        min_p=None if all(x == 0.0 for x in min_p) else torch.tensor(
+            min_p, dtype=torch.float, device=device),
         generators={},
         max_num_logprobs=0,
         prompt_token_ids=make_tensor_with_pad(
@@ -249,8 +248,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         reqs,
         req_ids_retained,
         input_batch.req_id_to_index,
-        device=torch.device(device),
-    )
+        device=torch.device(device))
 
     def same(t1: Optional[torch.Tensor], t2: Optional[torch.Tensor]) -> bool:
         return (t1 is None
@@ -274,20 +272,18 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         expected_sampling_metadata.repetition_penalties,
         sampling_metadata.repetition_penalties,
     )
-    assert torch.allclose(
-        expected_sampling_metadata.prompt_token_ids,
-        sampling_metadata.prompt_token_ids,
-    )
+    assert torch.allclose(expected_sampling_metadata.prompt_token_ids,
+                          sampling_metadata.prompt_token_ids)
     assert (expected_sampling_metadata.output_token_ids ==
             sampling_metadata.output_token_ids)
     assert expected_sampling_metadata.min_tokens == sampling_metadata.min_tokens
-    assert expected_sampling_metadata.no_penalties == sampling_metadata.no_penalties
+    assert expected_sampling_metadata.no_penalties == \
+           sampling_metadata.no_penalties
     assert expected_sampling_metadata.logit_bias == sampling_metadata.logit_bias
     if sampling_metadata.allowed_token_ids_mask:
         assert torch.allclose(
             expected_sampling_metadata.allowed_token_ids_mask,
-            sampling_metadata.allowed_token_ids_mask,
-        )
+            sampling_metadata.allowed_token_ids_mask)
 
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -334,10 +330,8 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
 
     reordered_reqs = reqs.copy()
     for swap_pair in swap_list:
-        reordered_reqs[swap_pair[0]], reordered_reqs[swap_pair[1]] = (
-            reordered_reqs[swap_pair[1]],
-            reordered_reqs[swap_pair[0]],
-        )
+        reordered_reqs[swap_pair[0]], reordered_reqs[swap_pair[1]] = \
+            reordered_reqs[swap_pair[1]], reordered_reqs[swap_pair[0]]
         input_batch.swap_states(swap_pair[0], swap_pair[1])
 
     for req_index in range(batch_size):

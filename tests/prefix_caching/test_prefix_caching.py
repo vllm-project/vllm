@@ -86,8 +86,8 @@ def test_mixed_requests(
                     block_size) * block_size
             else:
                 expected_num_cached_tokens = 0
-            assert req_outputs[
-                i].num_cached_tokens == expected_num_cached_tokens
+            assert (
+                req_outputs[i].num_cached_tokens == expected_num_cached_tokens)
 
         vllm_outputs = [(
             output.prompt_token_ids + list(output.outputs[0].token_ids),
@@ -108,6 +108,7 @@ def test_unstable_prompt_sequence(
     backend: str,
     monkeypatch,
 ) -> None:
+
     if backend == "FLASHINFER" and current_platform.is_rocm():
         pytest.skip("Flashinfer does not support ROCm/HIP.")
     if backend == "XFORMERS" and current_platform.is_rocm():
@@ -121,10 +122,8 @@ def test_unstable_prompt_sequence(
             max_model_len=4096,
     ) as vllm_model:
         for prompt in UNSTABLE_PROMPT_SEQUENCE:
-            vllm_model.generate(
-                TokensPrompt(prompt_token_ids=prompt),
-                SamplingParams(max_tokens=1),
-            )
+            vllm_model.generate(TokensPrompt(prompt_token_ids=prompt),
+                                SamplingParams(max_tokens=1))
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -193,8 +192,8 @@ def test_fully_cached_prefill_needs_uncached_token(model):
     assert len(sched_out.scheduled_seq_groups) == 1
     assert (sched_out.scheduled_seq_groups[0].seq_group.request_id ==
             seq_groupB.request_id)
-    assert sched_out.scheduled_seq_groups[
-        0].token_chunk_size == max_num_batched_tokens
+    assert (sched_out.scheduled_seq_groups[0].token_chunk_size ==
+            max_num_batched_tokens)
 
     # When seqB is finished, seqC could be prefilled.
     while not seqB.is_finished():

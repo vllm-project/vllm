@@ -44,8 +44,8 @@ class CustomCacheManager(FileCacheManager):
             self.cache_dir = os.path.join(self.cache_dir, self.key)
         else:
             # create cache directory if it doesn't exist
-            self.cache_dir = (os.getenv("TRITON_CACHE_DIR", "").strip()
-                              or default_cache_dir())
+            self.cache_dir = os.getenv("TRITON_CACHE_DIR",
+                                       "").strip() or default_cache_dir()
             if self.cache_dir:
                 self.cache_dir = f"{self.cache_dir}_{os.getpid()}"
                 self.cache_dir = os.path.join(self.cache_dir, self.key)

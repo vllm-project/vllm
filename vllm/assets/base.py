@@ -35,7 +35,6 @@ def get_vllm_public_assets(filename: str,
         global_http_connection.download_file(
             f"{VLLM_S3_BUCKET_URL}/{filename}",
             asset_path,
-            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
-        )
+            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT)
 
     return asset_path

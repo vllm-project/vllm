@@ -15,14 +15,16 @@ SPEC_MODEL = "JackFram/llama-160m"
     "common_llm_kwargs",
     [{
         "model_name": "JackFram/llama-68m",
+
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
         # speculative model
         "speculative_model": "JackFram/llama-160m",
+
         # num speculative tokens
         "num_speculative_tokens": 3,
-    }],
-)
+    }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{"seed": 1}])
 @pytest.mark.parametrize("test_llm_kwargs", [{"seed": 5}])
@@ -33,19 +35,13 @@ SPEC_MODEL = "JackFram/llama-160m"
     [
         # Use smaller output len for fast test.
         20,
-    ],
-)
-def test_seeded_consistency(
-    vllm_runner,
-    common_llm_kwargs,
-    per_test_common_llm_kwargs,
-    baseline_llm_kwargs,
-    test_llm_kwargs,
-    batch_size: int,
-    temperature: float,
-    output_len: int,
-):
-    """Verify outputs are consistent across multiple runs with same seed"""
+    ])
+def test_seeded_consistency(vllm_runner, common_llm_kwargs,
+                            per_test_common_llm_kwargs, baseline_llm_kwargs,
+                            test_llm_kwargs, batch_size: int,
+                            temperature: float, output_len: int):
+    """Verify outputs are consistent across multiple runs with same seed
+    """
     run_equality_correctness_test(
         vllm_runner,
         common_llm_kwargs,

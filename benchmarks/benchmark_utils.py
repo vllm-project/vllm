@@ -7,11 +7,9 @@ import os
 from typing import Any
 
 
-def convert_to_pytorch_benchmark_format(
-    args: argparse.Namespace,
-    metrics: dict[str, list],
-    extra_info: dict[str, Any],
-) -> list:
+def convert_to_pytorch_benchmark_format(args: argparse.Namespace,
+                                        metrics: dict[str, list],
+                                        extra_info: dict[str, Any]) -> list:
     """
     Save the benchmark results in the format used by PyTorch OSS benchmark with
     on metric per record
@@ -44,7 +42,7 @@ def convert_to_pytorch_benchmark_format(
         # Save tensor_parallel_size parameter if it's part of the metadata
         if not tp and "tensor_parallel_size" in extra_info:
             record["benchmark"]["extra_info"]["args"][
-                "tensor_parallel_size"] = (extra_info["tensor_parallel_size"])
+                "tensor_parallel_size"] = extra_info["tensor_parallel_size"]
 
         records.append(record)
 

@@ -56,6 +56,7 @@ def get_dora_requests() -> List[LoRARequest]:
 
 async def requests_processing_time(llm,
                                    dora_requests: List[LoRARequest]) -> float:
+
     sampling_params = SamplingParams(n=1,
                                      temperature=0.0,
                                      top_p=1.0,
@@ -134,6 +135,7 @@ async def test_add_dora():
     cold_run_requests = dora_requests[part_size * 2:]
 
     async with build_async_engine_client_from_engine_args(engine_args) as llm:
+
         # Dummy run - So any 1-time functionality like triton kernel compilation
         # is complete here.
         await requests_processing_time(llm, dummy_run_requests)

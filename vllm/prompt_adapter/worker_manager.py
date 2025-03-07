@@ -21,11 +21,11 @@ logger = logging.getLogger(__name__)
 
 
 class WorkerPromptAdapterManager(AbstractWorkerManager):
-    """WorkerPromptAdapterManager that manages
+    """WorkerPromptAdapterManager that manages 
     prompt_adapter models on the worker side.
 
-    Every request, the requested prompt_adapters will be
-    loaded (unless they are already loaded),
+    Every request, the requested prompt_adapters will be 
+    loaded (unless they are already loaded), 
     and every other prompt_adapter will be unloaded."""
 
     _manager_cls: Type[PromptAdapterModelManager] = PromptAdapterModelManager
@@ -36,8 +36,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
         max_num_batched_tokens: int,
         device: torch.device,
         prompt_adapter_config: PromptAdapterConfig,
-        prompt_adapter_model_cls: Type[
-            PromptAdapterModel] = PromptAdapterModel,
+        prompt_adapter_model_cls: Type[PromptAdapterModel] = PromptAdapterModel
     ):
         self._adapter_manager: PromptAdapterModelManager
         self.max_num_seqs = max_num_seqs
@@ -68,14 +67,15 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
             self, prompt_adapter_request: PromptAdapterRequest
     ) -> PromptAdapterModel:
         try:
-            prompt_adapter = self._prompt_adapter_model_cls.from_local_checkpoint(
-                prompt_adapter_request.prompt_adapter_local_path,
-                prompt_adapter_id=prompt_adapter_request.prompt_adapter_id,
-                num_virtual_tokens=prompt_adapter_request.
-                prompt_adapter_num_virtual_tokens,
-                config=self.prompt_adapter_config,
-                device=str(self.device),
-            )
+            prompt_adapter = (
+                self._prompt_adapter_model_cls.from_local_checkpoint(
+                    prompt_adapter_request.prompt_adapter_local_path,
+                    prompt_adapter_id=prompt_adapter_request.prompt_adapter_id,
+                    num_virtual_tokens=prompt_adapter_request.
+                    prompt_adapter_num_virtual_tokens,
+                    config=self.prompt_adapter_config,
+                    device=str(self.device),
+                ))
         except Exception as e:
             raise RuntimeError(
                 f"Loading prompt_adapter "
@@ -92,30 +92,19 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
 
     def set_active_adapters(self, requests: Set[Any],
                             mapping: Optional[Any]) -> None:
-        set_active_adapters_worker(
-            requests,
-            mapping,
-            self._apply_adapters,
-            self._adapter_manager.set_adapter_mapping,
-        )
+        set_active_adapters_worker(requests, mapping, self._apply_adapters,
+                                   self._adapter_manager.set_adapter_mapping)
 
     def add_adapter(self, adapter_request: Any) -> bool:
-        return add_adapter_worker(
-            adapter_request,
-            self.list_adapters,
-            self._load_adapter,
-            self._adapter_manager.add_adapter,
-            self._adapter_manager.activate_adapter,
-        )
+        return add_adapter_worker(adapter_request, self.list_adapters,
+                                  self._load_adapter,
+                                  self._adapter_manager.add_adapter,
+                                  self._adapter_manager.activate_adapter)
 
     def _apply_adapters(self, adapter_requests: Set[Any]) -> None:
-        apply_adapters_worker(
-            adapter_requests,
-            self.list_adapters,
-            self._adapter_manager.adapter_slots,
-            self.remove_adapter,
-            self.add_adapter,
-        )
+        apply_adapters_worker(adapter_requests, self.list_adapters,
+                              self._adapter_manager.adapter_slots,
+                              self.remove_adapter, self.add_adapter)
 
     def remove_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.remove_adapter(adapter_id)
@@ -128,16 +117,16 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
 
 
 class LRUCacheWorkerPromptAdapterManager(WorkerPromptAdapterManager):
-    """WorkerPromptAdapterManager that manages
+    """WorkerPromptAdapterManager that manages 
     prompt_adapter models on the worker side.
 
-    Uses an LRU Cache. Every request, the requested
-    prompt_adapters will be loaded (unless they are already loaded)
+    Uses an LRU Cache. Every request, the requested 
+    prompt_adapters will be loaded (unless they are already loaded) 
     and least recently used prompt_adapters will
     be unloaded if the cache is above capacity."""
 
-    _prompt_adapter_manager_cls: Type[LRUCachePromptAdapterModelManager] = (
-        LRUCachePromptAdapterModelManager)
+    _prompt_adapter_manager_cls: Type[
+        LRUCachePromptAdapterModelManager] = LRUCachePromptAdapterModelManager
 
     def create_prompt_adapter_manager(
         self,
@@ -148,8 +137,7 @@ class LRUCacheWorkerPromptAdapterManager(WorkerPromptAdapterManager):
             max_num_seqs=self.max_num_seqs,
             max_num_batched_tokens=self.max_num_batched_tokens,
             prompt_adapter_config=self.prompt_adapter_config,
-            prompt_adapter_manager_cls=self._prompt_adapter_manager_cls,
-        )
+            prompt_adapter_manager_cls=self._prompt_adapter_manager_cls)
         self._adapter_manager: LRUCachePromptAdapterModelManager = (
             prompt_adapter_manager)
         return prompt_adapter_manager.model
@@ -183,8 +171,8 @@ class LRUCacheWorkerPromptAdapterManager(WorkerPromptAdapterManager):
         else:
             # If the prompt_adapter is already loaded, just touch it to
             # update its position in the caches
-            loaded = (self._adapter_manager.get_adapter(
-                prompt_adapter_request.prompt_adapter_id) is not None)
+            loaded = self._adapter_manager.get_adapter(
+                prompt_adapter_request.prompt_adapter_id) is not None
         self._adapter_manager.activate_adapter(
             prompt_adapter_request.prompt_adapter_id)
         return loaded

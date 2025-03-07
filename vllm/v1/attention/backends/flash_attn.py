@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
-
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -28,6 +27,7 @@ logger = init_logger(__name__)
 
 
 class FlashAttentionBackend(AttentionBackend):
+
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -104,37 +104,29 @@ class FlashAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build(
-        self,
-        num_reqs: int,
-        num_actual_tokens: int,
-        max_query_len: int,
-        common_prefix_len: int,
-    ):
+    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+              common_prefix_len: int):
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
         query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
             self.runner.device, non_blocking=True)
         seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(self.runner.device,
                                                           non_blocking=True)
-        block_table = self.runner.input_batch.block_table.get_device_tensor(
-        )[:num_reqs]
-        slot_mapping = (self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            self.runner.device, non_blocking=True).long())
+        block_table = (
+            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
+        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
+            self.runner.device, non_blocking=True).long()
 
         use_cascade = common_prefix_len > 0
         if use_cascade:
             # TODO: Optimize.
-            cu_prefix_query_lens = torch.tensor(
-                [0, num_actual_tokens],
-                dtype=torch.int32,
-                device=self.runner.device,
-            )
-            prefix_kv_lens = torch.tensor(
-                [common_prefix_len],
-                dtype=torch.int32,
-                device=self.runner.device,
-            )
-            suffix_kv_lens = self.runner.seq_lens_np[:num_reqs] - common_prefix_len
+            cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
+                                                dtype=torch.int32,
+                                                device=self.runner.device)
+            prefix_kv_lens = torch.tensor([common_prefix_len],
+                                          dtype=torch.int32,
+                                          device=self.runner.device)
+            suffix_kv_lens = (self.runner.seq_lens_np[:num_reqs] -
+                              common_prefix_len)
             suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
                 self.runner.device)
         else:
@@ -399,12 +391,10 @@ def cascade_attention(
     common_prefix_len: int,
     fa_version: int,
 ) -> torch.Tensor:
-    assert alibi_slopes is None, "Cascade attention does not support ALiBi."
+    assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
     # TODO: Support sliding window.
-    assert sliding_window == (
-        -1,
-        -1,
-    ), "Cascade attention does not support sliding window."
+    assert sliding_window == (-1, -1), (
+        "Cascade attention does not support sliding window.")
 
     num_tokens = query.shape[0]
     block_size = key_cache.shape[-3]

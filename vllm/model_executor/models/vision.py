@@ -55,7 +55,7 @@ class VisionLanguageConfig(Protocol):
 
 
 def get_vision_encoder_info(
-    hf_config: VisionLanguageConfig, ) -> VisionEncoderInfo:
+        hf_config: VisionLanguageConfig) -> VisionEncoderInfo:
     # Avoid circular imports
     from .clip import CLIPEncoderInfo, CLIPVisionConfig
     from .pixtral import PixtralHFEncoderInfo, PixtralVisionConfig
@@ -88,7 +88,6 @@ def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
             device_available = current_platform.has_device_capability(80)
             if device_available and support_fa:
                 from transformers.utils import is_flash_attn_2_available
-
                 if is_flash_attn_2_available():
                     selected_backend = _Backend.FLASH_ATTN
                 else:
@@ -138,9 +137,11 @@ def resolve_visual_encoder_outputs(
     # of each layer.
     num_loaded_layers = len(encoder_outputs) - 1
     offset = max_possible_layers - num_loaded_layers
-    hs_pool = [(encoder_outputs[layer_idx]
-                if layer_idx >= 0 else encoder_outputs[layer_idx + offset])
-               for layer_idx in feature_sample_layers]
+    hs_pool = [
+        encoder_outputs[layer_idx]
+        if layer_idx >= 0 else encoder_outputs[layer_idx + offset]
+        for layer_idx in feature_sample_layers
+    ]
 
     # Apply post-norm on the final hidden state if we are using it
     uses_last_layer = feature_sample_layers[-1] in (len(hs_pool) - 1, -1)

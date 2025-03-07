@@ -65,11 +65,9 @@ def test_stop(model):
     # Output should not contain the stop word.
     assert len(new_split_text) == STOP_IDX
 
-    params = SamplingParams(
-        temperature=0,
-        stop=split_text[STOP_IDX],
-        include_stop_str_in_output=True,
-    )
+    params = SamplingParams(temperature=0,
+                            stop=split_text[STOP_IDX],
+                            include_stop_str_in_output=True)
     output = model.generate(PROMPT, params)
     new_split_text = output[0].outputs[0].text.split()
 

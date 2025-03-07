@@ -11,15 +11,13 @@ import requests
 
 
 def _query_server(prompt: str, max_tokens: int = 5) -> dict:
-    response = requests.post(
-        "http://localhost:8000/generate",
-        json={
-            "prompt": prompt,
-            "max_tokens": max_tokens,
-            "temperature": 0,
-            "ignore_eos": True,
-        },
-    )
+    response = requests.post("http://localhost:8000/generate",
+                             json={
+                                 "prompt": prompt,
+                                 "max_tokens": max_tokens,
+                                 "temperature": 0,
+                                 "ignore_eos": True
+                             })
     response.raise_for_status()
     return response.json()
 
@@ -30,8 +28,8 @@ def _query_server_long(prompt: str) -> dict:
 
 @pytest.fixture
 def api_server(tokenizer_pool_size: int, distributed_executor_backend: str):
-    script_path = (Path(__file__).parent.joinpath(
-        "api_server_async_engine.py").absolute())
+    script_path = Path(__file__).parent.joinpath(
+        "api_server_async_engine.py").absolute()
     commands = [
         sys.executable,
         "-u",

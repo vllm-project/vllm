@@ -19,13 +19,13 @@ from vllm.profiler.utils import (TablePrinter, event_has_module,
 @dataclass
 class _ModuleTreeNode:
     event: _ProfilerEvent
-    parent: Optional["_ModuleTreeNode"] = None
-    children: List["_ModuleTreeNode"] = field(default_factory=list)
+    parent: Optional['_ModuleTreeNode'] = None
+    children: List['_ModuleTreeNode'] = field(default_factory=list)
     trace: str = ""
 
     @property
     def is_leaf(self):
-        return self.event.children is None or len(self.event.children) == 0
+        return (self.event.children is None or len(self.event.children) == 0)
 
     @property
     def is_torch_op(self):
@@ -98,8 +98,7 @@ class LayerwiseProfileResults(profile):
         TablePrinter(ModelStatsEntry, _column_widths).print_table(
             self._indent_row_names_based_on_depth(
                 filtered_model_table,
-                indent_style=lambda indent: "|" + "-" * indent + " ",
-            ))
+                indent_style=lambda indent: "|" + "-" * indent + " "))
 
     def print_summary_table(self, column_widths: Dict[str, int] = None):
         _column_widths = dict(name=80,
@@ -115,8 +114,7 @@ class LayerwiseProfileResults(profile):
         TablePrinter(SummaryStatsEntry, _column_widths).print_table(
             self._indent_row_names_based_on_depth(
                 filtered_summary_table,
-                indent_style=lambda indent: "|" + "-" * indent + " ",
-            ))
+                indent_style=lambda indent: "|" + "-" * indent + " "))
 
     def export_model_stats_table_csv(self, filename: str):
         df = pd.DataFrame([
@@ -140,14 +138,15 @@ class LayerwiseProfileResults(profile):
             "summary_stats":
             self._convert_stats_tree_to_dict(self._summary_stats_tree),
             "model_stats":
-            self._convert_stats_tree_to_dict(self._model_stats_tree),
+            self._convert_stats_tree_to_dict(self._model_stats_tree)
         }
 
     @staticmethod
-    def _indent_row_names_based_on_depth(
-        depths_rows: List[Tuple[int, StatsEntry]],
-        indent_style: Union[Callable[[int], str], str] = " ",
-    ):
+    def _indent_row_names_based_on_depth(depths_rows: List[Tuple[int,
+                                                                 StatsEntry]],
+                                         indent_style: Union[Callable[[int],
+                                                                      str],
+                                                             str] = " "):
         indented_rows = []
         for depth, row in depths_rows:
             if row.cuda_time_us == 0:
@@ -170,6 +169,7 @@ class LayerwiseProfileResults(profile):
 
         def _df_traversal(event: _ProfilerEvent,
                           curr_node: Optional[_ModuleTreeNode] = None):
+
             # For the tensor parallel case for now only look at task 1
             if event.start_tid != 1:
                 return
@@ -182,14 +182,13 @@ class LayerwiseProfileResults(profile):
                     self._module_tree.append(node)
                 curr_node = node
 
-            is_leaf = event.children is None or len(event.children) == 0
+            is_leaf = (event.children is None or len(event.children) == 0)
             if is_leaf and curr_node:
                 node = _ModuleTreeNode(
                     event=event,
                     parent=curr_node,
                     trace=event_torch_op_stack_trace(
-                        event, until=lambda x: event_has_module(x)),
-                )
+                        event, until=lambda x: event_has_module(x)))
                 curr_node.children.append(node)
                 curr_node = node
 
@@ -210,7 +209,7 @@ class LayerwiseProfileResults(profile):
         return next(iterator, None)
 
     def _cumulative_cuda_time(self, node: _ModuleTreeNode):
-        "Return cuda time in microseconds"
+        'Return cuda time in microseconds'
 
         def _cumulative_cuda_time_recursive(node: _ModuleTreeNode):
             if node.is_leaf and (gpu_kineto_event :=
@@ -237,14 +236,14 @@ class LayerwiseProfileResults(profile):
             return (cuda_time_us / total_cuda_time) * 100
 
         def build_summary_stats_tree_df(
-                node: _ModuleTreeNode,
-                parent: Optional[_StatsTreeNode] = None,
-                summary_trace: Tuple[str] = (),
-        ):
+            node: _ModuleTreeNode,
+            parent: Optional[_StatsTreeNode] = None,
+            summary_trace: Tuple[str] = ()):
+
             if event_has_module(node.event):
                 name = event_module_repr(node.event)
                 cuda_time_us = self._cumulative_cuda_time(node)
-            elif gpu_kineto_event := self._get_kineto_gpu_event(node):
+            elif (gpu_kineto_event := self._get_kineto_gpu_event(node)):
                 name = gpu_kineto_event.name()
                 cuda_time_us = gpu_kineto_event.duration_ns() / 1000.0
             else:
@@ -257,16 +256,13 @@ class LayerwiseProfileResults(profile):
                 entry.invocations += 1
                 entry.pct_cuda_time = pct_cuda_time(entry.cuda_time_us)
             else:
-                new_node = _StatsTreeNode(
-                    entry=SummaryStatsEntry(
-                        name=name,
-                        cuda_time_us=cuda_time_us,
-                        pct_cuda_time=pct_cuda_time(cuda_time_us),
-                        invocations=1,
-                    ),
-                    children=[],
-                    parent=parent,
-                )
+                new_node = _StatsTreeNode(entry=SummaryStatsEntry(
+                    name=name,
+                    cuda_time_us=cuda_time_us,
+                    pct_cuda_time=pct_cuda_time(cuda_time_us),
+                    invocations=1),
+                                          children=[],
+                                          parent=parent)
                 if parent:
                     parent.children.append(new_node)
                 summary_dict[summary_trace] = new_node
@@ -288,7 +284,7 @@ class LayerwiseProfileResults(profile):
                 cuda_time_us = self._cumulative_cuda_time(node)
                 cpu_time_us = node.event.duration_time_ns / 1000
                 trace = ""
-            elif gpu_kineto_event := self._get_kineto_gpu_event(node):
+            elif (gpu_kineto_event := self._get_kineto_gpu_event(node)):
                 name = gpu_kineto_event.name()
                 cuda_time_us = gpu_kineto_event.duration_ns() / 1000.0
                 cpu_time_us = 0
@@ -296,17 +292,14 @@ class LayerwiseProfileResults(profile):
             else:
                 return None
 
-            new_node = _StatsTreeNode(
-                entry=ModelStatsEntry(
-                    name=name,
-                    cpu_time_us=cpu_time_us,
-                    cuda_time_us=cuda_time_us,
-                    pct_cuda_time=pct_cuda_time(cuda_time_us),
-                    trace=trace,
-                ),
-                parent=parent,
-                children=[],
-            )
+            new_node = _StatsTreeNode(entry=ModelStatsEntry(
+                name=name,
+                cpu_time_us=cpu_time_us,
+                cuda_time_us=cuda_time_us,
+                pct_cuda_time=pct_cuda_time(cuda_time_us),
+                trace=trace),
+                                      parent=parent,
+                                      children=[])
             if parent:
                 parent.children.append(new_node)
 
@@ -367,8 +360,7 @@ class layerwise_profile(profile):
             record_shapes=True,
             with_stack=True,
             with_modules=True,
-            experimental_config=_ExperimentalConfig(verbose=True),
-        )
+            experimental_config=_ExperimentalConfig(verbose=True))
 
         self.num_running_seqs = num_running_seqs
 

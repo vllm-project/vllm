@@ -85,12 +85,10 @@ class TestTokenizer(TokenizerBase):
                add_special_tokens: Optional[bool] = None) -> list[int]:
         raise NotImplementedError()
 
-    def apply_chat_template(
-        self,
-        messages: list["ChatCompletionMessageParam"],
-        tools: Optional[list[dict[str, Any]]] = None,
-        **kwargs,
-    ) -> list[int]:
+    def apply_chat_template(self,
+                            messages: list["ChatCompletionMessageParam"],
+                            tools: Optional[list[dict[str, Any]]] = None,
+                            **kwargs) -> list[int]:
         raise NotImplementedError()
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
@@ -110,11 +108,9 @@ class TestTokenizer(TokenizerBase):
 
 
 def test_customized_tokenizer():
-    TokenizerRegistry.register(
-        "test_tokenizer",
-        "tests.tokenization.test_tokenizer_registry",
-        "TestTokenizer",
-    )
+    TokenizerRegistry.register("test_tokenizer",
+                               "tests.tokenization.test_tokenizer_registry",
+                               "TestTokenizer")
 
     tokenizer = TokenizerRegistry.get_tokenizer("test_tokenizer")
     assert isinstance(tokenizer, TestTokenizer)

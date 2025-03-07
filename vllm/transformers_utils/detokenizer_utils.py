@@ -65,8 +65,7 @@ def convert_prompt_ids_to_tokens(
     # Offset a little more in case we have special tokens.
     new_tokens = tokenizer.convert_ids_to_tokens(
         prompt_ids[-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2:],
-        skip_special_tokens=skip_special_tokens,
-    )
+        skip_special_tokens=skip_special_tokens)
     read_offset = len(new_tokens)
     prefix_offset = max(
         read_offset - INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET, 0)
@@ -87,7 +86,7 @@ def convert_ids_list_to_tokens(
 
     Returns:
       Python list of token string representations
-
+    
     """
     token_str_lst = tokenizer.convert_ids_to_tokens(token_ids)
     _replace_none_with_empty(token_str_lst)  # type: ignore
@@ -138,8 +137,7 @@ def detokenize_incrementally(
          read_offset) = convert_prompt_ids_to_tokens(
              tokenizer,
              all_input_ids[:-1],
-             skip_special_tokens=skip_special_tokens,
-         )
+             skip_special_tokens=skip_special_tokens)
     assert prev_tokens is not None
 
     # If the new token id is out of bounds, return an empty string.

@@ -83,15 +83,10 @@ async def get_outlines_guided_decoding_logits_processor(
             max_workers=max_workers)
     loop = asyncio.get_running_loop()
 
-    return await loop.run_in_executor(
-        global_thread_pool,
-        _get_logits_processor,
-        guide,
-        tokenizer,
-        mode,
-        guided_params.whitespace_pattern,
-        reasoner,
-    )
+    return await loop.run_in_executor(global_thread_pool,
+                                      _get_logits_processor, guide, tokenizer,
+                                      mode, guided_params.whitespace_pattern,
+                                      reasoner)
 
 
 def get_local_outlines_guided_decoding_logits_processor(
@@ -115,7 +110,7 @@ def get_local_outlines_guided_decoding_logits_processor(
 
 
 def _get_guide_and_mode(
-    guided_params: GuidedDecodingParams,
+    guided_params: GuidedDecodingParams
 ) -> Union[Tuple[str, GuidedDecodingMode], Tuple[None, None]]:
     if guided_params.json:
         if isinstance(guided_params.json, dict):

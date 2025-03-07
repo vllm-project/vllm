@@ -44,14 +44,13 @@ def bench_fn(label: str, sub_label: str, description: str, fn: Callable, *args,
 
 
 def bench_int8(
-    dtype: torch.dtype,
-    m: int,
-    k: int,
-    n: int,
-    label: str,
-    sub_label: str,
-    bench_kernels: Optional[list[str]] = None,
-) -> Iterable[TMeasurement]:
+        dtype: torch.dtype,
+        m: int,
+        k: int,
+        n: int,
+        label: str,
+        sub_label: str,
+        bench_kernels: Optional[list[str]] = None) -> Iterable[TMeasurement]:
     """Benchmark INT8-based kernels."""
     assert dtype == torch.int8
     a, b = make_rand_tensors(torch.int8, m, n, k)
@@ -97,14 +96,13 @@ def bench_int8(
 
 
 def bench_fp8(
-    dtype: torch.dtype,
-    m: int,
-    k: int,
-    n: int,
-    label: str,
-    sub_label: str,
-    bench_kernels: Optional[list[str]] = None,
-) -> Iterable[TMeasurement]:
+        dtype: torch.dtype,
+        m: int,
+        k: int,
+        n: int,
+        label: str,
+        sub_label: str,
+        bench_kernels: Optional[list[str]] = None) -> Iterable[TMeasurement]:
     """Benchmark FP8-based kernels."""
     assert dtype == torch.float8_e4m3fn
     a, b = make_rand_tensors(torch.float8_e4m3fn, m, n, k)
@@ -143,14 +141,12 @@ def bench_fp8(
         lambda: torch._scaled_mm(
             a, b, scale_a, scale_b, out_dtype=torch.bfloat16),
         "pytorch_fp8_fp8_bf16_scaled_mm_fast_accum":
-        lambda: torch._scaled_mm(
-            a,
-            b,
-            scale_a,
-            scale_b,
-            out_dtype=torch.bfloat16,
-            use_fast_accum=True,
-        ),
+        lambda: torch._scaled_mm(a,
+                                 b,
+                                 scale_a,
+                                 scale_b,
+                                 out_dtype=torch.bfloat16,
+                                 use_fast_accum=True),
         "cutlass_fp8_fp8_bf16_scaled_mm":
         lambda: ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16),
         "cutlass_fp8_fp8_fp16_scaled_mm":
@@ -179,15 +175,13 @@ def bench_fp8(
     return timers
 
 
-def bench(
-    dtype: torch.dtype,
-    m: int,
-    k: int,
-    n: int,
-    label: str,
-    sub_label: str,
-    bench_kernels: Optional[list[str]] = None,
-) -> Iterable[TMeasurement]:
+def bench(dtype: torch.dtype,
+          m: int,
+          k: int,
+          n: int,
+          label: str,
+          sub_label: str,
+          bench_kernels: Optional[list[str]] = None) -> Iterable[TMeasurement]:
     if dtype == torch.int8:
         return bench_int8(dtype, m, k, n, label, sub_label, bench_kernels)
     if dtype == torch.float8_e4m3fn:
@@ -201,33 +195,27 @@ def print_timers(timers: Iterable[TMeasurement]):
     compare.print()
 
 
-def run(
-    dtype: torch.dtype,
-    MKNs: Iterable[tuple[int, int, int]],
-    bench_kernels: Optional[list[str]] = None,
-) -> Iterable[TMeasurement]:
+def run(dtype: torch.dtype,
+        MKNs: Iterable[tuple[int, int, int]],
+        bench_kernels: Optional[list[str]] = None) -> Iterable[TMeasurement]:
     results = []
     for m, k, n in MKNs:
-        timers = bench(
-            dtype,
-            m,
-            k,
-            n,
-            f"scaled-{dtype}-gemm",
-            f"MKN=({m}x{k}x{n})",
-            bench_kernels=bench_kernels,
-        )
+        timers = bench(dtype,
+                       m,
+                       k,
+                       n,
+                       f"scaled-{dtype}-gemm",
+                       f"MKN=({m}x{k}x{n})",
+                       bench_kernels=bench_kernels)
         print_timers(timers)
         results.extend(timers)
     return results
 
 
-def make_output(
-    data: Iterable[TMeasurement],
-    MKNs: Iterable[tuple[int, int, int]],
-    base_description: str,
-    timestamp=None,
-):
+def make_output(data: Iterable[TMeasurement],
+                MKNs: Iterable[tuple[int, int, int]],
+                base_description: str,
+                timestamp=None):
     print(f"== All Results {base_description} ====")
     print_timers(data)
 
@@ -297,7 +285,7 @@ def run_model_bench(args):
         pkl.dump(all_data, f)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
 
     def to_torch_dtype(dt):
         if dt == "int8":
@@ -322,22 +310,19 @@ Benchmark Cutlass GEMM.
     Output:
         - a .pkl file, that is a list of raw torch.benchmark.utils.Measurements for the pytorch and cutlass implementations for the various GEMMs.
             """,  # noqa: E501
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
+        formatter_class=argparse.RawTextHelpFormatter)
 
-    parser.add_argument(
-        "--dtype",
-        type=to_torch_dtype,
-        required=True,
-        help="Available options are ['int8', 'fp8']",
-    )
+    parser.add_argument("--dtype",
+                        type=to_torch_dtype,
+                        required=True,
+                        help="Available options are ['int8', 'fp8']")
     parser.add_argument(
         "--kernels",
         nargs="+",
         type=str,
         default=None,
         help=
-        "Exact names of the kernels to benchmark. If not set, runs all kernels.",
+        "Exact names of the kernels to benchmark. If not set, runs all kernels."
     )
 
     subparsers = parser.add_subparsers(dest="cmd")
@@ -358,13 +343,11 @@ Benchmark Cutlass GEMM.
     range_parser.set_defaults(func=run_range_bench)
 
     model_parser = subparsers.add_parser("model_bench")
-    model_parser.add_argument(
-        "--models",
-        nargs="+",
-        type=str,
-        default=DEFAULT_MODELS,
-        choices=WEIGHT_SHAPES.keys(),
-    )
+    model_parser.add_argument("--models",
+                              nargs="+",
+                              type=str,
+                              default=DEFAULT_MODELS,
+                              choices=WEIGHT_SHAPES.keys())
     model_parser.add_argument("--tp-sizes",
                               nargs="+",
                               type=int,

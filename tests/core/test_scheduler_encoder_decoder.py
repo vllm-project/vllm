@@ -11,7 +11,7 @@ from .utils import (append_new_token, create_dummy_prompt_encoder_decoder,
 
 
 def test_scheduler_schedule_simple_encoder_decoder():
-    """
+    '''
     Test basic scheduler functionality in the context
     of an encoder/decoder model. Focus on testing
     enc/dec-specific functionality sense tests already
@@ -31,7 +31,7 @@ def test_scheduler_schedule_simple_encoder_decoder():
     * Abort scheduled seq groups
     * Assert that aborted seq groups no longer appear in
       cross-attention block table
-    """
+    '''
 
     block_size = 4
     num_seq_group = 4

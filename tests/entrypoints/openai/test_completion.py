@@ -111,22 +111,16 @@ async def client(server):
 @pytest.mark.parametrize(
     # first test base model, then test loras, then test prompt adapters
     "model_name,num_virtual_tokens",
-    [
-        (MODEL_NAME, 0),
-        ("zephyr-lora", 0),
-        ("zephyr-lora2", 0),
-        ("zephyr-pa", PA_NUM_VIRTUAL_TOKENS),
-        ("zephyr-pa2", PA_NUM_VIRTUAL_TOKENS),
-    ],
+    [(MODEL_NAME, 0), ("zephyr-lora", 0), ("zephyr-lora2", 0),
+     ("zephyr-pa", PA_NUM_VIRTUAL_TOKENS),
+     ("zephyr-pa2", PA_NUM_VIRTUAL_TOKENS)],
 )
 async def test_single_completion(client: openai.AsyncOpenAI, model_name: str,
                                  num_virtual_tokens: int):
-    completion = await client.completions.create(
-        model=model_name,
-        prompt="Hello, my name is",
-        max_tokens=5,
-        temperature=0.0,
-    )
+    completion = await client.completions.create(model=model_name,
+                                                 prompt="Hello, my name is",
+                                                 max_tokens=5,
+                                                 temperature=0.0)
 
     assert completion.id is not None
     assert completion.choices is not None and len(completion.choices) == 1
@@ -137,8 +131,7 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str,
     assert completion.usage == openai.types.CompletionUsage(
         completion_tokens=5,
         prompt_tokens=6 + num_virtual_tokens,
-        total_tokens=11 + num_virtual_tokens,
-    )
+        total_tokens=11 + num_virtual_tokens)
 
     # test using token IDs
     completion = await client.completions.create(
@@ -248,6 +241,7 @@ async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
 )
 async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
                                             model_name: str):
+
     with pytest.raises(
         (openai.BadRequestError, openai.APIError)):  # test using token IDs
         await client.completions.create(
@@ -286,10 +280,10 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name, prompt_logprobs",
-    [(MODEL_NAME, -1), (MODEL_NAME, 0), (MODEL_NAME, 1), (MODEL_NAME, None)],
-)
+@pytest.mark.parametrize("model_name, prompt_logprobs", [(MODEL_NAME, -1),
+                                                         (MODEL_NAME, 0),
+                                                         (MODEL_NAME, 1),
+                                                         (MODEL_NAME, None)])
 async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
                                           model_name: str,
                                           prompt_logprobs: Optional[int]):
@@ -332,13 +326,11 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
         temperature=0.0,
     )
     single_output = single_completion.choices[0].text
-    stream = await client.completions.create(
-        model=model_name,
-        prompt=prompt,
-        max_tokens=5,
-        temperature=0.0,
-        stream=True,
-    )
+    stream = await client.completions.create(model=model_name,
+                                             prompt=prompt,
+                                             max_tokens=5,
+                                             temperature=0.0,
+                                             stream=True)
     chunks: list[str] = []
     finish_reason_count = 0
     async for chunk in stream:
@@ -397,50 +389,47 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
 
     # Test stream=True, stream_options=
     #     {"include_usage": False, "continuous_usage_stats": False}
-    stream = await client.completions.create(
-        model=model_name,
-        prompt=prompt,
-        max_tokens=5,
-        temperature=0.0,
-        stream=True,
-        stream_options={
-            "include_usage": False,
-            "continuous_usage_stats": False,
-        },
-    )
+    stream = await client.completions.create(model=model_name,
+                                             prompt=prompt,
+                                             max_tokens=5,
+                                             temperature=0.0,
+                                             stream=True,
+                                             stream_options={
+                                                 "include_usage": False,
+                                                 "continuous_usage_stats":
+                                                 False,
+                                             })
 
     async for chunk in stream:
         assert chunk.usage is None
 
     # Test stream=True, stream_options=
     #     {"include_usage": False, "continuous_usage_stats": True}
-    stream = await client.completions.create(
-        model=model_name,
-        prompt=prompt,
-        max_tokens=5,
-        temperature=0.0,
-        stream=True,
-        stream_options={
-            "include_usage": False,
-            "continuous_usage_stats": True,
-        },
-    )
+    stream = await client.completions.create(model=model_name,
+                                             prompt=prompt,
+                                             max_tokens=5,
+                                             temperature=0.0,
+                                             stream=True,
+                                             stream_options={
+                                                 "include_usage": False,
+                                                 "continuous_usage_stats":
+                                                 True,
+                                             })
     async for chunk in stream:
         assert chunk.usage is None
 
     # Test stream=True, stream_options=
     #     {"include_usage": True, "continuous_usage_stats": False}
-    stream = await client.completions.create(
-        model=model_name,
-        prompt=prompt,
-        max_tokens=5,
-        temperature=0.0,
-        stream=True,
-        stream_options={
-            "include_usage": True,
-            "continuous_usage_stats": False,
-        },
-    )
+    stream = await client.completions.create(model=model_name,
+                                             prompt=prompt,
+                                             max_tokens=5,
+                                             temperature=0.0,
+                                             stream=True,
+                                             stream_options={
+                                                 "include_usage": True,
+                                                 "continuous_usage_stats":
+                                                 False,
+                                             })
     async for chunk in stream:
         if chunk.choices[0].finish_reason is None:
             assert chunk.usage is None
@@ -457,17 +446,16 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
 
     # Test stream=True, stream_options=
     #     {"include_usage": True, "continuous_usage_stats": True}
-    stream = await client.completions.create(
-        model=model_name,
-        prompt=prompt,
-        max_tokens=5,
-        temperature=0.0,
-        stream=True,
-        stream_options={
-            "include_usage": True,
-            "continuous_usage_stats": True,
-        },
-    )
+    stream = await client.completions.create(model=model_name,
+                                             prompt=prompt,
+                                             max_tokens=5,
+                                             temperature=0.0,
+                                             stream=True,
+                                             stream_options={
+                                                 "include_usage": True,
+                                                 "continuous_usage_stats":
+                                                 True,
+                                             })
     async for chunk in stream:
         assert chunk.usage is not None
         assert chunk.usage.prompt_tokens > 0
@@ -487,26 +475,22 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
     # Test stream=False, stream_options=
     #     {"include_usage": None}
     with pytest.raises(BadRequestError):
-        await client.completions.create(
-            model=model_name,
-            prompt=prompt,
-            max_tokens=5,
-            temperature=0.0,
-            stream=False,
-            stream_options={"include_usage": None},
-        )
+        await client.completions.create(model=model_name,
+                                        prompt=prompt,
+                                        max_tokens=5,
+                                        temperature=0.0,
+                                        stream=False,
+                                        stream_options={"include_usage": None})
 
     # Test stream=False, stream_options=
     #    {"include_usage": True}
     with pytest.raises(BadRequestError):
-        await client.completions.create(
-            model=model_name,
-            prompt=prompt,
-            max_tokens=5,
-            temperature=0.0,
-            stream=False,
-            stream_options={"include_usage": True},
-        )
+        await client.completions.create(model=model_name,
+                                        prompt=prompt,
+                                        max_tokens=5,
+                                        temperature=0.0,
+                                        stream=False,
+                                        stream_options={"include_usage": True})
 
     # Test stream=False, stream_options=
     #     {"continuous_usage_stats": None}
@@ -517,8 +501,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
             max_tokens=5,
             temperature=0.0,
             stream=False,
-            stream_options={"continuous_usage_stats": None},
-        )
+            stream_options={"continuous_usage_stats": None})
 
     # Test stream=False, stream_options=
     #    {"continuous_usage_stats": True}
@@ -529,8 +512,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
             max_tokens=5,
             temperature=0.0,
             stream=False,
-            stream_options={"continuous_usage_stats": True},
-        )
+            stream_options={"continuous_usage_stats": True})
 
 
 @pytest.mark.asyncio
@@ -564,12 +546,12 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
                 use_beam_search=True),
         )
         assert len(batch.choices) == 4
-        assert (batch.choices[0].text
-                != batch.choices[1].text), "beam search should be different"
-        assert (batch.choices[0].text == batch.choices[2].text
-                ), "two copies of the same prompt should be the same"
-        assert (batch.choices[1].text == batch.choices[3].text
-                ), "two copies of the same prompt should be the same"
+        assert batch.choices[0].text != batch.choices[
+            1].text, "beam search should be different"
+        assert batch.choices[0].text == batch.choices[
+            2].text, "two copies of the same prompt should be the same"
+        assert batch.choices[1].text == batch.choices[
+            3].text, "two copies of the same prompt should be the same"
 
         # test streaming
         batch = await client.completions.create(
@@ -668,11 +650,8 @@ async def test_guided_json_completion(client: openai.AsyncOpenAI,
         n=3,
         temperature=1.0,
         max_tokens=500,
-        extra_body=dict(
-            guided_json=sample_json_schema,
-            guided_decoding_backend=guided_decoding_backend,
-        ),
-    )
+        extra_body=dict(guided_json=sample_json_schema,
+                        guided_decoding_backend=guided_decoding_backend))
 
     assert completion.id is not None
     assert len(completion.choices) == 3
@@ -692,11 +671,8 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
         n=3,
         temperature=1.0,
         max_tokens=20,
-        extra_body=dict(
-            guided_regex=sample_regex,
-            guided_decoding_backend=guided_decoding_backend,
-        ),
-    )
+        extra_body=dict(guided_regex=sample_regex,
+                        guided_decoding_backend=guided_decoding_backend))
 
     assert completion.id is not None
     assert len(completion.choices) == 3
@@ -707,22 +683,17 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-async def test_guided_choice_completion(
-    client: openai.AsyncOpenAI,
-    guided_decoding_backend: str,
-    sample_guided_choice,
-):
+async def test_guided_choice_completion(client: openai.AsyncOpenAI,
+                                        guided_decoding_backend: str,
+                                        sample_guided_choice):
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt="The best language for type-safe systems programming is ",
         n=2,
         temperature=1.0,
         max_tokens=10,
-        extra_body=dict(
-            guided_choice=sample_guided_choice,
-            guided_decoding_backend=guided_decoding_backend,
-        ),
-    )
+        extra_body=dict(guided_choice=sample_guided_choice,
+                        guided_decoding_backend=guided_decoding_backend))
 
     assert completion.id is not None
     assert len(completion.choices) == 2
@@ -733,20 +704,19 @@ async def test_guided_choice_completion(
 @pytest.mark.asyncio
 async def test_guided_grammar(client: openai.AsyncOpenAI,
                               sample_sql_statements):
+
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt=("Generate a sql state that select col_1 from "
                 "table_1 where it is equals to 1"),
         temperature=1.0,
         max_tokens=500,
-        extra_body=dict(guided_grammar=sample_sql_statements),
-    )
+        extra_body=dict(guided_grammar=sample_sql_statements))
 
     content = completion.choices[0].text
 
     # use Lark to parse the output, and make sure it's a valid parse tree
     from lark import Lark
-
     parser = Lark(sample_sql_statements)
     parser.parse(content)
 
@@ -768,14 +738,12 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
     # test using text and token IDs
     for prompt in ("Hello, my name is", [0, 0, 0, 0, 0]):
-        completion = await client.completions.create(
-            model=model_name,
-            prompt=prompt,
-            max_tokens=5,
-            temperature=0.0,
-            echo=True,
-            logprobs=logprobs_arg,
-        )
+        completion = await client.completions.create(model=model_name,
+                                                     prompt=prompt,
+                                                     max_tokens=5,
+                                                     temperature=0.0,
+                                                     echo=True,
+                                                     logprobs=logprobs_arg)
 
         prompt_text = tokenizer.decode(prompt) if isinstance(prompt,
                                                              list) else prompt
@@ -783,10 +751,10 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
         logprobs = completion.choices[0].logprobs
         assert logprobs is not None
         assert len(logprobs.text_offset) > 5
-        assert len(
-            logprobs.token_logprobs) > 5 and logprobs.token_logprobs[0] is None
-        assert len(
-            logprobs.top_logprobs) > 5 and logprobs.top_logprobs[0] is None
+        assert (len(logprobs.token_logprobs) > 5
+                and logprobs.token_logprobs[0] is None)
+        assert (len(logprobs.top_logprobs) > 5
+                and logprobs.top_logprobs[0] is None)
         for top_logprobs in logprobs.top_logprobs[1:]:
             assert max(logprobs_arg,
                        1) <= len(top_logprobs) <= logprobs_arg + 1
@@ -795,24 +763,19 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-async def test_guided_decoding_type_error(
-    client: openai.AsyncOpenAI,
-    guided_decoding_backend: str,
-    sample_json_schema,
-    sample_regex,
-):
+async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
+                                          guided_decoding_backend: str,
+                                          sample_json_schema, sample_regex):
     with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example JSON that fits this schema: 42",
             extra_body=dict(guided_json=42,
-                            guided_decoding_backend=guided_decoding_backend),
-        )
+                            guided_decoding_backend=guided_decoding_backend))
 
     with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example string that fits this regex",
             extra_body=dict(guided_regex=sample_regex,
-                            guided_json=sample_json_schema),
-        )
+                            guided_json=sample_json_schema))

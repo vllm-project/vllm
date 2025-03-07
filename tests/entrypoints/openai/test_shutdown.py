@@ -23,6 +23,7 @@ async def test_shutdown_on_engine_failure():
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         async with remote_server.get_async_client() as client:
+
             with pytest.raises(
                 (openai.APIConnectionError, openai.InternalServerError)):
                 # Asking for lots of prompt logprobs will currently crash the
@@ -31,8 +32,7 @@ async def test_shutdown_on_engine_failure():
                 await client.completions.create(
                     model=MODEL_NAME,
                     prompt=prompt,
-                    extra_body={"prompt_logprobs": 10},
-                )
+                    extra_body={"prompt_logprobs": 10})
 
             # Now the server should shut down
             return_code = remote_server.proc.wait(timeout=8)

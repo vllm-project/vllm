@@ -23,7 +23,8 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
     @classmethod
     def can_implement(
             cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
-        if not current_platform.is_cuda() and not current_platform.is_cpu():
+
+        if (not current_platform.is_cuda() and not current_platform.is_cpu()):
             return False, "CutlassScaledMM requires running on CUDA or CPU."
 
         return True, None
@@ -33,10 +34,8 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         # Cutlass kernels need transposed weight.
         weight = getattr(layer, self.w_q_name)
         replace_parameter(
-            layer,
-            self.w_q_name,
-            torch.nn.Parameter(weight.t().data, requires_grad=False),
-        )
+            layer, self.w_q_name,
+            torch.nn.Parameter(weight.t().data, requires_grad=False))
 
         # WEIGHT SCALE
         # Cutlass kernels support only per-tensor and per-channel.
@@ -48,10 +47,8 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
             weight_scale = convert_to_channelwise(weight_scale,
                                                   layer.logical_widths)
         replace_parameter(
-            layer,
-            self.w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False),
-        )
+            layer, self.w_s_name,
+            torch.nn.Parameter(weight_scale.data, requires_grad=False))
 
         # INPUT SCALE
         if self.config.is_static_input_scheme:
@@ -59,10 +56,8 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
 
             if self.config.input_symmetric:
                 replace_parameter(
-                    layer,
-                    self.i_s_name,
-                    torch.nn.Parameter(input_scale.max(), requires_grad=False),
-                )
+                    layer, self.i_s_name,
+                    torch.nn.Parameter(input_scale.max(), requires_grad=False))
                 setattr(layer, self.i_zp_name, None)
             else:
                 input_zero_point = getattr(layer, self.i_zp_name)
@@ -76,19 +71,14 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                 scale = (range_max - range_min) / (int8_traits.max -
                                                    int8_traits.min)
                 replace_parameter(
-                    layer,
-                    self.i_s_name,
-                    torch.nn.Parameter(scale, requires_grad=False),
-                )
+                    layer, self.i_s_name,
+                    torch.nn.Parameter(scale, requires_grad=False))
 
                 # AZP loaded as int8 but used as int32
                 azp = (int8_traits.min -
                        range_min / scale).to(dtype=torch.int32)
-                replace_parameter(
-                    layer,
-                    self.i_zp_name,
-                    torch.nn.Parameter(azp, requires_grad=False),
-                )
+                replace_parameter(layer, self.i_zp_name,
+                                  torch.nn.Parameter(azp, requires_grad=False))
 
         else:
             setattr(layer, self.i_s_name, None)
@@ -106,20 +96,15 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                 # cutlass_w8a8 requires azp to be folded into azp_adj
                 # in the per-tensor case
                 azp_adj = getattr(layer, self.i_zp_name) * azp_adj
-            setattr(
-                layer,
-                self.azp_adj_name,
-                torch.nn.Parameter(azp_adj, requires_grad=False),
-            )
+            setattr(layer, self.azp_adj_name,
+                    torch.nn.Parameter(azp_adj, requires_grad=False))
         else:
             setattr(layer, self.azp_adj_name, None)
 
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def apply_weights(self,
+                      layer: torch.nn.Module,
+                      x: torch.Tensor,
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         w_q, w_s, i_s, i_zp, azp_adj = self._get_weight_params(layer)
 
         # ops.scaled_int8_quant supports both dynamic and static quant:
@@ -135,16 +120,14 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
             # Currently, static is always per-tensor and dynamic is per-token
             static = i_zp is not None
             azp = None if static else x_zp
-            return ops.cutlass_scaled_mm_azp(
-                x_q,
-                w_q,
-                scale_a=x_s,
-                scale_b=w_s,
-                out_dtype=x.dtype,
-                azp_adj=azp_adj,
-                azp=azp,
-                bias=bias,
-            )
+            return ops.cutlass_scaled_mm_azp(x_q,
+                                             w_q,
+                                             scale_a=x_s,
+                                             scale_b=w_s,
+                                             out_dtype=x.dtype,
+                                             azp_adj=azp_adj,
+                                             azp=azp,
+                                             bias=bias)
         return ops.cutlass_scaled_mm(x_q,
                                      w_q,
                                      scale_a=x_s,

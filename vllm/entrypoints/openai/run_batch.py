@@ -44,8 +44,7 @@ def parse_args():
         help=
         "The path or url to a single input file. Currently supports local file "
         "paths, or the http protocol (http or https). If a URL is specified, "
-        "the file should be available via HTTP GET.",
-    )
+        "the file should be available via HTTP GET.")
     parser.add_argument(
         "-o",
         "--output-file",
@@ -53,8 +52,7 @@ def parse_args():
         type=str,
         help="The path or url to a single output file. Currently supports "
         "local file paths, or web (http or https) urls. If a URL is specified,"
-        " the file should be available via HTTP PUT.",
-    )
+        " the file should be available via HTTP PUT.")
     parser.add_argument(
         "--output-tmp-dir",
         type=str,
@@ -62,29 +60,24 @@ def parse_args():
         help="The directory to store the output file before uploading it "
         "to the output URL.",
     )
-    parser.add_argument(
-        "--response-role",
-        type=nullable_str,
-        default="assistant",
-        help="The role name to return if `request.add_generation_prompt=True`.",
-    )
+    parser.add_argument("--response-role",
+                        type=nullable_str,
+                        default="assistant",
+                        help="The role name to return if "
+                        "`request.add_generation_prompt=True`.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 
-    parser.add_argument(
-        "--max-log-len",
-        type=int,
-        default=None,
-        help="Max number of prompt characters or prompt "
-        "ID numbers being printed in log."
-        "\n\nDefault: Unlimited",
-    )
+    parser.add_argument('--max-log-len',
+                        type=int,
+                        default=None,
+                        help='Max number of prompt characters or prompt '
+                        'ID numbers being printed in log.'
+                        '\n\nDefault: Unlimited')
 
-    parser.add_argument(
-        "--enable-metrics",
-        action="store_true",
-        help="Enable Prometheus metrics",
-    )
+    parser.add_argument("--enable-metrics",
+                        action="store_true",
+                        help="Enable Prometheus metrics")
     parser.add_argument(
         "--url",
         type=str,
@@ -101,10 +94,9 @@ def parse_args():
     )
     parser.add_argument(
         "--enable-prompt-tokens-details",
-        action="store_true",
+        action='store_true',
         default=False,
-        help="If set to True, enable prompt_tokens_details in usage.",
-    )
+        help="If set to True, enable prompt_tokens_details in usage.")
 
     return parser.parse_args()
 
@@ -130,25 +122,21 @@ class BatchProgressTracker:
             self._pbar.update()
 
     def pbar(self) -> tqdm:
-        enable_tqdm = (not torch.distributed.is_initialized()
-                       or torch.distributed.get_rank() == 0)
-        self._pbar = tqdm(
-            total=self._total,
-            unit="req",
-            desc="Running batch",
-            mininterval=5,
-            disable=not enable_tqdm,
-            bar_format=_BAR_FORMAT,
-        )
+        enable_tqdm = not torch.distributed.is_initialized(
+        ) or torch.distributed.get_rank() == 0
+        self._pbar = tqdm(total=self._total,
+                          unit="req",
+                          desc="Running batch",
+                          mininterval=5,
+                          disable=not enable_tqdm,
+                          bar_format=_BAR_FORMAT)
         return self._pbar
 
 
 async def read_file(path_or_url: str) -> str:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
-        async with (
-                aiohttp.ClientSession() as session,
-                session.get(path_or_url) as resp,
-        ):
+        async with aiohttp.ClientSession() as session, \
+                   session.get(path_or_url) as resp:
             return await resp.text()
     else:
         with open(path_or_url, encoding="utf-8") as f:
@@ -217,11 +205,8 @@ async def upload_data(output_url: str, data_or_file: str,
                                 f"Error message: {str(e)}.") from e
 
 
-async def write_file(
-    path_or_url: str,
-    batch_outputs: list[BatchRequestOutput],
-    output_tmp_dir: str,
-) -> None:
+async def write_file(path_or_url: str, batch_outputs: list[BatchRequestOutput],
+                     output_tmp_dir: str) -> None:
     """
     Write batch_outputs to a file or upload to a URL.
     path_or_url: The path or URL to write batch_outputs to.
@@ -280,11 +265,9 @@ async def make_async_error_request_output(
     return make_error_request_output(request, error_msg)
 
 
-async def run_request(
-    serving_engine_func: Callable,
-    request: BatchRequestInput,
-    tracker: BatchProgressTracker,
-) -> BatchRequestOutput:
+async def run_request(serving_engine_func: Callable,
+                      request: BatchRequestInput,
+                      tracker: BatchProgressTracker) -> BatchRequestOutput:
     response = await serving_engine_func(request.body)
 
     if isinstance(response,
@@ -302,8 +285,7 @@ async def run_request(
             custom_id=request.custom_id,
             response=BatchResponseData(
                 status_code=response.code,
-                request_id=f"vllm-batch-{random_uuid()}",
-            ),
+                request_id=f"vllm-batch-{random_uuid()}"),
             error=response,
         )
     else:
@@ -343,7 +325,7 @@ async def main(args):
         lora_modules=None,
         prompt_adapters=None,
     )
-    openai_serving_chat = (OpenAIServingChat(
+    openai_serving_chat = OpenAIServingChat(
         engine,
         model_config,
         openai_serving_models,
@@ -352,15 +334,15 @@ async def main(args):
         chat_template=None,
         chat_template_content_format="auto",
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if model_config.runner_type == "generate" else None)
-    openai_serving_embedding = (OpenAIServingEmbedding(
+    ) if model_config.runner_type == "generate" else None
+    openai_serving_embedding = OpenAIServingEmbedding(
         engine,
         model_config,
         openai_serving_models,
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
-    ) if model_config.task == "embed" else None)
+    ) if model_config.task == "embed" else None
     openai_serving_scores = (ServingScores(
         engine,
         model_config,

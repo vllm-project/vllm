@@ -19,7 +19,6 @@ from vllm.transformers_utils.config import (
 
 class PoolingType(IntEnum):
     """Enumeration for different types of pooling methods."""
-
     LAST = 0
     ALL = 1
     CLS = 2
@@ -62,12 +61,10 @@ class SimplePooler(nn.Module):
             assert step_tag_id is None and returned_token_ids is None
             return MeanPool(normalize=normalize, softmax=softmax)
         if pooling_type == PoolingType.STEP:
-            return StepPool(
-                normalize=normalize,
-                softmax=softmax,
-                step_tag_id=step_tag_id,
-                returned_token_ids=returned_token_ids,
-            )
+            return StepPool(normalize=normalize,
+                            softmax=softmax,
+                            step_tag_id=step_tag_id,
+                            returned_token_ids=returned_token_ids)
 
         assert_never(pooling_type)
 
@@ -162,7 +159,7 @@ class MeanPool(SimplePooler):
         cumsum = torch.cumsum(hidden_states, dim=0)
         start_indices = torch.cat([
             torch.tensor([0], device=hidden_states.device),
-            torch.cumsum(prompt_lens[:-1], dim=0),
+            torch.cumsum(prompt_lens[:-1], dim=0)
         ])
         end_indices = torch.cumsum(prompt_lens, dim=0)
         return (cumsum[end_indices - 1] - cumsum[start_indices] +
@@ -251,18 +248,17 @@ class Pooler(nn.Module):
         returned_token_ids: Optional[List[int]] = None,
     ) -> SimplePooler:
         return SimplePooler.from_pooling_type(
-            pooling_type=(PoolingType[pooler_config.pooling_type]
-                          if pooler_config.pooling_type is not None else
-                          pooling_type),
-            normalize=(pooler_config.normalize
-                       if pooler_config.normalize is not None else normalize),
-            softmax=(pooler_config.softmax
-                     if pooler_config.softmax is not None else softmax),
-            step_tag_id=(pooler_config.step_tag_id if pooler_config.step_tag_id
-                         is not None else step_tag_id),
-            returned_token_ids=(pooler_config.returned_token_ids
-                                if pooler_config.returned_token_ids is not None
-                                else returned_token_ids),
+            pooling_type=PoolingType[pooler_config.pooling_type]
+            if pooler_config.pooling_type is not None else pooling_type,
+            normalize=pooler_config.normalize
+            if pooler_config.normalize is not None else normalize,
+            softmax=pooler_config.softmax
+            if pooler_config.softmax is not None else softmax,
+            step_tag_id=pooler_config.step_tag_id
+            if pooler_config.step_tag_id is not None else step_tag_id,
+            returned_token_ids=pooler_config.returned_token_ids
+            if pooler_config.returned_token_ids is not None else
+            returned_token_ids,
         )
 
 
@@ -288,8 +284,8 @@ class CrossEncodingPooler(nn.Module):
         super().__init__()
         self.classifier = classifier
         self.pooler = pooler
-        self.default_activation_function = get_cross_encoder_activation_function(
-            config)
+        self.default_activation_function = \
+            get_cross_encoder_activation_function(config)
 
     def forward(
         self,

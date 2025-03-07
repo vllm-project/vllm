@@ -137,7 +137,6 @@ class Request:
 
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
-
     WAITING = 0
     RUNNING = 1
     PREEMPTED = 2
@@ -154,7 +153,7 @@ class RequestStatus(enum.IntEnum):
 
     @staticmethod
     def get_finished_reason(
-        status: "RequestStatus", ) -> Union[FinishReason, None]:
+            status: "RequestStatus") -> Union[FinishReason, None]:
         return _FINISHED_REASON_MAP.get(status)
 
 

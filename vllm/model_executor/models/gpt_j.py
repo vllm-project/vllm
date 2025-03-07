@@ -17,7 +17,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPT-J model compatible with HuggingFace weights."""
-
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -94,14 +93,12 @@ class GPTJAttention(nn.Module):
             base=rope_theta,
             is_neox_style=False,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_size,
-            scaling,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_size,
+                              scaling,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -155,7 +152,8 @@ class GPTJBlock(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        inner_dim = 4 * config.n_embd if config.n_inner is None else config.n_inner
+        inner_dim = (4 * config.n_embd
+                     if config.n_inner is None else config.n_inner)
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.attn = GPTJAttention(config,
                                   cache_config,
@@ -202,8 +200,9 @@ class GPTJModel(nn.Module):
             prefix=f"{prefix}.h",
         )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.n_embd)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.n_embd))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
@@ -300,8 +299,8 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
             if "attn.bias" in name or "attn.masked_bias" in name:
                 continue
 
-            if self.quant_config is not None and (
-                    scale_name := self.quant_config.get_cache_scale(name)):
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -312,7 +311,7 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
                 loaded_params.add(scale_name)
                 continue
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)

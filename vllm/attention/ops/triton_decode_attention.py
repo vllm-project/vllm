@@ -338,11 +338,8 @@ def _fwd_grouped_kernel_stage1(
             if logit_cap > 0:
                 qk = logit_cap * tanh(qk / logit_cap)
 
-            qk = tl.where(
-                mask_h[:, None] & (offs_n[None, :] < split_kv_end),
-                qk,
-                float("-inf"),
-            )
+            qk = tl.where(mask_h[:, None] & (offs_n[None, :] < split_kv_end),
+                          qk, float("-inf"))
 
             offs_buf_v = (kv_loc[:, None] * stride_buf_vbs +
                           cur_kv_head * stride_buf_vh + offs_dv[None, :])
@@ -431,7 +428,7 @@ def _decode_grouped_att_m_fwd(
         extra_kargs = {
             "waves_per_eu": 1,
             "matrix_instr_nonkdim": 16,
-            "kpack": 2,
+            "kpack": 2
         }
         num_stages = 1
 
@@ -507,11 +504,9 @@ def _fwd_kernel_stage2(
                                   cur_batch_seq_len)
 
         if split_kv_end > split_kv_start:
-            tv = tl.load(
-                Mid_O + offs_v + split_kv_id * stride_mid_os,
-                mask=mask_d,
-                other=0.0,
-            )
+            tv = tl.load(Mid_O + offs_v + split_kv_id * stride_mid_os,
+                         mask=mask_d,
+                         other=0.0)
             tlogic = tl.load(Mid_O + offs_logic + split_kv_id * stride_mid_os)
             n_e_max = tl.maximum(tlogic, e_max)
 
@@ -551,7 +546,7 @@ def _decode_softmax_reducev_fwd(
         extra_kargs = {
             "waves_per_eu": 4,
             "matrix_instr_nonkdim": 16,
-            "kpack": 2,
+            "kpack": 2
         }
 
     grid = (batch, head_num)

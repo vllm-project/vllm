@@ -4,7 +4,6 @@ from typing import Dict, List, Optional, Tuple
 
 try:
     import intel_extension_for_pytorch.llm.modules as ipex_modules
-
     _use_ipex = True
 except ImportError:
     _use_ipex = False
@@ -178,26 +177,17 @@ class _IPEXPagedAttention(_PagedAttention):
         *args,
     ) -> None:
         block_size = value_cache.shape[2]
-        head_mapping = (torch.arange(
+        head_mapping = torch.arange(
             0,
             num_kv_heads,
             device="cpu",
             dtype=torch.int32,
         ).view(num_kv_heads,
-               1).repeat_interleave(query.size(1) // num_kv_heads).flatten())
+               1).repeat_interleave(query.size(1) // num_kv_heads).flatten()
         ipex_modules.PagedAttention.single_query_cached_kv_attention(
-            output,
-            query.contiguous(),
-            key_cache,
-            value_cache,
-            head_mapping,
-            scale,
-            block_tables,
-            context_lens,
-            block_size,
-            max_context_len,
-            alibi_slopes,
-        )
+            output, query.contiguous(), key_cache, value_cache, head_mapping,
+            scale, block_tables, context_lens, block_size, max_context_len,
+            alibi_slopes)
 
 
 PagedAttention = _IPEXPagedAttention if _use_ipex else _PagedAttention

@@ -41,12 +41,10 @@ class ServingScores(OpenAIServing):
         *,
         request_logger: Optional[RequestLogger],
     ) -> None:
-        super().__init__(
-            engine_client=engine_client,
-            model_config=model_config,
-            models=models,
-            request_logger=request_logger,
-        )
+        super().__init__(engine_client=engine_client,
+                         model_config=model_config,
+                         models=models,
+                         request_logger=request_logger)
 
     async def _embedding_score(
         self,
@@ -61,6 +59,7 @@ class ServingScores(OpenAIServing):
                                                None]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> list[PoolingRequestOutput]:
+
         input_texts = texts_1 + texts_2
 
         engine_prompts: list[TokensPrompt] = []
@@ -72,9 +71,12 @@ class ServingScores(OpenAIServing):
             *(tokenize_async(t, **tokenization_kwargs) for t in input_texts))
 
         for tok_result, input_text in zip(tokenized_prompts, input_texts):
-            text_token_prompt = self._validate_input(request,
-                                                     tok_result["input_ids"],
-                                                     input_text)
+
+            text_token_prompt = \
+                self._validate_input(
+                    request,
+                    tok_result["input_ids"],
+                    input_text)
 
             engine_prompts.append(
                 TokensPrompt(
@@ -85,15 +87,14 @@ class ServingScores(OpenAIServing):
         pooling_params = request.to_pooling_params()
 
         for i, engine_prompt in enumerate(engine_prompts):
+
             request_id_item = f"{request_id}-{i}"
 
-            self._log_inputs(
-                request_id_item,
-                input_texts[i],
-                params=pooling_params,
-                lora_request=lora_request,
-                prompt_adapter_request=prompt_adapter_request,
-            )
+            self._log_inputs(request_id_item,
+                             input_texts[i],
+                             params=pooling_params,
+                             lora_request=lora_request,
+                             prompt_adapter_request=prompt_adapter_request)
 
             generators.append(
                 self.engine_client.encode(
@@ -110,8 +111,8 @@ class ServingScores(OpenAIServing):
         # Non-streaming response
         final_res_batch: list[PoolingRequestOutput] = []
 
-        embeddings: list[
-            Optional[PoolingRequestOutput]] = [None] * len(engine_prompts)
+        embeddings: list[Optional[PoolingRequestOutput]] =\
+              [None] * len(engine_prompts)
 
         async for i, res in result_generator:
             embeddings[i] = res
@@ -149,6 +150,7 @@ class ServingScores(OpenAIServing):
                                                None]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
     ) -> list[PoolingRequestOutput]:
+
         request_prompts: list[str] = []
         engine_prompts: list[TokensPrompt] = []
 
@@ -170,15 +172,15 @@ class ServingScores(OpenAIServing):
               for t1, t2 in input_pairs))
 
         for prompt_inputs, (t1, t2) in zip(tokenized_prompts, input_pairs):
+
             request_prompt = f"{t1}{tokenizer.sep_token}{t2}"
 
             input_ids = prompt_inputs["input_ids"]
-            text_token_prompt = self._validate_input(request, input_ids,
-                                                     request_prompt)
+            text_token_prompt = \
+                self._validate_input(request, input_ids, request_prompt)
             engine_prompt = TokensPrompt(
                 prompt_token_ids=text_token_prompt["prompt_token_ids"],
-                token_type_ids=prompt_inputs.get("token_type_ids"),
-            )
+                token_type_ids=prompt_inputs.get("token_type_ids"))
 
             request_prompts.append(request_prompt)
             engine_prompts.append(engine_prompt)
@@ -191,13 +193,11 @@ class ServingScores(OpenAIServing):
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
 
-            self._log_inputs(
-                request_id_item,
-                request_prompts[i],
-                params=pooling_params,
-                lora_request=lora_request,
-                prompt_adapter_request=prompt_adapter_request,
-            )
+            self._log_inputs(request_id_item,
+                             request_prompts[i],
+                             params=pooling_params,
+                             lora_request=lora_request,
+                             prompt_adapter_request=prompt_adapter_request)
 
             generator = self.engine_client.encode(
                 engine_prompt,
@@ -230,6 +230,7 @@ class ServingScores(OpenAIServing):
         raw_request: Optional[Request] = None,
         truncate_prompt_tokens: Optional[int] = None,
     ) -> list[PoolingRequestOutput]:
+
         tokenization_kwargs: dict[str, Any] = {}
         if truncate_prompt_tokens is not None:
             tokenization_kwargs["truncation"] = True
@@ -241,13 +242,13 @@ class ServingScores(OpenAIServing):
         ) = self._maybe_get_adapters(request)
 
         if prompt_adapter_request is not None:
-            raise NotImplementedError(
-                "Prompt adapter is not supported for scoring models")
+            raise NotImplementedError("Prompt adapter is not supported "
+                                      "for scoring models")
 
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-        if (truncate_prompt_tokens is not None
-                and truncate_prompt_tokens > self.max_model_len):
+        if truncate_prompt_tokens is not None and \
+                truncate_prompt_tokens > self.max_model_len:
             raise ValueError(
                 f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
                 f"is greater than max_model_len ({self.max_model_len})."
@@ -273,8 +274,7 @@ class ServingScores(OpenAIServing):
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
                 prompt_adapter_request=prompt_adapter_request,
-                trace_headers=trace_headers,
-            )
+                trace_headers=trace_headers)
 
         else:
             return await self._embedding_score(
@@ -286,8 +286,7 @@ class ServingScores(OpenAIServing):
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
                 prompt_adapter_request=prompt_adapter_request,
-                trace_headers=trace_headers,
-            )
+                trace_headers=trace_headers)
 
     async def create_score(
         self,
@@ -408,13 +407,9 @@ class ServingScores(OpenAIServing):
         )
 
     def request_output_to_rerank_response(
-        self,
-        final_res_batch: list[PoolingRequestOutput],
-        request_id: str,
-        model_name: str,
-        documents: list[str],
-        top_n: int,
-    ) -> RerankResponse:
+            self, final_res_batch: list[PoolingRequestOutput], request_id: str,
+            model_name: str, documents: list[str],
+            top_n: int) -> RerankResponse:
         """
         Convert the output of do_rank to a RerankResponse
         """
@@ -441,5 +436,4 @@ class ServingScores(OpenAIServing):
             id=request_id,
             model=model_name,
             results=results,
-            usage=RerankUsage(total_tokens=num_prompt_tokens),
-        )
+            usage=RerankUsage(total_tokens=num_prompt_tokens))

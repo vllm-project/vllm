@@ -6,7 +6,6 @@ VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 has to be set before running this test.
 Run `VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1
 pytest tests/basic_correctness/test_preemption.py`.
 """
-
 import pytest
 from prometheus_client import REGISTRY
 
@@ -78,11 +77,10 @@ def test_chunked_prefill_recompute(
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
         vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert (
-            hf_output_str == vllm_output_str
-        ), f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}"
-        assert (hf_output_ids == vllm_output_ids
-                ), f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}"
+        assert hf_output_str == vllm_output_str, (
+            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
+        assert hf_output_ids == vllm_output_ids, (
+            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -112,8 +110,8 @@ def test_preemption(
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
                 < ARTIFICIAL_PREEMPTION_MAX_CNT)
-        total_preemption = vllm_model.model.llm_engine.scheduler[
-            0].num_cumulative_preemption
+        total_preemption = (
+            vllm_model.model.llm_engine.scheduler[0].num_cumulative_preemption)
 
     check_outputs_equal(
         outputs_0_lst=hf_outputs,

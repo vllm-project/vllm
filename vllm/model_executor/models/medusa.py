@@ -21,11 +21,10 @@ class ResidualBlock(nn.Module):
         super().__init__()
 
         self.layers = nn.ModuleList([
-            nn.Linear(
-                hidden_size,
-                hidden_size,
-                bias=getattr(config, "medusa_fc_bias", False),
-            ) for _ in range(num_layers)
+            nn.Linear(hidden_size,
+                      hidden_size,
+                      bias=getattr(config, "medusa_fc_bias", False))
+            for _ in range(num_layers)
         ])
         self.act = nn.SiLU()
 
@@ -38,13 +37,13 @@ class ResidualBlock(nn.Module):
 class Medusa(nn.Module):
     """This class implements the Medusa draft model from the paper: https://arxiv.org/abs/2401.10774
     Reference implementation: https://github.com/FasterDecoding/Medusa
-
+    
     Differences from reference implementation:
     1. Currently this only supports generating proposals from top-1 tokens.
-    2. We have an optional token_map which reduces draft vocab to most
-       frequently used tokens to give some additional speed-up by reducing
-       sampling overhead. This is disabled unless the checkpoint file has
-       explicit token_map tensor and config has an optional attribute
+    2. We have an optional token_map which reduces draft vocab to most 
+       frequently used tokens to give some additional speed-up by reducing 
+       sampling overhead. This is disabled unless the checkpoint file has 
+       explicit token_map tensor and config has an optional attribute 
        truncated_vocab_size < vocab_size. To use this technique, one has to find
        the top-k most frequent tokens in target dataset and add that as a tensor
        in the draft checkpoint (using key token_map). Also, the draft config
@@ -55,11 +54,10 @@ class Medusa(nn.Module):
         super().__init__()
         self.config = config
         self.blocks = nn.ModuleList([
-            ResidualBlock(
-                config=config,
-                hidden_size=self.config.hidden_size,
-                num_layers=self.config.num_hidden_layers,
-            ) for _ in range(self.config.num_heads)
+            ResidualBlock(config=config,
+                          hidden_size=self.config.hidden_size,
+                          num_layers=self.config.num_hidden_layers)
+            for _ in range(self.config.num_heads)
         ])
         self.orig_vocab_size = config.vocab_size
         self.truncated_vocab_size = config.truncated_vocab_size
@@ -102,10 +100,8 @@ class Medusa(nn.Module):
         return [block(hidden_states) for block in self.blocks]
 
     def compute_logits(
-        self,
-        hidden_states: List[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> List[torch.Tensor]:
+            self, hidden_states: List[torch.Tensor],
+            sampling_metadata: SamplingMetadata) -> List[torch.Tensor]:
         logits_lst: List[torch.Tensor] = []
 
         for hs, lm_head in zip(hidden_states, self.lm_heads):
@@ -123,8 +119,7 @@ class Medusa(nn.Module):
                 logits_lst.append(-torch.inf * torch.ones(
                     size=(*_logits.shape[:-1], self.orig_vocab_size),
                     device=_logits.device,
-                    dtype=_logits.dtype,
-                ))
+                    dtype=_logits.dtype))
 
                 logits_lst[-1][..., self.token_map] = _logits
 
@@ -195,8 +190,9 @@ class Medusa(nn.Module):
                 weights_map["lm_head.weight"] = loaded_weight
 
         for name, loaded_weight in weights_map.items():
-            if ("lm_head" in name and self.token_map is not None
-                    and loaded_weight.shape[0] > self.token_map.shape[0]):
+            if "lm_head" in name and self.token_map is not None and\
+                loaded_weight.shape[0] > self.token_map.shape[0]:
+
                 loaded_weight = loaded_weight[self.token_map]
 
             param = params_dict[name]

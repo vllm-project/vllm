@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """A block manager that manages token blocks."""
-
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple
@@ -138,7 +137,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             device=Device.GPU)
 
         # Use watermark to avoid frequent cache eviction.
-        if self.num_total_gpu_blocks - num_required_blocks < self.watermark_blocks:
+        if (self.num_total_gpu_blocks - num_required_blocks
+                < self.watermark_blocks):
             return AllocStatus.NEVER
         if num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks:
             return AllocStatus.OK
@@ -163,6 +163,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         return block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
+
         # Allocate self-attention block tables for decoder sequences
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
         assert not (set(seq.seq_id for seq in waiting_seqs)
@@ -190,7 +191,9 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         # encoder prompt.
         request_id = seq_group.request_id
 
-        assert request_id not in self.cross_block_tables, "block table already exists"
+        assert (request_id
+                not in self.cross_block_tables), \
+            "block table already exists"
 
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
@@ -218,11 +221,12 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             block_table = self.block_tables[seq.seq_id]
 
-            num_touched_blocks += block_table.get_num_blocks_touched_by_append_slots(
-                token_ids=block_table.get_unseen_token_ids(
-                    seq.get_token_ids()),
-                num_lookahead_slots=num_lookahead_slots,
-            )
+            num_touched_blocks += (
+                block_table.get_num_blocks_touched_by_append_slots(
+                    token_ids=block_table.get_unseen_token_ids(
+                        seq.get_token_ids()),
+                    num_lookahead_slots=num_lookahead_slots,
+                ))
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             Device.GPU)
@@ -233,6 +237,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         seq: Sequence,
         num_lookahead_slots: int,
     ) -> List[Tuple[int, int]]:
+
         block_table = self.block_tables[seq.seq_id]
 
         block_table.append_token_ids(
@@ -315,8 +320,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         computed_seq_block_ids = []
         for seq in seqs:
             all_blocks = self.block_tables[seq.seq_id].physical_block_ids
-            num_cached_tokens = self._computed_blocks_tracker.get_num_cached_tokens(
-                seq)
+            num_cached_tokens = (
+                self._computed_blocks_tracker.get_num_cached_tokens(seq))
             assert num_cached_tokens % self.block_size == 0
             num_cached_blocks = num_cached_tokens // self.block_size
             computed_block_ids = all_blocks[:num_cached_blocks]
@@ -338,12 +343,12 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
     def can_swap_in(self, seq_group: SequenceGroup,
                     num_lookahead_slots: int) -> AllocStatus:
-        """Returns the AllocStatus for the given sequence_group
+        """Returns the AllocStatus for the given sequence_group 
         with num_lookahead_slots.
 
         Args:
             sequence_group (SequenceGroup): The sequence group to swap in.
-            num_lookahead_slots (int): Number of lookahead slots used in
+            num_lookahead_slots (int): Number of lookahead slots used in 
                 speculative decoding, default to 0.
 
         Returns:
@@ -360,7 +365,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             seq_group (SequenceGroup): The sequence group to swap in.
 
         Returns:
-            List[Tuple[int, int]]: The mapping of swapping block from CPU
+            List[Tuple[int, int]]: The mapping of swapping block from CPU 
                 to GPU.
         """
         physical_block_id_mapping = []
@@ -390,12 +395,12 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         return physical_block_id_mapping
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
-        """Returns whether we can swap out the given sequence_group
+        """Returns whether we can swap out the given sequence_group 
         with num_lookahead_slots.
 
         Args:
             seq_group (SequenceGroup): The sequence group to swap out.
-            num_lookahead_slots (int): Number of lookahead slots used in
+            num_lookahead_slots (int): Number of lookahead slots used in 
                 speculative decoding, default to 0.
 
         Returns:
@@ -413,7 +418,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             sequence_group (SequenceGroup): The sequence group to swap out.
 
         Returns:
-            List[Tuple[int, int]]: The mapping of swapping block from
+            List[Tuple[int, int]]: The mapping of swapping block from 
                 GPU to CPU.
         """
         physical_block_id_mapping = []
@@ -454,14 +459,12 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
     def reset_prefix_cache(self) -> bool:
         return self.block_allocator.reset_prefix_cache()
 
-    def _can_swap(
-        self,
-        seq_group: SequenceGroup,
-        device: Device,
-        status: SequenceStatus,
-        num_lookahead_slots: int = 0,
-    ) -> AllocStatus:
-        """Returns the AllocStatus for swapping in/out the given sequence_group
+    def _can_swap(self,
+                  seq_group: SequenceGroup,
+                  device: Device,
+                  status: SequenceStatus,
+                  num_lookahead_slots: int = 0) -> AllocStatus:
+        """Returns the AllocStatus for swapping in/out the given sequence_group 
         on to the 'device'.
 
         Args:
@@ -469,11 +472,11 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             device (Device): device to swap the 'seq_group' on.
             status (SequenceStatus): The status of sequence which is needed
                 for action. RUNNING for swap out and SWAPPED for swap in
-            num_lookahead_slots (int): Number of lookahead slots used in
+            num_lookahead_slots (int): Number of lookahead slots used in 
                 speculative decoding, default to 0.
 
         Returns:
-            AllocStatus: The AllocStatus for swapping in/out the given
+            AllocStatus: The AllocStatus for swapping in/out the given 
                 sequence_group on to the 'device'.
         """
         # First determine the number of blocks that will be touched by this
@@ -487,11 +490,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
                 # Compute the number blocks to touch for the tokens to be
                 # appended. This does NOT include the full blocks that need
                 # to be touched for the swap.
-                num_blocks_touched += (
+                num_blocks_touched += \
                     block_table.get_num_blocks_touched_by_append_slots(
                         block_table.get_unseen_token_ids(seq.get_token_ids()),
-                        num_lookahead_slots=num_lookahead_slots,
-                    ))
+                        num_lookahead_slots=num_lookahead_slots)
                 blocks.extend(block_table.blocks)
         # Compute the number of full blocks to touch and add it to the
         # existing count of blocks to touch.
@@ -505,8 +507,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         if self.block_allocator.get_num_total_blocks(
                 device) < num_blocks_touched:
             return AllocStatus.NEVER
-        elif (self.block_allocator.get_num_free_blocks(device) -
-              num_blocks_touched >= watermark_blocks):
+        elif self.block_allocator.get_num_free_blocks(
+                device) - num_blocks_touched >= watermark_blocks:
             return AllocStatus.OK
         else:
             return AllocStatus.LATER

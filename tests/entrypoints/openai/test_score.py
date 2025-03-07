@@ -54,10 +54,9 @@ def server(model: dict[str, Any]):
 @pytest.fixture(scope="class")
 def runner(model: dict[str, Any], hf_runner):
     kwargs = {
-        "dtype":
-        DTYPE,
-        ("is_cross_encoder" if model["is_cross_encoder"] else "is_sentence_transformer"):
-        True,
+        "dtype": DTYPE,
+        "is_cross_encoder" if model["is_cross_encoder"]\
+              else "is_sentence_transformer": True
     }
 
     with hf_runner(model["name"], **kwargs) as hf_model:
@@ -71,17 +70,15 @@ class TestModel:
         text_1 = "What is the capital of France?"
         text_2 = [
             "The capital of Brazil is Brasilia.",
-            "The capital of France is Paris.",
+            "The capital of France is Paris."
         ]
 
-        score_response = requests.post(
-            server.url_for("score"),
-            json={
-                "model": model["name"],
-                "text_1": text_1,
-                "text_2": text_2,
-            },
-        )
+        score_response = requests.post(server.url_for("score"),
+                                       json={
+                                           "model": model["name"],
+                                           "text_1": text_1,
+                                           "text_2": text_2,
+                                       })
         score_response.raise_for_status()
         score = ScoreResponse.model_validate(score_response.json())
 
@@ -101,21 +98,19 @@ class TestModel:
                                      model: dict[str, Any], runner):
         text_1 = [
             "What is the capital of the United States?",
-            "What is the capital of France?",
+            "What is the capital of France?"
         ]
         text_2 = [
             "The capital of Brazil is Brasilia.",
-            "The capital of France is Paris.",
+            "The capital of France is Paris."
         ]
 
-        score_response = requests.post(
-            server.url_for("score"),
-            json={
-                "model": model["name"],
-                "text_1": text_1,
-                "text_2": text_2,
-            },
-        )
+        score_response = requests.post(server.url_for("score"),
+                                       json={
+                                           "model": model["name"],
+                                           "text_1": text_1,
+                                           "text_2": text_2,
+                                       })
         score_response.raise_for_status()
         score = ScoreResponse.model_validate(score_response.json())
 
@@ -136,14 +131,12 @@ class TestModel:
         text_1 = "What is the capital of France?"
         text_2 = "The capital of France is Paris."
 
-        score_response = requests.post(
-            server.url_for("score"),
-            json={
-                "model": model["name"],
-                "text_1": text_1,
-                "text_2": text_2,
-            },
-        )
+        score_response = requests.post(server.url_for("score"),
+                                       json={
+                                           "model": model["name"],
+                                           "text_1": text_1,
+                                           "text_2": text_2,
+                                       })
         score_response.raise_for_status()
         score = ScoreResponse.model_validate(score_response.json())
 
@@ -161,33 +154,32 @@ class TestModel:
 
     def test_score_max_model_len(self, server: RemoteOpenAIServer,
                                  model: dict[str, Any]):
+
         text_1 = "What is the capital of France?" * 20
         text_2 = [
             "The capital of Brazil is Brasilia.",
-            "The capital of France is Paris.",
+            "The capital of France is Paris."
         ]
 
-        score_response = requests.post(
-            server.url_for("score"),
-            json={
-                "model": model["name"],
-                "text_1": text_1,
-                "text_2": text_2,
-            },
-        )
+        score_response = requests.post(server.url_for("score"),
+                                       json={
+                                           "model": model["name"],
+                                           "text_1": text_1,
+                                           "text_2": text_2,
+                                       })
         assert score_response.status_code == 400
         # Assert just a small fragments of the response
-        assert "Please reduce the length of the input." in score_response.text
+        assert "Please reduce the length of the input." in \
+            score_response.text
 
         # Test truncation
-        score_response = requests.post(
-            server.url_for("score"),
-            json={
-                "model": model["name"],
-                "text_1": text_1,
-                "text_2": text_2,
-                "truncate_prompt_tokens": 101,
-            },
-        )
+        score_response = requests.post(server.url_for("score"),
+                                       json={
+                                           "model": model["name"],
+                                           "text_1": text_1,
+                                           "text_2": text_2,
+                                           "truncate_prompt_tokens": 101
+                                       })
         assert score_response.status_code == 400
-        assert "Please, select a smaller truncation size." in score_response.text
+        assert "Please, select a smaller truncation size." in \
+            score_response.text

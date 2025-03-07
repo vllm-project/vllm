@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 
 def compute_meta(
-    token_lora_tensor: torch.Tensor,
+    token_lora_tensor: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, bool]:
     """
     Get the information required for the sgmv kernel. With the  features:
@@ -36,15 +36,8 @@ def compute_meta(
     # does not need to launch the triton kernel, which can improve performance
     if batch_size == 1 and lora_indices_tensor == -1:
         no_lora = True
-    return (
-        b_seq_start_tensor,
-        seq_length_tensor,
-        lora_indices_tensor,
-        batch_size,
-        max_length,
-        token_nums,
-        no_lora,
-    )
+    return (b_seq_start_tensor, seq_length_tensor, lora_indices_tensor,
+            batch_size, max_length, token_nums, no_lora)
 
 
 # TODO see if this can be vectorized
@@ -56,14 +49,8 @@ def convert_mapping(
     extra_vocab_size: int,
     device: torch.device,
     long_lora_context: Optional["LongContextLoRAContext"] = None,
-) -> Tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        Optional[torch.Tensor],
-        List[int],
-]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+           Optional[torch.Tensor], List[int]]:
     """Converts LoRAMapping to index tensors.
 
     Args:

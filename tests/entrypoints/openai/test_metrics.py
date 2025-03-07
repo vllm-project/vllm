@@ -50,18 +50,16 @@ def default_server_args():
     ]
 
 
-@pytest.fixture(
-    scope="module",
-    params=[
-        "",
-        "--enable-chunked-prefill",
-        "--disable-frontend-multiprocessing",
-    ],
-)
+@pytest.fixture(scope="module",
+                params=[
+                    "",
+                    "--enable-chunked-prefill",
+                    "--disable-frontend-multiprocessing",
+                ])
 def server(use_v1, default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
-    env_dict = dict(VLLM_USE_V1="1" if use_v1 else "0")
+    env_dict = dict(VLLM_USE_V1='1' if use_v1 else '0')
     with RemoteOpenAIServer(MODEL_NAME, default_server_args,
                             env_dict=env_dict) as remote_server:
         yield remote_server
@@ -91,31 +89,26 @@ EXPECTED_VALUES = {
     "vllm:request_inference_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_prefill_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_decode_time_seconds": [("_count", _NUM_REQUESTS)],
-    "vllm:request_prompt_tokens": [
-        ("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
-        ("_count", _NUM_REQUESTS),
-    ],
-    "vllm:request_generation_tokens": [
-        ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-        ("_count", _NUM_REQUESTS),
-    ],
+    "vllm:request_prompt_tokens":
+    [("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
+     ("_count", _NUM_REQUESTS)],
+    "vllm:request_generation_tokens":
+    [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
+     ("_count", _NUM_REQUESTS)],
     "vllm:request_params_n": [("_count", _NUM_REQUESTS)],
     "vllm:request_params_max_tokens": [
         ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-        ("_count", _NUM_REQUESTS),
+        ("_count", _NUM_REQUESTS)
     ],
-    "vllm:iteration_tokens_total": [
-        (
-            "_sum",
-            _NUM_REQUESTS * (_NUM_PROMPT_TOKENS_PER_REQUEST +
-                             _NUM_GENERATION_TOKENS_PER_REQUEST),
-        ),
-        ("_count", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
+    "vllm:iteration_tokens_total":
+    [("_sum", _NUM_REQUESTS *
+      (_NUM_PROMPT_TOKENS_PER_REQUEST + _NUM_GENERATION_TOKENS_PER_REQUEST)),
+     ("_count", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST)],
+    "vllm:prompt_tokens": [("_total",
+                            _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
+    "vllm:generation_tokens": [
+        ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)
     ],
-    "vllm:prompt_tokens":
-    [("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
-    "vllm:generation_tokens":
-    [("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
     "vllm:request_success": [("_total", _NUM_REQUESTS)],
 }
 
@@ -128,8 +121,7 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
         await client.completions.create(
             model=MODEL_NAME,
             prompt=_TOKENIZED_PROMPT,
-            max_tokens=_NUM_GENERATION_TOKENS_PER_REQUEST,
-        )
+            max_tokens=_NUM_GENERATION_TOKENS_PER_REQUEST)
 
     response = requests.get(server.url_for("metrics"))
     print(response.text)
@@ -163,12 +155,12 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
                                 f"{expected_value} did not match found value "
                                 f"{sample.value}")
                             break
-                    assert (
-                        found_suffix
-                    ), f"Did not find {metric_name_w_suffix} in prom endpoint"
+                    assert found_suffix, (
+                        f"Did not find {metric_name_w_suffix} in prom endpoint"
+                    )
                 break
 
-        assert found_metric, f"Did not find {metric_family} in prom endpoint"
+        assert found_metric, (f"Did not find {metric_family} in prom endpoint")
 
 
 EXPECTED_METRICS = [
@@ -281,17 +273,15 @@ EXPECTED_METRICS_V1 = [
 async def test_metrics_exist(server: RemoteOpenAIServer,
                              client: openai.AsyncClient, use_v1: bool):
     # sending a request triggers the metrics to be logged.
-    await client.completions.create(
-        model=MODEL_NAME,
-        prompt="Hello, my name is",
-        max_tokens=5,
-        temperature=0.0,
-    )
+    await client.completions.create(model=MODEL_NAME,
+                                    prompt="Hello, my name is",
+                                    max_tokens=5,
+                                    temperature=0.0)
 
     response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 
-    for metric in EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS:
+    for metric in (EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS):
         assert metric in response.text
 
 
@@ -304,10 +294,9 @@ def test_metrics_exist_run_batch(use_v1: bool):
     port = "8001"
     server_url = f"http://{base_url}:{port}"
 
-    with (
-            tempfile.NamedTemporaryFile("w") as input_file,
-            tempfile.NamedTemporaryFile("r") as output_file,
-    ):
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
         input_file.write(input_batch)
         input_file.flush()
         proc = subprocess.Popen([

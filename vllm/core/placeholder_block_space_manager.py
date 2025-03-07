@@ -9,7 +9,7 @@ from vllm.utils import Device
 
 class PlaceholderBlockSpaceManager(BlockSpaceManager):
     """A version of BlockSpaceManager for use in environments
-    where block management is not required.
+    where block management is not required. 
     For example: pooling models or attention-free models like Mamba.
 
     This class provides the same interface as BlockSpaceManager, but its

@@ -55,7 +55,7 @@ def maybe_serialize_tool_calls(request: "ChatCompletionRequest"):
     #   - https://github.com/pydantic/pydantic/issues/9541
     # TODO: remove when pydantic v2.11 is released
     for i, message in enumerate(request.messages):
-        if message.get("role") == "assistant":
+        if message.get("role") == 'assistant':
             tool_calls_validator = message.get("tool_calls", ().__iter__())
             validated_tool_calls = []
             while True:
@@ -71,7 +71,7 @@ def maybe_serialize_tool_calls(request: "ChatCompletionRequest"):
 def truncate_tool_call_ids(request: "ChatCompletionRequest"):
     """Truncates tool call IDs for Mistral's ID requirements."""
     for i, message in enumerate(request.messages):
-        if message.get("role") == "assistant":
+        if message.get("role") == 'assistant':
             tool_calls = message.get("tool_calls", [])
             for tool_call in tool_calls:
                 if len(tool_call["id"]) > 9:
@@ -102,8 +102,7 @@ def list_local_repo_files(repo_id: str, revision: Optional[str]) -> List[str]:
     repo_cache = os.path.join(
         huggingface_hub.constants.HF_HUB_CACHE,
         huggingface_hub.constants.REPO_ID_SEPARATOR.join(
-            ["models", *repo_id.split("/")]),
-    )
+            ["models", *repo_id.split("/")]))
 
     if revision is None:
         revision_file = os.path.join(repo_cache, "refs", "main")
@@ -137,9 +136,9 @@ def find_tokenizer_file(files: List[str]):
 
 
 def make_mistral_chat_completion_request(
-    messages: List["ChatCompletionMessageParam"],
-    tools: Optional[List[Dict[str, Any]]] = None,
-) -> "ChatCompletionRequest":
+        messages: List["ChatCompletionMessageParam"],
+        tools: Optional[List[Dict[str,
+                                  Any]]] = None) -> "ChatCompletionRequest":
     last_message = cast(Dict[str, Any], messages[-1])
     if last_message["role"] == "assistant":
         last_message["prefix"] = True
@@ -169,7 +168,6 @@ def make_mistral_chat_completion_request(
                 function["parameters"] = {}
 
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
-
     return ChatCompletionRequest(messages=messages,
                                  tools=tools)  # type: ignore[type-var]
 
@@ -183,11 +181,9 @@ class MistralTokenizer(TokenizerBase):
         tokenizer_ = tokenizer.instruct_tokenizer.tokenizer
         from mistral_common.tokens.tokenizers.tekken import (
             SpecialTokenPolicy, Tekkenizer)
-
         self.is_tekken = isinstance(tokenizer_, Tekkenizer)
         from mistral_common.tokens.tokenizers.sentencepiece import (
             SentencePieceTokenizer)
-
         self.is_spm = isinstance(tokenizer_, SentencePieceTokenizer)
         if self.is_tekken:
             # Make sure special tokens will not raise
@@ -229,7 +225,6 @@ class MistralTokenizer(TokenizerBase):
 
         from mistral_common.tokens.tokenizers.mistral import (
             MistralTokenizer as PublicMistralTokenizer)
-
         mistral_tokenizer = PublicMistralTokenizer.from_file(tokenizer_file)
         return cls(mistral_tokenizer)
 
@@ -370,12 +365,11 @@ class MistralTokenizer(TokenizerBase):
         else:
             return self.tokenizer.encode(text, bos=True, eos=False)
 
-    def apply_chat_template(
-        self,
-        messages: List["ChatCompletionMessageParam"],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **kwargs,
-    ) -> List[int]:
+    def apply_chat_template(self,
+                            messages: List["ChatCompletionMessageParam"],
+                            tools: Optional[List[Dict[str, Any]]] = None,
+                            **kwargs) -> List[int]:
+
         request = make_mistral_chat_completion_request(messages, tools)
         encoded = self.mistral.encode_chat_completion(request)
 
@@ -384,7 +378,6 @@ class MistralTokenizer(TokenizerBase):
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
         from mistral_common.tokens.tokenizers.base import SpecialTokens
-
         if self.is_tekken:
             tokens = [
                 t for t in tokens
@@ -397,18 +390,15 @@ class MistralTokenizer(TokenizerBase):
                 shift = self.tokenizer.num_special_tokens
 
                 def _token_to_id(t: str):
-                    t_bytes = t.encode("utf-8") if not isinstance(t,
-                                                                  bytes) else t
+                    t_bytes = t.encode("utf-8") \
+                        if not isinstance(t, bytes) else t
                     try:
-                        return (
-                            shift +
-                            self.tokenizer._tekken_token2id_nospecial[t_bytes])
+                        return shift + \
+                            self.tokenizer._tekken_token2id_nospecial[t_bytes]
                     except KeyError:
                         logger.warning(
                             "Failed to convert token %s to id,"
-                            " replacing with <unk>",
-                            t_bytes,
-                        )
+                            " replacing with <unk>", t_bytes)
                         return self.tokenizer.unk_id
 
                 ids = [_token_to_id(t) for t in tokens]
@@ -436,7 +426,7 @@ class MistralTokenizer(TokenizerBase):
                 decoded_list.append(
                     self.tokenizer.decode(regular_tokens))  # type: ignore
 
-            decoded = "".join(decoded_list)
+            decoded = ''.join(decoded_list)
 
         return decoded
 

@@ -14,7 +14,7 @@ def test_run(my_rank, pipe):
     print(f"rank {my_rank} test_run starts....")
     # test run
     x = torch.tensor([1]).to(pipe.device)
-    y = torch.tensor([[2.0, 3.0, 4.0, 8.0]]).to(pipe.device)
+    y = torch.tensor([[2., 3., 4., 8.]]).to(pipe.device)
     if my_rank == 0:
         pipe.send_tensor(x)
         print(f"rank {my_rank} sent tensor x")
@@ -95,6 +95,7 @@ def latency_test(my_rank, pipe, nelement, ntensor):
     torch.distributed.barrier()
 
     for i in tqdm(range(500)):
+
         tensors = []
 
         if my_rank == 0:
@@ -119,23 +120,24 @@ def latency_test(my_rank, pipe, nelement, ntensor):
 
     torch.distributed.barrier()
 
-    print("Latency test passed.")
-    print("Latency:", torch.tensor(latencies).mean().item() * 1000, "ms")
+    print('Latency test passed.')
+    print('Latency:', torch.tensor(latencies).mean().item() * 1000, 'ms')
 
 
 if __name__ == "__main__":
-    my_rank = int(os.environ["RANK"])
+
+    my_rank = int(os.environ['RANK'])
 
     torch.distributed.init_process_group(
-        backend="gloo",
-        init_method="tcp://localhost:12398",
+        backend='gloo',
+        init_method='tcp://localhost:12398',
         world_size=2,
         rank=my_rank,
     )
 
     config = KVTransferConfig(
-        kv_connector="PyNcclConnector",
-        kv_buffer_device="cuda",
+        kv_connector='PyNcclConnector',
+        kv_buffer_device='cuda',
         kv_buffer_size=1e9,
         kv_rank=my_rank,
         kv_role="kv_both",  # this arg doesn't matter in this test

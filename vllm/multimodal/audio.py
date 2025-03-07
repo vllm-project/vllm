@@ -74,4 +74,4 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
             soundfile.write(buffer, audio, sr, format="WAV")
             data = buffer.getvalue()
 
-        return base64.b64encode(data).decode("utf-8")
+        return base64.b64encode(data).decode('utf-8')

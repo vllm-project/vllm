@@ -23,9 +23,9 @@ class KVCacheSpecBase:
     def type_id(self) -> str:
         """
         The type identifier of this KV cache.
-        Return different strings for layers with different KV cache type (e.g.,
-        different number of tokens like full attention vs sliding window
-        attention, different KV cache size per token like layers with different
+        Return different strings for layers with different KV cache type (e.g., 
+        different number of tokens like full attention vs sliding window 
+        attention, different KV cache size per token like layers with different 
         number of heads)
 
         Returns:
@@ -66,8 +66,8 @@ class FullAttentionSpec(KVCacheSpecBase):
 
     @property
     def page_size_bytes(self) -> int:
-        return (2 * self.block_size * self.num_kv_heads * self.head_size *
-                get_dtype_size(self.dtype))
+        return  2 * self.block_size * self.num_kv_heads * self.head_size \
+                * get_dtype_size(self.dtype)
 
     def bytes_for_tokens(self, num_tokens: int) -> int:
         return cdiv(num_tokens, self.block_size) * self.page_size_bytes
@@ -83,7 +83,6 @@ class KVCacheTensor:
     for a layer. Only contains the size of KV cache for that layer for now. Will
     be extended to support multiple layers sharing the same memory pool.
     """
-
     size: int  # The size of KV cache Tensor in bytes
 
 

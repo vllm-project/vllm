@@ -16,8 +16,7 @@ class RequestStatsUpdate(
         msgspec.Struct,  # type: ignore
         array_like=True,
         omit_defaults=True,
-        gc=False,
-):
+        gc=False):
     """
     An update to the request stats.
 
@@ -259,8 +258,8 @@ class RequestStats:
         Since a request could be preempted in decoding and later resumed
         to prefill the decoded tokens, we use the first prefill start timestamp.
         """
-        return self.prefill_start_ts_s_lst[
-            0] if self.prefill_start_ts_s_lst else None
+        return (self.prefill_start_ts_s_lst[0]
+                if self.prefill_start_ts_s_lst else None)
 
     @property
     def e2e_latency_s(self) -> Optional[float]:
@@ -314,8 +313,8 @@ class RequestStats:
             return []
         latency_s_lst = []
         for i in range(1, len(self.output_token_ts_s_lst)):
-            assert self.output_token_ts_s_lst[i] >= self.output_token_ts_s_lst[
-                i - 1]
+            assert (self.output_token_ts_s_lst[i]
+                    >= self.output_token_ts_s_lst[i - 1])
             latency_s = (self.output_token_ts_s_lst[i] -
                          self.output_token_ts_s_lst[i - 1])
             latency_s_lst.append(latency_s)
@@ -433,8 +432,7 @@ class EngineCoreStatsSnapshot(
         msgspec.Struct,  # type: ignore
         array_like=True,
         omit_defaults=True,
-        gc=False,
-):
+        gc=False):
     """
     A snapshot of the EngineCore's current stats over a period of time.
     """

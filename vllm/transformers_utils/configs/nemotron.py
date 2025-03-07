@@ -61,7 +61,7 @@ class NemotronConfig(PretrainedConfig):
             (MQA) otherwise GQA is used. When converting a multi-head
             checkpoint to a GQA checkpoint, each group key and value
             head should be constructed by meanpooling all the original
-            heads within that group. For more details checkout
+            heads within that group. For more details checkout 
             [this paper](https://arxiv.org/pdf/2305.13245.pdf). If it
             is not specified, will default to `num_attention_heads`.
         hidden_act (`str` or `function`, *optional*, defaults to `"relu2"`):
@@ -146,8 +146,8 @@ class NemotronConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         head_dim = head_dim or kwargs.get("kv_channels")
-        self.head_dim = (head_dim if head_dim is not None else
-                         (hidden_size // num_attention_heads))
+        self.head_dim = head_dim if head_dim is not None else (
+            hidden_size // num_attention_heads)
 
         # for backward compatibility
         if num_key_value_heads is None:
@@ -161,9 +161,8 @@ class NemotronConfig(PretrainedConfig):
         self.rope_theta = rope_theta
         self.rope_scaling = rope_scaling
         # for backward compatibility
-        partial_rotary_factor = (kwargs.get("rope_percent")
-                                 or kwargs.get("rope_percentage")
-                                 or partial_rotary_factor)
+        partial_rotary_factor = kwargs.get("rope_percent") or kwargs.get(
+            "rope_percentage") or partial_rotary_factor
         self.partial_rotary_factor = partial_rotary_factor
         self._rope_scaling_validation()
         self.attention_bias = attention_bias
@@ -193,15 +192,13 @@ class NemotronConfig(PretrainedConfig):
         rope_scaling_type = self.rope_scaling.get("type", None)
         rope_scaling_factor = self.rope_scaling.get("factor", None)
         if rope_scaling_type is None or rope_scaling_type not in [
-                "linear",
-                "dynamic",
+                "linear", "dynamic"
         ]:
             raise ValueError(
                 "`rope_scaling`'s type field must be one of ['linear', "
                 f"'dynamic'], got {rope_scaling_type}")
-        if (rope_scaling_factor is None
-                or not isinstance(rope_scaling_factor, float)
-                or rope_scaling_factor <= 1.0):
+        if rope_scaling_factor is None or not isinstance(
+                rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
             raise ValueError(
                 "`rope_scaling`'s factor field must be a float > 1, got "
                 f"{rope_scaling_factor}")

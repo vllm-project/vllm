@@ -37,20 +37,16 @@ class ContextInfo(TypedDict):
     context_length: str
 
 
-LONG_LORA_INFOS: list[ContextIDInfo] = [
-    {
-        "lora_id": 1,
-        "context_length": "16k",
-    },
-    {
-        "lora_id": 2,
-        "context_length": "16k",
-    },
-    {
-        "lora_id": 3,
-        "context_length": "32k",
-    },
-]
+LONG_LORA_INFOS: list[ContextIDInfo] = [{
+    "lora_id": 1,
+    "context_length": "16k",
+}, {
+    "lora_id": 2,
+    "context_length": "16k",
+}, {
+    "lora_id": 3,
+    "context_length": "32k",
+}]
 
 
 @pytest.fixture()
@@ -338,8 +334,7 @@ def llama_2_7b_engine_extra_embeddings():
             "meta-llama/Llama-2-7b-hf",
             enable_lora=False,
             gpu_memory_utilization=0.5,  # Lower memory usage
-            max_model_len=128,
-        )  # Reduce context size to save memory
+            max_model_len=128)  # Reduce context size to save memory
     yield engine.llm_engine
     del engine
     cleanup_dist_env_and_memory(shutdown_ray=True)

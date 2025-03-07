@@ -29,9 +29,9 @@ logger = init_logger(__name__)
 # We prefer to use os.sched_yield as it results in tighter polling loops,
 # measured to be around 3e-7 seconds. However on earlier versions of Python
 # os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
-USE_SCHED_YIELD = (sys.version_info[:3]
-                   >= (3, 11, 1)) or (sys.version_info[:2] == (3, 10)
-                                      and sys.version_info[2] >= 8)
+USE_SCHED_YIELD = ((sys.version_info[:3] >= (3, 11, 1))
+                   or (sys.version_info[:2] == (3, 10)
+                       and sys.version_info[2] >= 8))
 
 
 def sched_yield():
@@ -43,13 +43,11 @@ def sched_yield():
 
 class ShmRingBuffer:
 
-    def __init__(
-        self,
-        n_reader: int,
-        max_chunk_bytes: int,
-        max_chunks: int,
-        name: Optional[str] = None,
-    ):
+    def __init__(self,
+                 n_reader: int,
+                 max_chunk_bytes: int,
+                 max_chunks: int,
+                 name: Optional[str] = None):
         """
         A shared memory ring buffer implementation for broadcast communication.
         Essentially, it is a queue where only one will `enqueue` and multiple
@@ -57,7 +55,7 @@ class ShmRingBuffer:
         of items that can be stored in the buffer are known in advance.
         In this case, we don't need to synchronize the access to
          the buffer.
-
+        
         Buffer memory layout:
                   data                                 metadata
                     |                                      |
@@ -98,7 +96,7 @@ class ShmRingBuffer:
         created object to other processes by pickling it. The other processes will
         get the name of the shared memory and open it, so that they can access the
         same shared memory buffer.
-        """  # noqa
+        """# noqa
         self.n_reader = n_reader
         self.metadata_size = 1 + n_reader
         self.max_chunk_bytes = max_chunk_bytes
@@ -123,13 +121,12 @@ class ShmRingBuffer:
             # fix to https://stackoverflow.com/q/62748654/9191338
             # Python incorrectly tracks shared memory even if it is not
             # created by the process. The following patch is a workaround.
-            with patch(
-                    "multiprocessing.resource_tracker.register",
-                    lambda *args, **kwargs: None,
-            ):
+            with patch("multiprocessing.resource_tracker.register",
+                       lambda *args, **kwargs: None):
                 try:
                     self.shared_memory = shared_memory.SharedMemory(name=name)
-                    assert self.shared_memory.size == self.total_bytes_of_buffer
+                    assert (
+                        self.shared_memory.size == self.total_bytes_of_buffer)
                 except FileNotFoundError:
                     # we might deserialize the object in a different node
                     # in this case, this object is not used,
@@ -137,12 +134,8 @@ class ShmRingBuffer:
                     pass
 
     def handle(self):
-        return (
-            self.n_reader,
-            self.max_chunk_bytes,
-            self.max_chunks,
-            self.shared_memory.name,
-        )
+        return (self.n_reader, self.max_chunk_bytes, self.max_chunks,
+                self.shared_memory.name)
 
     def __reduce__(self):
         return (
@@ -363,15 +356,13 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.debug(
-                            "No available block found in %s second. ",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL,
-                        )
+                        logger.debug("No available block found in %s second. ",
+                                     VLLM_RINGBUFFER_WARNING_INTERVAL)
                         n_warning += 1
 
                     # if we time out, raise an exception
-                    if timeout is not None and time.monotonic(
-                    ) - start_time > timeout:
+                    if (timeout is not None
+                            and time.monotonic() - start_time > timeout):
                         raise TimeoutError
 
                     continue
@@ -423,15 +414,13 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
-                        logger.debug(
-                            "No available block found in %s second. ",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL,
-                        )
+                        logger.debug("No available block found in %s second. ",
+                                     VLLM_RINGBUFFER_WARNING_INTERVAL)
                         n_warning += 1
 
                     # if we time out, raise an exception
-                    if timeout is not None and time.monotonic(
-                    ) - start_time > timeout:
+                    if (timeout is not None
+                            and time.monotonic() - start_time > timeout):
                         raise TimeoutError
 
                     continue
@@ -448,7 +437,7 @@ class MessageQueue:
                 break
 
     def enqueue(self, obj, timeout: Optional[float] = None):
-        """Write to message queue with optional timeout (in seconds)"""
+        """ Write to message queue with optional timeout (in seconds) """
         assert self._is_writer, "Only writers can enqueue"
         serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
         if self.n_local_reader > 0:
@@ -464,7 +453,7 @@ class MessageQueue:
             self.remote_socket.send(serialized_obj)
 
     def dequeue(self, timeout: Optional[float] = None):
-        """Read from message queue with optional timeout (in seconds)"""
+        """ Read from message queue with optional timeout (in seconds) """
         if self._is_local_reader:
             with self.acquire_read(timeout) as buf:
                 overflow = buf[0] == 1
@@ -491,12 +480,11 @@ class MessageQueue:
             return self.dequeue()
 
     @staticmethod
-    def create_from_process_group(
-        pg: Union[ProcessGroup, StatelessProcessGroup],
-        max_chunk_bytes,
-        max_chunks,
-        writer_rank=0,
-    ) -> "MessageQueue":
+    def create_from_process_group(pg: Union[ProcessGroup,
+                                            StatelessProcessGroup],
+                                  max_chunk_bytes,
+                                  max_chunks,
+                                  writer_rank=0) -> "MessageQueue":
         if isinstance(pg, ProcessGroup):
             group_rank = dist.get_rank(pg)
             group_world_size = dist.get_world_size(pg)
@@ -507,7 +495,6 @@ class MessageQueue:
             global_ranks = list(range(pg.world_size))
 
         from vllm.distributed.parallel_state import in_the_same_node_as
-
         status = in_the_same_node_as(pg, source_rank=writer_rank)
         same_node_ranks = [i for i, s in enumerate(status) if s]
         n_reader = group_world_size - 1

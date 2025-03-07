@@ -78,7 +78,7 @@ def support_torch_compile(
     During runtime, when we actually mark dimensions of tensors,
      it depends on the value of arguments:
 
-    - if it is a single integer (can be negative), the corresponding dimension
+    - if it is a single integer (can be negative), the corresponding dimension 
         of the argument will be marked as dynamic.
     - if it is `None`, ignored.
     - if it is `IntermediateTensors`, all the tensors in the intermediate
@@ -93,7 +93,7 @@ def support_torch_compile(
     def cls_decorator_helper(cls: _T) -> _T:
         # helper to pass `dynamic_arg_dims`` to `_support_torch_compile``
         # to avoid too much indentation for `_support_torch_compile``
-        if not hasattr(cls, "forward"):
+        if not hasattr(cls, 'forward'):
             raise TypeError("decorated class should have a forward method.")
         sig = inspect.signature(cls.forward)
         inferred_dynamic_arg_dims = dynamic_arg_dims
@@ -101,18 +101,14 @@ def support_torch_compile(
             inferred_dynamic_arg_dims = {}
             for k, v in sig.parameters.items():
                 if v.annotation in [
-                        torch.Tensor,
-                        Optional[torch.Tensor],
-                        IntermediateTensors,
-                        Optional[IntermediateTensors],
+                        torch.Tensor, Optional[torch.Tensor],
+                        IntermediateTensors, Optional[IntermediateTensors]
                 ]:
                     inferred_dynamic_arg_dims[k] = 0
 
-            logger.debug(
-                ("Inferred dynamic dimensions for forward method of %s: %s"),
-                cls,
-                list(inferred_dynamic_arg_dims.keys()),
-            )
+            logger.debug(("Inferred dynamic dimensions for "
+                          "forward method of %s: %s"), cls,
+                         list(inferred_dynamic_arg_dims.keys()))
 
         if len(inferred_dynamic_arg_dims) == 0:
             raise ValueError(
@@ -151,14 +147,15 @@ def _support_torch_compile(
 
     old_init = cls.__init__
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         self.vllm_config = vllm_config
         # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
-        self.do_not_compile = (vllm_config.compilation_config.level in [
+        self.do_not_compile = \
+            vllm_config.compilation_config.level in [
             CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
-        ] or not supports_dynamo())
+        ] or not supports_dynamo()
         if self.do_not_compile:
             return
         compilation_counter.num_models_seen += 1
@@ -236,11 +233,8 @@ def _support_torch_compile(
                     code.co_filename)
                 return inline_call(parent, func, args, kwargs)
 
-            with patch.object(
-                    InliningInstructionTranslator,
-                    "inline_call",
-                    patched_inline_call,
-            ):
+            with patch.object(InliningInstructionTranslator, 'inline_call',
+                              patched_inline_call):
                 output = self.compiled_callable(*args, **kwargs)
             return output
 

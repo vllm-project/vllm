@@ -27,7 +27,7 @@ def run_intern_vit_test(
     img_processor = CLIPImageProcessor.from_pretrained(model)
     images = [asset.pil_image for asset in image_assets]
     pixel_values = [
-        img_processor(images, return_tensors="pt").pixel_values.to(dtype)
+        img_processor(images, return_tensors='pt').pixel_values.to(dtype)
         for images in images
     ]
 
@@ -45,7 +45,6 @@ def run_intern_vit_test(
 
     from vllm.distributed import cleanup_dist_env_and_memory
     from vllm.model_executor.models.intern_vit import InternVisionModel
-
     vllm_model = InternVisionModel(config)
     vllm_model.load_weights(hf_model.state_dict().items())
 
@@ -66,13 +65,10 @@ def run_intern_vit_test(
         assert cos_similar(vllm_output, hf_output).mean() > 0.99
 
 
-@pytest.mark.parametrize(
-    "model_id",
-    [
-        "OpenGVLab/InternViT-300M-448px",
-        "OpenGVLab/InternViT-6B-448px-V1-5",
-    ],
-)
+@pytest.mark.parametrize("model_id", [
+    "OpenGVLab/InternViT-300M-448px",
+    "OpenGVLab/InternViT-6B-448px-V1-5",
+])
 @pytest.mark.parametrize("dtype", [torch.half])
 @torch.inference_mode()
 def test_models(dist_init, image_assets, model_id, dtype: str) -> None:

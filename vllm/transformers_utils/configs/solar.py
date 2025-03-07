@@ -224,8 +224,8 @@ class SolarConfig(PretrainedConfig):
         if self.rope_scaling is None:
             return
 
-        if not isinstance(self.rope_scaling, dict) or len(
-                self.rope_scaling) != 2:
+        if (not isinstance(self.rope_scaling, dict)
+                or len(self.rope_scaling) != 2):
             raise ValueError(
                 "`rope_scaling` must be a dictionary with two fields,"
                 " `type` and `factor`, "

@@ -50,14 +50,12 @@ def create_dummy_prompt(
 
 def create_dummy_lora_sequence(request_id: int, token_ids: list[int],
                                block_size: int, lora_int_id: int) -> Sequence:
-    return Sequence(
-        seq_id=request_id,
-        inputs=token_inputs(token_ids),
-        block_size=block_size,
-        lora_request=LoRARequest(lora_name="dummy",
-                                 lora_path="/dummy",
-                                 lora_int_id=lora_int_id),
-    )
+    return Sequence(seq_id=request_id,
+                    inputs=token_inputs(token_ids),
+                    block_size=block_size,
+                    lora_request=LoRARequest(lora_name="dummy",
+                                             lora_path="/dummy",
+                                             lora_int_id=lora_int_id))
 
 
 def create_dummy_sequence(request_id: int, token_ids: list[int],
@@ -102,24 +100,22 @@ def create_dummy_prompt_encoder_decoder(
                               inputs=inputs["encoder"],
                               block_size=block_size)
 
-    seq_group = SequenceGroup(
-        request_id=request_id,
-        seqs=[decoder_prompt],
-        arrival_time=time.time(),
-        lora_request=lora_request,
-        encoder_seq=encoder_prompt,
-    )
+    seq_group = SequenceGroup(request_id=request_id,
+                              seqs=[decoder_prompt],
+                              arrival_time=time.time(),
+                              lora_request=lora_request,
+                              encoder_seq=encoder_prompt)
 
     return decoder_prompt, encoder_prompt, seq_group
 
 
 def create_seq_group(
-    seq_prompt_len: int = 1024,
-    seq_output_lens: GenericSequence[int] = (128, ),
-    request_id: str = "0",
-    seq_id_start: int = 0,
-    sampling_params: Optional[SamplingParams] = None,
-) -> SequenceGroup:
+        seq_prompt_len: int = 1024,
+        seq_output_lens: GenericSequence[int] = (128, ),
+        request_id: str = '0',
+        seq_id_start: int = 0,
+        sampling_params: Optional[SamplingParams] = None) -> SequenceGroup:
+
     assert len(seq_output_lens) > 0
 
     if sampling_params is None:
@@ -153,12 +149,12 @@ def create_seq_group(
 
 
 def create_seq_group_encoder_decoder(
-    seq_prompt_len: int = 1024,
-    seq_output_lens: GenericSequence[int] = (128, ),
-    request_id: str = "0",
-    seq_id_start: int = 0,
-    sampling_params: Optional[SamplingParams] = None,
-) -> SequenceGroup:
+        seq_prompt_len: int = 1024,
+        seq_output_lens: GenericSequence[int] = (128, ),
+        request_id: str = '0',
+        seq_id_start: int = 0,
+        sampling_params: Optional[SamplingParams] = None) -> SequenceGroup:
+
     assert len(seq_output_lens) > 0
 
     if sampling_params is None:
@@ -194,13 +190,11 @@ def create_seq_group_encoder_decoder(
         block_size=16,
     )
 
-    return SequenceGroup(
-        request_id=request_id,
-        seqs=seqs,
-        sampling_params=sampling_params,
-        arrival_time=time.time(),
-        encoder_seq=encoder_seq,
-    )
+    return SequenceGroup(request_id=request_id,
+                         seqs=seqs,
+                         sampling_params=sampling_params,
+                         arrival_time=time.time(),
+                         encoder_seq=encoder_seq)
 
 
 def round_up_to_next_block(seq_len: int, block_size: int) -> int:

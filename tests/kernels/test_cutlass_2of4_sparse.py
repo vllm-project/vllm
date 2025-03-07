@@ -55,19 +55,17 @@ def prune_to_2_4(tensor):
 
 # This function checks that applying an identity matrix multiplication
 # to the compressed weights yields the original uncompressed weights.
-def check_compress_decompress_invariance(
-    dtype: torch.dtype,
-    b: torch.Tensor,
-    b_compressed: torch.Tensor,
-    b_metadata: torch.Tensor,
-):
+def check_compress_decompress_invariance(dtype: torch.dtype, b: torch.Tensor,
+                                         b_compressed: torch.Tensor,
+                                         b_metadata: torch.Tensor):
+
     # For float16 and bfloat16, cutlass_scaled_sparse_mm's output must be the
     # same dtype as its inputs. This line addresses that constraint while
     # arbitrarily using bfloat16 for the int8/fp8 cases.
     out_dtype = torch.float16 if dtype is torch.float16 else torch.bfloat16
 
-    eye = torch.eye(b.shape[0], device="cuda", dtype=dtype)
-    eye_scale = torch.ones(1, device="cuda", dtype=torch.float32)
+    eye = torch.eye(b.shape[0], device='cuda', dtype=dtype)
+    eye_scale = torch.ones(1, device='cuda', dtype=torch.float32)
     b_decomp = ops.cutlass_scaled_sparse_mm(eye,
                                             b_compressed,
                                             b_metadata,
@@ -81,8 +79,8 @@ def check_compress_decompress_invariance(
 def make_rand_sparse_tensors(
         dtype: torch.dtype, m: int, n: int, k: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    a = torch.randn((m, k), device="cuda")
-    b = torch.randn((n, k), device="cuda").t()
+    a = torch.randn((m, k), device='cuda')
+    b = torch.randn((n, k), device='cuda').t()
 
     if dtype == torch.int8:
         # ensure A and B aren't all zeros after rounding
@@ -109,12 +107,11 @@ def make_rand_sparse_tensors(
     return b_compressed, e, a, b
 
 
-@pytest.mark.skipif(
-    not sparse_cutlass_supported(),
-    reason="Sparse CUTLASS is not supported on this GPU type.",
-)
+@pytest.mark.skipif(not sparse_cutlass_supported(),
+                    reason="Sparse CUTLASS is not supported on this GPU type.")
 # Test working with a subset of A and B for sparse matmul
 def test_cutlass_sparse_subset():
+
     big_m = 1024
     m, n, k = 512, 512, 512
 
@@ -164,15 +161,14 @@ MNK_FACTORS = [
 
 
 # Test working with a subset of A and B for sparse matmul
-@pytest.mark.skipif(
-    not sparse_cutlass_supported(),
-    reason="Sparse CUTLASS is not supported on this GPU type.",
-)
+@pytest.mark.skipif(not sparse_cutlass_supported(),
+                    reason="Sparse CUTLASS is not supported on this GPU type.")
 @pytest.mark.parametrize("m, n, k", MNK_FACTORS)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_bias", [True, False])
 def test_cutlass_sparse_gemm(m: int, k: int, n: int, dtype: type[torch.dtype],
                              use_bias: bool):
+
     # Create tensors
     b_comp, e, a, b = make_rand_sparse_tensors(dtype, m, n, k)
     scale_a = torch.ones((1, 1), device="cuda", dtype=torch.float32)
@@ -198,21 +194,18 @@ def test_cutlass_sparse_gemm(m: int, k: int, n: int, dtype: type[torch.dtype],
     torch.testing.assert_close(out, baseline, rtol=1e-2, atol=3e-1)
 
 
-@pytest.mark.skipif(
-    not sparse_cutlass_supported(),
-    reason="Sparse CUTLASS is not supported on this GPU type.",
-)
+@pytest.mark.skipif(not sparse_cutlass_supported(),
+                    reason="Sparse CUTLASS is not supported on this GPU type.")
 @pytest.mark.parametrize("m, k, n", MNK_FACTORS)
-@pytest.mark.skipif(
-    not current_platform.has_device_capability(89),
-    reason="FP8 is not supported on this GPU type.",
-)
+@pytest.mark.skipif(not current_platform.has_device_capability(89),
+                    reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("use_bias", [True, False])
 def test_cutlass_sparse_fp8_gemm(m: int, n: int, k: int, use_bias: bool):
+
     # Create tensors
     b_comp, e, a, b = make_rand_sparse_tensors(torch.float8_e4m3fn, m, n, k)
-    scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32)
-    scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32)
+    scale_a = (torch.randn((1, 1), device="cuda", dtype=torch.float32))
+    scale_b = (torch.randn((1, 1), device="cuda", dtype=torch.float32))
     out_dtype = torch.bfloat16
 
     bias = torch.rand(
@@ -236,26 +229,19 @@ def test_cutlass_sparse_fp8_gemm(m: int, n: int, k: int, use_bias: bool):
     torch.testing.assert_close(out, baseline, rtol=1e-2, atol=3e-1)
 
 
-@pytest.mark.skipif(
-    not sparse_cutlass_supported(),
-    reason="Sparse CUTLASS is not supported on this GPU type.",
-)
+@pytest.mark.skipif(not sparse_cutlass_supported(),
+                    reason="Sparse CUTLASS is not supported on this GPU type.")
 @pytest.mark.parametrize("m,k,n", MNK_FACTORS)
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
-def test_cutlass_sparse_int8_gemm(
-    m: int,
-    n: int,
-    k: int,
-    per_act_token: bool,
-    per_out_ch: bool,
-    use_bias: bool,
-):
+def test_cutlass_sparse_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
+                                  per_out_ch: bool, use_bias: bool):
+
     # Create tensors
     b_comp, e, a, b = make_rand_sparse_tensors(torch.int8, m, n, k)
-    scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32)
-    scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32)
+    scale_a = (torch.randn((1, 1), device="cuda", dtype=torch.float32))
+    scale_b = (torch.randn((1, 1), device="cuda", dtype=torch.float32))
     out_dtype = torch.bfloat16
 
     bias = torch.rand(

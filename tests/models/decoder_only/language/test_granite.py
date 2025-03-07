@@ -3,7 +3,6 @@
 
 Run `pytest tests/models/test_granite.py`.
 """
-
 import pytest
 
 from ...utils import check_logprobs_close

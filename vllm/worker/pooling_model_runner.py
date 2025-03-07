@@ -25,7 +25,6 @@ class ModelInputForGPUWithPoolingMetadata(ModelInputForGPU):
     """
     Used by the PoolingModelRunner.
     """
-
     pooling_metadata: Optional["PoolingMetadata"] = None
 
 
@@ -41,11 +40,9 @@ class PoolingModelRunner(
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ):
-        super().__init__(
-            vllm_config=vllm_config,
-            kv_cache_dtype=kv_cache_dtype,
-            is_driver_worker=is_driver_worker,
-        )
+        super().__init__(vllm_config=vllm_config,
+                         kv_cache_dtype=kv_cache_dtype,
+                         is_driver_worker=is_driver_worker)
 
     @torch.inference_mode()
     def execute_model(
@@ -70,8 +67,7 @@ class PoolingModelRunner(
             assert model_input.prompt_adapter_mapping is not None
             self.set_active_prompt_adapters(
                 model_input.prompt_adapter_requests,
-                model_input.prompt_adapter_mapping,
-            )
+                model_input.prompt_adapter_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
@@ -96,11 +92,10 @@ class PoolingModelRunner(
             model_executable = self.model
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        seqlen_agnostic_kwargs = (
-            {
-                "finished_requests_ids": model_input.finished_requests_ids,
-                "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
-            } if self.has_inner_state else {})
+        seqlen_agnostic_kwargs = {
+            "finished_requests_ids": model_input.finished_requests_ids,
+            "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
+        } if self.has_inner_state else {}
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_start = torch.cuda.Event(enable_timing=True)
@@ -120,8 +115,7 @@ class PoolingModelRunner(
                 **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                              device=self.device),
                 **cross_enc_kwargs,
-                **seqlen_agnostic_kwargs,
-            )
+                **seqlen_agnostic_kwargs)
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
@@ -151,10 +145,8 @@ class PoolingModelRunner(
             return []
 
         return [
-            self.model.pooler(
-                hidden_states=hidden_or_intermediate_states,
-                pooling_metadata=model_input.pooling_metadata,
-            )
+            self.model.pooler(hidden_states=hidden_or_intermediate_states,
+                              pooling_metadata=model_input.pooling_metadata)
         ]
 
     def make_model_input_from_broadcasted_tensor_dict(
@@ -170,7 +162,7 @@ class PoolingModelRunner(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None,
+        finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForGPUWithPoolingMetadata:
         assert seq_group_metadata_list is not None
         model_input = self._prepare_model_input_tensors(

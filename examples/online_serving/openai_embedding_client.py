@@ -18,7 +18,7 @@ model = models.data[0].id
 responses = client.embeddings.create(
     input=[
         "Hello my name is",
-        "The best thing about vLLM is that it supports many different models",
+        "The best thing about vLLM is that it supports many different models"
     ],
     model=model,
 )

@@ -367,11 +367,10 @@ class SiglipEncoder(nn.Module):
             num_hidden_layers = num_hidden_layers_override
 
         self.layers = nn.ModuleList([
-            SiglipEncoderLayer(
-                config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.layers.{layer_idx}",
-            ) for layer_idx in range(num_hidden_layers)
+            SiglipEncoderLayer(config,
+                               quant_config=quant_config,
+                               prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(
@@ -484,6 +483,7 @@ class SiglipVisionTransformer(nn.Module):
         interpolate_pos_encoding: bool = True,
         feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
+
         hidden_states = self.embeddings(
             pixel_values,
             interpolate_pos_encoding=interpolate_pos_encoding,
@@ -500,11 +500,8 @@ class SiglipVisionTransformer(nn.Module):
 
         # Handle post-norm (if applicable) and stacks feature layers if needed
         encoder_outputs = resolve_visual_encoder_outputs(
-            encoder_outputs,
-            feature_sample_layers,
-            self.post_layernorm,
-            self.config.num_hidden_layers,
-        )
+            encoder_outputs, feature_sample_layers, self.post_layernorm,
+            self.config.num_hidden_layers)
 
         # TODO: add this back when pooled_output is used in inference.
         # if self.use_head:
@@ -575,7 +572,7 @@ class SiglipVisionModel(nn.Module):
                 if layer_idx >= layer_count:
                     continue
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)

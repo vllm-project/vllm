@@ -103,8 +103,8 @@ class MultiModalPlugin(ABC):
                     self,
                 )
 
-            self._input_mappers[
-                model_cls] = mapper or self._default_input_mapper
+            self._input_mappers[model_cls] = (mapper
+                                              or self._default_input_mapper)
 
             return model_cls
 
@@ -349,8 +349,8 @@ class MultiModalPlaceholderMap:
                 mm_items = [mm_items]
 
             if positions:
-                intersecting_items = placeholder_maps[
-                    modality].append_items_from_seq_group(
+                intersecting_items = placeholder_maps[modality] \
+                    .append_items_from_seq_group(
                         positions,
                         mm_items,
                         placeholders,

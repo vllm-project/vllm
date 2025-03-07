@@ -21,7 +21,6 @@ class AttentionType:
     Attention type.
     Use string to be compatible with `torch.compile`.
     """
-
     # Decoder attention between previous layer Q/K/V
     DECODER = "decoder"
     # Encoder attention between previous layer Q/K/V for encoder-decoder
@@ -34,7 +33,6 @@ class AttentionType:
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
-
     # For some attention backends, we allocate an output tensor before
     # calling the custom op. When piecewise cudagraph is enabled, this
     # makes sure the output tensor is allocated inside the cudagraph.
@@ -96,21 +94,15 @@ class AttentionBackend(ABC):
     ) -> None:
         raise NotImplementedError
 
-    def advance_step(
-        self,
-        model_input: "ModelRunnerInputBase",
-        sampled_token_ids: Optional[torch.Tensor],
-        block_size: int,
-        num_seqs: int,
-        num_queries: int,
-    ) -> None:
+    def advance_step(self, model_input: "ModelRunnerInputBase",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int, num_seqs: int, num_queries: int) -> None:
         raise NotImplementedError
 
 
 @dataclass
 class AttentionMetadata:
     """Attention metadata for prefill and decode batched together."""
-
     # Total number of prefill requests.
     num_prefills: int
     # Number of prefill tokens.
@@ -205,11 +197,10 @@ class AttentionState(ABC, Generic[T]):
 
     @abstractmethod
     def prepare_graph_input_buffers(
-        self,
-        input_buffers: Dict[str, Any],
-        attn_metadata: T,
-        is_encoder_decoder_model: bool = False,
-    ) -> None:
+            self,
+            input_buffers: Dict[str, Any],
+            attn_metadata: T,
+            is_encoder_decoder_model: bool = False) -> None:
         """In-place modify input buffers dict for CUDA graph replay."""
         ...
 
@@ -233,18 +224,14 @@ class AttentionMetadataBuilder(ABC, Generic[T]):
         raise NotImplementedError
 
     @abstractmethod
-    def build(
-        self,
-        seq_lens: List[int],
-        query_lens: List[int],
-        cuda_graph_pad_size: int,
-        batch_size: int,
-    ) -> T:
+    def build(self, seq_lens: List[int], query_lens: List[int],
+              cuda_graph_pad_size: int, batch_size: int) -> T:
         """Build attention metadata with on-device tensors."""
         raise NotImplementedError
 
 
 class AttentionLayer(Protocol):
+
     _k_scale: torch.Tensor
     _v_scale: torch.Tensor
     _k_scale_float: float

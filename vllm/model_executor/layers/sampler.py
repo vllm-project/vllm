@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """A layer that samples the next tokens from the model's outputs."""
-
 import itertools
 import warnings
 from dataclasses import dataclass
@@ -38,7 +37,6 @@ def get_sampler() -> torch.nn.Module:
     if envs.VLLM_USE_V1:
         # Lazy import: the v1 package isn't distributed
         from vllm.v1.sample.sampler import Sampler as V1Sampler
-
         return V1Sampler()
     return Sampler()
 
@@ -84,8 +82,7 @@ SampleReturnType = Tuple[MaybeDeferredSampleResultType, Optional[torch.Tensor]]
 class SamplerOutput(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True,
-):  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """For each sequence group, we generate a list of SequenceOutput object,
     each of which contains one possible candidate for the next token.
 
@@ -147,7 +144,8 @@ class SamplerOutput(
                           self.__class__) and self.outputs == other.outputs
 
     def __repr__(self) -> str:
-        """Show the shape of a tensor instead of its values to reduce noise."""
+        """Show the shape of a tensor instead of its values to reduce noise.
+        """
         sampled_token_probs_repr = ("None" if self.sampled_token_probs is None
                                     else self.sampled_token_probs.shape)
         sampled_token_ids_repr = ("None" if self.sampled_token_ids is None else
@@ -207,8 +205,8 @@ class Sampler(nn.Module):
 
         # Initialize new sampling tensors
         (sampling_tensors, do_penalties, do_top_p_top_k,
-         do_min_p) = (SamplingTensors.from_sampling_metadata(
-             sampling_metadata, vocab_size, logits.device, logits.dtype))
+         do_min_p) = SamplingTensors.from_sampling_metadata(
+             sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         self._sampling_tensors = sampling_tensors
         self._do_penalties = do_penalties
@@ -261,14 +259,11 @@ class Sampler(nn.Module):
 
         # Apply presence and frequency penalties.
         if do_penalties:
-            logits = apply_penalties(
-                logits,
-                sampling_tensors.prompt_tokens,
-                sampling_tensors.output_tokens,
-                sampling_tensors.presence_penalties,
-                sampling_tensors.frequency_penalties,
-                sampling_tensors.repetition_penalties,
-            )
+            logits = apply_penalties(logits, sampling_tensors.prompt_tokens,
+                                     sampling_tensors.output_tokens,
+                                     sampling_tensors.presence_penalties,
+                                     sampling_tensors.frequency_penalties,
+                                     sampling_tensors.repetition_penalties)
 
         # Use float32 to apply temperature scaling.
         # Use in-place division to avoid creating a new tensor.
@@ -325,8 +320,7 @@ class Sampler(nn.Module):
             prompt_logprobs,
             sample_logprobs,
             on_device_tensors=on_device_tensors,
-            skip_sampler_cpu_output=sampling_metadata.skip_sampler_cpu_output,
-        )
+            skip_sampler_cpu_output=sampling_metadata.skip_sampler_cpu_output)
 
     @property
     def _should_modify_greedy_probs_inplace(self) -> bool:
@@ -348,7 +342,7 @@ def _apply_min_tokens_penalty(
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
     """Apply min_tokens penalty which sets stop tokens to -inf if min_tokens
-    have not been generated yet
+        have not been generated yet
     """
     # list of indices in logits that will be set to -inf
     logits_to_penalize: List[Tuple[int, int]] = []
@@ -462,7 +456,8 @@ def _greedy_sample(
 
         seq_ids = seq_group.seq_ids
         num_parent_seqs = len(seq_ids)
-        assert num_parent_seqs == 1, "Greedy sampling should have only one seq."
+        assert num_parent_seqs == 1, (
+            "Greedy sampling should have only one seq.")
         parent_ids = list(range(num_parent_seqs))
         next_token_ids = [samples_lst[sample_idx]]
         results.append((next_token_ids, parent_ids))
@@ -542,12 +537,8 @@ def _multinomial(
 
 
 def _top_k_top_p_multinomial_with_flashinfer(
-    probs: torch.Tensor,
-    top_ks: torch.Tensor,
-    top_ps: torch.Tensor,
-    num_samples: int,
-    seq_groups: Optional[List[SequenceGroupToSample]],
-):
+        probs: torch.Tensor, top_ks: torch.Tensor, top_ps: torch.Tensor,
+        num_samples: int, seq_groups: Optional[List[SequenceGroupToSample]]):
     max_top_k_round = 32
     if num_samples > 1:
         probs = probs.repeat_interleave(num_samples, dim=0)
@@ -584,8 +575,8 @@ def _top_k_top_p_multinomial_with_flashinfer(
 
 
 def get_pythonized_sample_results(
-    sample_result_args: SampleResultArgsType, ) -> SampleResultType:
-    """This function consumes GPU-side sampler results and computes
+        sample_result_args: SampleResultArgsType) -> SampleResultType:
+    '''This function consumes GPU-side sampler results and computes
     Pythonized CPU-side sampler results (GPU -> CPU sync.)
 
     Single-step scheduling: this function is invoked at sampling-time
@@ -599,7 +590,7 @@ def get_pythonized_sample_results(
 
     Returns:
       Pythonized sampler results
-    """
+    '''
 
     (
         sample_metadata,
@@ -640,7 +631,7 @@ def _sample_with_torch(
     include_gpu_probs_tensor: bool,
     modify_greedy_probs: bool,
 ) -> SampleReturnType:
-    """Torch-oriented _sample() implementation.
+    '''Torch-oriented _sample() implementation.
 
     Single-step scheduling:
     * Perform GPU-side sampling computation
@@ -650,7 +641,7 @@ def _sample_with_torch(
     * Perform GPU-side sampling computation
     * Defer Pythonization & preserve GPU-side
       tensors required for Pythonization
-    """
+    '''
 
     categorized_seq_group_ids: Dict[SamplingType, List[int]] = {
         t: []
@@ -669,12 +660,10 @@ def _sample_with_torch(
 
     # Create output tensor for sampled token ids.
     if include_gpu_probs_tensor:
-        sampled_token_ids_tensor = torch.full(
-            (logprobs.shape[0], 1),
-            VLLM_INVALID_TOKEN_ID,
-            dtype=torch.long,
-            device=logprobs.device,
-        )
+        sampled_token_ids_tensor = torch.full((logprobs.shape[0], 1),
+                                              VLLM_INVALID_TOKEN_ID,
+                                              dtype=torch.long,
+                                              device=logprobs.device)
     else:
         sampled_token_ids_tensor = None
 
@@ -696,8 +685,8 @@ def _sample_with_torch(
 
             if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
-                sampled_token_ids_tensor[long_sample_indices] = (
-                    greedy_samples.unsqueeze(-1))
+                sampled_token_ids_tensor[
+                    long_sample_indices] = greedy_samples.unsqueeze(-1)
 
             if modify_greedy_probs:
                 # If required, modify the probabilities such that sampling from
@@ -717,26 +706,24 @@ def _sample_with_torch(
                               seq_groups)
 
             if flashinfer_top_k_top_p_sampling is not None:
-                multinomial_samples[sampling_type] = (
-                    _top_k_top_p_multinomial_with_flashinfer(
+                multinomial_samples[
+                    sampling_type] = _top_k_top_p_multinomial_with_flashinfer(
                         probs[long_sample_indices],
                         sampling_tensors.top_ks[long_sample_indices],
                         sampling_tensors.top_ps[long_sample_indices],
                         max_n_in_batch,
                         seq_groups_arg,
-                    ))
+                    )
             else:
                 multinomial_samples[sampling_type] = _multinomial(
                     probs[long_sample_indices],
                     max_n_in_batch,
-                    seq_groups=seq_groups_arg,
-                )
+                    seq_groups=seq_groups_arg)
 
             if sampled_token_ids_tensor is not None:
                 # Store sampled tokens in output tensor.
-                sampled_token_ids_tensor[
-                    long_sample_indices] = multinomial_samples[
-                        sampling_type].to(torch.long)
+                sampled_token_ids_tensor[long_sample_indices] = \
+                    multinomial_samples[sampling_type].to(torch.long)
 
         else:
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
@@ -748,17 +735,14 @@ def _sample_with_torch(
         sample_metadata=sample_metadata,
         multinomial_samples=multinomial_samples,
         greedy_samples=greedy_samples,
-        sample_results_dict=sample_results_dict,
-    )
+        sample_results_dict=sample_results_dict)
 
     if not sampling_metadata.skip_sampler_cpu_output:
         # GPU<->CPU sync happens here.
         # This also converts the sampler output to a Python object.
         # Return Pythonized sampler result & sampled token ids
-        return (
-            get_pythonized_sample_results(maybe_deferred_args),
-            sampled_token_ids_tensor,
-        )
+        return get_pythonized_sample_results(
+            maybe_deferred_args), sampled_token_ids_tensor
     else:
         # Defer sampler result Pythonization; return deferred
         # Pythonization args & sampled token ids
@@ -814,7 +798,7 @@ def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     """
     vals = x[torch.arange(0, len(x), device=x.device, dtype=indices.dtype),
              indices]
-    result = x > vals[:, None]
+    result = (x > vals[:, None])
     del vals
     return result.sum(1).add_(1)
 
@@ -862,12 +846,13 @@ def get_logprobs(
 
     # Select indices to compute logprob from, ranks of token ids, and the top
     # k token ids from logprobs.
-    for seq_group, sample_result in zip(sampling_metadata.seq_groups,
-                                        sample_results):
+    for (seq_group, sample_result) in zip(sampling_metadata.seq_groups,
+                                          sample_results):
         sampling_params = seq_group.sampling_params
 
         # Update indices and tokens for prompt logprobs.
-        if seq_group.is_prompt and sampling_params.prompt_logprobs is not None:
+        if (seq_group.is_prompt
+                and sampling_params.prompt_logprobs is not None):
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.prompt_logprobs)
             next_prompt_tokens = _get_next_prompt_tokens(seq_group)
@@ -928,11 +913,11 @@ def get_logprobs(
             top_logprobs, top_token_ids = torch.topk(logprobs,
                                                      largest_num_logprobs,
                                                      dim=-1)
-            top_logprobs = top_logprobs.to("cpu")
-            top_token_ids = top_token_ids.to("cpu")
+            top_logprobs = top_logprobs.to('cpu')
+            top_token_ids = top_token_ids.to('cpu')
 
-        selected_logprobs = selected_logprobs.to("cpu")
-        ranks = ranks.to("cpu")
+        selected_logprobs = selected_logprobs.to('cpu')
+        ranks = ranks.to('cpu')
 
     # Find prompt/sample logprobs.
     prompt_logprobs_per_seq_group: List[Optional[PromptLogprobs]] = []
@@ -943,28 +928,15 @@ def get_logprobs(
     for seq_group, sample_result in zip(sampling_metadata.seq_groups,
                                         sample_results):
         (prompt_logprobs, top_logprob_idx,
-         selected_logprobs_idx) = (_get_prompt_logprob_if_needed(
-             seq_group,
-             selected_logprobs,
-             ranks,
-             top_token_ids,
-             top_logprobs,
-             selected_logprobs_idx,
-             top_logprob_idx,
-         ))
+         selected_logprobs_idx) = _get_prompt_logprob_if_needed(
+             seq_group, selected_logprobs, ranks, top_token_ids, top_logprobs,
+             selected_logprobs_idx, top_logprob_idx)
         prompt_logprobs_per_seq_group.append(prompt_logprobs)
 
         (sampled_logprobs, top_logprob_idx,
-         selected_logprobs_idx) = (_get_sampled_logprob_if_needed(
-             seq_group,
-             sample_result,
-             selected_logprobs,
-             ranks,
-             top_token_ids,
-             top_logprobs,
-             selected_logprobs_idx,
-             top_logprob_idx,
-         ))
+         selected_logprobs_idx) = _get_sampled_logprob_if_needed(
+             seq_group, sample_result, selected_logprobs, ranks, top_token_ids,
+             top_logprobs, selected_logprobs_idx, top_logprob_idx)
         sample_logprobs_per_seq_group.append(sampled_logprobs)
 
     return prompt_logprobs_per_seq_group, sample_logprobs_per_seq_group
@@ -1064,10 +1036,8 @@ def _get_sampled_logprob_if_needed(
                     zip(next_token_ids, parent_seq_ids)):
                 # Get the logprob of a sampled token.
                 sampled_logprobs_dict = {
-                    next_token_id: (
-                        selected_logprob_items[idx],
-                        rank_items[idx],
-                    )
+                    next_token_id:
+                    (selected_logprob_items[idx], rank_items[idx])
                 }
                 if num_logprobs is not None and num_logprobs > 0:
                     # Get top K logprobs.
@@ -1102,12 +1072,9 @@ def _get_sampled_logprob_if_needed(
     return sampled_logprobs, top_logprob_idx, selected_logprobs_idx
 
 
-def _modify_greedy_probs_inplace(
-    logprobs: torch.Tensor,
-    probs: torch.Tensor,
-    sample_indices: torch.Tensor,
-    greedy_samples: torch.Tensor,
-) -> None:
+def _modify_greedy_probs_inplace(logprobs: torch.Tensor, probs: torch.Tensor,
+                                 sample_indices: torch.Tensor,
+                                 greedy_samples: torch.Tensor) -> None:
     """Modify the probability distributions of the greedily-sampled tokens such
     that each sampled token has a "probability" of 1.0. This is required by
     speculative decoding, which depends on the sampling method being encoded
@@ -1182,22 +1149,16 @@ def _build_sampler_output(
         assert sample_logprobs is not None
         assert not isinstance(maybe_deferred_sample_results,
                               SampleResultArgsType)
-        assert (len(
-            sampling_metadata.seq_groups) == len(maybe_deferred_sample_results)
-                == len(prompt_logprobs) == len(sample_logprobs))
+        assert len(sampling_metadata.seq_groups) \
+            == len(maybe_deferred_sample_results) \
+            == len(prompt_logprobs) \
+            == len(sample_logprobs)
         deferred_sample_results_args = None
 
-        for (
-                seq_group,
-                sample_result,
-                group_prompt_logprobs,
-                group_sample_logprobs,
-        ) in zip(
-                sampling_metadata.seq_groups,
-                maybe_deferred_sample_results,
-                prompt_logprobs,
-                sample_logprobs,
-        ):
+        for (seq_group, sample_result, group_prompt_logprobs,
+             group_sample_logprobs) in zip(sampling_metadata.seq_groups,
+                                           maybe_deferred_sample_results,
+                                           prompt_logprobs, sample_logprobs):
             seq_ids = seq_group.seq_ids
             next_token_ids, parent_ids = sample_result
             seq_outputs: List[SequenceOutput] = []
@@ -1215,19 +1176,15 @@ def _build_sampler_output(
         (sampled_token_probs, logprobs_tensor,
          sampled_token_ids) = on_device_tensors
     else:
-        sampled_token_probs, logprobs_tensor, sampled_token_ids = (
-            None,
-            None,
-            None,
-        )
+        sampled_token_probs, logprobs_tensor, sampled_token_ids = (None, None,
+                                                                   None)
 
     return SamplerOutput(
         outputs=sampler_output,
         sampled_token_probs=sampled_token_probs,
         sampled_token_ids=sampled_token_ids,
         logprobs=logprobs_tensor,
-        deferred_sample_results_args=deferred_sample_results_args,
-    )
+        deferred_sample_results_args=deferred_sample_results_args)
 
 
 def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[int]:
@@ -1244,8 +1201,8 @@ def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[int]:
     Returns:
         A list of next prompt tokens to compute logprob.
     """
-    assert (seq_group.is_prompt
-            ), "Caller should ensure the sequence group is in a prefill stage."
+    assert seq_group.is_prompt, (
+        "Caller should ensure the sequence group is in a prefill stage.")
     seq_ids = seq_group.seq_ids
     query_len = seq_group.query_len
     assert query_len is not None

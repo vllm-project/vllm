@@ -8,7 +8,7 @@ default_atol = {torch.float16: 1e-3, torch.bfloat16: 1e-3, torch.float: 1e-5}
 default_rtol = {
     torch.float16: 1e-3,
     torch.bfloat16: 1.6e-2,
-    torch.float: 1.3e-6,
+    torch.float: 1.3e-6
 }
 
 

@@ -34,10 +34,10 @@ class HQQMarlinConfig(QuantizationConfig):
         skip_modules: Optional[List[str]] = None,
     ) -> None:
         super().__init__()
-        assert group_size == 64, "The only supported HQQ group size is currently 64."
-        assert (
-            weight_bits == 4
-        ), "The only supported HQQ quantization bitsize is currently 4."
+        assert group_size == 64, ("The only supported HQQ group size is "
+                                  "currently 64.")
+        assert weight_bits == 4, ("The only supported HQQ quantization "
+                                  "bitsize is currently 4.")
 
         self.weight_bits = weight_bits
         self.group_size = group_size
@@ -67,7 +67,7 @@ class HQQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "HQQMarlinConfig":
-        wq_params = config["quant_config"]["weight_quant_params"]
+        wq_params = (config["quant_config"]["weight_quant_params"])
         weight_bits = cls.get_from_keys(wq_params, ["nbits"])
         group_size = cls.get_from_keys(wq_params, ["group_size"])
         skip_modules = config["skip_modules"]
@@ -75,7 +75,7 @@ class HQQMarlinConfig(QuantizationConfig):
 
     def is_layer_skipped(self, prefix: str) -> bool:
         # Split the prefix into its dot-separated components
-        components = prefix.split(".")
+        components = prefix.split('.')
 
         # Check if any of the skip modules exactly matches any component
         return self.skip_modules is not None and any(
@@ -110,6 +110,7 @@ def error_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
 # HQQ packing creates issues with sharding - therefore, prior to loading, we
 # repack to GPTQ. We also reshape the weights to their proper GPTQ shape.
 class HQQweightParameter(PackedvLLMParameter):
+
     # unpack function from https://github.com/mobiusml/hqq
     def unpack_4bit_u8(self,
                        W_q: torch.Tensor) -> torch.Tensor:  # uint8/2 > uint8
@@ -135,36 +136,27 @@ class HQQweightParameter(PackedvLLMParameter):
         loaded_weight = self.unpack_4bit_u8(loaded_weight)
         loaded_weight = loaded_weight.reshape(-1, self.input_shape).transpose(
             1, 0)
-        loaded_weight = gptq_pack(
-            loaded_weight,
-            self.weight_bits,
-            loaded_weight.shape[0],
-            loaded_weight.shape[1],
-        )
+        loaded_weight = gptq_pack(loaded_weight, self.weight_bits,
+                                  loaded_weight.shape[0],
+                                  loaded_weight.shape[1])
         super().load_merged_column_weight(loaded_weight, **kwargs)
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
         loaded_weight = self.unpack_4bit_u8(loaded_weight)
         loaded_weight = loaded_weight.reshape(self.output_shape,
                                               -1).transpose(1, 0)
-        loaded_weight = gptq_pack(
-            loaded_weight,
-            self.weight_bits,
-            loaded_weight.shape[0],
-            loaded_weight.shape[1],
-        )
+        loaded_weight = gptq_pack(loaded_weight, self.weight_bits,
+                                  loaded_weight.shape[0],
+                                  loaded_weight.shape[1])
         super().load_row_parallel_weight(loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         loaded_weight = self.unpack_4bit_u8(loaded_weight)
         loaded_weight = loaded_weight.reshape(-1, self.input_shape).transpose(
             1, 0)
-        loaded_weight = gptq_pack(
-            loaded_weight,
-            self.weight_bits,
-            loaded_weight.shape[0],
-            loaded_weight.shape[1],
-        )
+        loaded_weight = gptq_pack(loaded_weight, self.weight_bits,
+                                  loaded_weight.shape[0],
+                                  loaded_weight.shape[1])
         super().load_qkv_weight(loaded_weight, **kwargs)
 
 
@@ -186,7 +178,8 @@ class HQQZeroScaleParameter(GroupQuantScaleParameter):
 
 
 class HQQMarlinMethod(LinearMethodBase):
-    """Linear method for HQQ Marlin."""
+    """Linear method for HQQ Marlin.
+    """
 
     def __init__(
         self,
@@ -223,30 +216,25 @@ class HQQMarlinMethod(LinearMethodBase):
             packed_dim=0,
             packed_factor=self.quant_config.pack_factor,
             weight_bits=self.quant_config.weight_bits,
-            weight_loader=weight_loader,
-        )
+            weight_loader=weight_loader)
 
-        zeros = HQQZeroScaleParameter(
-            data=torch.empty(
-                self.output_size_per_partition,
-                self.scales_and_zp_size,
-                dtype=params_dtype,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
+        zeros = HQQZeroScaleParameter(data=torch.empty(
+            self.output_size_per_partition,
+            self.scales_and_zp_size,
+            dtype=params_dtype,
+        ),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
 
-        scales = HQQZeroScaleParameter(
-            data=torch.empty(
-                self.output_size_per_partition,
-                self.scales_and_zp_size,
-                dtype=params_dtype,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
+        scales = HQQZeroScaleParameter(data=torch.empty(
+            self.output_size_per_partition,
+            self.scales_and_zp_size,
+            dtype=params_dtype,
+        ),
+                                       input_dim=1,
+                                       output_dim=0,
+                                       weight_loader=weight_loader)
 
         layer.register_parameter("W_q", qweight)
         layer.register_parameter("zero", zeros)
@@ -254,30 +242,17 @@ class HQQMarlinMethod(LinearMethodBase):
 
         # Ignore extra parameters in the HQQ model.
         # To be added as needed.
-        ignore_parameters = (
-            "axis",
-            "channel_wise",
-            "compute_dtype",
-            "encoded_state_dict",
-            "group_size",
-            "nbits",
-            "offload_meta",
-            "optimize",
-            "packing",
-            "quant_scale",
-            "quant_zero",
-            "round_zero",
-            "shape",
-            "stores_quant_config",
-            "unpack_view_dtype",
-            "view_as_float",
-        )
+        ignore_parameters = ("axis", "channel_wise", "compute_dtype",
+                             "encoded_state_dict", "group_size", "nbits",
+                             "offload_meta", "optimize", "packing",
+                             "quant_scale", "quant_zero", "round_zero",
+                             "shape", "stores_quant_config",
+                             "unpack_view_dtype", "view_as_float")
         for name in ignore_parameters:
             layer.register_parameter(
                 name,
                 HQQEmptyParameter(data=torch.empty(0),
-                                  weight_loader=weight_loader),
-            )
+                                  weight_loader=weight_loader))
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         dev = layer.W_q.device
@@ -291,18 +266,14 @@ class HQQMarlinMethod(LinearMethodBase):
             self.output_size_per_partition,
             self.quant_config.weight_bits,
         ).to(dev)
-        marlin_s = marlin_permute_scales(
-            layer.scale.transpose(1, 0),
-            self.input_size_per_partition,
-            self.output_size_per_partition,
-            self.quant_config.group_size,
-        ).to(dev)
-        marlin_zp = marlin_permute_scales(
-            layer.zero.transpose(1, 0),
-            self.input_size_per_partition,
-            self.output_size_per_partition,
-            self.quant_config.group_size,
-        ).to(dev)
+        marlin_s = marlin_permute_scales(layer.scale.transpose(1, 0),
+                                         self.input_size_per_partition,
+                                         self.output_size_per_partition,
+                                         self.quant_config.group_size).to(dev)
+        marlin_zp = marlin_permute_scales(layer.zero.transpose(1, 0),
+                                          self.input_size_per_partition,
+                                          self.output_size_per_partition,
+                                          self.quant_config.group_size).to(dev)
 
         layer.g_idx = marlin_make_empty_g_idx(dev)
         layer.g_idx_sort_indices = marlin_make_empty_g_idx(dev)
@@ -317,11 +288,9 @@ class HQQMarlinMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        workspace = MarlinWorkspace(
-            self.output_size_per_partition,
-            GPTQ_MARLIN_MIN_THREAD_N,
-            GPTQ_MARLIN_MAX_PARALLEL,
-        )
+        workspace = MarlinWorkspace(self.output_size_per_partition,
+                                    GPTQ_MARLIN_MIN_THREAD_N,
+                                    GPTQ_MARLIN_MAX_PARALLEL)
 
         scales = layer.marlin_scales
         zeros = layer.marlin_zeros

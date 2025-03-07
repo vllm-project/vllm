@@ -60,7 +60,7 @@ def run_reasoning_extraction_nonstreaming(
 ) -> tuple[Optional[str], Optional[str]]:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     return reasoning_parser.extract_reasoning_content(
-        model_output="".join(model_output), request=request)
+        model_output=''.join(model_output), request=request)
 
 
 def run_reasoning_extraction_streaming(

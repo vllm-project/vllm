@@ -4,13 +4,12 @@ This file demonstrates the example usage of disaggregated prefilling
 with LMCache.
 We will launch 2 vllm instances (GPU 0 for prefill and GPU 1 for decode),
 and launch an additional LMCache server.
-KV cache is transferred in the following manner:
+KV cache is transferred in the following manner: 
 VLLM prefill node -> LMCache server -> VLLM decode node.
 
 Note that `pip install lmcache` is needed to run this example.
 Learn more about LMCache in https://github.com/LMCache/LMCache.
 """
-
 import os
 import subprocess
 import time
@@ -51,15 +50,13 @@ def run_prefill(prefill_done, prompts):
     )
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # memory. Reduce the value if your GPU has less memory.
-    llm = LLM(
-        model="mistralai/Mistral-7B-Instruct-v0.2",
-        kv_transfer_config=ktc,
-        max_model_len=8000,
-        gpu_memory_utilization=0.8,
-        enforce_eager=True,
-    )
+    llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2",
+              kv_transfer_config=ktc,
+              max_model_len=8000,
+              gpu_memory_utilization=0.8,
+              enforce_eager=True)
 
-    # llm.generate(prompts, sampling_params)
+    #llm.generate(prompts, sampling_params)
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
         generated_text = output.outputs[0].text
@@ -82,13 +79,11 @@ def run_decode(prefill_done, prompts, timeout=1):
     )
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # of memory. Reduce the value if your GPU has less memory.
-    llm = LLM(
-        model="mistralai/Mistral-7B-Instruct-v0.2",
-        kv_transfer_config=ktc,
-        max_model_len=8000,
-        gpu_memory_utilization=0.8,
-        enforce_eager=True,
-    )
+    llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2",
+              kv_transfer_config=ktc,
+              max_model_len=8000,
+              gpu_memory_utilization=0.8,
+              enforce_eager=True)
 
     print("Waiting for prefill node to finish...")
     prefill_done.wait()
@@ -112,6 +107,7 @@ def run_lmcache_server(port):
 
 
 if __name__ == "__main__":
+
     prompts = [
         "Hello, how are you?" * 1000,
     ]

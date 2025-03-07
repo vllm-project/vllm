@@ -6,7 +6,6 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
  all workers in a node other than the head node, which can cause the test
  to fail.
 """
-
 import json
 import os
 from dataclasses import dataclass
@@ -68,36 +67,26 @@ class PPTestSettings:
     ):
         return PPTestSettings(
             parallel_setups=[
-                ParallelSetup(
-                    tp_size=tp_base,
-                    pp_size=pp_base,
-                    eager_mode=False,
-                    chunked_prefill=False,
-                ),
-                ParallelSetup(
-                    tp_size=tp_base,
-                    pp_size=2 * pp_base,
-                    eager_mode=False,
-                    chunked_prefill=True,
-                ),
-                ParallelSetup(
-                    tp_size=tp_base,
-                    pp_size=2 * pp_base,
-                    eager_mode=True,
-                    chunked_prefill=False,
-                ),
-                ParallelSetup(
-                    tp_size=2 * tp_base,
-                    pp_size=pp_base,
-                    eager_mode=False,
-                    chunked_prefill=True,
-                ),
-                ParallelSetup(
-                    tp_size=2 * tp_base,
-                    pp_size=pp_base,
-                    eager_mode=True,
-                    chunked_prefill=False,
-                ),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=pp_base,
+                              eager_mode=False,
+                              chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=2 * pp_base,
+                              eager_mode=False,
+                              chunked_prefill=True),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=2 * pp_base,
+                              eager_mode=True,
+                              chunked_prefill=False),
+                ParallelSetup(tp_size=2 * tp_base,
+                              pp_size=pp_base,
+                              eager_mode=False,
+                              chunked_prefill=True),
+                ParallelSetup(tp_size=2 * tp_base,
+                              pp_size=pp_base,
+                              eager_mode=True,
+                              chunked_prefill=False),
             ],
             # only ray is supported for V1
             distributed_backends=["mp", "ray", "ray"],
@@ -118,12 +107,10 @@ class PPTestSettings:
     ):
         return PPTestSettings(
             parallel_setups=[
-                ParallelSetup(
-                    tp_size=tp_base,
-                    pp_size=pp_base,
-                    eager_mode=True,
-                    chunked_prefill=False,
-                ),
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=pp_base,
+                              eager_mode=True,
+                              chunked_prefill=False),
             ],
             distributed_backends=["mp"],
             vllm_major_versions=["0"],
@@ -138,14 +125,8 @@ class PPTestSettings:
         for parallel_setup in self.parallel_setups:
             for backend, vllm_major_version in zip(self.distributed_backends,
                                                    self.vllm_major_versions):
-                yield (
-                    model_id,
-                    parallel_setup,
-                    backend,
-                    vllm_major_version,
-                    self.task,
-                    opts,
-                )
+                yield (model_id, parallel_setup, backend, vllm_major_version,
+                       self.task, opts)
 
 
 # NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
@@ -392,14 +373,8 @@ def _compare_tp(
 
 
 @pytest.mark.parametrize(
-    (
-        "model_id",
-        "parallel_setup",
-        "distributed_backend",
-        "vllm_major_version",
-        "task",
-        "test_options",
-    ),
+    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
+     "task", "test_options"),
     [
         params for model_id, settings in TEXT_GENERATION_MODELS.items()
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
@@ -415,28 +390,20 @@ def test_tp_language_generation(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(
-        model_id,
-        parallel_setup,
-        distributed_backend,
-        vllm_major_version,
-        task,
-        test_options,
-        num_gpus_available,
-        method="generate",
-        is_multimodal=False,
-    )
+    _compare_tp(model_id,
+                parallel_setup,
+                distributed_backend,
+                vllm_major_version,
+                task,
+                test_options,
+                num_gpus_available,
+                method="generate",
+                is_multimodal=False)
 
 
 @pytest.mark.parametrize(
-    (
-        "model_id",
-        "parallel_setup",
-        "distributed_backend",
-        "vllm_major_version",
-        "task",
-        "test_options",
-    ),
+    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
+     "task", "test_options"),
     [
         params for model_id, settings in EMBEDDING_MODELS.items()
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
@@ -452,28 +419,20 @@ def test_tp_language_embedding(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(
-        model_id,
-        parallel_setup,
-        distributed_backend,
-        vllm_major_version,
-        task,
-        test_options,
-        num_gpus_available,
-        method="encode",
-        is_multimodal=False,
-    )
+    _compare_tp(model_id,
+                parallel_setup,
+                distributed_backend,
+                vllm_major_version,
+                task,
+                test_options,
+                num_gpus_available,
+                method="encode",
+                is_multimodal=False)
 
 
 @pytest.mark.parametrize(
-    (
-        "model_id",
-        "parallel_setup",
-        "distributed_backend",
-        "vllm_major_version",
-        "task",
-        "test_options",
-    ),
+    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
+     "task", "test_options"),
     [
         params for model_id, settings in MULTIMODAL_MODELS.items()
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
@@ -489,14 +448,12 @@ def test_tp_multimodal_generation(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(
-        model_id,
-        parallel_setup,
-        distributed_backend,
-        vllm_major_version,
-        task,
-        test_options,
-        num_gpus_available,
-        method="generate",
-        is_multimodal=True,
-    )
+    _compare_tp(model_id,
+                parallel_setup,
+                distributed_backend,
+                vllm_major_version,
+                task,
+                test_options,
+                num_gpus_available,
+                method="generate",
+                is_multimodal=True)

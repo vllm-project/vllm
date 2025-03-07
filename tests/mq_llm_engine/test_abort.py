@@ -27,6 +27,7 @@ def tmp_socket():
 async def test_abort(tmp_socket):
     with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
                            ipc_path=tmp_socket) as engine:
+
         client = await engine.make_client()
 
         request_id_to_be_aborted = "request-aborted"
@@ -57,8 +58,8 @@ async def test_abort(tmp_socket):
         # Confirm that we got all the EXPECTED tokens from the requests.
         for task in tasks:
             count, request_id = await task
-            assert (count == EXPECTED_TOKENS
-                    ), f"{request_id} generated only {count} tokens"
+            assert count == EXPECTED_TOKENS, (
+                f"{request_id} generated only {count} tokens")
 
         # Cancel task (this will hang indefinitely if not).
         task_aborted.cancel()

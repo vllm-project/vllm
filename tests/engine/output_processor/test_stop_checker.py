@@ -35,22 +35,14 @@ def sequence_with_eos(text: str, eos_token: str,
     return seq
 
 
-@pytest.mark.parametrize(
-    ["text_wo_eos", "eos_token", "eos_token_id"],
-    [
-        ("This text ends with EOS token", "</s>", 2),
-    ],
-)
+@pytest.mark.parametrize(["text_wo_eos", "eos_token", "eos_token_id"], [
+    ("This text ends with EOS token", "</s>", 2),
+])
 @pytest.mark.parametrize("ignore_eos", [True, False])
 @pytest.mark.parametrize("include_stop_str_in_output", [True, False])
 @pytest.mark.skip_global_cleanup
-def test_stop_on_eos_token(
-    text_wo_eos: str,
-    eos_token: str,
-    eos_token_id: int,
-    ignore_eos: bool,
-    include_stop_str_in_output: bool,
-):
+def test_stop_on_eos_token(text_wo_eos: str, eos_token: str, eos_token_id: int,
+                           ignore_eos: bool, include_stop_str_in_output: bool):
     """
     Test the behavior of the StopChecker's maybe_stop_sequence method
     when an EOS token is encountered.
@@ -77,8 +69,7 @@ def test_stop_on_eos_token(
     sampling_params = SamplingParams(
         min_tokens=1,
         ignore_eos=ignore_eos,
-        include_stop_str_in_output=include_stop_str_in_output,
-    )
+        include_stop_str_in_output=include_stop_str_in_output)
 
     stop_checker.maybe_stop_sequence(
         seq=seq,

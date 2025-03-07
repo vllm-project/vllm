@@ -47,7 +47,7 @@ async def test_single_pooling(server: RemoteOpenAIServer, model_name: str):
         json={
             "model": model_name,
             "input": input_texts,
-            "encoding_format": "float",
+            "encoding_format": "float"
         },
     )
     response.raise_for_status()
@@ -67,7 +67,7 @@ async def test_single_pooling(server: RemoteOpenAIServer, model_name: str):
         json={
             "model": model_name,
             "input": input_tokens,
-            "encoding_format": "float",
+            "encoding_format": "float"
         },
     )
     response.raise_for_status()
@@ -86,16 +86,15 @@ async def test_single_pooling(server: RemoteOpenAIServer, model_name: str):
 async def test_batch_pooling(server: RemoteOpenAIServer, model_name: str):
     # test list[str]
     input_texts = [
-        "The cat sat on the mat.",
-        "A feline was resting on a rug.",
-        "Stars twinkle brightly in the night sky.",
+        "The cat sat on the mat.", "A feline was resting on a rug.",
+        "Stars twinkle brightly in the night sky."
     ]
     response = requests.post(
         server.url_for("pooling"),
         json={
             "model": model_name,
             "input": input_texts,
-            "encoding_format": "float",
+            "encoding_format": "float"
         },
     )
     response.raise_for_status()
@@ -109,18 +108,14 @@ async def test_batch_pooling(server: RemoteOpenAIServer, model_name: str):
     assert poolings.usage.total_tokens == 25
 
     # test list[list[int]]
-    input_tokens = [
-        [4, 5, 7, 9, 20],
-        [15, 29, 499],
-        [24, 24, 24, 24, 24],
-        [25, 32, 64, 77],
-    ]
+    input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
+                    [25, 32, 64, 77]]
     response = requests.post(
         server.url_for("pooling"),
         json={
             "model": model_name,
             "input": input_tokens,
-            "encoding_format": "float",
+            "encoding_format": "float"
         },
     )
     response.raise_for_status()
@@ -138,20 +133,16 @@ async def test_batch_pooling(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_conversation_pooling(server: RemoteOpenAIServer,
                                     model_name: str):
-    messages = [
-        {
-            "role": "user",
-            "content": "The cat sat on the mat.",
-        },
-        {
-            "role": "assistant",
-            "content": "A feline was resting on a rug.",
-        },
-        {
-            "role": "user",
-            "content": "Stars twinkle brightly in the night sky.",
-        },
-    ]
+    messages = [{
+        "role": "user",
+        "content": "The cat sat on the mat.",
+    }, {
+        "role": "assistant",
+        "content": "A feline was resting on a rug.",
+    }, {
+        "role": "user",
+        "content": "Stars twinkle brightly in the night sky.",
+    }]
 
     chat_response = requests.post(
         server.url_for("pooling"),
@@ -200,7 +191,7 @@ async def test_batch_base64_pooling(server: RemoteOpenAIServer,
                                     model_name: str):
     input_texts = [
         "Hello my name is",
-        "The best thing about vLLM is that it supports many different models",
+        "The best thing about vLLM is that it supports many different models"
     ]
 
     float_response = requests.post(

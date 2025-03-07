@@ -62,13 +62,11 @@ class NaiveBlockAllocator(BlockAllocator):
             # a block pool between allocators
             self._block_pool = block_pool
 
-    def allocate_immutable_block(
-        self,
-        prev_block: Optional[Block],
-        token_ids: List[int],
-        extra_hash: Optional[int] = None,
-        device: Optional[Device] = None,
-    ) -> Block:
+    def allocate_immutable_block(self,
+                                 prev_block: Optional[Block],
+                                 token_ids: List[int],
+                                 extra_hash: Optional[int] = None,
+                                 device: Optional[Device] = None) -> Block:
         """Allocates a new immutable block with the given token IDs, linked to
         the previous block.
 
@@ -87,12 +85,11 @@ class NaiveBlockAllocator(BlockAllocator):
         return block
 
     def allocate_immutable_blocks(
-        self,
-        prev_block: Optional[Block],
-        block_token_ids: List[List[int]],
-        extra_hash: Optional[int] = None,
-        device: Optional[Device] = None,
-    ) -> List[Block]:
+            self,
+            prev_block: Optional[Block],
+            block_token_ids: List[List[int]],
+            extra_hash: Optional[int] = None,
+            device: Optional[Device] = None) -> List[Block]:
         assert device is None
         num_blocks = len(block_token_ids)
 
@@ -106,18 +103,15 @@ class NaiveBlockAllocator(BlockAllocator):
                 prev_block=prev_block,
                 token_ids=block_token_ids[i],
                 block_size=self._block_size,
-                physical_block_id=block_ids[i],
-            )
+                physical_block_id=block_ids[i])
             blocks.append(prev_block)
 
         return blocks
 
-    def allocate_mutable_block(
-        self,
-        prev_block: Optional[Block],
-        extra_hash: Optional[int] = None,
-        device: Optional[Device] = None,
-    ) -> Block:
+    def allocate_mutable_block(self,
+                               prev_block: Optional[Block],
+                               extra_hash: Optional[int] = None,
+                               device: Optional[Device] = None) -> Block:
         """Allocates a new mutable block, linked to the previous block.
 
         Args:
@@ -130,12 +124,10 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         assert device is None
         block_id = self._allocate_block_id()
-        block = self._block_pool.init_block(
-            prev_block=prev_block,
-            token_ids=[],
-            block_size=self._block_size,
-            physical_block_id=block_id,
-        )
+        block = self._block_pool.init_block(prev_block=prev_block,
+                                            token_ids=[],
+                                            block_size=self._block_size,
+                                            physical_block_id=block_id)
         return block
 
     def _allocate_block_id(self) -> BlockId:
@@ -185,6 +177,7 @@ class NaiveBlockAllocator(BlockAllocator):
         forked_blocks: List[Block] = []
         prev_block = None
         for block in source_blocks:
+
             # Increment refcount for each block.
             assert block.block_id is not None
             refcount = self._refcounter.incr(block.block_id)
@@ -194,8 +187,7 @@ class NaiveBlockAllocator(BlockAllocator):
                 prev_block=prev_block,
                 token_ids=block.token_ids,
                 block_size=self._block_size,
-                physical_block_id=block.block_id,
-            )
+                physical_block_id=block.block_id)
 
             forked_blocks.append(forked_block)
             prev_block = forked_blocks[-1]
@@ -213,7 +205,7 @@ class NaiveBlockAllocator(BlockAllocator):
         given the absolute block id.
 
         Args:
-            absolute_id (int): The absolute block id for the block
+            absolute_id (int): The absolute block id for the block 
             in whole allocator.
 
         Returns:
@@ -237,7 +229,7 @@ class NaiveBlockAllocator(BlockAllocator):
             block (Block): The block to check for copy-on-write.
 
         Returns:
-            BlockId: The block index of the new block if a copy-on-write
+            BlockId: The block index of the new block if a copy-on-write 
                 operation was performed, or the original block index if
                 no copy-on-write was necessary.
         """
@@ -371,16 +363,14 @@ class NaiveBlock(Block):
             If not provided, it defaults to self.
     """
 
-    def __init__(
-        self,
-        prev_block: Optional[Block],
-        token_ids: List[int],
-        block_size: int,
-        allocator: BlockAllocator,
-        block_id: Optional[int] = None,
-        _cow_target: Optional[Block] = None,
-        extra_hash: Optional[int] = None,
-    ):
+    def __init__(self,
+                 prev_block: Optional[Block],
+                 token_ids: List[int],
+                 block_size: int,
+                 allocator: BlockAllocator,
+                 block_id: Optional[int] = None,
+                 _cow_target: Optional[Block] = None,
+                 extra_hash: Optional[int] = None):
         self._token_ids: List[int] = []
         self._block_size = block_size
         self._prev_block = prev_block
@@ -391,18 +381,18 @@ class NaiveBlock(Block):
         self._append_token_ids_no_cow(token_ids)
 
     def append_token_ids(self, token_ids: List[int]) -> None:
-        """Appends the given token IDs to the block and performs a
+        """Appends the given token IDs to the block and performs a 
         copy-on-write if necessary.
 
         Args:
-            token_ids (Optional[List[int]]): The token IDs to be appended
+            token_ids (Optional[List[int]]): The token IDs to be appended 
                 to the block.
         """
         self._append_token_ids_no_cow(token_ids)
 
         if self._block_id is not None:
-            self._block_id = self._allocator.cow_block_if_not_appendable(
-                self._cow_target)
+            self._block_id = (self._allocator.cow_block_if_not_appendable(
+                self._cow_target))
 
     def _append_token_ids_no_cow(self, token_ids: List[int]) -> None:
         """Appends the given token IDs to the block

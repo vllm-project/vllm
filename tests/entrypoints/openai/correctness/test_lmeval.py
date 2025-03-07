@@ -26,7 +26,7 @@ MORE_ARGS_LIST = [
     [],  # Default
     ["--enable-chunked-prefill"],  # Chunked
     ["--num-scheduler-steps", "8"],  # MS
-    ["--num-scheduler-steps", "8", "--multi-step-stream-outputs"],  # MS+Stream
+    ["--num-scheduler-steps", "8", "--multi-step-stream-outputs"]  # MS+Stream
 ]
 MAX_WAIT_SECONDS = None
 
@@ -67,10 +67,9 @@ def run_test(more_args):
                 ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda() and not current_platform.is_tpu(),
-    reason="V1 currently only supported on CUDA and TPU",
-)
+@pytest.mark.skipif(not current_platform.is_cuda()
+                    and not current_platform.is_tpu(),
+                    reason="V1 currently only supported on CUDA and TPU")
 def test_lm_eval_accuracy_v1_engine(monkeypatch):
     """Run with the V1 Engine."""
 

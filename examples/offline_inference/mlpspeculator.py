@@ -24,6 +24,7 @@ def time_generation(llm: LLM, prompts: list[str],
 
 
 if __name__ == "__main__":
+
     template = (
         "Below is an instruction that describes a task. Write a response "
         "that appropriately completes the request.\n\n### Instruction:\n{}"

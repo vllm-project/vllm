@@ -6,7 +6,6 @@ with LMCache.
 Note that `pip install lmcache` is needed to run this example.
 Learn more about LMCache in https://github.com/LMCache/LMCache.
 """
-
 import os
 import time
 
@@ -42,13 +41,11 @@ ktc = KVTransferConfig.from_cli(
 # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
 # memory. Reduce the value if your GPU has less memory.
 # Note that LMCache is not compatible with chunked prefill for now.
-llm = LLM(
-    model="mistralai/Mistral-7B-Instruct-v0.2",
-    kv_transfer_config=ktc,
-    max_model_len=8000,
-    enable_chunked_prefill=False,
-    gpu_memory_utilization=0.8,
-)
+llm = LLM(model="mistralai/Mistral-7B-Instruct-v0.2",
+          kv_transfer_config=ktc,
+          max_model_len=8000,
+          enable_chunked_prefill=False,
+          gpu_memory_utilization=0.8)
 
 outputs = llm.generate(first_prompt, sampling_params)
 for output in outputs:

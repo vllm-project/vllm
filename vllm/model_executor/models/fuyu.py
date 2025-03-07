@@ -15,8 +15,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyTorch Fuyu model."""
-
+""" PyTorch Fuyu model."""
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
@@ -121,10 +120,8 @@ class FuyuProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         image_processor = self.get_image_processor()
-        return ImageSize(
-            width=image_processor.size["width"],
-            height=image_processor.size["height"],
-        )
+        return ImageSize(width=image_processor.size["width"],
+                         height=image_processor.size["height"])
 
 
 class FuyuDummyInputsBuilder(BaseDummyInputsBuilder[FuyuProcessingInfo]):
@@ -134,8 +131,8 @@ class FuyuDummyInputsBuilder(BaseDummyInputsBuilder[FuyuProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        target_width, target_height = self.info.get_image_size_with_most_features(
-        )
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
         mm_data = {
@@ -178,9 +175,10 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
 
             # Original output: (1, num_images, Pn, Px * Py * C)
             # New output: (num_images, Pn, Px * Py * C)
-            assert isinstance(image_patches, list) and len(image_patches) == 1
-            assert isinstance(image_patches[0], torch.Tensor) and len(
-                image_patches[0]) == len(images)
+            assert (isinstance(image_patches, list)
+                    and len(image_patches) == 1)
+            assert (isinstance(image_patches[0], torch.Tensor)
+                    and len(image_patches[0]) == len(images))
 
             processed_outputs["image_patches"] = image_patches[0]
 
@@ -244,11 +242,9 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    FuyuMultiModalProcessor,
-    info=FuyuProcessingInfo,
-    dummy_inputs=FuyuDummyInputsBuilder,
-)
+@MULTIMODAL_REGISTRY.register_processor(FuyuMultiModalProcessor,
+                                        info=FuyuProcessingInfo,
+                                        dummy_inputs=FuyuDummyInputsBuilder)
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -281,6 +277,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.sampler
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
+
         h = w = self.config.patch_size
         num_channels = self.config.num_channels
         expected_dims = num_channels * h * w

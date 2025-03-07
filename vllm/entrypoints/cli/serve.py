@@ -13,7 +13,7 @@ from vllm.utils import FlexibleArgumentParser
 
 
 class ServeSubcommand(CLISubcommand):
-    """The `serve` subcommand for the vLLM CLI."""
+    """The `serve` subcommand for the vLLM CLI. """
 
     def __init__(self):
         self.name = "serve"
@@ -41,19 +41,18 @@ class ServeSubcommand(CLISubcommand):
         serve_parser = subparsers.add_parser(
             "serve",
             help="Start the vLLM OpenAI Compatible API server",
-            usage="vllm serve <model_tag> [options]",
-        )
+            usage="vllm serve <model_tag> [options]")
         serve_parser.add_argument("model_tag",
                                   type=str,
                                   help="The model tag to serve")
         serve_parser.add_argument(
             "--config",
             type=str,
-            default="",
+            default='',
             required=False,
             help="Read CLI options from a config file."
             "Must be a YAML with the following options:"
-            "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#cli-reference",
+            "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#cli-reference"
         )
 
         return make_arg_parser(serve_parser)

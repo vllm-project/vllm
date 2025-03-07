@@ -119,8 +119,8 @@ class BackgroundProcHandle:
 
         # Wait for startup.
         if reader.recv()["status"] != "READY":
-            raise RuntimeError(
-                f"{process_name} initialization failed. See root cause above.")
+            raise RuntimeError(f"{process_name} initialization failed. "
+                               "See root cause above.")
 
     def shutdown(self):
         self._finalizer()
@@ -157,12 +157,12 @@ def bind_kv_cache(
     This function:
       1) Fills the ModelRunner's kv cache list (`runner_kv_caches`) with
          kv_caches.
-      2) Associates each attention layer in the `forward_context` with its
+      2) Associates each attention layer in the `forward_context` with its 
          corresponding KV cache in kv_caches.
 
     Args:
         kv_caches: The allocated kv_caches with layer names as keys.
-        forward_context: The global forward context containing all Attention
+        forward_context: The global forward context containing all Attention 
         layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
     """

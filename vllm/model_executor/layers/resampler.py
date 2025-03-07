@@ -31,7 +31,6 @@ related helpers for sincos positional embeddings.
 
 Example models: Qwen (Qwen-VL), MiniCPM-V 2.0
 """
-
 import math
 from functools import partial
 from typing import Callable, Optional, Tuple, Union
@@ -56,7 +55,7 @@ def get_abs_pos(abs_pos: torch.Tensor, tgt_size: Union[torch.Tensor,
     dtype = abs_pos.dtype
     if isinstance(tgt_size, int):
         tgt_size = (tgt_size, tgt_size)
-    if src_size == tgt_size[0] and src_size == tgt_size[1]:
+    if (src_size == tgt_size[0] and src_size == tgt_size[1]):
         return abs_pos
     return (F.interpolate(
         abs_pos.float().reshape(1, src_size, src_size, -1).permute(0, 3, 1, 2),
@@ -134,11 +133,8 @@ def get_2d_sincos_pos_embed(
     grid_w = np.arange(grid_w_size, dtype=np.float32)
     grid = np.meshgrid(grid_w, grid_h)  # here w goes first
     grid = np.stack(grid, axis=0)
-    assert isinstance(grid, np.ndarray) and grid.shape == (
-        2,
-        grid_h_size,
-        grid_w_size,
-    )
+    assert isinstance(grid, np.ndarray) and \
+        grid.shape == (2, grid_h_size, grid_w_size)
 
     if version == (2, 0):
         grid = grid.reshape([2, 1, grid_h_size, grid_w_size])
@@ -159,17 +155,15 @@ class BaseResampler(nn.Module):
         A tensor with the shape of (grid_size**2, embed_dim)
     """
 
-    def __init__(
-        self,
-        num_queries: int,
-        embed_dim: int,
-        num_heads: int,
-        kv_dim: Optional[int] = None,
-        norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
-        do_post_projection: bool = True,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self,
+                 num_queries: int,
+                 embed_dim: int,
+                 num_heads: int,
+                 kv_dim: Optional[int] = None,
+                 norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
+                 do_post_projection: bool = True,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
 
         self.num_queries = num_queries
@@ -179,16 +173,14 @@ class BaseResampler(nn.Module):
         self.query = nn.Parameter(torch.empty(self.num_queries, embed_dim))
 
         if kv_dim is not None and kv_dim != embed_dim:
-            self.kv_proj = ReplicatedLinear(
-                kv_dim,
-                embed_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.kv_proj",
-            )
+            self.kv_proj = ReplicatedLinear(kv_dim,
+                                            embed_dim,
+                                            bias=False,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.kv_proj")
         else:
             # Maintain the same return value with ReplicatedLinear.forward
-            self.kv_proj = lambda *args, **kwargs: (  # type: ignore # noqa
+            self.kv_proj = lambda *args, **kwargs: (  # type: ignore # noqa 
                 nn.Identity()(*args, **kwargs),
                 None,
             )
@@ -197,9 +189,9 @@ class BaseResampler(nn.Module):
         self.ln_kv = norm_layer(embed_dim)
         self.do_post_projection = do_post_projection
         self.ln_post = norm_layer(embed_dim) if do_post_projection else None
-        self.proj = (nn.Parameter(
+        self.proj = nn.Parameter(
             (embed_dim**-0.5) *
-            torch.empty(embed_dim, embed_dim)) if do_post_projection else None)
+            torch.empty(embed_dim, embed_dim)) if do_post_projection else None
 
     def _repeat(self, query, N: int):
         return query.unsqueeze(1).repeat(1, N, 1)
@@ -213,28 +205,24 @@ class Resampler2(BaseResampler):
     present in minicpmv2.0, but not qwen-vl.
     """
 
-    def __init__(
-        self,
-        grid_size: int,
-        embed_dim: int,
-        num_heads: int,
-        kv_dim: Optional[int] = None,
-        norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
-        adaptive: bool = False,
-        do_post_projection: bool = True,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(
-            grid_size**2,
-            embed_dim,
-            num_heads,
-            kv_dim,
-            norm_layer,
-            do_post_projection=do_post_projection,
-            quant_config=quant_config,
-            prefix=prefix,
-        )
+    def __init__(self,
+                 grid_size: int,
+                 embed_dim: int,
+                 num_heads: int,
+                 kv_dim: Optional[int] = None,
+                 norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
+                 adaptive: bool = False,
+                 do_post_projection: bool = True,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
+        super().__init__(grid_size**2,
+                         embed_dim,
+                         num_heads,
+                         kv_dim,
+                         norm_layer,
+                         do_post_projection=do_post_projection,
+                         quant_config=quant_config,
+                         prefix=prefix)
 
         self.adaptive = adaptive
         pos_embed_arr = get_2d_sincos_pos_embed(embed_dim,

@@ -22,13 +22,11 @@ from vllm.utils import (cuda_device_count_stateless,
 logger = init_logger(__name__)
 
 
-def producer(
-    batch_src: Sequence[int],
-    producer_queue,
-    consumer_queue,
-    result_queue,
-    cuda_visible_devices: Optional[str] = None,
-):
+def producer(batch_src: Sequence[int],
+             producer_queue,
+             consumer_queue,
+             result_queue,
+             cuda_visible_devices: Optional[str] = None):
     if cuda_visible_devices is not None:
         update_environment_variables(
             {"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
@@ -57,13 +55,11 @@ def producer(
         lib.cudaDeviceReset()
 
 
-def consumer(
-    batch_tgt: Sequence[int],
-    producer_queue,
-    consumer_queue,
-    result_queue,
-    cuda_visible_devices: Optional[str] = None,
-):
+def consumer(batch_tgt: Sequence[int],
+             producer_queue,
+             consumer_queue,
+             result_queue,
+             cuda_visible_devices: Optional[str] = None):
     if cuda_visible_devices is not None:
         update_environment_variables(
             {"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
@@ -142,26 +138,12 @@ def can_actually_p2p(
     producer_queue = smp.Queue()
     consumer_queue = smp.Queue()
     result_queue = smp.Queue()
-    p_src = smp.Process(
-        target=producer,
-        args=(
-            batch_src,
-            producer_queue,
-            consumer_queue,
-            result_queue,
-            cuda_visible_devices,
-        ),
-    )
-    p_tgt = smp.Process(
-        target=consumer,
-        args=(
-            batch_tgt,
-            producer_queue,
-            consumer_queue,
-            result_queue,
-            cuda_visible_devices,
-        ),
-    )
+    p_src = smp.Process(target=producer,
+                        args=(batch_src, producer_queue, consumer_queue,
+                              result_queue, cuda_visible_devices))
+    p_tgt = smp.Process(target=consumer,
+                        args=(batch_tgt, producer_queue, consumer_queue,
+                              result_queue, cuda_visible_devices))
     p_src.start()
     p_tgt.start()
     p_src.join()
@@ -174,10 +156,7 @@ def can_actually_p2p(
         if a != b:
             logger.warning(
                 "Two processes do not agree on the P2P access"
-                " status on %d -> %d, treat as disabled.",
-                src,
-                tgt,
-            )
+                " status on %d -> %d, treat as disabled.", src, tgt)
             result.append(False)
         else:
             result.append(a)
@@ -217,13 +196,11 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
 
     path = os.path.join(
         envs.VLLM_CACHE_ROOT,
-        f"gpu_p2p_access_cache_for_{cuda_visible_devices}.json",
-    )
+        f"gpu_p2p_access_cache_for_{cuda_visible_devices}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     from vllm.distributed.parallel_state import get_world_group
-
-    if (not is_distributed or get_world_group().local_rank
-            == 0) and (not os.path.exists(path)):
+    if ((not is_distributed or get_world_group().local_rank == 0)
+            and (not os.path.exists(path))):
         # only the local master process (with local_rank == 0) can
         #  enter this block to calculate the cache
         logger.info("generating GPU P2P access cache in %s", path)
@@ -244,11 +221,9 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         with tempfile.NamedTemporaryFile() as output_file:
             input_bytes = pickle.dumps(
                 (batch_src, batch_tgt, output_file.name))
-            returned = subprocess.run(
-                [sys.executable, __file__],
-                input=input_bytes,
-                capture_output=True,
-            )
+            returned = subprocess.run([sys.executable, __file__],
+                                      input=input_bytes,
+                                      capture_output=True)
             # check if the subprocess is successful
             try:
                 returned.check_returncode()

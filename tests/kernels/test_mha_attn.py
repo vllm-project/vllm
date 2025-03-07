@@ -4,7 +4,6 @@ Test:
 
 * Tests for MultiHeadAttention layer
 """
-
 from unittest.mock import patch
 
 import pytest
@@ -20,7 +19,8 @@ from vllm.platforms.rocm import RocmPlatform
 
 @pytest.fixture(autouse=True)
 def clear_cache():
-    """Clear lru cache to ensure each test case runs without caching."""
+    """Clear lru cache to ensure each test case runs without caching.
+    """
     _cached_get_attn_backend.cache_clear()
 
 
@@ -73,8 +73,9 @@ NUM_HEADS = [1, 16]
 NUM_KV_HEADS = [1]
 HEAD_SIZES = [64, 80]
 # flshattF and tritonflashattF supported: {torch.float16, torch.bfloat16}
-DTYPES = ([torch.half, torch.bfloat16, torch.float]
-          if not current_platform.is_rocm() else [torch.half, torch.bfloat16])
+DTYPES = [
+    torch.half, torch.bfloat16, torch.float
+] if not current_platform.is_rocm() else [torch.half, torch.bfloat16]
 CUDA_DEVICES = ["cuda"]
 
 

@@ -78,6 +78,7 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
+
             # NOTE: post_layernorm is not used in Aria
             if "post_layernorm" in name:
                 continue
@@ -202,7 +203,7 @@ class AriaFusedMoE(FusedMoE):
         # up weights for each expert.
         # Note: Loading expert weights with quantization is not supported
         tp_rank = get_tensor_model_parallel_rank()
-        if shard_id == "w13":
+        if shard_id == 'w13':
             # the shape of loaded_weight is
             # (num_experts, hidden_size, 2 * moe_intermediate_size)
             if self.tp_size > 1:
@@ -214,7 +215,7 @@ class AriaFusedMoE(FusedMoE):
                 param.data.copy_(up_and_gate)
             else:
                 param.data.copy_(loaded_weight.transpose(1, 2))
-        elif shard_id == "w2":
+        elif shard_id == 'w2':
             # the shape of loaded_weight is
             # (num_experts, moe_intermediate_size, hidden_size)
             if self.tp_size > 1:
@@ -312,7 +313,6 @@ class AriaTextModel(LlamaModel, SupportsQuant):
     Custom LlamaModel for the AriaMoE model which modifies the standard
     LlamaModel by replacing the `LlamaDecoderLayer` with `MoEDecoderLayer`.
     """
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -321,11 +321,9 @@ class AriaTextModel(LlamaModel, SupportsQuant):
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            layer_type=AriaTextDecoderLayer,
-        )
+        super().__init__(vllm_config=vllm_config,
+                         prefix=prefix,
+                         layer_type=AriaTextDecoderLayer)
 
     # Adapted from LlamaModel.load_weights with the modification of adding
     # the expert weights mapping to `stacked_params_mapping`
@@ -338,20 +336,21 @@ class AriaTextModel(LlamaModel, SupportsQuant):
             (".qkv_proj", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
-            ("experts.w13_weight", "experts.fc1.weight", "w13"),
-            ("experts.w2_weight", "experts.fc2.weight", "w2"),
+            ("experts.w13_weight", "experts.fc1.weight", 'w13'),
+            ("experts.w2_weight", "experts.fc2.weight", 'w2'),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if self.quant_config is not None and (
-                    scale_name := self.quant_config.get_cache_scale(name)):
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -436,11 +435,9 @@ class AriaDummyInputsBuilder(BaseDummyInputsBuilder[AriaProcessingInfo]):
 
         mm_data = {
             "image":
-            self._get_dummy_images(
-                width=max_image_size,
-                height=max_image_size,
-                num_images=num_images,
-            )
+            self._get_dummy_images(width=max_image_size,
+                                   height=max_image_size,
+                                   num_images=num_images)
         }
 
         hf_processor = self.info.get_hf_processor()
@@ -484,11 +481,9 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor[AriaProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    AriaMultiModalProcessor,
-    info=AriaProcessingInfo,
-    dummy_inputs=AriaDummyInputsBuilder,
-)
+@MULTIMODAL_REGISTRY.register_processor(AriaMultiModalProcessor,
+                                        info=AriaProcessingInfo,
+                                        dummy_inputs=AriaDummyInputsBuilder)
 class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     """
     Aria model for conditional generation tasks.
@@ -496,7 +491,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     This model combines a vision tower, a multi-modal projector, and a language
     model to perform tasks that involve both image and text inputs.
     """
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "language_model.model": "language_model",
@@ -596,8 +590,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         assert self.vision_tower is not None
 
-        pixel_values = image_input["pixel_values"]
-        pixel_mask = image_input["pixel_mask"]
+        pixel_values = image_input['pixel_values']
+        pixel_mask = image_input['pixel_mask']
 
         patch_attention_mask = self._create_patch_attention_mask(pixel_mask)
 
@@ -629,11 +623,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                self.config.image_token_index,
-            )
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.config.image_token_index)
         return inputs_embeds
 
     def forward(

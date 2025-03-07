@@ -17,9 +17,9 @@ def test_ngram_algo_correctness_for_single_no_match():
     block_size = 32
     num_gpu_blocks = 2048 // block_size
     seed = 100
-    model_name = "JackFram/llama-68m"
+    model_name = 'JackFram/llama-68m'
     vocab_size = 32_000
-    device = "cuda:0"
+    device = 'cuda:0'
 
     ngram_worker = create_worker(
         NGramWorker,
@@ -55,10 +55,8 @@ def test_ngram_algo_correctness_for_single_no_match():
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=proposal_len,
-        ),
-        seq_ids_with_bonus_token_in_last_step=None,
-    )
+            num_lookahead_slots=proposal_len),
+        seq_ids_with_bonus_token_in_last_step=None)
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -77,9 +75,9 @@ def test_ngram_algo_correctness_for_batches_not_match_all():
     block_size = 32
     num_gpu_blocks = 2048 // block_size
     seed = 100
-    model_name = "JackFram/llama-68m"
+    model_name = 'JackFram/llama-68m'
     vocab_size = 32_000
-    device = "cuda:0"
+    device = 'cuda:0'
 
     ngram_worker = create_worker(
         NGramWorker,
@@ -110,27 +108,8 @@ def test_ngram_algo_correctness_for_batches_not_match_all():
         [31, 32, 31, 32, 33, 34, 35, 36, 37, 38, 31, 32, 33],
         # shall find no candidate as exceed max_proposal_len
         [
-            31,
-            32,
-            31,
-            32,
-            31,
-            32,
-            31,
-            32,
-            31,
-            32,
-            31,
-            32,
-            33,
-            34,
-            35,
-            36,
-            37,
-            38,
-            31,
-            32,
-            33,
+            31, 32, 31, 32, 31, 32, 31, 32, 31, 32, 31, 32, 33, 34, 35, 36, 37,
+            38, 31, 32, 33
         ],
     ]
 
@@ -146,10 +125,8 @@ def test_ngram_algo_correctness_for_batches_not_match_all():
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=proposal_len,
-        ),
-        seq_ids_with_bonus_token_in_last_step=None,
-    )
+            num_lookahead_slots=proposal_len),
+        seq_ids_with_bonus_token_in_last_step=None)
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -179,9 +156,9 @@ def test_ngram_algo_correctness_for_batches_match_all():
     block_size = 32
     num_gpu_blocks = 2048 // block_size
     seed = 100
-    model_name = "JackFram/llama-68m"
+    model_name = 'JackFram/llama-68m'
     vocab_size = 32_000
-    device = "cuda:0"
+    device = 'cuda:0'
 
     ngram_worker = create_worker(
         NGramWorker,
@@ -225,10 +202,8 @@ def test_ngram_algo_correctness_for_batches_match_all():
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=proposal_len,
-        ),
-        seq_ids_with_bonus_token_in_last_step=None,
-    )
+            num_lookahead_slots=proposal_len),
+        seq_ids_with_bonus_token_in_last_step=None)
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)

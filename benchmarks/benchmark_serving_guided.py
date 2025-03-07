@@ -22,7 +22,6 @@ On the client side, run:
         --endpoint /generate_stream
     to the end of the command above.
 """
-
 import argparse
 import asyncio
 import dataclasses
@@ -97,7 +96,6 @@ class SampleRequest:
         prompt_len: The length of the prompt in tokens.
         expected_output_len: The expected length of the output in tokens.
     """
-
     prompt: str
     prompt_len: int
     expected_output_len: int
@@ -108,7 +106,7 @@ class SampleRequest:
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
                     args: argparse.Namespace) -> list[SampleRequest]:
-    if args.dataset == "json":
+    if args.dataset == 'json':
         if args.json_schema_path is None:
             dir_path = os.path.dirname(os.path.realpath(__file__))
             args.json_schema_path = os.path.join(dir_path,
@@ -120,13 +118,12 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         input_len = len(tokenizer(prompt).input_ids)
         print(f"Input length of the prompt: {input_len} tokens")
         requests = [
-            SampleRequest(
-                prompt=prompt,
-                prompt_len=input_len,
-                expected_output_len=args.output_len,
-                schema=schema,
-                structure_type=args.structure_type,
-            ) for _ in range(args.num_prompts)
+            SampleRequest(prompt=prompt,
+                          prompt_len=input_len,
+                          expected_output_len=args.output_len,
+                          schema=schema,
+                          structure_type=args.structure_type)
+            for _ in range(args.num_prompts)
         ]
 
     elif args.dataset == "grammar":
@@ -149,13 +146,12 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         input_len = len(tokenizer(prompt).input_ids)
         print(f"Input length of the prompt: {input_len} tokens")
         requests = [
-            SampleRequest(
-                prompt=prompt,
-                prompt_len=input_len,
-                expected_output_len=args.output_len,
-                schema=schema,
-                structure_type=args.structure_type,
-            ) for _ in range(args.num_prompts)
+            SampleRequest(prompt=prompt,
+                          prompt_len=input_len,
+                          expected_output_len=args.output_len,
+                          schema=schema,
+                          structure_type=args.structure_type)
+            for _ in range(args.num_prompts)
         ]
 
     elif args.dataset == "regex":
@@ -168,13 +164,12 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         input_len = len(tokenizer(prompt).input_ids)
         print(f"Input length of the prompt: {input_len} tokens")
         requests = [
-            SampleRequest(
-                prompt=prompt,
-                prompt_len=input_len,
-                expected_output_len=args.output_len,
-                schema=regex,
-                structure_type=args.structure_type,
-            ) for _ in range(args.num_prompts)
+            SampleRequest(prompt=prompt,
+                          prompt_len=input_len,
+                          expected_output_len=args.output_len,
+                          schema=regex,
+                          structure_type=args.structure_type)
+            for _ in range(args.num_prompts)
         ]
 
     elif args.dataset == "choice":
@@ -184,13 +179,12 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
         input_len = len(tokenizer(prompt).input_ids)
         print(f"Input length of the prompt: {input_len} tokens")
         requests = [
-            SampleRequest(
-                prompt=prompt,
-                prompt_len=input_len,
-                expected_output_len=args.output_len,
-                schema=choice,
-                structure_type=args.structure_type,
-            ) for _ in range(args.num_prompts)
+            SampleRequest(prompt=prompt,
+                          prompt_len=input_len,
+                          expected_output_len=args.output_len,
+                          schema=choice,
+                          structure_type=args.structure_type)
+            for _ in range(args.num_prompts)
         ]
 
     elif args.dataset == "xgrammar_bench":
@@ -210,14 +204,12 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
             completion = dataset["completion"][idx]
 
             requests.append(
-                SampleRequest(
-                    prompt=prompt,
-                    prompt_len=input_len,
-                    expected_output_len=args.output_len,
-                    schema=schema,
-                    structure_type=args.structure_type,
-                    completion=completion,
-                ))
+                SampleRequest(prompt=prompt,
+                              prompt_len=input_len,
+                              expected_output_len=args.output_len,
+                              schema=schema,
+                              structure_type=args.structure_type,
+                              completion=completion))
 
     return requests
 
@@ -228,29 +220,28 @@ async def get_request(
     burstiness: float = 1.0,
 ) -> AsyncGenerator[tuple[int, SampleRequest], None]:
     """
-    Asynchronously generates requests at a specified rate
+    Asynchronously generates requests at a specified rate 
     with OPTIONAL burstiness.
-
+    
     Args:
-        input_requests:
+        input_requests: 
             A list of input requests, each represented as a tuple.
-        request_rate:
+        request_rate: 
             The rate at which requests are generated (requests/s).
-        burstiness (optional):
-            The burstiness factor of the request generation.
+        burstiness (optional): 
+            The burstiness factor of the request generation. 
             Only takes effect when request_rate is not inf.
             Default value is 1, which follows a Poisson process.
             Otherwise, the request intervals follow a gamma distribution.
-            A lower burstiness value (0 < burstiness < 1) results
-            in more bursty requests, while a higher burstiness value
+            A lower burstiness value (0 < burstiness < 1) results 
+            in more bursty requests, while a higher burstiness value 
             (burstiness > 1) results in a more uniform arrival of requests.
     """
     input_requests = iter(input_requests)
 
     # Calculate scale parameter theta to maintain the desired request_rate.
-    assert (
-        burstiness > 0
-    ), f"A positive burstiness factor is expected, but given {burstiness}."
+    assert burstiness > 0, (
+        f"A positive burstiness factor is expected, but given {burstiness}.")
     theta = 1.0 / (request_rate * burstiness)
 
     for i, request in enumerate(input_requests):
@@ -337,8 +328,7 @@ def calculate_metrics(
         warnings.warn(
             "All requests failed. This is likely due to a misconfiguration "
             "on the benchmark arguments.",
-            stacklevel=2,
-        )
+            stacklevel=2)
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
@@ -408,8 +398,7 @@ async def benchmark(
     print("Starting initial single prompt test run...")
     guided_decoding_req_idx = random.sample(
         range(len(input_requests)),
-        int(len(input_requests) * guided_decoding_ratio),
-    )
+        int(len(input_requests) * guided_decoding_ratio))
 
     test_request = input_requests[0]
     test_input = RequestFuncInput(
@@ -459,7 +448,8 @@ async def benchmark(
     # and it will simplify the code in limited_request_func.
     #    semaphore = (asyncio.Semaphore(max_concurrency)
     #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = (asyncio.Semaphore(max_concurrency)
+                 if max_concurrency else None)
 
     async def limited_request_func(request_func_input, pbar):
         if semaphore is None:
@@ -474,8 +464,8 @@ async def benchmark(
     expected: list[str] = []
     async for i, request in get_request(input_requests, request_rate,
                                         burstiness):
-        extra_body = (prepare_extra_body(request)
-                      if i in guided_decoding_req_idx else None)
+        extra_body = prepare_extra_body(
+            request) if i in guided_decoding_req_idx else None
         request_func_input = RequestFuncInput(
             model=model_id,
             prompt=request.prompt,
@@ -521,7 +511,7 @@ async def benchmark(
         goodput_config_dict=goodput_config_dict,
     )
 
-    print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
+    print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
                                     benchmark_duration))
@@ -566,8 +556,8 @@ async def benchmark(
     }
 
     ret = [{
-        "generated": output.generated_text,
-        "expected": gt
+        'generated': output.generated_text,
+        'expected': gt
     } for output, gt in zip(outputs, expected)]
 
     def process_one_metric(
@@ -582,15 +572,13 @@ async def benchmark(
         # metric.
         if metric_attribute_name not in selected_percentile_metrics:
             return
-        print("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
+        print("{s:{c}^{n}}".format(s=metric_header, n=50, c='-'))
         print("{:<40} {:<10.2f}".format(
             f"Mean {metric_name} (ms):",
-            getattr(metrics, f"mean_{metric_attribute_name}_ms"),
-        ))
+            getattr(metrics, f"mean_{metric_attribute_name}_ms")))
         print("{:<40} {:<10.2f}".format(
             f"Median {metric_name} (ms):",
-            getattr(metrics, f"median_{metric_attribute_name}_ms"),
-        ))
+            getattr(metrics, f"median_{metric_attribute_name}_ms")))
         result[f"mean_{metric_attribute_name}_ms"] = getattr(
             metrics, f"mean_{metric_attribute_name}_ms")
         result[f"median_{metric_attribute_name}_ms"] = getattr(
@@ -620,10 +608,9 @@ def evaluate(ret, args):
     def _eval_correctness_json(expected, actual):
         # extract json string from string using regex
         import re
-
-        actual = actual.replace("\n", "").replace(" ", "").strip()
+        actual = actual.replace('\n', '').replace(' ', '').strip()
         try:
-            actual = re.search(r"\{.*\}", actual).group()
+            actual = re.search(r'\{.*\}', actual).group()
             actual = json.loads(actual)
         except Exception:
             return False
@@ -635,29 +622,28 @@ def evaluate(ret, args):
 
     def _eval_correctness_regex(expected, actual):
         import re
-
         return re.match(args.regex, actual) is not None
 
     def _eval_correctness(expected, actual):
-        if args.structure_type == "guided_json":
+        if args.structure_type == 'guided_json':
             return _eval_correctness_json(expected, actual)
-        elif args.structure_type == "guided_regex":
+        elif args.structure_type == 'guided_regex':
             return _eval_correctness_regex(expected, actual)
-        elif args.structure_type == "guided_choice":
+        elif args.structure_type == 'guided_choice':
             return _eval_correctness_choice(expected, actual)
         else:
             return None
 
     scores = []
     for res in ret:
-        score = _eval_correctness(res["expected"], res["generated"])
-        res["correctness"] = score
+        score = _eval_correctness(res['expected'], res['generated'])
+        res['correctness'] = score
         scores.append(score)
 
     not_none_scores = [score for score in scores if score is not None]
 
-    return ((sum(not_none_scores) / len(not_none_scores) *
-             100) if len(not_none_scores) > 0 else None)
+    return (sum(not_none_scores) / len(not_none_scores) *
+            100) if len(not_none_scores) > 0 else None
 
 
 def parse_goodput(slo_pairs):
@@ -669,7 +655,7 @@ def parse_goodput(slo_pairs):
     except ValueError as err:
         raise argparse.ArgumentTypeError(
             "Invalid format found for service level objectives. "
-            'Specify service level objectives for goodput as "KEY:VALUE" '
+            "Specify service level objectives for goodput as \"KEY:VALUE\" "
             "pairs, where the key is a metric name, and the value is a "
             "number in milliseconds.") from err
     return goodput_config_dict
@@ -713,19 +699,19 @@ def main(args: argparse.Namespace):
     tokenizer = get_tokenizer(tokenizer_id,
                               trust_remote_code=args.trust_remote_code)
 
-    if args.dataset == "grammar":
-        args.structure_type = "guided_grammar"
-    elif args.dataset == "regex":
-        args.structure_type = "guided_regex"
-    elif args.dataset == "choice":
-        args.structure_type = "guided_choice"
+    if args.dataset == 'grammar':
+        args.structure_type = 'guided_grammar'
+    elif args.dataset == 'regex':
+        args.structure_type = 'guided_regex'
+    elif args.dataset == 'choice':
+        args.structure_type = 'guided_choice'
     else:
-        args.structure_type = "guided_json"
+        args.structure_type = 'guided_json'
 
     if args.no_guided_decoding:
         args.guided_decoding_ratio = 0
     if args.save_results:
-        result_file_name = f"{args.guided_decoding_ratio}guided"
+        result_file_name = f'{args.guided_decoding_ratio}guided'
         result_file_name += f"_{backend}"
         result_file_name += f"_{args.request_rate}qps"
         result_file_name += f"_{args.model.split('/')[-1]}"
@@ -765,7 +751,7 @@ def main(args: argparse.Namespace):
 
     # Save config and results to json
     score = evaluate(ret, args)
-    print("correct_rate(%)", score, "\n")
+    print("correct_rate(%)", score, '\n')
     if args.save_results:
         results = {
             "backend":
@@ -777,13 +763,13 @@ def main(args: argparse.Namespace):
             "num_prompts":
             args.num_prompts,
             "request_rate":
-            (args.request_rate if args.request_rate < float("inf") else "inf"),
+            args.request_rate if args.request_rate < float("inf") else "inf",
             "burstiness":
             args.burstiness,
             "max_concurrency":
             args.max_concurrency,
             "correct_rate(%)":
-            score,
+            score
         }
         results = {"outputs": ret, **results, **benchmark_result}
 
@@ -792,7 +778,7 @@ def main(args: argparse.Namespace):
             result_file_name = args.result_filename
         if args.result_dir:
             result_file_name = os.path.join(args.result_dir, result_file_name)
-        with open(result_file_name, "w", encoding="utf-8") as outfile:
+        with open(result_file_name, "w", encoding='utf-8') as outfile:
             json.dump(results, outfile, indent=4)
 
 
@@ -822,15 +808,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--dataset",
-        default="json",
-        choices=["json", "grammar", "regex", "choice", "xgrammar_bench"],
-    )
-    parser.add_argument(
-        "--json_schema_path",
-        type=str,
-        default=None,
-        help="Path to json schema.",
-    )
+        default='json',
+        choices=['json', 'grammar', 'regex', 'choice', 'xgrammar_bench'])
+    parser.add_argument("--json_schema_path",
+                        type=str,
+                        default=None,
+                        help="Path to json schema.")
     parser.add_argument(
         "--max-concurrency",
         type=int,
@@ -842,8 +825,7 @@ if __name__ == "__main__":
         "initiated, this argument will control how many are actually allowed "
         "to execute at a time. This means that when used in combination, the "
         "actual request rate may be lower than specified with --request-rate, "
-        "if the server is not processing requests fast enough to keep up.",
-    )
+        "if the server is not processing requests fast enough to keep up.")
     parser.add_argument(
         "--model",
         type=str,
@@ -931,58 +913,49 @@ if __name__ == "__main__":
         "--ignore-eos",
         action="store_true",
         help="Set ignore_eos flag when sending the benchmark request."
-        "Warning: ignore_eos is not supported in deepspeed_mii and tgi.",
-    )
+        "Warning: ignore_eos is not supported in deepspeed_mii and tgi.")
     parser.add_argument(
         "--percentile-metrics",
         type=str,
         default="ttft,tpot,itl",
         help="Comma-seperated list of selected metrics to report percentils. "
         "This argument specifies the metrics to report percentiles. "
-        'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
-        'Default value is "ttft,tpot,itl".',
-    )
+        "Allowed metric names are \"ttft\", \"tpot\", \"itl\", \"e2el\". "
+        "Default value is \"ttft,tpot,itl\".")
     parser.add_argument(
         "--metric-percentiles",
         type=str,
         default="99",
         help="Comma-seperated list of percentiles for selected metrics. "
-        'To report 25-th, 50-th, and 75-th percentiles, use "25,50,75". '
-        'Default value is "99". '
-        'Use "--percentile-metrics" to select metrics.',
+        "To report 25-th, 50-th, and 75-th percentiles, use \"25,50,75\". "
+        "Default value is \"99\". "
+        "Use \"--percentile-metrics\" to select metrics.",
     )
     parser.add_argument(
         "--goodput",
         nargs="+",
         required=False,
-        help='Specify service level objectives for goodput as "KEY:VALUE" '
+        help="Specify service level objectives for goodput as \"KEY:VALUE\" "
         "pairs, where the key is a metric name, and the value is in "
-        'milliseconds. Multiple "KEY:VALUE" pairs can be provided, '
+        "milliseconds. Multiple \"KEY:VALUE\" pairs can be provided, "
         "separated by spaces. Allowed request level metric names are "
-        '"ttft", "tpot", "e2el". For more context on the definition of '
+        "\"ttft\", \"tpot\", \"e2el\". For more context on the definition of "
         "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
-        "and the blog: https://hao-ai-lab.github.io/blogs/distserve",
-    )
+        "and the blog: https://hao-ai-lab.github.io/blogs/distserve")
 
-    parser.add_argument(
-        "--no-guided-decoding",
-        action="store_true",
-        default=False,
-        help="Whether to disable JSON decoding or not.",
-    )
-    parser.add_argument(
-        "--guided-decoding-ratio",
-        type=float,
-        default=1.0,
-        help="Ratio of Guided Decoding requests",
-    )
-    parser.add_argument(
-        "--guided-decoding-backend",
-        type=str,
-        choices=["outlines", "lm-format-enforcer", "xgrammar"],
-        default="xgrammar",
-        help="Backend to use for guided decoding",
-    )
+    parser.add_argument("--no-guided-decoding",
+                        action='store_true',
+                        default=False,
+                        help="Whether to disable JSON decoding or not.")
+    parser.add_argument("--guided-decoding-ratio",
+                        type=float,
+                        default=1.0,
+                        help="Ratio of Guided Decoding requests")
+    parser.add_argument("--guided-decoding-backend",
+                        type=str,
+                        choices=["outlines", "lm-format-enforcer", "xgrammar"],
+                        default="xgrammar",
+                        help="Backend to use for guided decoding")
 
     args = parser.parse_args()
     main(args)

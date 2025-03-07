@@ -31,18 +31,17 @@ def make_lora_request(lora_id: int):
 
 
 def test_lora_functions_sync():
+
     max_loras = 4
     # Create engine in eager-mode. Due to high max_loras, the CI can
     # OOM during cuda-graph capture.
-    engine_args = EngineArgs(
-        model=MODEL_PATH,
-        enable_lora=True,
-        max_loras=max_loras,
-        max_lora_rank=LORA_RANK,
-        max_model_len=128,
-        gpu_memory_utilization=0.8,
-        enforce_eager=True,
-    )
+    engine_args = EngineArgs(model=MODEL_PATH,
+                             enable_lora=True,
+                             max_loras=max_loras,
+                             max_lora_rank=LORA_RANK,
+                             max_model_len=128,
+                             gpu_memory_utilization=0.8,
+                             enforce_eager=True)
 
     llm = LLM.get_engine_class().from_engine_args(engine_args)
 
@@ -79,6 +78,7 @@ def test_lora_functions_sync():
 
 @pytest.mark.asyncio
 async def test_lora_functions_async():
+
     if os.getenv("VLLM_USE_V1") == "0":
         pytest.skip(
             reason=
@@ -91,21 +91,18 @@ async def test_lora_functions_async():
     import importlib
 
     import vllm.engine.async_llm_engine
-
     importlib.reload(vllm.engine.async_llm_engine)
     from vllm.entrypoints.openai.api_server import (
         build_async_engine_client_from_engine_args)
 
     max_loras = 4
-    engine_args = AsyncEngineArgs(
-        model=MODEL_PATH,
-        enable_lora=True,
-        max_loras=max_loras,
-        max_lora_rank=LORA_RANK,
-        max_model_len=128,
-        gpu_memory_utilization=0.8,
-        enforce_eager=True,
-    )
+    engine_args = AsyncEngineArgs(model=MODEL_PATH,
+                                  enable_lora=True,
+                                  max_loras=max_loras,
+                                  max_lora_rank=LORA_RANK,
+                                  max_model_len=128,
+                                  gpu_memory_utilization=0.8,
+                                  enforce_eager=True)
 
     async def run_check(fn, args, expected: list):
         await fn(args)

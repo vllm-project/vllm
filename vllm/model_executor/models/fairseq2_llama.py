@@ -130,7 +130,7 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
         # We make the loaded weights compatible with both
         # full checkpoints and tp sharded checkpoints.
         # Embeddings are repeated to fit the vocab size.
-        # Other weights are flagged for the weight_loader calls.
+        # Other weights are flagged for the weight_loader calls.
         if any(emb in modules for emb in ["embed_tokens", "lm_head"]):
             # Embeddings are sharded on dim 0
             dim = 0
@@ -138,9 +138,9 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
             # so we don't worry about padding
             if self.tp_size > 1 and loaded_weight.shape[
                     dim] < self.config.vocab_size:
-                assert (loaded_weight.shape[dim] *
-                        self.tp_size == self.config.vocab_size
-                        ), "vocab_size should be divisible by tp_size."
+                assert loaded_weight.shape[
+                    dim] * self.tp_size == self.config.vocab_size, \
+                        "vocab_size should be divisible by tp_size."
                 repeats = [1] * len(loaded_weight.size())
                 repeats[dim] = self.tp_size
                 # repeat to match vocab size and to be easily 'narrow'able

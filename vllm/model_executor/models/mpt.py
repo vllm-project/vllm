@@ -62,7 +62,7 @@ class MPTAttention(nn.Module):
         self.qk_ln = config.attn_config["qk_ln"]
         self.alibi_bias_max = config.attn_config["alibi_bias_max"]
         if "kv_n_heads" in config.attn_config:
-            self.total_num_kv_heads = config.attn_config["kv_n_heads"]
+            self.total_num_kv_heads = config.attn_config['kv_n_heads']
         else:
             self.total_num_kv_heads = self.total_num_heads
         assert not config.attn_config["prefix_lm"]
@@ -112,16 +112,14 @@ class MPTAttention(nn.Module):
 
         self.head_dim = self.d_model // self.total_num_heads
         scaling = self.head_dim**-0.5
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            scaling,
-            alibi_slopes=alibi_slopes,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              scaling,
+                              alibi_slopes=alibi_slopes,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -230,8 +228,7 @@ class MPTModel(nn.Module):
             config.n_layers,
             lambda prefix: MPTBlock(
                 config, cache_config, quant_config, prefix=prefix),
-            prefix=f"{prefix}.blocks",
-        )
+            prefix=f"{prefix}.blocks")
         self.norm_f = nn.LayerNorm(config.d_model)
         if config.no_bias:
             for module in self.modules():
@@ -239,8 +236,9 @@ class MPTModel(nn.Module):
                         module.bias, nn.Parameter):
                     # Remove the bias term in Linear and LayerNorm.
                     module.register_parameter("bias", None)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.d_model)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.d_model))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)

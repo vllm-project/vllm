@@ -63,14 +63,12 @@ def _get_prompt(audio_count, question, placeholder, model_name) -> str:
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     placeholder = f"{placeholder}\n" * audio_count
 
-    return tokenizer.apply_chat_template(
-        [{
-            "role": "user",
-            "content": f"{placeholder}{question}"
-        }],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
+    return tokenizer.apply_chat_template([{
+        'role': 'user',
+        'content': f"{placeholder}{question}"
+    }],
+                                         tokenize=False,
+                                         add_generation_prompt=True)
 
 
 def test_ultravox_lora(vllm_runner):
@@ -118,17 +116,12 @@ def test_ultravox_lora(vllm_runner):
             dtype="bfloat16",
             max_model_len=1024,
     ) as vllm_model:
-        llama_outputs: list[tuple[list[int],
-                                  str]] = vllm_model.generate_greedy(
-                                      [
-                                          _get_prompt(0, PROMPT,
-                                                      VLLM_PLACEHOLDER,
-                                                      LLMA_MODEL_NAME)
-                                      ],
-                                      256,
-                                      lora_request=LoRARequest(
-                                          str(1), 1, llama3_1_8b_chess_lora),
-                                  )
+        llama_outputs: list[tuple[list[int], str]] = (
+            vllm_model.generate_greedy(
+                [_get_prompt(0, PROMPT, VLLM_PLACEHOLDER, LLMA_MODEL_NAME)],
+                256,
+                lora_request=LoRARequest(str(1), 1, llama3_1_8b_chess_lora),
+            ))
 
     check_outputs_equal(
         outputs_0_lst=ultravox_outputs,

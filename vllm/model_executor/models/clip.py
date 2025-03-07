@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Minimal implementation of CLIPVisionModel intended to be only used
 within a vision language model."""
-
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -71,11 +70,9 @@ class CLIPVisionEmbeddings(nn.Module):
         self.num_positions = self.num_patches + 1
         self.position_embedding = nn.Embedding(self.num_positions,
                                                self.embed_dim)
-        self.register_buffer(
-            "position_ids",
-            torch.arange(self.num_positions).expand((1, -1)),
-            persistent=False,
-        )
+        self.register_buffer("position_ids",
+                             torch.arange(self.num_positions).expand((1, -1)),
+                             persistent=False)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         batch_size = pixel_values.shape[0]
@@ -135,8 +132,8 @@ class CLIPAttention(nn.Module):
                                        self.head_dim, self.scale)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return (tensor.view(bsz, seq_len, self.num_heads,
-                            self.head_dim).transpose(1, 2).contiguous())
+        return tensor.view(bsz, seq_len, self.num_heads,
+                           self.head_dim).transpose(1, 2).contiguous()
 
     def forward(
         self,
@@ -163,20 +160,16 @@ class CLIPMLP(nn.Module):
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
-        self.fc1 = ColumnParallelLinear(
-            config.hidden_size,
-            config.intermediate_size,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fc1",
-        )
-        self.fc2 = RowParallelLinear(
-            config.intermediate_size,
-            config.hidden_size,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fc2",
-        )
+        self.fc1 = ColumnParallelLinear(config.hidden_size,
+                                        config.intermediate_size,
+                                        bias=True,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.fc1")
+        self.fc2 = RowParallelLinear(config.intermediate_size,
+                                     config.hidden_size,
+                                     bias=True,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.fc2")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
@@ -209,6 +202,7 @@ class CLIPEncoderLayer(nn.Module):
                                         eps=config.layer_norm_eps)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
@@ -248,11 +242,10 @@ class CLIPEncoder(nn.Module):
         else:
             num_hidden_layers = num_hidden_layers_override
         self.layers = nn.ModuleList([
-            CLIPEncoderLayer(
-                config=config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.layers.{layer_idx}",
-            ) for layer_idx in range(num_hidden_layers)
+            CLIPEncoderLayer(config=config,
+                             quant_config=quant_config,
+                             prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(
@@ -323,6 +316,7 @@ class CLIPVisionTransformer(nn.Module):
         pixel_values: torch.Tensor,
         feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
+
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.pre_layrnorm(hidden_states)
 
@@ -332,16 +326,12 @@ class CLIPVisionTransformer(nn.Module):
         # depending on if we have feature_sample_layers or not
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
-            return_all_hidden_states=return_all_hidden_states,
-        )
+            return_all_hidden_states=return_all_hidden_states)
 
         # Handle post-norm (if applicable) and stacks feature layers if needed
         encoder_outputs = resolve_visual_encoder_outputs(
-            encoder_outputs,
-            feature_sample_layers,
-            self.post_layernorm,
-            self.config.num_hidden_layers,
-        )
+            encoder_outputs, feature_sample_layers, self.post_layernorm,
+            self.config.num_hidden_layers)
 
         return encoder_outputs
 
@@ -366,8 +356,7 @@ class CLIPVisionModel(nn.Module, SupportsQuant):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
-            prefix=f"{prefix}.vision_model",
-        )
+            prefix=f"{prefix}.vision_model")
 
     def forward(
         self,
@@ -406,7 +395,7 @@ class CLIPVisionModel(nn.Module, SupportsQuant):
                 if layer_idx >= layer_count:
                     continue
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)

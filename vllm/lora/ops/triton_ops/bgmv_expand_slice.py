@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Based on:
-Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
-Punica: Multi-Tenant LoRA Serving.
+Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
+Punica: Multi-Tenant LoRA Serving. 
 https://arxiv.org/abs/2310.18547
 """
 
@@ -63,7 +63,8 @@ def _bgmv_expand_slice_kernel(
     if CAST_TYPE:
         tiled_a = tiled_a.to(lora_ptr.dtype.element_ty)
     # sliding  to  next row-block
-    b_ptr = lora_ptr + l0_stride * lora_index + pid_sn * split_n_length * lora_k_stride
+    b_ptr = (lora_ptr + l0_stride * lora_index +
+             pid_sn * split_n_length * lora_k_stride)
     c_ptr = (out_ptr + cur_batch * cm_stride + pid_sn * split_n_length +
              slice_offset * cn_stride)
 

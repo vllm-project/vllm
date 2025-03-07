@@ -3,7 +3,6 @@
 
 Run `pytest tests/models/embedding/language/test_scoring.py`.
 """
-
 import math
 
 import pytest
@@ -37,6 +36,7 @@ def model_name(request):
 
 @pytest.mark.parametrize("dtype", ["half"])
 def test_llm_1_to_1(vllm_runner, hf_runner, model_name, dtype: str):
+
     text_pair = [TEXTS_1[0], TEXTS_2[0]]
 
     with hf_runner(model_name, dtype=dtype, is_cross_encoder=True) as hf_model:
@@ -54,6 +54,7 @@ def test_llm_1_to_1(vllm_runner, hf_runner, model_name, dtype: str):
 
 @pytest.mark.parametrize("dtype", ["half"])
 def test_llm_1_to_N(vllm_runner, hf_runner, model_name, dtype: str):
+
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[0], TEXTS_2[1]],
@@ -75,6 +76,7 @@ def test_llm_1_to_N(vllm_runner, hf_runner, model_name, dtype: str):
 
 @pytest.mark.parametrize("dtype", ["half"])
 def test_llm_N_to_N(vllm_runner, hf_runner, model_name, dtype: str):
+
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[1], TEXTS_2[1]],
@@ -102,6 +104,7 @@ def emb_model_name(request):
 @pytest.mark.parametrize("dtype", ["half"])
 def test_llm_1_to_1_embedding(vllm_runner, hf_runner, emb_model_name,
                               dtype: str):
+
     text_pair = [TEXTS_1[0], TEXTS_2[0]]
 
     with hf_runner(emb_model_name, dtype=dtype,
@@ -126,6 +129,7 @@ def test_llm_1_to_1_embedding(vllm_runner, hf_runner, emb_model_name,
 @pytest.mark.parametrize("dtype", ["half"])
 def test_llm_1_to_N_embedding(vllm_runner, hf_runner, emb_model_name,
                               dtype: str):
+
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[0], TEXTS_2[1]],
@@ -157,6 +161,7 @@ def test_llm_1_to_N_embedding(vllm_runner, hf_runner, emb_model_name,
 @pytest.mark.parametrize("dtype", ["half"])
 def test_llm_N_to_N_embedding(vllm_runner, hf_runner, emb_model_name,
                               dtype: str):
+
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[1], TEXTS_2[1]],

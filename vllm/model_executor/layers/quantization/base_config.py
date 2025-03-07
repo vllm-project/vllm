@@ -43,7 +43,7 @@ class QuantizeMethodBase(ABC):
 
 
 def method_has_implemented_embedding(
-    method_class: Type[QuantizeMethodBase], ) -> bool:
+        method_class: Type[QuantizeMethodBase]) -> bool:
     """
     Not all quant methods have embedding implemented, so we need to check that
     it exists for our given method. We check this by making sure the function
@@ -53,7 +53,8 @@ def method_has_implemented_embedding(
                                             None)
     class_embedding = inspect.getattr_static(method_class, "embedding", None)
 
-    return class_embedding is not None and class_embedding is not base_embedding
+    return (class_embedding is not None
+            and class_embedding is not base_embedding)
 
 
 class QuantizationConfig(ABC):
@@ -101,10 +102,10 @@ class QuantizationConfig(ABC):
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
         """
-        Detects if this quantization method can support a given checkpoint
-        format by overriding the user specified quantization method --
-        this method should only be overwritten by subclasses in exceptional
-        circumstances
+           Detects if this quantization method can support a given checkpoint
+           format by overriding the user specified quantization method -- 
+           this method should only be overwritten by subclasses in exceptional 
+           circumstances
         """
         return None
 
@@ -114,8 +115,8 @@ class QuantizationConfig(ABC):
         for key in keys:
             if key in config:
                 return config[key]
-        raise ValueError(
-            f"Cannot find any of {keys} in the model's quantization config.")
+        raise ValueError(f"Cannot find any of {keys} in the model's "
+                         "quantization config.")
 
     @staticmethod
     def get_from_keys_or(config: Dict[str, Any], keys: List[str],
@@ -130,7 +131,7 @@ class QuantizationConfig(ABC):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional[QuantizeMethodBase]:
         """Get the quantize method to use for the quantized layer.
-
+        
         Args:
             layer: The layer for the quant method.
             prefix: The full name of the layer in the state dict

@@ -98,12 +98,10 @@ class TokenizerBase(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def apply_chat_template(
-        self,
-        messages: List["ChatCompletionMessageParam"],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **kwargs,
-    ) -> List[int]:
+    def apply_chat_template(self,
+                            messages: List["ChatCompletionMessageParam"],
+                            tools: Optional[List[Dict[str, Any]]] = None,
+                            **kwargs) -> List[int]:
         raise NotImplementedError()
 
     @abstractmethod

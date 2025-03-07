@@ -49,6 +49,7 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
+
         assert start_engine_loop
 
         self.model_config = vllm_config.model_config
@@ -66,8 +67,7 @@ class AsyncLLM(EngineClient):
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
-            lora_config=vllm_config.lora_config,
-        )
+            lora_config=vllm_config.lora_config)
         self.tokenizer.ping()
 
         # Processor (converts Inputs --> EngineCoreRequests).
@@ -155,16 +155,11 @@ class AsyncLLM(EngineClient):
                 request_id, params = parent_req.get_child_info(idx)
 
             # 3) Convert Input --> Request.
-            request = self.processor.process_inputs(
-                request_id,
-                prompt,
-                params,
-                arrival_time,
-                lora_request,
-                trace_headers,
-                prompt_adapter_request,
-                priority,
-            )
+            request = self.processor.process_inputs(request_id, prompt, params,
+                                                    arrival_time, lora_request,
+                                                    trace_headers,
+                                                    prompt_adapter_request,
+                                                    priority)
 
             # 4) Add the request to OutputProcessor (this process).
             self.output_processor.add_request(request, parent_req, idx, queue)
@@ -199,8 +194,8 @@ class AsyncLLM(EngineClient):
             * 3) Adding the Request to the Detokenizer.
             * 4) Adding the Request to the EngineCore (separate process).
 
-        A separate output_handler loop runs in a background AsyncIO task,
-        pulling outputs from EngineCore and putting them into the
+        A separate output_handler loop runs in a background AsyncIO task, 
+        pulling outputs from EngineCore and putting them into the 
         per-request AsyncStream.
 
         The caller of generate() iterates the returned AsyncGenerator,
@@ -272,8 +267,7 @@ class AsyncLLM(EngineClient):
                 else:
                     slices = np.array_split(
                         outputs.outputs,
-                        cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE),
-                    )
+                        cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
 
                 for i, outputs_slice in enumerate(slices):
                     # 2) Process EngineCoreOutputs.

@@ -89,7 +89,8 @@ class VisualAttention(nn.Module):
         self.embed_dim = embed_dim
         self.kdim = kdim if kdim is not None else embed_dim
         self.vdim = vdim if vdim is not None else embed_dim
-        self._qkv_same_embed_dim = self.kdim == embed_dim and self.vdim == embed_dim
+        self._qkv_same_embed_dim = self.kdim == embed_dim \
+            and self.vdim == embed_dim
 
         self.num_heads = num_heads
 
@@ -100,9 +101,8 @@ class VisualAttention(nn.Module):
         self.hidden_size_per_partition = embed_dim
 
         # Strided linear layer.
-        assert (
-            self._qkv_same_embed_dim
-        ), "Visual Attention implementation only supports self-attention"
+        assert self._qkv_same_embed_dim, \
+                'Visual Attention implementation only supports self-attention'
         self.in_proj = ReplicatedLinear(embed_dim, 3 * embed_dim)
         self.out_proj = ReplicatedLinear(embed_dim, embed_dim)
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
@@ -117,10 +117,9 @@ class VisualAttention(nn.Module):
         mixed_x_layer, _ = self.in_proj(x)
 
         # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
-        new_tensor_shape = mixed_x_layer.size()[:-1] + (
-            self.num_attention_heads_per_partition,
-            3 * self.hidden_size_per_attention_head,
-        )
+        new_tensor_shape = mixed_x_layer.size()[:-1] + \
+            (self.num_attention_heads_per_partition,
+             3 * self.hidden_size_per_attention_head)
         mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
 
         # [sq, b, np, 3 * hn] --> 3 [sq, b, np, hn]
@@ -129,16 +128,12 @@ class VisualAttention(nn.Module):
 
         # [sq, b, np, hn] -> [sq, b * np, hn]
         query_layer = query_layer.view(
-            sq,
-            b * self.num_attention_heads_per_partition,
-            self.hidden_size_per_attention_head,
-        ).transpose(0, 1)
+            sq, b * self.num_attention_heads_per_partition,
+            self.hidden_size_per_attention_head).transpose(0, 1)
         # [sk, b, np, hn] -> [sk, b * np, hn]
         key_layer = key_layer.view(
-            sq,
-            b * self.num_attention_heads_per_partition,
-            self.hidden_size_per_attention_head,
-        ).transpose(0, 1)
+            sq, b * self.num_attention_heads_per_partition,
+            self.hidden_size_per_attention_head).transpose(0, 1)
 
         q_scaled = query_layer / self.norm_factor
         if attn_mask is not None:
@@ -149,28 +144,23 @@ class VisualAttention(nn.Module):
         attention_probs = attention_probs.softmax(dim=-1)
 
         value_layer = value_layer.view(
-            sq,
-            b * self.num_attention_heads_per_partition,
-            self.hidden_size_per_attention_head,
-        ).transpose(0, 1)
+            sq, b * self.num_attention_heads_per_partition,
+            self.hidden_size_per_attention_head).transpose(0, 1)
 
         # matmul: [b * np, sq, hn]
         context_layer = torch.bmm(attention_probs, value_layer)
 
         # change view [b, np, sq, hn]
         context_layer = context_layer.view(
-            b,
-            self.num_attention_heads_per_partition,
-            sq,
-            self.hidden_size_per_attention_head,
-        )
+            b, self.num_attention_heads_per_partition, sq,
+            self.hidden_size_per_attention_head)
 
         # [b, np, sq, hn] --> [sq, b, np, hn]
         context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
 
         # [sq, b, np, hn] --> [sq, b, hp]
-        new_context_layer_shape = context_layer.size()[:-2] + (
-            self.hidden_size_per_partition, )
+        new_context_layer_shape = context_layer.size()[:-2] + \
+            (self.hidden_size_per_partition,)
         context_layer = context_layer.view(*new_context_layer_shape)
 
         output, _ = self.out_proj(context_layer)
@@ -263,13 +253,12 @@ class TransformerBlock(nn.Module):
         self.layers = layers
 
         self.resblocks = nn.ModuleList([
-            VisualAttentionBlock(
-                width,
-                heads,
-                mlp_ratio,
-                norm_layer=norm_layer,
-                quant_config=quant_config,
-            ) for _ in range(layers)
+            VisualAttentionBlock(width,
+                                 heads,
+                                 mlp_ratio,
+                                 norm_layer=norm_layer,
+                                 quant_config=quant_config)
+            for _ in range(layers)
         ])
 
     def get_cast_dtype(self) -> torch.dtype:
@@ -288,35 +277,29 @@ class TransformerBlock(nn.Module):
 
 class VisionTransformer(nn.Module):
 
-    def __init__(
-        self,
-        image_size: int,
-        patch_size: int,
-        width: int,
-        layers: int,
-        heads: int,
-        mlp_ratio: float,
-        n_queries: int = 256,
-        output_dim: int = 512,
-        image_start_id: int = 151857,
-        quant_config: Optional[QuantizationConfig] = None,
-        **kwargs,
-    ):
+    def __init__(self,
+                 image_size: int,
+                 patch_size: int,
+                 width: int,
+                 layers: int,
+                 heads: int,
+                 mlp_ratio: float,
+                 n_queries: int = 256,
+                 output_dim: int = 512,
+                 image_start_id: int = 151857,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 **kwargs):
         super().__init__()
         image_height, image_width = self.image_size = (image_size, image_size)
         patch_height, patch_width = self.patch_size = (patch_size, patch_size)
-        self.grid_size = (
-            image_height // patch_height,
-            image_width // patch_width,
-        )
+        self.grid_size = (image_height // patch_height,
+                          image_width // patch_width)
         self.output_dim = output_dim
-        self.conv1 = nn.Conv2d(
-            in_channels=3,
-            out_channels=width,
-            kernel_size=patch_size,
-            stride=patch_size,
-            bias=False,
-        )
+        self.conv1 = nn.Conv2d(in_channels=3,
+                               out_channels=width,
+                               kernel_size=patch_size,
+                               stride=patch_size,
+                               bias=False)
 
         # class embeddings and positional embeddings
         scale = width**-0.5
@@ -326,14 +309,12 @@ class VisionTransformer(nn.Module):
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
 
         self.ln_pre = norm_layer(width)
-        self.transformer = TransformerBlock(
-            width,
-            layers,
-            heads,
-            mlp_ratio,
-            norm_layer=norm_layer,
-            quant_config=quant_config,
-        )
+        self.transformer = TransformerBlock(width,
+                                            layers,
+                                            heads,
+                                            mlp_ratio,
+                                            norm_layer=norm_layer,
+                                            quant_config=quant_config)
 
         self.attn_pool = Resampler2(
             grid_size=int(math.sqrt(n_queries)),
@@ -398,7 +379,7 @@ class QwenVLModel(QWenModel):
 
 @lru_cache(maxsize=1)
 def _get_tokenizer_without_image_pad(
-    tokenizer: PreTrainedTokenizer, ) -> PreTrainedTokenizer:
+        tokenizer: PreTrainedTokenizer) -> PreTrainedTokenizer:
     """
     The logic of adding image pad tokens should only be applied in
     :class:`QwenVLProcessor`, so they are patched out here.
@@ -442,7 +423,8 @@ def _get_tokenizer_without_image_pad(
                 errors=errors or self.errors,
             )
 
-    TokenizerWithoutImagePad.__name__ = f"{tokenizer.__class__.__name__}WithoutImagePad"
+    TokenizerWithoutImagePad.__name__ = \
+        f"{tokenizer.__class__.__name__}WithoutImagePad"
 
     new_tokenizer.__class__ = TokenizerWithoutImagePad
     return new_tokenizer
@@ -673,11 +655,9 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    QwenVLMultiModalProcessor,
-    info=QwenVLProcessingInfo,
-    dummy_inputs=QwenVLDummyInputsBuilder,
-)
+@MULTIMODAL_REGISTRY.register_processor(QwenVLMultiModalProcessor,
+                                        info=QwenVLProcessingInfo,
+                                        dummy_inputs=QwenVLDummyInputsBuilder)
 class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
                                      SupportsMultiModal):
     packed_modules_mapping = {
@@ -695,8 +675,7 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
         return MultiModelKeys.from_string_field(
             language_model="transformer.h",
             connector="transformer.visual.attn_pool",
-            tower_model="transformer.visual.transformer",
-        )
+            tower_model="transformer.visual.transformer")
 
     def __init__(
         self,
@@ -780,11 +759,8 @@ class QwenVLForConditionalGeneration(QWenBaseModel, SupportsPP, SupportsLoRA,
 
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                self.transformer.visual.image_pad_id,
-            )
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.transformer.visual.image_pad_id)
 
         return inputs_embeds
 

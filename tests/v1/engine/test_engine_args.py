@@ -19,7 +19,8 @@ def test_prefix_caching_from_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([])
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert engine_args.enable_prefix_caching, "V1 turns on prefix caching by default."
+    assert (engine_args.enable_prefix_caching
+            ), "V1 turns on prefix caching by default."
 
     # Turn it off possible with flag.
     args = parser.parse_args(["--no-enable-prefix-caching"])

@@ -18,8 +18,7 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
 __all__ = ["CompressedTensorsW8A16Fp8"]
 
 SUPPORTED_STRATEGIES = [
-    QuantizationStrategy.CHANNEL,
-    QuantizationStrategy.TENSOR,
+    QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR
 ]
 
 
@@ -58,16 +57,12 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                                                    requires_grad=False)
         prepare_fp8_layer_for_marlin(layer, strategy="channel")
 
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size: int,
-        output_partition_sizes: List[int],
-        input_size_per_partition: int,
-        params_dtype: torch.dtype,
-        weight_loader: Callable,
-        **kwargs,
-    ):
+    def create_weights(self, layer: torch.nn.Module, input_size: int,
+                       output_partition_sizes: List[int],
+                       input_size_per_partition: int,
+                       params_dtype: torch.dtype, weight_loader: Callable,
+                       **kwargs):
+
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = input_size_per_partition
@@ -75,16 +70,13 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         layer.orig_dtype = params_dtype
 
         # WEIGHT
-        weight = ModelWeightParameter(
-            data=torch.empty(
-                output_size_per_partition,
-                input_size_per_partition,
-                dtype=torch.float8_e4m3fn,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
+        weight = ModelWeightParameter(data=torch.empty(
+            output_size_per_partition,
+            input_size_per_partition,
+            dtype=torch.float8_e4m3fn),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE
@@ -93,14 +85,11 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                 data=torch.empty((sum(output_partition_sizes), 1),
                                  dtype=torch.float32),
                 output_dim=0,
-                weight_loader=weight_loader,
-            )
+                weight_loader=weight_loader)
         elif self.strategy == QuantizationStrategy.TENSOR:
-            weight_scale = PerTensorScaleParameter(
-                data=torch.empty(len(output_partition_sizes),
-                                 dtype=torch.float32),
-                weight_loader=weight_loader,
-            )
+            weight_scale = PerTensorScaleParameter(data=torch.empty(
+                len(output_partition_sizes), dtype=torch.float32),
+                                                   weight_loader=weight_loader)
         else:
             raise ValueError(
                 f"Unsupported weight strategy={self.strategy}, "
@@ -111,25 +100,20 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
         # INPUT SCALE (to deal with converted checkpoints)
         if self.is_static_input_scheme:
-            input_scale = PerTensorScaleParameter(
-                data=torch.empty(len(output_partition_sizes),
-                                 dtype=torch.float32),
-                weight_loader=weight_loader,
-            )
+            input_scale = PerTensorScaleParameter(data=torch.empty(
+                len(output_partition_sizes), dtype=torch.float32),
+                                                  weight_loader=weight_loader)
             layer.register_parameter("input_scale", input_scale)
 
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        return apply_fp8_marlin_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            workspace=layer.workspace,
-            size_n=layer.output_size_per_partition,
-            size_k=layer.input_size_per_partition,
-            bias=bias,
-        )
+    def apply_weights(self,
+                      layer: torch.nn.Module,
+                      x: torch.Tensor,
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        return apply_fp8_marlin_linear(input=x,
+                                       weight=layer.weight,
+                                       weight_scale=layer.weight_scale,
+                                       workspace=layer.workspace,
+                                       size_n=layer.output_size_per_partition,
+                                       size_k=layer.input_size_per_partition,
+                                       bias=bias)

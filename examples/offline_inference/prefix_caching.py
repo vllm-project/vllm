@@ -55,11 +55,9 @@ del regular_llm
 cleanup_dist_env_and_memory()
 
 # Create an LLM with prefix caching enabled.
-prefix_cached_llm = LLM(
-    model="facebook/opt-125m",
-    enable_prefix_caching=True,
-    gpu_memory_utilization=0.4,
-)
+prefix_cached_llm = LLM(model="facebook/opt-125m",
+                        enable_prefix_caching=True,
+                        gpu_memory_utilization=0.4)
 
 # Warmup so that the shared prompt's KV cache is computed.
 prefix_cached_llm.generate(generating_prompts[0], sampling_params)

@@ -34,7 +34,8 @@ class NeuronPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.worker.neuron_worker.NeuronWorker"
+            parallel_config.worker_cls = \
+                "vllm.worker.neuron_worker.NeuronWorker"
 
         if parallel_config.world_size > 1:
             parallel_config.distributed_executor_backend = "uni"
@@ -47,7 +48,8 @@ class NeuronPlatform(Platform):
         cache_config = vllm_config.cache_config
         if cache_config:
             # neuron needs block_size = max_model_len
-            vllm_config.cache_config.block_size = vllm_config.model_config.max_model_len
+            vllm_config.cache_config.block_size = \
+                vllm_config.model_config.max_model_len
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:

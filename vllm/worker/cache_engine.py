@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """CacheEngine class for managing the KV cache."""
-
 from math import prod
 from typing import List
 
@@ -59,14 +58,12 @@ class CacheEngine:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # Get attention backend.
-        self.attn_backend = get_attn_backend(
-            self.head_size,
-            model_config.dtype,
-            cache_config.cache_dtype,
-            self.block_size,
-            model_config.is_attention_free,
-            use_mla=model_config.use_mla,
-        )
+        self.attn_backend = get_attn_backend(self.head_size,
+                                             model_config.dtype,
+                                             cache_config.cache_dtype,
+                                             self.block_size,
+                                             model_config.is_attention_free,
+                                             use_mla=model_config.use_mla)
 
         # Initialize the cache.
         self.gpu_cache = self._allocate_kv_cache(
@@ -103,12 +100,10 @@ class CacheEngine:
             # null block in CpuGpuBlockAllocator requires at least that
             # block to be zeroed-out.
             # We zero-out everything for simplicity.
-            layer_kv_cache = torch.zeros(
-                alloc_shape,
-                dtype=self.dtype,
-                pin_memory=pin_memory,
-                device=device,
-            )
+            layer_kv_cache = torch.zeros(alloc_shape,
+                                         dtype=self.dtype,
+                                         pin_memory=pin_memory,
+                                         device=device)
 
             # If we allocated with padding for alignment reasons truncate the
             # shape while preserving the aligned stride
@@ -138,8 +133,8 @@ class CacheEngine:
         # Currently align_cache only applies to MLA models since the other
         # cache kernels haven't been updated yet to support non-continguous
         # tensors
-        return (model_config.use_mla and current_platform.is_cuda()
-                and envs.VLLM_CUDA_MEM_ALIGN_KV_CACHE)
+        return model_config.use_mla and current_platform.is_cuda() \
+            and envs.VLLM_CUDA_MEM_ALIGN_KV_CACHE
 
     @staticmethod
     def get_cache_block_size(
@@ -165,8 +160,8 @@ class CacheEngine:
         # For MLA there is no value cache, since the latent vector
         # is joint keys and values.
         value_cache_entry = key_cache_entry if not model_config.use_mla else 0
-        total = (num_attention_layers * cache_config.block_size *
-                 (key_cache_entry + value_cache_entry))
+        total = num_attention_layers * cache_config.block_size * \
+            (key_cache_entry + value_cache_entry)
 
         dtype_size = get_dtype_size(dtype)
         return dtype_size * total

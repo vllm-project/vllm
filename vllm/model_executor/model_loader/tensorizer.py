@@ -49,15 +49,9 @@ except ImportError:
     _write_stream = tensorizer.placeholder_attr("_write_stream")
 
 __all__ = [
-    "EncryptionParams",
-    "DecryptionParams",
-    "TensorDeserializer",
-    "TensorSerializer",
-    "open_stream",
-    "convert_bytes",
-    "get_mem_usage",
-    "no_init_or_tensor",
-    "TensorizerConfig",
+    'EncryptionParams', 'DecryptionParams', 'TensorDeserializer',
+    'TensorSerializer', 'open_stream', 'convert_bytes', 'get_mem_usage',
+    'no_init_or_tensor', 'TensorizerConfig'
 ]
 
 logger = init_logger(__name__)
@@ -80,8 +74,8 @@ class TensorizerConfig:
 
     def __post_init__(self):
         # check if the configuration is for a sharded vLLM model
-        self._is_sharded = (isinstance(self.tensorizer_uri, str) and re.search(
-            r"%0\dd", self.tensorizer_uri) is not None)
+        self._is_sharded = isinstance(self.tensorizer_uri, str) \
+            and re.search(r'%0\dd', self.tensorizer_uri) is not None
 
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
         tensorizer_args = {
@@ -100,14 +94,16 @@ class TensorizerConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        if parallel_config.tensor_parallel_size > 1 and not self._is_sharded:
+        if parallel_config.tensor_parallel_size > 1 \
+            and not self._is_sharded:
             raise ValueError(
                 "For a sharded model, tensorizer_uri should include a"
                 " string format template like '%04d' to be formatted"
                 " with the rank of the shard")
 
     def verify_with_model_config(self, model_config: "ModelConfig") -> None:
-        if model_config.quantization is not None and self.tensorizer_uri is not None:
+        if (model_config.quantization is not None
+                and self.tensorizer_uri is not None):
             logger.warning(
                 "Loading a model using Tensorizer with quantization on vLLM"
                 " is unstable and may lead to errors.")
@@ -185,7 +181,7 @@ class TensorizerArgs:
         self.deserializer_params = {
             "verify_hash": self.verify_hash,
             "encryption": self.encryption_keyfile,
-            "num_readers": self.num_readers,
+            "num_readers": self.num_readers
         }
 
         if self.encryption_keyfile:
@@ -195,7 +191,7 @@ class TensorizerArgs:
             ) as stream:
                 key = stream.read()
                 decryption_params = DecryptionParams.from_key(key)
-                self.deserializer_params["encryption"] = decryption_params
+                self.deserializer_params['encryption'] = decryption_params
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -203,18 +199,17 @@ class TensorizerArgs:
 
         # Tensorizer options arg group
         group = parser.add_argument_group(
-            "tensorizer options",
-            description=("Options for configuring the behavior of the"
-                         " tensorizer deserializer when "
-                         "load_format=tensorizer is specified when "
-                         "initializing an LLMEngine, either via the CLI "
-                         "when running the vLLM OpenAI inference server "
-                         "with a JSON string passed to "
-                         "--model-loader-extra-config or as arguments given "
-                         "to TensorizerConfig when passed to "
-                         "model_loader_extra_config in the constructor "
-                         "for LLMEngine."),
-        )
+            'tensorizer options',
+            description=('Options for configuring the behavior of the'
+                         ' tensorizer deserializer when '
+                         'load_format=tensorizer is specified when '
+                         'initializing an LLMEngine, either via the CLI '
+                         'when running the vLLM OpenAI inference server '
+                         'with a JSON string passed to '
+                         '--model-loader-extra-config or as arguments given '
+                         'to TensorizerConfig when passed to '
+                         'model_loader_extra_config in the constructor '
+                         'for LLMEngine.'))
 
         group.add_argument(
             "--tensorizer-uri",
@@ -232,8 +227,7 @@ class TensorizerArgs:
             "--encryption-keyfile",
             default=None,
             help="The file path to a binary file containing a binary key to "
-            "use for decryption. Can be a file path or S3 network URI.",
-        )
+            "use for decryption. Can be a file path or S3 network URI.")
         group.add_argument(
             "--num-readers",
             default=None,
@@ -241,8 +235,7 @@ class TensorizerArgs:
             help="Controls how many threads are allowed to read concurrently "
             "from the source file. Default is `None`, which will dynamically "
             "set the number of readers based on the available resources "
-            "and model size. This greatly increases performance.",
-        )
+            "and model size. This greatly increases performance.")
         group.add_argument(
             "--s3-access-key-id",
             default=None,
@@ -286,8 +279,8 @@ class TensorizerAgent:
 
     def __init__(self, tensorizer_config: TensorizerConfig, vllm_config):
         self.tensorizer_config = tensorizer_config
-        self.tensorizer_args = self.tensorizer_config._construct_tensorizer_args(
-        )
+        self.tensorizer_args = (
+            self.tensorizer_config._construct_tensorizer_args())
         self.vllm_config = vllm_config
         self.model = self._init_model()
 
@@ -297,10 +290,8 @@ class TensorizerAgent:
         model_args.torch_dtype = self.tensorizer_config.dtype
         assert self.tensorizer_config.model_class is not None
         # TODO: Do we need to consider old-style model class?
-        with (
-                no_init_or_tensor(),
-                set_current_vllm_config(self.vllm_config, check_compile=True),
-        ):
+        with no_init_or_tensor(), set_current_vllm_config(self.vllm_config,
+                                                          check_compile=True):
             return self.tensorizer_config.model_class(
                 vllm_config=self.vllm_config, )
 
@@ -311,19 +302,17 @@ class TensorizerAgent:
             if (isinstance(child, VocabParallelEmbedding)
                     and child.weight.shape[0]
                     < child.num_embeddings_per_partition):
-                new_weight = torch.empty(
-                    child.num_embeddings_per_partition,
-                    child.embedding_dim,
-                    dtype=child.weight.dtype,
-                    device=child.weight.device,
-                )
+                new_weight = torch.empty(child.num_embeddings_per_partition,
+                                         child.embedding_dim,
+                                         dtype=child.weight.dtype,
+                                         device=child.weight.device)
                 new_weight[:child.weight.shape[0]].copy_(child.weight.data)
                 new_weight[child.weight.shape[0]:].fill_(0)
                 child.weight.data = new_weight
 
     def _check_tensors_on_meta_device(self):
         for tensor in self.model.state_dict().values():
-            if tensor.device.type == "meta":
+            if tensor.device.type == 'meta':
                 raise ValueError(
                     "The serialized model contains tensors on the meta device,"
                     " indicating that some tensors were not loaded properly."
@@ -347,18 +336,14 @@ class TensorizerAgent:
         """
         before_mem = get_mem_usage()
         start = time.perf_counter()
-        with (
-                _read_stream(
-                    self.tensorizer_config.tensorizer_uri,
-                    **self.tensorizer_args.stream_params,
-                ) as stream,
-                TensorDeserializer(
-                    stream,
-                    dtype=self.tensorizer_config.dtype,
-                    device=f"cuda:{torch.cuda.current_device()}",
-                    **self.tensorizer_args.deserializer_params,
-                ) as deserializer,
-        ):
+        with _read_stream(
+                self.tensorizer_config.tensorizer_uri,
+                **self.tensorizer_args.stream_params
+        ) as stream, TensorDeserializer(
+                stream,
+                dtype=self.tensorizer_config.dtype,
+                device=f'cuda:{torch.cuda.current_device()}',
+                **self.tensorizer_args.deserializer_params) as deserializer:
             deserializer.load_into_module(self.model)
             end = time.perf_counter()
 
@@ -367,12 +352,8 @@ class TensorizerAgent:
         per_second = convert_bytes(deserializer.total_tensor_bytes / duration)
         after_mem = get_mem_usage()
         deserializer.close()
-        logger.info(
-            "Deserialized %s in %0.2fs, %s/s",
-            total_bytes_str,
-            end - start,
-            per_second,
-        )
+        logger.info("Deserialized %s in %0.2fs, %s/s", total_bytes_str,
+                    end - start, per_second)
         logger.info("Memory usage before: %s", before_mem)
         logger.info("Memory usage after: %s", after_mem)
 
@@ -383,7 +364,7 @@ class TensorizerAgent:
 
 
 def tensorizer_weights_iterator(
-    tensorizer_args: "TensorizerArgs",
+    tensorizer_args: "TensorizerArgs"
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     logger.warning("Deserializing HuggingFace models is not optimized for "
                    "loading on vLLM, as tensorizer is forced to load to CPU. "
@@ -414,12 +395,10 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
         bool: True if the model is a vLLM model, False otherwise.
     """
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
-    deserializer = TensorDeserializer(
-        open_stream(tensorizer_args.tensorizer_uri,
-                    **tensorizer_args.stream_params),
-        **tensorizer_args.deserializer_params,
-        lazy_load=True,
-    )
+    deserializer = TensorDeserializer(open_stream(
+        tensorizer_args.tensorizer_uri, **tensorizer_args.stream_params),
+                                      **tensorizer_args.deserializer_params,
+                                      lazy_load=True)
     if tensorizer_config.vllm_tensorized:
         logger.warning(
             "Please note that newly serialized vLLM models are automatically "
@@ -435,8 +414,7 @@ def serialize_vllm_model(
 ) -> nn.Module:
     model.register_parameter(
         "vllm_tensorized_marker",
-        nn.Parameter(torch.tensor((1, ), device="meta"), requires_grad=False),
-    )
+        nn.Parameter(torch.tensor((1, ), device="meta"), requires_grad=False))
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
 
     encryption_params = None
@@ -448,7 +426,6 @@ def serialize_vllm_model(
     output_file = tensorizer_args.tensorizer_uri
     if tensorizer_config._is_sharded:
         from vllm.distributed import get_tensor_model_parallel_rank
-
         output_file = output_file % get_tensor_model_parallel_rank()
 
     with _write_stream(output_file, **tensorizer_args.stream_params) as stream:
@@ -459,15 +436,13 @@ def serialize_vllm_model(
     return model
 
 
-def tensorize_vllm_model(
-    engine_args: EngineArgs,
-    tensorizer_config: TensorizerConfig,
-    generate_keyfile: bool = True,
-):
+def tensorize_vllm_model(engine_args: EngineArgs,
+                         tensorizer_config: TensorizerConfig,
+                         generate_keyfile: bool = True):
     """Utility to load a model and then serialize it with Tensorizer
 
-    Intended to be used separately from running a vLLM server since it
-    creates its own Engine instance.
+       Intended to be used separately from running a vLLM server since it
+       creates its own Engine instance.
     """
     engine_config = engine_args.create_engine_config()
     tensorizer_config.verify_with_model_config(engine_config.model_config)
@@ -475,8 +450,8 @@ def tensorize_vllm_model(
         engine_config.parallel_config)
 
     # generate the encryption key before creating the engine to support sharding
-    if (generate_keyfile
-            and (keyfile := tensorizer_config.encryption_keyfile) is not None):
+    if generate_keyfile and (keyfile :=
+                             tensorizer_config.encryption_keyfile) is not None:
         encryption_params = EncryptionParams.random()
         with _write_stream(
                 keyfile,

@@ -25,8 +25,8 @@ class BlockDiagonalCausalFromBottomRightMask:
             key_lens_blockaligned = offset_per_seq[:num_seqs].tolist()
         n_keys = sum(key_lens_blockaligned)
 
-        a = torch.arange(n_queries).reshape(n_queries,
-                                            1).expand(n_queries, n_keys)
+        a = (torch.arange(n_queries).reshape(n_queries,
+                                             1).expand(n_queries, n_keys))
         b = torch.arange(n_keys).reshape(1, n_keys).expand(n_queries, n_keys)
         q_cumsum = torch.tensor([0] + query_lens).cumsum(dim=0)
         k_cumsum = torch.tensor([0] + key_lens_blockaligned).cumsum(dim=0)
@@ -155,7 +155,8 @@ def ref_context_attention(
 
     output = output.unsqueeze(1)
     if return_max_reduce:
-        cached_max, cached_sum_reciprocal, lse, masked_score, scaled_qk = debug_tensors
+        cached_max, cached_sum_reciprocal, lse, masked_score, scaled_qk = (
+            debug_tensors)
         return (
             output,
             cached_max,
@@ -446,8 +447,9 @@ def test_contexted_kv_attention(
     )
 
     # Build attention masks
-    prior_mask, active_mask = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
-        query_lens, seq_lens, block_size=block_size)
+    prior_mask, active_mask = (
+        BlockDiagonalCausalFromBottomRightMask.from_seqlens(
+            query_lens, seq_lens, block_size=block_size))
     prior_mask_padded = F.pad(
         prior_mask,
         (

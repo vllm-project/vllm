@@ -14,6 +14,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class IncrementalDetokenizer:
+
     # Generation data
     token_ids: list[int]
     output_text: str = ""
@@ -42,8 +43,8 @@ class IncrementalDetokenizer:
 
     @property
     def output_token_ids(self) -> list[int]:
-        return (self.token_ids if not self.prompt_len else
-                (self.token_ids[self.prompt_len:]))
+        return self.token_ids if not self.prompt_len else (
+            self.token_ids[self.prompt_len:])
 
     @classmethod
     def from_new_request(
@@ -51,6 +52,7 @@ class IncrementalDetokenizer:
         tokenizer: Optional[AnyTokenizer],
         request: EngineCoreRequest,
     ) -> "IncrementalDetokenizer":
+
         if tokenizer is None:
             return cls(token_ids=[])
 
@@ -106,7 +108,7 @@ class IncrementalDetokenizer:
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
             (new_tokens, new_decoded_token_text, prefix_offset,
-             read_offset) = (detokenize_incrementally(
+             read_offset) = detokenize_incrementally(
                  tokenizer=self.tokenizer,
                  all_input_ids=self.token_ids,
                  prev_tokens=self.tokens,
@@ -115,7 +117,7 @@ class IncrementalDetokenizer:
                  skip_special_tokens=self.skip_special_tokens,
                  spaces_between_special_tokens=self.
                  spaces_between_special_tokens,
-             ))
+             )
 
             self.tokens.extend(new_tokens)
             self.prefix_offset = prefix_offset
@@ -148,8 +150,8 @@ class IncrementalDetokenizer:
         # We return the full output text if the sequence is finished.
         buffer_length = 0 if finished else self.stop_buffer_length
         if not delta:
-            return (self.output_text[:-buffer_length] if buffer_length else
-                    (self.output_text))
+            return self.output_text[:-buffer_length] if buffer_length else (
+                self.output_text)
         length = len(self.output_text) - buffer_length
         last_offset = self._last_output_text_offset
         if last_offset < length:

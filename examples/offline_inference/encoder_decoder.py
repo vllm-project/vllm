@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
+'''
 Demonstrate prompting of text-to-text
 encoder/decoder models, specifically BART
-"""
+'''
 
 from vllm import LLM, SamplingParams
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
@@ -65,19 +65,14 @@ enc_dec_prompt3 = ExplicitEncoderDecoderPrompt(
 #   decoder prompts together into a list of ExplicitEncoderDecoderPrompt
 #   instances
 zipped_prompt_list = zip_enc_dec_prompts(
-    ["An encoder prompt", "Another encoder prompt"],
-    ["A decoder prompt", "Another decoder prompt"],
-)
+    ['An encoder prompt', 'Another encoder prompt'],
+    ['A decoder prompt', 'Another decoder prompt'])
 
 # - Let's put all of the above example prompts together into one list
 #   which we will pass to the encoder/decoder LLM.
 prompts = [
-    single_text_prompt_raw,
-    single_text_prompt,
-    single_tokens_prompt,
-    enc_dec_prompt1,
-    enc_dec_prompt2,
-    enc_dec_prompt3,
+    single_text_prompt_raw, single_text_prompt, single_tokens_prompt,
+    enc_dec_prompt1, enc_dec_prompt2, enc_dec_prompt3
 ] + zipped_prompt_list
 
 print(prompts)

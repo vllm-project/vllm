@@ -20,8 +20,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         prompts,
         sampling_params,
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None,
-    )
+        if lora_id else None)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -45,13 +44,11 @@ def v1(run_with_both_engines_lora):
 @pytest.mark.xfail(current_platform.is_rocm(),
                    reason="There can be output mismatch on ROCm")
 def test_gemma_lora(gemma_lora_files):
-    llm = vllm.LLM(
-        MODEL_PATH,
-        max_model_len=1024,
-        enable_lora=True,
-        max_loras=4,
-        enable_chunked_prefill=True,
-    )
+    llm = vllm.LLM(MODEL_PATH,
+                   max_model_len=1024,
+                   enable_lora=True,
+                   max_loras=4,
+                   enable_chunked_prefill=True)
 
     expected_lora_output = [
         "more important than knowledge.\nAuthor: Albert Einstein\n",

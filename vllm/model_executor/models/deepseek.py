@@ -22,7 +22,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Deepseek model."""
-
 from typing import Any, Dict, Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -70,18 +69,14 @@ class DeepseekMLP(nn.Module):
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size,
-            [intermediate_size] * 2,
+            hidden_size, [intermediate_size] * 2,
             bias=False,
-            quant_config=quant_config,
-        )
-        self.down_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            reduce_results=reduce_results,
-        )
+            quant_config=quant_config)
+        self.down_proj = RowParallelLinear(intermediate_size,
+                                           hidden_size,
+                                           bias=False,
+                                           quant_config=quant_config,
+                                           reduce_results=reduce_results)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -114,25 +109,23 @@ class DeepseekMoE(nn.Module):
                 f"the number of experts {self.n_routed_experts}.")
 
         self.experts = nn.ModuleList([
-            DeepseekMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                reduce_results=False,
-            ) for idx in range(self.n_routed_experts)
+            DeepseekMLP(hidden_size=config.hidden_size,
+                        intermediate_size=config.moe_intermediate_size,
+                        hidden_act=config.hidden_act,
+                        quant_config=quant_config,
+                        reduce_results=False)
+            for idx in range(self.n_routed_experts)
         ])
         self.pack_params()
 
-        self.gate = ReplicatedLinear(
-            config.hidden_size,
-            self.n_routed_experts,
-            bias=False,
-            quant_config=None,
-        )
+        self.gate = ReplicatedLinear(config.hidden_size,
+                                     self.n_routed_experts,
+                                     bias=False,
+                                     quant_config=None)
 
         if config.n_shared_experts is not None:
-            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+            intermediate_size = (config.moe_intermediate_size *
+                                 config.n_shared_experts)
             self.shared_experts = DeepseekMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
@@ -167,15 +160,13 @@ class DeepseekMoE(nn.Module):
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = fused_moe(
-            hidden_states,
-            self.w1,
-            self.w2,
-            router_logits,
-            self.top_k,
-            renormalize=self.config.norm_topk_prob,
-            inplace=True,
-        )
+        final_hidden_states = fused_moe(hidden_states,
+                                        self.w1,
+                                        self.w2,
+                                        router_logits,
+                                        self.top_k,
+                                        renormalize=self.config.norm_topk_prob,
+                                        inplace=True)
 
         if self.config.n_shared_experts is not None:
             final_hidden_states = final_hidden_states + shared_output
@@ -245,15 +236,13 @@ class DeepseekAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -340,6 +329,7 @@ class DeepseekDecoderLayer(nn.Module):
 
 
 class DeepseekModel(nn.Module):
+
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -360,11 +350,11 @@ class DeepseekModel(nn.Module):
             lambda prefix: DeepseekDecoderLayer(
                 config, cache_config, quant_config=quant_config, prefix=prefix
             ),
-            prefix=f"{prefix}.layers",
-        )
+            prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -463,7 +453,7 @@ class DeepseekForCausalLM(nn.Module, SupportsPP):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -471,8 +461,8 @@ class DeepseekForCausalLM(nn.Module, SupportsPP):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Skip experts that are not assigned to this worker.
-                if ("mlp.experts." in name or "mlp.shared_experts."
-                        in name) and name not in params_dict:
+                if (("mlp.experts." in name or "mlp.shared_experts." in name)
+                        and name not in params_dict):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -485,8 +475,8 @@ class DeepseekForCausalLM(nn.Module, SupportsPP):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Skip experts that are not assigned to this worker.
-                if ("mlp.experts." in name or "mlp.shared_experts."
-                        in name) and name not in params_dict:
+                if (("mlp.experts." in name or "mlp.shared_experts." in name)
+                        and name not in params_dict):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue

@@ -46,37 +46,29 @@ def benchmark_config(
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
     if use_int8_w8a16:
-        w1 = torch.randint(
-            -127,
-            127,
-            (
-                num_experts,
-                shard_intermediate_size,
-                hidden_size,
-            ),
-            dtype=torch.int8,
-        )
-        w2 = torch.randint(
-            -127,
-            127,
-            (
-                num_experts,
-                hidden_size,
-                shard_intermediate_size // 2,
-            ),
-            dtype=torch.int8,
-        )
+        w1 = torch.randint(-127,
+                           127, (
+                               num_experts,
+                               shard_intermediate_size,
+                               hidden_size,
+                           ),
+                           dtype=torch.int8)
+        w2 = torch.randint(-127,
+                           127, (
+                               num_experts,
+                               hidden_size,
+                               shard_intermediate_size // 2,
+                           ),
+                           dtype=torch.int8)
     else:
         w1 = torch.randn(num_experts,
                          shard_intermediate_size,
                          hidden_size,
                          dtype=init_dtype)
-        w2 = torch.randn(
-            num_experts,
-            hidden_size,
-            shard_intermediate_size // 2,
-            dtype=init_dtype,
-        )
+        w2 = torch.randn(num_experts,
+                         hidden_size,
+                         shard_intermediate_size // 2,
+                         dtype=init_dtype)
     gating_output = torch.randn(num_iters,
                                 num_tokens,
                                 num_experts,
@@ -101,12 +93,10 @@ def benchmark_config(
             n_tiles_w2 = (K + block_n - 1) // block_n
             k_tiles_w1 = (K + block_k - 1) // block_k
             k_tiles_w2 = (N + block_k - 1) // block_k
-            w1_scale = (torch.rand(
-                (E, n_tiles_w1, k_tiles_w1), dtype=torch.float32) *
-                        factor_for_scale)
-            w2_scale = (torch.rand(
-                (E, n_tiles_w2, k_tiles_w2), dtype=torch.float32) *
-                        factor_for_scale)
+            w1_scale = torch.rand((E, n_tiles_w1, k_tiles_w1),
+                                  dtype=torch.float32) * factor_for_scale
+            w2_scale = torch.rand((E, n_tiles_w2, k_tiles_w2),
+                                  dtype=torch.float32) * factor_for_scale
         else:
             w1_scale = torch.randn(num_experts, dtype=torch.float32)
             w2_scale = torch.randn(num_experts, dtype=torch.float32)
@@ -124,7 +114,6 @@ def benchmark_config(
 
     def run():
         from vllm.model_executor.layers.fused_moe import override_config
-
         with override_config(config):
             fused_moe(
                 x,
@@ -242,20 +231,14 @@ def get_configs_compute_bound(use_fp16,
     if block_quant_shape is not None and not use_fp16:
         block_n, block_k = block_quant_shape[0], block_quant_shape[1]
         for config in configs[:]:
-            if (config["BLOCK_SIZE_K"] % block_k != 0
-                    or config["BLOCK_SIZE_N"] % block_n != 0):
+            if config["BLOCK_SIZE_K"] % block_k != 0 or config[
+                    "BLOCK_SIZE_N"] % block_n != 0:
                 configs.remove(config)
     return configs
 
 
-def prune_rocm_search_space(
-    num_tokens,
-    shard_intermediate_size,
-    hidden_size,
-    search_space,
-    is_fp16,
-    topk,
-):
+def prune_rocm_search_space(num_tokens, shard_intermediate_size, hidden_size,
+                            search_space, is_fp16, topk):
     N1, K1 = shard_intermediate_size, hidden_size
     N2, K2 = hidden_size, shard_intermediate_size // 2
     pruned_space_1 = prune_rocm_configs(num_tokens * topk, N1, K1,
@@ -302,9 +285,11 @@ def prune_rocm_configs(M, N, K, configs, is_fp16=True):
             if (matrix_instr_nonkdim > BLOCK_SIZE_M
                     or matrix_instr_nonkdim > BLOCK_SIZE_N):
                 continue
-            if matrix_instr_nonkdim >= M and matrix_instr_nonkdim != BLOCK_SIZE_M:
+            if (matrix_instr_nonkdim >= M
+                    and matrix_instr_nonkdim != BLOCK_SIZE_M):
                 continue
-            if matrix_instr_nonkdim >= N and matrix_instr_nonkdim != BLOCK_SIZE_N:
+            if (matrix_instr_nonkdim >= N
+                    and matrix_instr_nonkdim != BLOCK_SIZE_N):
                 continue
         # Skip BLOCK_SIZE that is too large compare to M/N
         # unless BLOCK_SIZE is already small enough
@@ -390,29 +375,20 @@ class BenchmarkWorker:
         op_config = get_moe_configs(num_experts, shard_intermediate_size // 2,
                                     dtype_str)
         if op_config is None:
-            config = get_default_config(
-                num_tokens,
-                num_experts,
-                shard_intermediate_size,
-                hidden_size,
-                topk,
-                dtype_str,
-                is_marlin=False,
-            )
+            config = get_default_config(num_tokens,
+                                        num_experts,
+                                        shard_intermediate_size,
+                                        hidden_size,
+                                        topk,
+                                        dtype_str,
+                                        is_marlin=False)
         else:
             config = op_config[min(op_config.keys(),
                                    key=lambda x: abs(x - num_tokens))]
-        kernel_time = benchmark_config(
-            config,
-            num_tokens,
-            num_experts,
-            shard_intermediate_size,
-            hidden_size,
-            topk,
-            dtype,
-            use_fp8_w8a8,
-            use_int8_w8a16,
-        )
+        kernel_time = benchmark_config(config, num_tokens, num_experts,
+                                       shard_intermediate_size, hidden_size,
+                                       topk, dtype, use_fp8_w8a8,
+                                       use_int8_w8a16)
         return config, kernel_time
 
     def tune(
@@ -432,17 +408,13 @@ class BenchmarkWorker:
         best_time = float("inf")
         if current_platform.is_rocm():
             is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16)
-            search_space = prune_rocm_search_space(
-                num_tokens,
-                shard_intermediate_size,
-                hidden_size,
-                search_space,
-                is_fp16,
-                topk,
-            )
+            search_space = prune_rocm_search_space(num_tokens,
+                                                   shard_intermediate_size,
+                                                   hidden_size, search_space,
+                                                   is_fp16, topk)
 
-        with (torch.cuda.device(self.device_id)
-              if current_platform.is_rocm() else nullcontext()):
+        with torch.cuda.device(self.device_id) if current_platform.is_rocm(
+        ) else nullcontext():
             for config in tqdm(search_space):
                 try:
                     kernel_time = benchmark_config(
@@ -456,8 +428,7 @@ class BenchmarkWorker:
                         use_fp8_w8a8,
                         use_int8_w8a16,
                         num_iters=20,
-                        block_quant_shape=block_quant_shape,
-                    )
+                        block_quant_shape=block_quant_shape)
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
                     continue
@@ -497,17 +468,10 @@ def sort_config(config: BenchmarkConfig) -> BenchmarkConfig:
     }
 
 
-def save_configs(
-    configs: dict[int, BenchmarkConfig],
-    num_experts: int,
-    shard_intermediate_size: int,
-    hidden_size: int,
-    topk: int,
-    dtype: torch.dtype,
-    use_fp8_w8a8: bool,
-    use_int8_w8a16: bool,
-    block_quant_shape: List[int],
-) -> None:
+def save_configs(configs: dict[int, BenchmarkConfig], num_experts: int,
+                 shard_intermediate_size: int, hidden_size: int, topk: int,
+                 dtype: torch.dtype, use_fp8_w8a8: bool, use_int8_w8a16: bool,
+                 block_quant_shape: List[int]) -> None:
     dtype_str = get_config_dtype_str(dtype,
                                      use_int8_w8a16=use_int8_w8a16,
                                      use_fp8_w8a8=use_fp8_w8a8)
@@ -544,7 +508,7 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-        block_quant_shape = config.quantization_config["weight_block_size"]
+        block_quant_shape = config.quantization_config['weight_block_size']
     elif config.architectures[0] == "Qwen2MoeForCausalLM":
         E = config.num_experts
         topk = config.num_experts_per_tok
@@ -564,24 +528,8 @@ def main(args: argparse.Namespace):
 
     if args.batch_size is None:
         batch_sizes = [
-            1,
-            2,
-            4,
-            8,
-            16,
-            24,
-            32,
-            48,
-            64,
-            96,
-            128,
-            256,
-            512,
-            1024,
-            1536,
-            2048,
-            3072,
-            4096,
+            1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 1536,
+            2048, 3072, 4096
         ]
     else:
         batch_sizes = [args.batch_size]
@@ -609,51 +557,24 @@ def main(args: argparse.Namespace):
         start = time.time()
         configs = _distribute(
             "tune",
-            [(
-                batch_size,
-                E,
-                shard_intermediate_size,
-                hidden_size,
-                topk,
-                dtype,
-                use_fp8_w8a8,
-                use_int8_w8a16,
-                search_space,
-                block_quant_shape,
-            ) for batch_size in batch_sizes],
-        )
+            [(batch_size, E, shard_intermediate_size, hidden_size, topk, dtype,
+              use_fp8_w8a8, use_int8_w8a16, search_space, block_quant_shape)
+             for batch_size in batch_sizes])
         best_configs = {
             M: sort_config(config)
             for M, config in zip(batch_sizes, configs)
         }
-        save_configs(
-            best_configs,
-            E,
-            shard_intermediate_size,
-            hidden_size,
-            topk,
-            dtype,
-            use_fp8_w8a8,
-            use_int8_w8a16,
-            block_quant_shape,
-        )
+        save_configs(best_configs, E, shard_intermediate_size, hidden_size,
+                     topk, dtype, use_fp8_w8a8, use_int8_w8a16,
+                     block_quant_shape)
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
     else:
         outputs = _distribute(
             "benchmark",
-            [(
-                batch_size,
-                E,
-                shard_intermediate_size,
-                hidden_size,
-                topk,
-                dtype,
-                use_fp8_w8a8,
-                use_int8_w8a16,
-                block_quant_shape,
-            ) for batch_size in batch_sizes],
-        )
+            [(batch_size, E, shard_intermediate_size, hidden_size, topk, dtype,
+              use_fp8_w8a8, use_int8_w8a16, block_quant_shape)
+             for batch_size in batch_sizes])
 
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
             print(f"Batch size: {batch_size}, config: {config}")
@@ -670,12 +591,10 @@ if __name__ == "__main__":
                         "--tensor-parallel-size",
                         type=int,
                         default=2)
-    parser.add_argument(
-        "--dtype",
-        type=str,
-        choices=["auto", "fp8_w8a8", "int8_w8a16"],
-        default="auto",
-    )
+    parser.add_argument("--dtype",
+                        type=str,
+                        choices=["auto", "fp8_w8a8", "int8_w8a16"],
+                        default="auto")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, required=False)
     parser.add_argument("--tune", action="store_true")

@@ -21,7 +21,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
-
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from typing import Any, Optional, Set, Tuple, TypedDict, Union
@@ -248,8 +247,7 @@ class Qwen2AudioMultiModalProcessor(
 @MULTIMODAL_REGISTRY.register_processor(
     Qwen2AudioMultiModalProcessor,
     info=Qwen2AudioProcessingInfo,
-    dummy_inputs=Qwen2AudioDummyInputsBuilder,
-)
+    dummy_inputs=Qwen2AudioDummyInputsBuilder)
 class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsPP):
 
@@ -287,8 +285,8 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
         if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(
-                f"Incorrect type of {name}. Got type: {type(mm_input)}")
+            raise ValueError(f"Incorrect type of {name}. "
+                             f"Got type: {type(mm_input)}")
         if isinstance(mm_input, torch.Tensor):
             return torch.concat(list(mm_input))
         else:
@@ -296,24 +294,23 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _parse_and_validate_audio_input(
             self, **kwargs: object) -> Optional[Qwen2AudioInputs]:
-        input_features = kwargs.pop("input_features", None)
-        feature_attention_mask = kwargs.pop("feature_attention_mask", None)
+        input_features = kwargs.pop('input_features', None)
+        feature_attention_mask = kwargs.pop('feature_attention_mask', None)
         if input_features is None:
             return None
         input_features = self._validate_and_reshape_mm_tensor(
-            input_features, "input_features")
+            input_features, 'input_features')
         feature_attention_mask = self._validate_and_reshape_mm_tensor(
-            feature_attention_mask, "feature_attention_mask")
+            feature_attention_mask, 'feature_attention_mask')
         if not isinstance(input_features, (torch.Tensor, list)):
             raise ValueError("Incorrect type of audio input features. "
                              f"Got type: {type(input_features)}")
-        return Qwen2AudioInputs(
-            input_features=input_features,
-            feature_attention_mask=feature_attention_mask,
-        )
+        return Qwen2AudioInputs(input_features=input_features,
+                                feature_attention_mask=feature_attention_mask)
 
     def _process_audio_input(self,
                              audio_input: Qwen2AudioInputs) -> torch.Tensor:
+
         input_features = audio_input["input_features"]
         feature_attention_mask = audio_input["feature_attention_mask"]
 
@@ -328,8 +325,8 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
             0,
             max_seq_len,
             dtype=audio_feat_lengths.dtype,
-            device=audio_feat_lengths.device,
-        ).unsqueeze(0).expand(batch_size, max_seq_len))
+            device=audio_feat_lengths.device).unsqueeze(0).expand(
+                batch_size, max_seq_len))
         lengths_expand = audio_feat_lengths.unsqueeze(-1).expand(
             batch_size, max_seq_len)
         # Create mask
@@ -340,8 +337,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                   max_seq_len)
         audio_attention_mask = audio_attention_mask_.to(
             dtype=self.audio_tower.conv1.weight.dtype,
-            device=self.audio_tower.conv1.weight.device,
-        )
+            device=self.audio_tower.conv1.weight.device)
         audio_attention_mask[audio_attention_mask_] = float("-inf")
 
         audio_outputs = self.audio_tower(input_features,
@@ -350,9 +346,9 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         audio_features = self.multi_modal_projector(selected_audio_feature)
         num_audios, max_audio_tokens, embed_dim = audio_features.shape
         audio_output_lengths = audio_output_lengths.unsqueeze(1)
-        audio_features_mask = (torch.arange(max_audio_tokens).expand(
-            num_audios, max_audio_tokens).to(audio_output_lengths.device)
-                               < audio_output_lengths)
+        audio_features_mask = torch.arange(max_audio_tokens).expand(
+            num_audios, max_audio_tokens).to(
+                audio_output_lengths.device) < audio_output_lengths
         masked_audio_features = audio_features[audio_features_mask].view(
             -1, embed_dim)
 
@@ -377,11 +373,8 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                self.config.audio_token_index,
-            )
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.config.audio_token_index)
         return inputs_embeds
 
     def forward(
@@ -392,6 +385,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -403,12 +397,10 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                       multimodal_embeddings)
             input_ids = None
 
-        hidden_states = self.language_model.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
+        hidden_states = self.language_model.model(input_ids,
+                                                  positions,
+                                                  intermediate_tensors,
+                                                  inputs_embeds=inputs_embeds)
         return hidden_states
 
     def compute_logits(

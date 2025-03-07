@@ -55,15 +55,12 @@ def test_multimodal_input_batch_nested_tensors():
     }, {
         "image": [c]
     }])
-    assert_multimodal_inputs_equal(
-        result,
-        {
-            "image": torch.stack([
-                a.unsqueeze(0), b.unsqueeze(0),
-                c.unsqueeze(0)
-            ])
-        },
-    )
+    assert_multimodal_inputs_equal(result, {
+        "image":
+        torch.stack([a.unsqueeze(0),
+                     b.unsqueeze(0),
+                     c.unsqueeze(0)])
+    })
 
 
 def test_multimodal_input_batch_heterogeneous_lists():
@@ -85,8 +82,7 @@ def test_multimodal_input_batch_multiple_batchable_lists():
     assert_multimodal_inputs_equal(
         result,
         {"image": torch.stack([torch.stack([a, b]),
-                               torch.stack([c, d])])},
-    )
+                               torch.stack([c, d])])})
 
 
 def test_multimodal_input_batch_mixed_stacking_depths():

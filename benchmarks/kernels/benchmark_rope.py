@@ -32,33 +32,21 @@ def benchmark_rope_kernels_multi_lora(
     # silulating serving 4 LoRAs
     scaling_factors = [1, 2, 4, 8]
     # batched RoPE can take multiple scaling factors
-    batched_rope = get_rope(
-        head_size,
-        rotary_dim,
-        max_position,
-        base,
-        is_neox_style,
-        {
-            "rope_type": "linear",
-            "factor": tuple(scaling_factors)
-        },
-    )
+    batched_rope = get_rope(head_size, rotary_dim, max_position, base,
+                            is_neox_style, {
+                                "rope_type": "linear",
+                                "factor": tuple(scaling_factors)
+                            })
     # non-batched RoPE takes only one scaling factor, we create multiple
     # instances to simulate the same behavior
     non_batched_ropes: list[RotaryEmbedding] = []
     for scaling_factor in scaling_factors:
         non_batched_ropes.append(
-            get_rope(
-                head_size,
-                rotary_dim,
-                max_position,
-                base,
-                is_neox_style,
-                {
-                    "rope_type": "linear",
-                    "factor": (scaling_factor, )
-                },
-            ))
+            get_rope(head_size, rotary_dim, max_position, base, is_neox_style,
+                     {
+                         "rope_type": "linear",
+                         "factor": (scaling_factor, )
+                     }))
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
     query = torch.randn(batch_size,
@@ -98,19 +86,17 @@ def benchmark_rope_kernels_multi_lora(
     torch.cuda.synchronize()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     parser = FlexibleArgumentParser(
         description="Benchmark the rotary embedding kernels.")
     parser.add_argument("--is-neox-style", type=bool, default=True)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--seq-len", type=int, default=512)
     parser.add_argument("--num-heads", type=int, default=8)
-    parser.add_argument(
-        "--head-size",
-        type=int,
-        choices=[64, 80, 96, 112, 120, 128, 192, 256],
-        default=128,
-    )
+    parser.add_argument("--head-size",
+                        type=int,
+                        choices=[64, 80, 96, 112, 120, 128, 192, 256],
+                        default=128)
     parser.add_argument("--rotary-dim", type=int, choices=[16, 32], default=32)
     parser.add_argument("--dtype",
                         type=str,

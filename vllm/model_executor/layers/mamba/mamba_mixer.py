@@ -34,21 +34,19 @@ class MambaMixer(CustomOp):
     **selective** state spaces)
     """
 
-    def __init__(
-        self,
-        hidden_size: int,
-        ssm_state_size: int,
-        conv_kernel_size: int,
-        intermediate_size: int,
-        time_step_rank: int,
-        use_conv_bias: bool,
-        use_bias: bool,
-        use_rms_norm: bool,
-        rms_norm_has_weight: bool = True,
-        rms_norm_eps: float = 1e-5,
-        activation="silu",
-        is_lora_enabled: bool = False,
-    ):
+    def __init__(self,
+                 hidden_size: int,
+                 ssm_state_size: int,
+                 conv_kernel_size: int,
+                 intermediate_size: int,
+                 time_step_rank: int,
+                 use_conv_bias: bool,
+                 use_bias: bool,
+                 use_rms_norm: bool,
+                 rms_norm_has_weight: bool = True,
+                 rms_norm_eps: float = 1e-5,
+                 activation="silu",
+                 is_lora_enabled: bool = False):
         super().__init__()
         self.time_step_rank = time_step_rank
         self.ssm_state_size = ssm_state_size
@@ -114,34 +112,31 @@ class MambaMixer(CustomOp):
             input_is_parallel=True,
         )
 
-        self.dt_layernorm = (RMSNorm(
+        self.dt_layernorm = RMSNorm(
             time_step_rank,
             eps=rms_norm_eps,
             has_weight=rms_norm_has_weight,
-        ) if use_rms_norm else None)
+        ) if use_rms_norm else None
 
-        self.b_layernorm = (RMSNorm(
+        self.b_layernorm = RMSNorm(
             ssm_state_size,
             eps=rms_norm_eps,
             has_weight=rms_norm_has_weight,
-        ) if use_rms_norm else None)
+        ) if use_rms_norm else None
 
-        self.c_layernorm = (RMSNorm(
+        self.c_layernorm = RMSNorm(
             ssm_state_size,
             eps=rms_norm_eps,
             has_weight=rms_norm_has_weight,
-        ) if use_rms_norm else None)
+        ) if use_rms_norm else None
 
-    def forward_native(
-        self,
-        hidden_states: torch.Tensor,
-        conv_state: torch.Tensor,
-        ssm_state: torch.Tensor,
-    ):
+    def forward_native(self, hidden_states: torch.Tensor,
+                       conv_state: torch.Tensor, ssm_state: torch.Tensor):
         pass
 
     def forward_cuda(self, hidden_states: torch.Tensor,
                      mamba_cache_params: MambaCacheParams):
+
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
         # 1. Gated MLP's linear projection
@@ -152,8 +147,8 @@ class MambaMixer(CustomOp):
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
 
-        if (attn_metadata.query_start_loc is not None
-                and attn_metadata.context_lens_tensor is not None):
+        if attn_metadata.query_start_loc is not None \
+            and attn_metadata.context_lens_tensor is not None:
             # |---------- N-1 iteration --------|
             # |---------------- N iteration ---------------------|
             # |- tokenA -|......................|-- newTokens ---|
@@ -168,8 +163,7 @@ class MambaMixer(CustomOp):
                 conv_states=mamba_cache_params.conv_state,
                 has_initial_state=attn_metadata.context_lens_tensor > 0,
                 cache_indices=mamba_cache_params.state_indices_tensor,
-                query_start_loc=attn_metadata.query_start_loc,
-            )
+                query_start_loc=attn_metadata.query_start_loc)
         else:
             hidden_states = causal_conv1d_update(
                 hidden_states.transpose(0, 1),
@@ -177,8 +171,7 @@ class MambaMixer(CustomOp):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=mamba_cache_params.state_indices_tensor,
-            )
+                conv_state_indices=mamba_cache_params.state_indices_tensor)
             hidden_states = hidden_states.transpose(0, 1)
 
         # 3. State Space Model sequence transformation
@@ -209,8 +202,8 @@ class MambaMixer(CustomOp):
         time_proj_bias = (self.dt_proj.bias.float() if hasattr(
             self.dt_proj, "bias") else None)
 
-        if (attn_metadata.query_start_loc is not None
-                and attn_metadata.context_lens_tensor is not None):
+        if attn_metadata.query_start_loc is not None \
+            and attn_metadata.context_lens_tensor is not None:
             scan_outputs = selective_scan_fn(
                 hidden_states,
                 mamba_cache_params.ssm_state,
@@ -224,8 +217,7 @@ class MambaMixer(CustomOp):
                 delta_softplus=True,
                 cache_indices=mamba_cache_params.state_indices_tensor,
                 has_initial_state=attn_metadata.context_lens_tensor > 0,
-                query_start_loc=attn_metadata.query_start_loc,
-            )
+                query_start_loc=attn_metadata.query_start_loc)
         else:
             scan_outputs = selective_state_update(
                 mamba_cache_params.ssm_state,
@@ -238,8 +230,7 @@ class MambaMixer(CustomOp):
                 gate.transpose(0, 1),
                 time_proj_bias,
                 dt_softplus=True,
-                state_batch_indices=mamba_cache_params.state_indices_tensor,
-            )
+                state_batch_indices=mamba_cache_params.state_indices_tensor)
             scan_outputs = scan_outputs.transpose(0, 1)
 
         # 4. Final linear projection

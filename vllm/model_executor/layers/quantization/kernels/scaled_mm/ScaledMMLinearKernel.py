@@ -27,15 +27,9 @@ class ScaledMMLinearKernel(ABC):
             cls, c: ScaledMMLinearLayerConfig) -> Tuple[bool, Optional[str]]:
         raise NotImplementedError
 
-    def __init__(
-        self,
-        c: ScaledMMLinearLayerConfig,
-        w_q_param_name: str,
-        w_s_param_name: str,
-        i_s_param_name: str,
-        i_zp_param_name: str,
-        azp_adj_param_name: str,
-    ) -> None:
+    def __init__(self, c: ScaledMMLinearLayerConfig, w_q_param_name: str,
+                 w_s_param_name: str, i_s_param_name: str,
+                 i_zp_param_name: str, azp_adj_param_name: str) -> None:
         assert self.can_implement(c)
         self.config = c
         self.w_q_name = w_q_param_name
@@ -49,19 +43,17 @@ class ScaledMMLinearKernel(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def apply_weights(self,
+                      layer: torch.nn.Module,
+                      x: torch.Tensor,
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         raise NotImplementedError
 
     def _get_weight_params(
             self, layer: torch.nn.Module) -> Tuple[
                 torch.Tensor,  # weight
                 torch.Tensor,  # weight_scale
-                Optional[torch.Tensor],  # input_scale,
+                Optional[torch.Tensor],  # input_scale, 
                 Optional[torch.Tensor],  # input_zp
                 Optional[torch.Tensor],  # azp_adj
             ]:

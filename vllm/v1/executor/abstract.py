@@ -25,7 +25,8 @@ class Executor(ExecutorBase):
     def get_class(vllm_config: VllmConfig) -> type["Executor"]:
         executor_class: type[Executor]
         parallel_config = vllm_config.parallel_config
-        distributed_executor_backend = parallel_config.distributed_executor_backend
+        distributed_executor_backend = (
+            parallel_config.distributed_executor_backend)
         # distributed_executor_backend must be set in VllmConfig.__post_init__
         if isinstance(distributed_executor_backend, type):
             if not issubclass(distributed_executor_backend, ExecutorBase):
@@ -36,11 +37,9 @@ class Executor(ExecutorBase):
         elif distributed_executor_backend == "ray":
             from vllm.v1.executor.ray_distributed_executor import (  # noqa
                 RayDistributedExecutor)
-
             executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-
             executor_class = MultiprocExecutor
         elif distributed_executor_backend == "uni":
             executor_class = UniProcExecutor
@@ -101,7 +100,6 @@ class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
         # we need to get the min across all ranks.
         memory = super().determine_available_memory()
         from vllm.distributed.parallel_state import get_world_group
-
         cpu_group = get_world_group().cpu_group
         memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)
         dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)

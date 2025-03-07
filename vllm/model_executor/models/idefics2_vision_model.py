@@ -66,12 +66,10 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.position_embedding = nn.Embedding(self.num_positions,
                                                self.embed_dim)
 
-    def forward(
-        self,
-        pixel_values: torch.FloatTensor,
-        patch_attention_mask: torch.BoolTensor,
-        tgt_sizes: Optional[torch.IntTensor] = None,
-    ) -> torch.Tensor:
+    def forward(self,
+                pixel_values: torch.FloatTensor,
+                patch_attention_mask: torch.BoolTensor,
+                tgt_sizes: Optional[torch.IntTensor] = None) -> torch.Tensor:
         batch_size, _, max_im_h, max_im_w = pixel_values.shape
         target_dtype = self.patch_embedding.weight.dtype
         patch_embeds = self.patch_embedding(pixel_values.to(target_dtype))
@@ -87,6 +85,7 @@ class Idefics2VisionEmbeddings(nn.Module):
                                   fill_value=0)
 
         for batch_idx, p_attn_mask in enumerate(patch_attention_mask):
+
             if tgt_sizes is not None:
                 nb_patches_h = tgt_sizes[batch_idx][0]
                 nb_patches_w = tgt_sizes[batch_idx][1]
@@ -256,11 +255,10 @@ class Idefics2Encoder(nn.Module):
 
         self.config = config
         self.layers = nn.ModuleList([
-            Idefics2EncoderLayer(
-                config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.layers.{layer_idx}",
-            ) for layer_idx in range(config.num_hidden_layers)
+            Idefics2EncoderLayer(config,
+                                 quant_config=quant_config,
+                                 prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(config.num_hidden_layers)
         ])
 
     def forward(

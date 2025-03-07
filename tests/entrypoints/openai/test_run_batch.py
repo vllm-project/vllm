@@ -29,22 +29,15 @@ INPUT_SCORE_BATCH = """{"custom_id": "request-1", "method": "POST", "url": "/v1/
 
 
 def test_empty_file():
-    with (
-            tempfile.NamedTemporaryFile("w") as input_file,
-            tempfile.NamedTemporaryFile("r") as output_file,
-    ):
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
         input_file.write("")
         input_file.flush()
         proc = subprocess.Popen([
-            sys.executable,
-            "-m",
-            "vllm.entrypoints.openai.run_batch",
-            "-i",
-            input_file.name,
-            "-o",
-            output_file.name,
-            "--model",
-            "intfloat/multilingual-e5-small",
+            sys.executable, "-m", "vllm.entrypoints.openai.run_batch", "-i",
+            input_file.name, "-o", output_file.name, "--model",
+            "intfloat/multilingual-e5-small"
         ], )
         proc.communicate()
         proc.wait()
@@ -55,22 +48,15 @@ def test_empty_file():
 
 
 def test_completions():
-    with (
-            tempfile.NamedTemporaryFile("w") as input_file,
-            tempfile.NamedTemporaryFile("r") as output_file,
-    ):
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
         input_file.write(INPUT_BATCH)
         input_file.flush()
         proc = subprocess.Popen([
-            sys.executable,
-            "-m",
-            "vllm.entrypoints.openai.run_batch",
-            "-i",
-            input_file.name,
-            "-o",
-            output_file.name,
-            "--model",
-            "NousResearch/Meta-Llama-3-8B-Instruct",
+            sys.executable, "-m", "vllm.entrypoints.openai.run_batch", "-i",
+            input_file.name, "-o", output_file.name, "--model",
+            "NousResearch/Meta-Llama-3-8B-Instruct"
         ], )
         proc.communicate()
         proc.wait()
@@ -87,22 +73,15 @@ def test_completions_invalid_input():
     """
     Ensure that we fail when the input doesn't conform to the openai api.
     """
-    with (
-            tempfile.NamedTemporaryFile("w") as input_file,
-            tempfile.NamedTemporaryFile("r") as output_file,
-    ):
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
         input_file.write(INVALID_INPUT_BATCH)
         input_file.flush()
         proc = subprocess.Popen([
-            sys.executable,
-            "-m",
-            "vllm.entrypoints.openai.run_batch",
-            "-i",
-            input_file.name,
-            "-o",
-            output_file.name,
-            "--model",
-            "NousResearch/Meta-Llama-3-8B-Instruct",
+            sys.executable, "-m", "vllm.entrypoints.openai.run_batch", "-i",
+            input_file.name, "-o", output_file.name, "--model",
+            "NousResearch/Meta-Llama-3-8B-Instruct"
         ], )
         proc.communicate()
         proc.wait()
@@ -110,22 +89,15 @@ def test_completions_invalid_input():
 
 
 def test_embeddings():
-    with (
-            tempfile.NamedTemporaryFile("w") as input_file,
-            tempfile.NamedTemporaryFile("r") as output_file,
-    ):
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
         input_file.write(INPUT_EMBEDDING_BATCH)
         input_file.flush()
         proc = subprocess.Popen([
-            sys.executable,
-            "-m",
-            "vllm.entrypoints.openai.run_batch",
-            "-i",
-            input_file.name,
-            "-o",
-            output_file.name,
-            "--model",
-            "intfloat/multilingual-e5-small",
+            sys.executable, "-m", "vllm.entrypoints.openai.run_batch", "-i",
+            input_file.name, "-o", output_file.name, "--model",
+            "intfloat/multilingual-e5-small"
         ], )
         proc.communicate()
         proc.wait()
@@ -139,10 +111,9 @@ def test_embeddings():
 
 
 def test_score():
-    with (
-            tempfile.NamedTemporaryFile("w") as input_file,
-            tempfile.NamedTemporaryFile("r") as output_file,
-    ):
+    with tempfile.NamedTemporaryFile(
+            "w") as input_file, tempfile.NamedTemporaryFile(
+                "r") as output_file:
         input_file.write(INPUT_SCORE_BATCH)
         input_file.flush()
         proc = subprocess.Popen([

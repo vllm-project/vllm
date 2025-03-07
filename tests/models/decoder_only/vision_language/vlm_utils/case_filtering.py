@@ -3,7 +3,6 @@
 modality, getting all combinations (similar to pytest's parametrization),
 handling multimodal placeholder substitution, and so on.
 """
-
 import itertools
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -14,11 +13,9 @@ from .types import (EMBEDDING_SIZE_FACTORS, ExpandableVLMTestArgs,
                     ImageSizeWrapper, SizeType, VLMTestInfo, VLMTestType)
 
 
-def get_filtered_test_settings(
-    test_settings: dict[str, VLMTestInfo],
-    test_type: VLMTestType,
-    fork_per_test: bool,
-) -> dict[str, VLMTestInfo]:
+def get_filtered_test_settings(test_settings: dict[str, VLMTestInfo],
+                               test_type: VLMTestType,
+                               fork_per_test: bool) -> dict[str, VLMTestInfo]:
     """Given the dict of potential test settings to run, return a subdict
     of tests who have the current test type enabled with the matching val for
     fork_per_test.
@@ -38,8 +35,8 @@ def get_filtered_test_settings(
                 assert test_info.convert_assets_to_embeddings is not None
             # Custom test inputs need to explicitly define the mm limit/inputs
             if matches_test_type(test_info, VLMTestType.CUSTOM_INPUTS):
-                assert test_info.custom_test_opts is not None and isinstance(
-                    test_info.custom_test_opts, Iterable)
+                assert (test_info.custom_test_opts is not None
+                        and isinstance(test_info.custom_test_opts, Iterable))
             # For all types besides custom inputs, we need a prompt formatter
             else:
                 assert test_info.prompt_formatter is not None
@@ -52,11 +49,9 @@ def get_filtered_test_settings(
     return matching_tests
 
 
-def get_parametrized_options(
-    test_settings: dict[str, VLMTestInfo],
-    test_type: VLMTestType,
-    fork_new_process_for_each_test: bool,
-):
+def get_parametrized_options(test_settings: dict[str, VLMTestInfo],
+                             test_type: VLMTestType,
+                             fork_new_process_for_each_test: bool):
     """Converts all of our VLMTestInfo into an expanded list of parameters.
     This is similar to nesting pytest parametrize calls, but done directly
     through an itertools product so that each test can set things like
@@ -78,10 +73,8 @@ def get_parametrized_options(
             ("max_tokens", ensure_wrapped(test_info.max_tokens)),
             ("num_logprobs", ensure_wrapped(test_info.num_logprobs)),
             ("dtype", ensure_wrapped(test_info.dtype)),
-            (
-                "distributed_executor_backend",
-                ensure_wrapped(test_info.distributed_executor_backend),
-            ),
+            ("distributed_executor_backend",
+             ensure_wrapped(test_info.distributed_executor_backend)),
         ])
 
         # num_frames is video only
@@ -97,7 +90,7 @@ def get_parametrized_options(
                     f"Sizes must be set for test type {test_type}")
             iter_kwargs["size_wrapper"] = wrapped_sizes
 
-        # Otherwise expand the custom test options instead
+        #Otherwise expand the custom test options instead
         else:
             if test_info.custom_test_opts is None:
                 raise ValueError("Test has type CUSTOM_INPUTS, but none given")
@@ -147,8 +140,10 @@ def get_wrapped_test_sizes(
     elif test_type == VLMTestType.CUSTOM_INPUTS:
         return tuple()
 
-    size_factors = test_info.image_size_factors if test_info.image_size_factors else []
-    fixed_sizes = test_info.image_sizes if test_info.image_sizes else []
+    size_factors = test_info.image_size_factors \
+        if test_info.image_size_factors else []
+    fixed_sizes = test_info.image_sizes \
+        if test_info.image_sizes else []
 
     wrapped_factors = [
         ImageSizeWrapper(type=SizeType.SIZE_FACTOR, data=factor)

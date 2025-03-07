@@ -78,7 +78,7 @@ class DeciLMForCausalLM(LlamaForCausalLM):
             if "k_proj" in name or "v_proj" in name:
                 loaded_weight = self._degroup_weight(loaded_weight)
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)

@@ -33,7 +33,8 @@ class Block(ABC):
     @property
     @abstractmethod
     def num_tokens_total(self) -> int:
-        """The number of tokens till the current block (inclusive)"""
+        """The number of tokens till the current block (inclusive)
+        """
         pass
 
     @property
@@ -112,21 +113,15 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def allocate_immutable_block(
-        self,
-        prev_block: Optional[Block],
-        token_ids: List[int],
-        extra_hash: Optional[int],
-    ) -> Block:
+    def allocate_immutable_block(self, prev_block: Optional[Block],
+                                 token_ids: List[int],
+                                 extra_hash: Optional[int]) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable_blocks(
-        self,
-        prev_block: Optional[Block],
-        block_token_ids: List[List[int]],
-        extra_hash: Optional[int],
-    ) -> List[Block]:
+    def allocate_immutable_blocks(self, prev_block: Optional[Block],
+                                  block_token_ids: List[List[int]],
+                                  extra_hash: Optional[int]) -> List[Block]:
         pass
 
     @abstractmethod
@@ -218,22 +213,18 @@ class BlockAllocator(ABC):
 class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable_block(
-        self,
-        prev_block: Optional[Block],
-        device: Device,
-        extra_hash: Optional[int] = None,
-    ) -> Block:
+    def allocate_mutable_block(self,
+                               prev_block: Optional[Block],
+                               device: Device,
+                               extra_hash: Optional[int] = None) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable_block(
-        self,
-        prev_block: Optional[Block],
-        token_ids: List[int],
-        device: Device,
-        extra_hash: Optional[int] = None,
-    ) -> Block:
+    def allocate_immutable_block(self,
+                                 prev_block: Optional[Block],
+                                 token_ids: List[int],
+                                 device: Device,
+                                 extra_hash: Optional[int] = None) -> Block:
         pass
 
     @abstractmethod

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Test model set-up and inference for quantized HF models supported
-on the CPU/GPU backend using IPEX (including AWQ/GPTQ).
+ on the CPU/GPU backend using IPEX (including AWQ/GPTQ).
+ 
+ Validating the configuration and printing results for manual checking.
 
-Validating the configuration and printing results for manual checking.
-
-Run `pytest tests/quantization/test_ipex_quant.py`.
+ Run `pytest tests/quantization/test_ipex_quant.py`.
 """
 
 import pytest
@@ -18,10 +18,9 @@ MODELS = [
 DTYPE = ["bfloat16"]
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cpu() and not current_platform.is_xpu(),
-    reason="only supports Intel CPU/XPU backend.",
-)
+@pytest.mark.skipif(not current_platform.is_cpu()
+                    and not current_platform.is_xpu(),
+                    reason="only supports Intel CPU/XPU backend.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", DTYPE)
 def test_ipex_quant(vllm_runner, model, dtype):

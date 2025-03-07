@@ -43,15 +43,10 @@ class AWQMarlinConfig(QuantizationConfig):
         8: scalar_types.uint8,
     }
 
-    def __init__(
-        self,
-        weight_bits: int,
-        group_size: int,
-        zero_point: bool,
-        lm_head_quantized: bool,
-        modules_to_not_convert: Optional[List[str]],
-        full_config: Dict[str, Any],
-    ) -> None:
+    def __init__(self, weight_bits: int, group_size: int, zero_point: bool,
+                 lm_head_quantized: bool,
+                 modules_to_not_convert: Optional[List[str]],
+                 full_config: Dict[str, Any]) -> None:
         super().__init__()
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
@@ -103,14 +98,8 @@ class AWQMarlinConfig(QuantizationConfig):
                                                  default=False)
         modules_to_not_convert = cls.get_from_keys_or(
             config, ["modules_to_not_convert"], None)
-        return cls(
-            weight_bits,
-            group_size,
-            zero_point,
-            lm_head_quantized,
-            modules_to_not_convert,
-            config,
-        )
+        return cls(weight_bits, group_size, zero_point, lm_head_quantized,
+                   modules_to_not_convert, config)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -134,8 +123,8 @@ class AWQMarlinConfig(QuantizationConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
-        if isinstance(layer, LinearBase) or (isinstance(layer, ParallelLMHead)
-                                             and self.lm_head_quantized):
+        if (isinstance(layer, LinearBase) or
+            (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
                 return UnquantizedLinearMethod()
             # Check if the layer is supported by AWQMarlin.
@@ -170,17 +159,15 @@ class AWQMarlinConfig(QuantizationConfig):
             return False
 
         # If we cannot find the info needed in the config, cannot convert.
-        if num_bits is None or group_size is None or zero_point is None:
+        if (num_bits is None or group_size is None or zero_point is None):
             return False
 
         if num_bits not in cls.TYPE_MAP:
             return False
 
-        return check_marlin_supported(
-            quant_type=cls.TYPE_MAP[num_bits],
-            group_size=group_size,
-            has_zp=zero_point,
-        )
+        return check_marlin_supported(quant_type=cls.TYPE_MAP[num_bits],
+                                      group_size=group_size,
+                                      has_zp=zero_point)
 
 
 class AWQMarlinLinearMethod(LinearMethodBase):
@@ -217,8 +204,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             output_size_per_partition=output_size_per_partition,
             input_size_per_partition=input_size_per_partition,
             input_size=input_size,
-            group_size=group_size,
-        )
+            group_size=group_size)
 
         qweight = PackedvLLMParameter(
             data=torch.empty(
@@ -230,8 +216,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             output_dim=1,
             packed_dim=1,
             packed_factor=self.quant_config.pack_factor,
-            weight_loader=weight_loader,
-        )
+            weight_loader=weight_loader)
 
         num_groups = input_size_per_partition // group_size
 
@@ -245,19 +230,16 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             output_dim=1,
             packed_dim=1,
             packed_factor=self.quant_config.pack_factor,
-            weight_loader=weight_loader,
-        )
+            weight_loader=weight_loader)
 
-        scales = GroupQuantScaleParameter(
-            data=torch.empty(
-                num_groups,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
-            input_dim=0,
-            output_dim=1,
-            weight_loader=weight_loader,
-        )
+        scales = GroupQuantScaleParameter(data=torch.empty(
+            num_groups,
+            output_size_per_partition,
+            dtype=params_dtype,
+        ),
+                                          input_dim=0,
+                                          output_dim=1,
+                                          weight_loader=weight_loader)
 
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("qzeros", qzeros)
@@ -289,8 +271,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             layer.qweight,
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
-            num_bits=self.quant_config.quant_type.size_bits,
-        )
+            num_bits=self.quant_config.quant_type.size_bits)
         replace_parameter(layer, "qweight", marlin_qweight)
 
         # Permute scales from AWQ format to marlin format.
@@ -298,8 +279,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             layer.scales,
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
-            group_size=self.quant_config.group_size,
-        )
+            group_size=self.quant_config.group_size)
         replace_parameter(layer, "scales", marlin_scales)
 
         # Permute zero-points from AWQ format to marlin format.
@@ -307,8 +287,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             layer.qzeros,
             size_k=layer.num_groups,
             size_n=layer.output_size_per_partition,
-            num_bits=self.quant_config.quant_type.size_bits,
-        )
+            num_bits=self.quant_config.quant_type.size_bits)
         replace_parameter(layer, "qzeros", marlin_zp)
 
         # Not-used
@@ -332,8 +311,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             quant_type=self.quant_config.quant_type,
             output_size_per_partition=layer.output_size_per_partition,
             input_size_per_partition=layer.input_size_per_partition,
-            bias=bias,
-        )
+            bias=bias)
 
 
 class AWQMoEMethod(FusedMoEMethodBase):
@@ -341,15 +319,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: AWQMarlinConfig):
         self.quant_config = quant_config
 
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size_per_partition: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
         extra_weight_attrs.update({
             "is_transposed":
             True,
@@ -358,81 +330,64 @@ class AWQMoEMethod(FusedMoEMethodBase):
         })
 
         w13_qweight = Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                2 * intermediate_size_per_partition //
-                self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
+            torch.empty(num_experts,
+                        hidden_size,
+                        2 * intermediate_size_per_partition //
+                        self.quant_config.pack_factor,
+                        dtype=torch.int32),
+            requires_grad=False)
         layer.register_parameter("w13_qweight", w13_qweight)
         set_weight_attrs(w13_qweight, extra_weight_attrs)
 
-        w2_qweight = Parameter(
-            torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                hidden_size // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
+        w2_qweight = Parameter(torch.empty(num_experts,
+                                           intermediate_size_per_partition,
+                                           hidden_size //
+                                           self.quant_config.pack_factor,
+                                           dtype=torch.int32),
+                               requires_grad=False)
         layer.register_parameter("w2_qweight", w2_qweight)
         set_weight_attrs(w2_qweight, extra_weight_attrs)
 
         num_groups_w13 = hidden_size // self.quant_config.group_size
-        num_groups_w2 = intermediate_size_per_partition // self.quant_config.group_size
+        num_groups_w2 = (intermediate_size_per_partition //
+                         self.quant_config.group_size)
 
         # WEIGHT_SCALES
         # Allocate 2 scales for w1 and w3 respectively.
-        w13_scales = Parameter(
-            torch.empty(
-                num_experts,
-                num_groups_w13,
-                intermediate_size_per_partition * 2,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
+        w13_scales = Parameter(torch.empty(num_experts,
+                                           num_groups_w13,
+                                           intermediate_size_per_partition * 2,
+                                           dtype=params_dtype),
+                               requires_grad=False)
         layer.register_parameter("w13_scales", w13_scales)
         set_weight_attrs(w13_scales, extra_weight_attrs)
 
-        w2_scales = Parameter(
-            torch.empty(num_experts,
-                        num_groups_w2,
-                        hidden_size,
-                        dtype=params_dtype),
-            requires_grad=False,
-        )
+        w2_scales = Parameter(torch.empty(num_experts,
+                                          num_groups_w2,
+                                          hidden_size,
+                                          dtype=params_dtype),
+                              requires_grad=False)
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
 
         # WEIGHT_ZERO_POINT
         # Allocate 2 zero points for w1 and w3 respectively.
         w13_qzeros = Parameter(
-            torch.empty(
-                num_experts,
-                num_groups_w13,
-                2 * intermediate_size_per_partition //
-                self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
+            torch.empty(num_experts,
+                        num_groups_w13,
+                        2 * intermediate_size_per_partition //
+                        self.quant_config.pack_factor,
+                        dtype=torch.int32),
+            requires_grad=False)
         layer.register_parameter("w13_qzeros", w13_qzeros)
         set_weight_attrs(w13_qzeros, extra_weight_attrs)
 
-        w2_qzeros = Parameter(
-            torch.empty(
-                num_experts,
-                num_groups_w2,
-                hidden_size // self.quant_config.pack_factor,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
+        w2_qzeros = Parameter(torch.empty(num_experts,
+                                          num_groups_w2,
+                                          hidden_size //
+                                          self.quant_config.pack_factor,
+                                          dtype=torch.int32),
+                              requires_grad=False)
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
 
@@ -489,16 +444,14 @@ class AWQMoEMethod(FusedMoEMethodBase):
             layer.w13_qzeros,
             size_k=layer.w13_qzeros.shape[1],
             size_n=layer.w13_qzeros.shape[2] * self.quant_config.pack_factor,
-            num_bits=self.quant_config.weight_bits,
-        )
+            num_bits=self.quant_config.weight_bits)
         replace_parameter(layer, "w13_qzeros", marlin_w13_zp)
 
         marlin_w2_zp = moe_awq_to_marlin_zero_points(
             layer.w2_qzeros,
             size_k=layer.w2_qzeros.shape[1],
             size_n=layer.w2_qzeros.shape[2] * self.quant_config.pack_factor,
-            num_bits=self.quant_config.weight_bits,
-        )
+            num_bits=self.quant_config.weight_bits)
         replace_parameter(layer, "w2_qzeros", marlin_w2_zp)
 
     def apply(
@@ -534,8 +487,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-        )
+            e_score_correction_bias=e_score_correction_bias)
 
         return torch.ops.vllm.fused_marlin_moe(
             x,

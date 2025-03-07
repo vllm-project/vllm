@@ -287,8 +287,8 @@ def sparse_semi_structured_to_dense_cutlass(sparse, meta_reordered):
 def mask_creator(tensor):
     """
     Class for creating N:M sparsity masks.
-    Masks will be created using the N:M ratio, where for every block of
-    M weights, N will be pruned based on ranked weight value. Each mask
+    Masks will be created using the N:M ratio, where for every block of 
+    M weights, N will be pruned based on ranked weight value. Each mask 
     will correspond to the given tensor.
 
     :param N: The number of weights in a group to keep
@@ -415,6 +415,7 @@ def get_weight_perm_24(num_bits: int):
 
 def marlin_permute_scales_24(s: torch.Tensor, size_k: int, size_n: int,
                              group_size: int) -> torch.Tensor:
+
     scale_perm, scale_perm_single = get_scale_perms_24()
     if group_size < size_k and group_size != -1:
         s = s.reshape((-1, len(scale_perm)))[:, scale_perm]

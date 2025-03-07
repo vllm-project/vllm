@@ -9,7 +9,6 @@ The key points:
 - Use cuda-ipc to pass tensors, since NCCL does not work when we have
     multiple processes on the same GPU.
 """
-
 import os
 
 import ray
@@ -41,7 +40,6 @@ class RayTrainingActor:
     def __init__(self):
         # ray will set CUDA_VISIBLE_DEVICES to the assigned GPUs
         from transformers import AutoModelForCausalLM
-
         self.model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
         self.model.to("cuda:0")
         for name, p in self.model.named_parameters():
@@ -50,7 +48,6 @@ class RayTrainingActor:
         # the argument for get_device_uuid is the index
         # of the GPU in the visible devices.
         from vllm.platforms import current_platform
-
         self.device_uuid = current_platform.get_device_uuid(0)
 
     def report_device_id(self) -> str:
@@ -58,7 +55,6 @@ class RayTrainingActor:
 
     def get_weight_ipc_handles(self):
         from torch.multiprocessing.reductions import reduce_tensor
-
         data = {}
         for name, p in self.model.named_parameters():
             # the training actor might only have a subset of the weights
@@ -105,7 +101,7 @@ for bundle_index, training_actor in enumerate(training_actors):
     print(f"training actor {bundle_index} is on {device_id}")
     training_actor_device_ids.append(device_id)
 
-for i, bundle_indices in enumerate([[0, 1], [2, 3]]):
+for (i, bundle_indices) in enumerate([[0, 1], [2, 3]]):
     # IMPORTANT: when creating vLLM instances, we need to
     # make sure there are no GPU activities on the target GPUs,
     # otherwise, they will interfere with the vLLM memory profiling,

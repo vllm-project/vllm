@@ -32,6 +32,7 @@ class Processor:
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
+
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -49,8 +50,8 @@ class Processor:
         self.mm_input_cache_client = MMInputCacheClient(model_config)
 
         # Multi-modal hasher (for images)
-        self.use_hash = (not model_config.disable_mm_preprocessor_cache
-                         ) or cache_config.enable_prefix_caching
+        self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
+            cache_config.enable_prefix_caching
 
     def _validate_logprobs(
         self,
@@ -121,8 +122,8 @@ class Processor:
 
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
         if lora_request is not None and not self.lora_config:
-            raise ValueError(
-                f"Got lora_request {lora_request} but LoRA is not enabled!")
+            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
+                             "not enabled!")
 
     def process_inputs(
         self,
@@ -135,6 +136,7 @@ class Processor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> EngineCoreRequest:
+
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
@@ -219,6 +221,7 @@ class Processor:
 
         # Last-mile processing of multimodal metadata and inputs.
         if mm_positions:
+
             # Merge and flatten multimodal placeholders, hashes and inputs
             # from dictionaries to lists, and sort them by each item's position
             # in the input sequence.
@@ -235,6 +238,7 @@ class Processor:
             # NOTE: Sort multimodal inputs/kwargs ONLY IF there are multiple
             # modalities involved AND the model supports merged input processor.
             if len(sorted_modalities) > 1 and precomputed_mm_inputs:
+
                 modality_order_dict = {
                     modality: order
                     for order, modality in enumerate(sorted_modalities)
@@ -249,8 +253,7 @@ class Processor:
                 precomputed_mm_inputs = sorted(
                     precomputed_mm_inputs,
                     key=lambda mm_input: modality_order_dict[list(
-                        mm_input.modalities)[0]],
-                )
+                        mm_input.modalities)[0]])
 
             # Apply mm input cache update and legacy input mapper if one exists.
             sorted_mm_inputs = self.mm_input_cache_client.process_inputs(

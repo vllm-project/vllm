@@ -9,23 +9,20 @@ from vllm.engine.arg_utils import EngineArgs, nullable_kvs
 from vllm.utils import FlexibleArgumentParser
 
 
-@pytest.mark.parametrize(
-    ("arg", "expected"),
-    [
-        (None, None),
-        ("image=16", {
-            "image": 16
-        }),
-        ("image=16,video=2", {
-            "image": 16,
-            "video": 2
-        }),
-        ("Image=16, Video=2", {
-            "image": 16,
-            "video": 2
-        }),
-    ],
-)
+@pytest.mark.parametrize(("arg", "expected"), [
+    (None, None),
+    ("image=16", {
+        "image": 16
+    }),
+    ("image=16,video=2", {
+        "image": 16,
+        "video": 2
+    }),
+    ("Image=16, Video=2", {
+        "image": 16,
+        "video": 2
+    }),
+])
 def test_limit_mm_per_prompt_parser(arg, expected):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
@@ -69,7 +66,8 @@ def test_prefix_cache_default():
     args = parser.parse_args([])
 
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert not engine_args.enable_prefix_caching, "prefix caching defaults to off."
+    assert (not engine_args.enable_prefix_caching
+            ), "prefix caching defaults to off."
 
     # with flag to turn it on.
     args = parser.parse_args(["--enable-prefix-caching"])
@@ -85,7 +83,7 @@ def test_prefix_cache_default():
 def test_valid_pooling_config():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([
-        "--override-pooler-config",
+        '--override-pooler-config',
         '{"pooling_type": "MEAN"}',
     ])
     engine_args = EngineArgs.from_cli_args(args=args)
@@ -98,9 +96,8 @@ def test_valid_pooling_config():
     [
         "image",  # Missing =
         "image=4,image=5",  # Conflicting values
-        "image=video=4",  # Too many = in tokenized arg
-    ],
-)
+        "image=video=4"  # Too many = in tokenized arg
+    ])
 def test_bad_nullable_kvs(arg):
     with pytest.raises(ArgumentTypeError):
         nullable_kvs(arg)

@@ -30,7 +30,7 @@ QUANTIZATION_METHODS: List[str] = [
     "neuron_quant",
     "ipex",
     "quark",
-    "moe_wna16",
+    "moe_wna16"
 ]
 
 # The customized quantization methods which will be added to this dict.

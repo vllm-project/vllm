@@ -18,7 +18,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Falcon configuration"""
-
 from transformers.configuration_utils import PretrainedConfig
 
 

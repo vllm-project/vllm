@@ -15,9 +15,6 @@ def get_model(*, vllm_config: VllmConfig) -> nn.Module:
 
 
 __all__ = [
-    "get_model",
-    "get_model_loader",
-    "BaseModelLoader",
-    "get_architecture_class_name",
-    "get_model_architecture",
+    "get_model", "get_model_loader", "BaseModelLoader",
+    "get_architecture_class_name", "get_model_architecture"
 ]

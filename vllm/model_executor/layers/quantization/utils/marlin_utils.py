@@ -50,11 +50,11 @@ def query_marlin_supported_quant_types(has_zp: bool,
 
 
 def _check_marlin_supported(
-    quant_type: ScalarType,
-    group_size: Optional[int],
-    has_zp: bool,
-    device_capability: Optional[int] = None,
-) -> Tuple[bool, Optional[str]]:
+        quant_type: ScalarType,
+        group_size: Optional[int],
+        has_zp: bool,
+        device_capability: Optional[int] = None) -> Tuple[bool, Optional[str]]:
+
     if device_capability is None:
         capability_tuple = current_platform.get_device_capability()
         device_capability = (-1 if capability_tuple is None else
@@ -64,30 +64,22 @@ def _check_marlin_supported(
         has_zp, device_capability)
 
     if quant_type not in supported_types:
-        return (
-            False,
-            f"Marlin does not support weight_bits = {quant_type}. "
-            f"Only types = {supported_types} "
-            f"are supported (for group_size = {group_size}, "
-            f"device_capability = {device_capability}, zp = {has_zp}).",
-        )
-    if group_size is None or group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
-        return (
-            False,
-            f"Marlin does not support group_size = {group_size}. "
-            f"Only group_sizes = {MARLIN_SUPPORTED_GROUP_SIZES} "
-            "are supported.",
-        )
+        return (False, f"Marlin does not support weight_bits = {quant_type}. "
+                f"Only types = {supported_types} "
+                f"are supported (for group_size = {group_size}, "
+                f"device_capability = {device_capability}, zp = {has_zp}).")
+    if (group_size is None or group_size not in MARLIN_SUPPORTED_GROUP_SIZES):
+        return (False, f"Marlin does not support group_size = {group_size}. "
+                f"Only group_sizes = {MARLIN_SUPPORTED_GROUP_SIZES} "
+                "are supported.")
 
     return True, None
 
 
-def check_marlin_supported(
-    quant_type: ScalarType,
-    group_size: int,
-    has_zp: bool = False,
-    device_capability: Optional[int] = None,
-) -> bool:
+def check_marlin_supported(quant_type: ScalarType,
+                           group_size: int,
+                           has_zp: bool = False,
+                           device_capability: Optional[int] = None) -> bool:
     cond, _ = _check_marlin_supported(quant_type, group_size, has_zp,
                                       device_capability)
     return cond
@@ -102,12 +94,10 @@ def verify_marlin_supported(quant_type: ScalarType,
         raise ValueError(err_msg)
 
 
-def verify_marlin_supports_shape(
-    output_size_per_partition: int,
-    input_size_per_partition: int,
-    input_size: int,
-    group_size: int,
-) -> None:
+def verify_marlin_supports_shape(output_size_per_partition: int,
+                                 input_size_per_partition: int,
+                                 input_size: int, group_size: int) -> None:
+
     # Validate output_size_per_partition
     if output_size_per_partition % GPTQ_MARLIN_MIN_THREAD_N != 0:
         raise ValueError(f"Weight output_size_per_partition = "
@@ -124,7 +114,8 @@ def verify_marlin_supports_shape(
                          "Consider reducing tensor_parallel_size or running "
                          "with --quantization gptq.")
 
-    if group_size < input_size and input_size_per_partition % group_size != 0:
+    if (group_size < input_size
+            and input_size_per_partition % group_size != 0):
         raise ValueError(
             f"Weight input_size_per_partition = {input_size_per_partition}"
             f" is not divisible by group_size = {group_size}. "
@@ -132,36 +123,31 @@ def verify_marlin_supports_shape(
             "with --quantization gptq.")
 
 
-def check_marlin_supports_shape(
-    output_size_per_partition: int,
-    input_size_per_partition: int,
-    input_size: int,
-    group_size: int,
-) -> Tuple[bool, Optional[str]]:
+def check_marlin_supports_shape(output_size_per_partition: int,
+                                input_size_per_partition: int,
+                                input_size: int, group_size: int) \
+                                    -> Tuple[bool, Optional[str]]:
     try:
-        verify_marlin_supports_shape(
-            output_size_per_partition,
-            input_size_per_partition,
-            input_size,
-            group_size,
-        )
+        verify_marlin_supports_shape(output_size_per_partition,
+                                     input_size_per_partition, input_size,
+                                     group_size)
     except ValueError as e:
         return False, e.__str__()
     return True, None
 
 
-def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
-    output_size_per_partition = (getattr(layer, "output_size_per_partition",
-                                         None) or layer.output_size)
-    input_size_per_partition = (getattr(layer, "input_size_per_partition",
-                                        None) or layer.input_size)
+def check_marlin_supports_layer(layer: LinearBase, group_size: int) \
+                                    -> bool:
+    output_size_per_partition = getattr(layer, "output_size_per_partition",
+                                        None) or layer.output_size
+    input_size_per_partition = getattr(layer, "input_size_per_partition",
+                                       None) or layer.input_size
 
     return check_marlin_supports_shape(
         output_size_per_partition=output_size_per_partition,
         input_size_per_partition=input_size_per_partition,
         input_size=layer.input_size,
-        group_size=group_size,
-    )[0]
+        group_size=group_size)[0]
 
 
 def marlin_make_workspace(output_size_per_partition: int,
@@ -216,6 +202,7 @@ def get_scale_perms():
 
 def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
                           group_size: int) -> torch.Tensor:
+
     scale_perm, scale_perm_single = get_scale_perms()
     if group_size < size_k and group_size != -1:
         s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
@@ -304,40 +291,37 @@ def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
 
 
 def apply_gptq_marlin_linear(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    weight_zp: torch.Tensor,
-    g_idx: torch.Tensor,
-    g_idx_sort_indices: torch.Tensor,
-    workspace: torch.Tensor,
-    wtype: ScalarType,
-    output_size_per_partition: int,
-    input_size_per_partition: int,
-    is_k_full: bool,
-    bias: Optional[torch.Tensor] = None,
-    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
-) -> torch.Tensor:
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_zp: torch.Tensor,
+        g_idx: torch.Tensor,
+        g_idx_sort_indices: torch.Tensor,
+        workspace: torch.Tensor,
+        wtype: ScalarType,
+        output_size_per_partition: int,
+        input_size_per_partition: int,
+        is_k_full: bool,
+        bias: Optional[torch.Tensor] = None,
+        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
-    output = ops.gptq_marlin_gemm(
-        reshaped_x,
-        weight,
-        weight_scale,
-        weight_zp,
-        g_idx,
-        g_idx_sort_indices,
-        workspace,
-        wtype,
-        size_m=reshaped_x.shape[0],
-        size_n=output_size_per_partition,
-        size_k=input_size_per_partition,
-        is_k_full=is_k_full,
-        has_zp=False,
-        use_fp32_reduce=use_fp32_reduce,
-        is_zp_float=False,
-    )
+    output = ops.gptq_marlin_gemm(reshaped_x,
+                                  weight,
+                                  weight_scale,
+                                  weight_zp,
+                                  g_idx,
+                                  g_idx_sort_indices,
+                                  workspace,
+                                  wtype,
+                                  size_m=reshaped_x.shape[0],
+                                  size_n=output_size_per_partition,
+                                  size_k=input_size_per_partition,
+                                  is_k_full=is_k_full,
+                                  has_zp=False,
+                                  use_fp32_reduce=use_fp32_reduce,
+                                  is_zp_float=False)
 
     if bias is not None:
         output.add_(bias)  # In-place add
@@ -346,39 +330,36 @@ def apply_gptq_marlin_linear(
 
 
 def apply_awq_marlin_linear(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    weight_scale: torch.Tensor,
-    weight_zp: torch.Tensor,
-    g_idx: torch.Tensor,
-    g_idx_sort_indices: torch.Tensor,
-    workspace: torch.Tensor,
-    quant_type: ScalarType,
-    output_size_per_partition: int,
-    input_size_per_partition: int,
-    bias: Optional[torch.Tensor] = None,
-    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
-) -> torch.Tensor:
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_zp: torch.Tensor,
+        g_idx: torch.Tensor,
+        g_idx_sort_indices: torch.Tensor,
+        workspace: torch.Tensor,
+        quant_type: ScalarType,
+        output_size_per_partition: int,
+        input_size_per_partition: int,
+        bias: Optional[torch.Tensor] = None,
+        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
-    output = ops.gptq_marlin_gemm(
-        reshaped_x,
-        weight,
-        weight_scale,
-        weight_zp,
-        g_idx,
-        g_idx_sort_indices,
-        workspace,
-        quant_type,
-        size_m=reshaped_x.shape[0],
-        size_n=output_size_per_partition,
-        size_k=input_size_per_partition,
-        is_k_full=True,
-        has_zp=True,
-        use_fp32_reduce=use_fp32_reduce,
-        is_zp_float=False,
-    )
+    output = ops.gptq_marlin_gemm(reshaped_x,
+                                  weight,
+                                  weight_scale,
+                                  weight_zp,
+                                  g_idx,
+                                  g_idx_sort_indices,
+                                  workspace,
+                                  quant_type,
+                                  size_m=reshaped_x.shape[0],
+                                  size_n=output_size_per_partition,
+                                  size_k=input_size_per_partition,
+                                  is_k_full=True,
+                                  has_zp=True,
+                                  use_fp32_reduce=use_fp32_reduce,
+                                  is_zp_float=False)
 
     if bias is not None:
         output.add_(bias)  # In-place add

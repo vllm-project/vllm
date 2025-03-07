@@ -23,7 +23,7 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
         super().__init__()
         self.base_layer = base_layer
         self.emb_layer = self.base_layer
-        if "LoRA" in base_layer.__class__.__name__:
+        if 'LoRA' in base_layer.__class__.__name__:
             self.emb_layer = self.base_layer.base_layer
 
     def create_prompt_adapter_weights(
@@ -40,8 +40,7 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
         self.adapter_lengths = torch.zeros(
             prompt_adapter_config.max_prompt_adapters,
             dtype=torch.long,
-            device=self.emb_layer.weight.device,
-        )
+            device=self.emb_layer.weight.device)
 
         self.indices_gpu: torch.Tensor
         self.embedding_indices_gpu: torch.Tensor
@@ -76,8 +75,7 @@ class VocabParallelEmbeddingWithPromptAdapter(nn.Module):
             valid_mask = self.indices_gpu != -1
             gathered_embeddings = self.embeddings_tensors[
                 self.embedding_indices_gpu[:, 0],
-                self.embedding_indices_gpu[:, 1],
-            ]
+                self.embedding_indices_gpu[:, 1]]
 
             # Update hidden states
             hidden_states[valid_mask] = gathered_embeddings

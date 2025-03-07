@@ -16,13 +16,11 @@ class SSLCertRefresher:
     reloads them when they change.
     """
 
-    def __init__(
-        self,
-        ssl_context: SSLContext,
-        key_path: Optional[str] = None,
-        cert_path: Optional[str] = None,
-        ca_path: Optional[str] = None,
-    ) -> None:
+    def __init__(self,
+                 ssl_context: SSLContext,
+                 key_path: Optional[str] = None,
+                 cert_path: Optional[str] = None,
+                 ca_path: Optional[str] = None) -> None:
         self.ssl = ssl_context
         self.key_path = key_path
         self.cert_path = cert_path
@@ -64,9 +62,7 @@ class SSLCertRefresher:
             except Exception as e:
                 logger.error(
                     "SSLCertRefresher failed taking action on file change. "
-                    "Error: %s",
-                    e,
-                )
+                    "Error: %s", e)
 
     def stop(self) -> None:
         """Stop watching files."""

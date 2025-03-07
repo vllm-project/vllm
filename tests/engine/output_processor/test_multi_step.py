@@ -76,12 +76,8 @@ def test_appends_token_ids(num_new_tokens: int, seq_output_len: int):
 @pytest.mark.parametrize("num_new_tokens", [5, 6, 7, 8])
 @pytest.mark.parametrize("max_tokens", [128 + 3])
 @pytest.mark.skip_global_cleanup
-def test_respects_max_tokens(
-    num_new_tokens: int,
-    seq_prompt_len: int,
-    seq_output_len: int,
-    max_tokens: int,
-):
+def test_respects_max_tokens(num_new_tokens: int, seq_prompt_len: int,
+                             seq_output_len: int, max_tokens: int):
     """Verify tokens after max_tokens are dropped and not appended to the
     sequence.
     """
@@ -130,8 +126,8 @@ def test_respects_max_tokens(
 
     # Expect the correct tokens were appended.
     expected_appended_tokens = new_token_ids[:max_tokens - seq_output_len]
-    assert (seq.get_token_ids()[-len(expected_appended_tokens):] ==
-            expected_appended_tokens)
+    assert seq.get_token_ids(
+    )[-len(expected_appended_tokens):] == expected_appended_tokens
 
 
 @pytest.mark.parametrize("seq_prompt_len", [1024])
@@ -197,8 +193,8 @@ def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
 
     # Expect the correct tokens were appended.
     expected_appended_tokens = new_token_ids[:eos_index + 1]
-    assert (seq.get_token_ids()[-len(expected_appended_tokens):] ==
-            expected_appended_tokens)
+    assert seq.get_token_ids(
+    )[-len(expected_appended_tokens):] == expected_appended_tokens
 
 
 @pytest.mark.parametrize("seq_prompt_len", [1024])
@@ -267,8 +263,8 @@ def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
     # Expect the correct tokens were appended.
     expected_appended_tokens = new_token_ids[:seq_output_len + num_new_tokens -
                                              seq_output_len]
-    assert (seq.get_token_ids()[-len(expected_appended_tokens):] ==
-            expected_appended_tokens)
+    assert seq.get_token_ids(
+    )[-len(expected_appended_tokens):] == expected_appended_tokens
 
 
 def mock_tokenizer(eos_token_id=1000):

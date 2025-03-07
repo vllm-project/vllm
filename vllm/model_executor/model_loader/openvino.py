@@ -82,8 +82,8 @@ def _require_model_export(model_id, revision=None, subfolder=None):
     hf_api = HfApi()
     try:
         model_info = hf_api.model_info(model_id, revision=revision or "main")
-        normalized_subfolder = None if subfolder is None else Path(
-            subfolder).as_posix()
+        normalized_subfolder = (None if subfolder is None else
+                                Path(subfolder).as_posix())
         model_files = [
             file.rfilename for file in model_info.siblings
             if normalized_subfolder is None
@@ -125,7 +125,8 @@ class OpenVINOCausalLM(nn.Module):
                 "as-is, all possible options that may affect model conversion "
                 "are ignored.")
 
-        load_in_8bit = envs.VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS if export else False
+        load_in_8bit = (envs.VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS
+                        if export else False)
         pt_model = OVModelForCausalLM.from_pretrained(
             model_config.model,
             export=export,

@@ -3,7 +3,6 @@
 
 Run `pytest tests/kernels/test_awq_marlin.py`.
 """
-
 import pytest
 import torch
 
@@ -27,11 +26,9 @@ GROUP_SIZES = [-1, 32, 128]
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("group_size", GROUP_SIZES)
-@pytest.mark.skipif(
-    not (ops.supports_moe_ops
-         and hasattr(torch.ops._moe_C, "marlin_gemm_moe")),
-    reason="Marlin is not supported on this GPU type.",
-)
+@pytest.mark.skipif(not (ops.supports_moe_ops
+                         and hasattr(torch.ops._moe_C, "marlin_gemm_moe")),
+                    reason="Marlin is not supported on this GPU type.")
 def test_fused_marlin_moe_awq(
     m: int,
     n: int,
@@ -152,16 +149,14 @@ def test_single_marlin_moe_multiply_awq(
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
 
-    marlin_output = torch.ops.vllm.single_marlin_moe(
-        a,
-        qweight,
-        scales,
-        score,
-        topk,
-        renormalize=False,
-        w_zeros=zp,
-        num_bits=num_bits,
-    )
+    marlin_output = torch.ops.vllm.single_marlin_moe(a,
+                                                     qweight,
+                                                     scales,
+                                                     score,
+                                                     topk,
+                                                     renormalize=False,
+                                                     w_zeros=zp,
+                                                     num_bits=num_bits)
 
     torch_output = torch_moe_single(a, w_ref.transpose(1, 2), score, topk)
 

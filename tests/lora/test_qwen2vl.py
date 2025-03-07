@@ -64,14 +64,13 @@ class Qwen2VLTester:
             max_model_len=self.config.max_model_len,
         )
 
-    def run_test(
-        self,
-        images: list[ImageAsset],
-        expected_outputs: list[str],
-        lora_id: Optional[int] = None,
-        temperature: float = 0,
-        max_tokens: int = 5,
-    ) -> list[str]:
+    def run_test(self,
+                 images: list[ImageAsset],
+                 expected_outputs: list[str],
+                 lora_id: Optional[int] = None,
+                 temperature: float = 0,
+                 max_tokens: int = 5) -> list[str]:
+
         sampling_params = vllm.SamplingParams(
             temperature=temperature,
             max_tokens=max_tokens,
@@ -117,8 +116,7 @@ QWEN25VL_MODEL_PATH = "Qwen/Qwen2.5-VL-3B-Instruct"
 
 @pytest.mark.xfail(
     current_platform.is_rocm(),
-    reason="Qwen2-VL dependency xformers incompatible with ROCm",
-)
+    reason="Qwen2-VL dependency xformers incompatible with ROCm")
 def test_qwen2vl_lora(qwen2vl_lora_files):
     """Test Qwen 2.0 VL model with LoRA"""
     config = TestConfig(model_path=QWEN2VL_MODEL_PATH,

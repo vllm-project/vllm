@@ -12,7 +12,6 @@ if TYPE_CHECKING:
 @dataclass
 class PrefixCacheStats:
     """Stores prefix cache hit statistics."""
-
     # Whether reset_prefix_cache was invoked.
     reset: bool = False
     # The number of requests in this update.
@@ -94,15 +93,10 @@ class IterationStats:
         """Calculate an interval relative to this iteration's timestamp."""
         return self.iteration_timestamp - start
 
-    def update_from_output(
-        self,
-        output: "EngineCoreOutput",
-        engine_core_timestamp: float,
-        is_prefilling: bool,
-        prompt_len: int,
-        req_stats: RequestStateStats,
-        lora_stats: Optional[LoRAStats],
-    ):
+    def update_from_output(self, output: "EngineCoreOutput",
+                           engine_core_timestamp: float, is_prefilling: bool,
+                           prompt_len: int, req_stats: RequestStateStats,
+                           lora_stats: Optional[LoRAStats]):
         num_new_generation_tokens = len(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens
@@ -124,13 +118,8 @@ class IterationStats:
 
         # Process request-level engine core events
         if output.events is not None:
-            self.update_from_events(
-                output.request_id,
-                output.events,
-                is_prefilling,
-                req_stats,
-                lora_stats,
-            )
+            self.update_from_events(output.request_id, output.events,
+                                    is_prefilling, req_stats, lora_stats)
 
         # Process the batch-level "new tokens" engine core event
         if is_prefilling:
@@ -145,17 +134,11 @@ class IterationStats:
         if num_new_generation_tokens > 0:
             req_stats.last_token_ts = engine_core_timestamp
 
-    def update_from_events(
-        self,
-        req_id: str,
-        events: list["EngineCoreEvent"],
-        is_prefilling: bool,
-        req_stats: RequestStateStats,
-        lora_stats: Optional[LoRAStats],
-    ):
+    def update_from_events(self, req_id: str, events: list["EngineCoreEvent"],
+                           is_prefilling: bool, req_stats: RequestStateStats,
+                           lora_stats: Optional[LoRAStats]):
         # Avoid circular dependency
         from vllm.v1.engine import EngineCoreEventType
-
         for event in events:
             if event.type == EngineCoreEventType.QUEUED:
                 req_stats.queued_ts = event.timestamp
@@ -168,13 +151,10 @@ class IterationStats:
             elif event.type == EngineCoreEventType.PREEMPTED:
                 self.num_preempted_reqs += 1
 
-    def update_from_finished_request(
-        self,
-        finish_reason: "FinishReason",
-        num_prompt_tokens: int,
-        max_tokens_param: Optional[int],
-        req_stats: RequestStateStats,
-    ):
+    def update_from_finished_request(self, finish_reason: "FinishReason",
+                                     num_prompt_tokens: int,
+                                     max_tokens_param: Optional[int],
+                                     req_stats: RequestStateStats):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
         # Queued interval is from first QUEUED event to first SCHEDULED
@@ -192,17 +172,16 @@ class IterationStats:
         # Any preemptions during prefill or decode are included
         inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
 
-        finished_req = FinishedRequestStats(
-            finish_reason=finish_reason,
-            e2e_latency=e2e_latency,
-            num_prompt_tokens=num_prompt_tokens,
-            num_generation_tokens=req_stats.num_generation_tokens,
-            max_tokens_param=max_tokens_param,
-            queued_time=queued_time,
-            prefill_time=prefill_time,
-            inference_time=inference_time,
-            decode_time=decode_time,
-        )
+        finished_req = \
+            FinishedRequestStats(finish_reason=finish_reason,
+                                 e2e_latency=e2e_latency,
+                                 num_prompt_tokens=num_prompt_tokens,
+                                 num_generation_tokens=req_stats.num_generation_tokens,
+                                 max_tokens_param=max_tokens_param,
+                                 queued_time=queued_time,
+                                 prefill_time=prefill_time,
+                                 inference_time=inference_time,
+                                 decode_time=decode_time)
         self.finished_requests.append(finished_req)
 
 
@@ -212,24 +191,24 @@ class LoRARequestStates:
     def __init__(self):
         self.lora_name_to_stats: dict[str, LoRAStats] = {}
 
-    def get_stats(self, req_state: "RequestState") -> Optional[LoRAStats]:
+    def get_stats(self, req_state: 'RequestState') -> Optional[LoRAStats]:
         if req_state.lora_name is None:
             return None
         if req_state.lora_name not in self.lora_name_to_stats:
             self.lora_name_to_stats[req_state.lora_name] = LoRAStats()
         return self.lora_name_to_stats[req_state.lora_name]
 
-    def add_request(self, req_state: "RequestState"):
+    def add_request(self, req_state: 'RequestState'):
         if (lora_stats := self.get_stats(req_state)) is not None:
             lora_stats.waiting_requests.add(req_state.request_id)
 
-    def finish_request(self, req_state: "RequestState"):
+    def finish_request(self, req_state: 'RequestState'):
         if req_state.lora_name is None:
             return
         lora_stats = self.lora_name_to_stats[req_state.lora_name]
         lora_stats.running_requests.remove(req_state.request_id)
 
-    def abort_request(self, req_state: "RequestState"):
+    def abort_request(self, req_state: 'RequestState'):
         if req_state.lora_name is None:
             return
         lora_stats = self.lora_name_to_stats[req_state.lora_name]
@@ -251,8 +230,8 @@ class LoRARequestStates:
             return
         for lora_name, stats in self.lora_name_to_stats.items():
             if stats.waiting_requests:
-                iteration_stats.waiting_lora_adapters[lora_name] = len(
-                    stats.waiting_requests)
+                iteration_stats.waiting_lora_adapters[lora_name] = \
+                    len(stats.waiting_requests)
             if stats.running_requests:
-                iteration_stats.running_lora_adapters[lora_name] = len(
-                    stats.running_requests)
+                iteration_stats.running_lora_adapters[lora_name] = \
+                    len(stats.running_requests)

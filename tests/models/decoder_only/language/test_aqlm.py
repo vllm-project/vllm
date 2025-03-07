@@ -25,25 +25,23 @@ from tests.quantization.utils import is_quant_method_supported
 # print(outputs)
 # ```
 ground_truth_generations = [
-    "\n### Features\n\n- **High-throughput**: v",
-    "The major milestones in the development of artificial intelligence from "
-    "195",
-    "Compare and contrast artificial intelligence with human intelligence in "
-    "terms of processing information. The",
-    "Explain the difference between supervised and unsupervised learning."
-    "\nExplain",
-    "Write a short story about a robot that dreams for the first time. The",
-    "Analyze the impact of the COVID-19 pandemic on global economic",
-    "The Mona Lisa is a painting by Leonardo da Vinci, and it",
-    "The early bird catches the worm.\nThe early bird catches the",
+    '\n### Features\n\n- **High-throughput**: v',
+    'The major milestones in the development of artificial intelligence from '
+    '195',
+    'Compare and contrast artificial intelligence with human intelligence in '
+    'terms of processing information. The',
+    'Explain the difference between supervised and unsupervised learning.'
+    '\nExplain',
+    'Write a short story about a robot that dreams for the first time. The',
+    'Analyze the impact of the COVID-19 pandemic on global economic',
+    'The Mona Lisa is a painting by Leonardo da Vinci, and it',
+    'The early bird catches the worm.\nThe early bird catches the'
 ]
 
 
 @pytest.mark.quant_model
-@pytest.mark.skipif(
-    not is_quant_method_supported("aqlm"),
-    reason="AQLM is not supported on this GPU type.",
-)
+@pytest.mark.skipif(not is_quant_method_supported("aqlm"),
+                    reason="AQLM is not supported on this GPU type.")
 @pytest.mark.parametrize("model", ["ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf"])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [16])
@@ -56,6 +54,7 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)

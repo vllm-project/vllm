@@ -28,6 +28,7 @@ def test_computed_prefix_blocks(model: str):
     outputs_with_detokenization = llm.generate(prompt,
                                                sampling_params)[0].outputs[0]
 
-    assert outputs_no_detokenization.text == ""
-    assert outputs_with_detokenization.text != ""
-    assert outputs_no_detokenization.token_ids == outputs_with_detokenization.token_ids
+    assert outputs_no_detokenization.text == ''
+    assert outputs_with_detokenization.text != ''
+    assert outputs_no_detokenization.token_ids == \
+        outputs_with_detokenization.token_ids

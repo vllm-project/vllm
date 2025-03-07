@@ -19,24 +19,21 @@ class ModelWithQuantization:
 
 
 MODELS: list[ModelWithQuantization]
-# AWQ quantization is currently not supported in ROCm.
+#AWQ quantization is currently not supported in ROCm.
 if current_platform.is_rocm():
     MODELS = [
         ModelWithQuantization(
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-            quantization="GPTQ",
-        ),
+            quantization="GPTQ"),
     ]
 else:
     MODELS = [
         ModelWithQuantization(
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
-            quantization="AWQ",
-        ),
+            quantization="AWQ"),
         ModelWithQuantization(
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-            quantization="GPTQ",
-        ),
+            quantization="GPTQ"),
     ]
 
 
@@ -61,8 +58,7 @@ def do_sample(llm: vllm.LLM,
         prompts,
         sampling_params,
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None,
-    )
+        if lora_id else None)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -85,8 +81,8 @@ def v1(run_with_both_engines_lora):
 @pytest.mark.parametrize("tp_size", [1])
 def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
                           tp_size):
-    if (num_gpus_available < tp_size and tp_size > 1
-            and current_platform.is_cuda_alike()):
+    if num_gpus_available < tp_size and \
+        tp_size > 1 and current_platform.is_cuda_alike():
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
     llm = vllm.LLM(
@@ -96,16 +92,15 @@ def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
         max_loras=4,
         max_model_len=400,
         tensor_parallel_size=tp_size,
-        gpu_memory_utilization=0.2,  # avoid OOM
+        gpu_memory_utilization=0.2,  #avoid OOM
         quantization=model.quantization,
         trust_remote_code=True,
-        enable_chunked_prefill=True,
-    )
+        enable_chunked_prefill=True)
 
     if model.quantization is None:
         expected_no_lora_output = [
             "Here are some examples of orange-brown colors",
-            "I'm sorry, I don't have",
+            "I'm sorry, I don't have"
         ]
         expected_lora_output = [
             "#ff8050",
@@ -133,11 +128,12 @@ def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
     def expect_match(output, expected_output):
         # HACK: GPTQ lora outputs are just incredibly unstable.
         # Assert that the outputs changed.
-        if model.quantization == "GPTQ" and expected_output is expected_lora_output:
+        if (model.quantization == "GPTQ"
+                and expected_output is expected_lora_output):
             assert output != expected_no_lora_output
             for i, o in enumerate(output):
                 assert o.startswith(
-                    "#"), f"Expected example {i} to start with # but got {o}"
+                    '#'), f"Expected example {i} to start with # but got {o}"
             return
         assert output == expected_output
 
@@ -189,11 +185,10 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
         max_num_seqs=16,
         max_loras=4,
         tensor_parallel_size=1,
-        gpu_memory_utilization=0.2,  # avoid OOM
+        gpu_memory_utilization=0.2,  #avoid OOM
         quantization=model.quantization,
         trust_remote_code=True,
-        enable_chunked_prefill=True,
-    )
+        enable_chunked_prefill=True)
     output_tp1 = do_sample(llm_tp1, tinyllama_lora_files, lora_id=1)
 
     del llm_tp1
@@ -205,10 +200,9 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
         max_num_seqs=16,
         max_loras=4,
         tensor_parallel_size=2,
-        gpu_memory_utilization=0.2,  # avoid OOM
+        gpu_memory_utilization=0.2,  #avoid OOM
         quantization=model.quantization,
-        enable_chunked_prefill=True,
-    )
+        enable_chunked_prefill=True)
     output_tp2 = do_sample(llm_tp2, tinyllama_lora_files, lora_id=1)
 
     del llm_tp2

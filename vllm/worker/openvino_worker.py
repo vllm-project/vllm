@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """An OpenVINO worker class."""
-
 from typing import Any, Dict, List, Optional, Tuple
 
 import openvino as ov
@@ -53,8 +52,8 @@ class OpenVINOCacheEngine:
         self.parallel_config = parallel_config
 
         self.head_size = model_config.get_head_size()
-        if (device_config.device.type == "cpu"
-                and cache_config.cache_dtype == ov.Type.u8):
+        if device_config.device.type == "cpu" and \
+            cache_config.cache_dtype == ov.Type.u8:
             # Scale, zero point and quantized data will be stored together.
             # The layout for per token per head:
             # |scale(f32)|zeropoint(f32)|quantized data(u8,idx_1)|quantized data(u8,idx_2)|...|quantized data(u8,idx_head_size)| # noqa: E501
@@ -111,21 +110,21 @@ class OpenVINOCacheEngine:
                 kv_cache.append((key_blocks, value_blocks))
         else:
             # Update key_cache shape:
-            k_block_shape = (
-                v_block_shape[0],
-                v_block_shape[1],
-                v_block_shape[3],
-                v_block_shape[2],
-            )
+            k_block_shape = (v_block_shape[0], v_block_shape[1],
+                             v_block_shape[3], v_block_shape[2])
 
             remote_context = ov_core.get_default_context(ov_device)
 
             for _ in range(self.num_layers):
-                key_blocks = remote_context.create_tensor(
-                    self.cache_config.cache_dtype, ov.Shape(k_block_shape), {})
+                key_blocks = \
+                    remote_context.create_tensor(self.cache_config.cache_dtype,
+                                                 ov.Shape(k_block_shape),
+                                                 {})
 
-                value_blocks = remote_context.create_tensor(
-                    self.cache_config.cache_dtype, ov.Shape(v_block_shape), {})
+                value_blocks = \
+                    remote_context.create_tensor(self.cache_config.cache_dtype,
+                                                 ov.Shape(v_block_shape),
+                                                 {})
 
                 kv_cache.append((key_blocks, value_blocks))
 
@@ -144,16 +143,12 @@ class OpenVINOCacheEngine:
         if num_blocks == 0:
             return swap_cache
 
-        assert (not current_platform.is_openvino_cpu()
-                ), "CPU device isn't supposed to have swap cache"
+        assert not current_platform.is_openvino_cpu(), \
+            "CPU device isn't supposed to have swap cache"
 
         # Update key_cache shape:
-        k_block_shape = (
-            v_block_shape[0],
-            v_block_shape[1],
-            v_block_shape[3],
-            v_block_shape[2],
-        )
+        k_block_shape = (v_block_shape[0], v_block_shape[1], v_block_shape[3],
+                         v_block_shape[2])
 
         for _ in range(self.num_layers):
             key_blocks = ov.Tensor(self.cache_config.cache_dtype,
@@ -179,7 +174,7 @@ class OpenVINOCacheEngine:
                                               src_to_dst)
 
     def copy(self, src_to_dsts: List[Tuple[int, int]]) -> None:
-        if len(src_to_dsts) > 0:
+        if (len(src_to_dsts) > 0):
             self.attn_backend.copy_blocks(self.kv_cache, src_to_dsts)
 
     @staticmethod
@@ -455,8 +450,8 @@ class OpenVINOWorker(LoRANotSupportedWorkerBase):
     def profile_run(self) -> int:
         ov_device = envs.VLLM_OPENVINO_DEVICE
 
-        assert (not current_platform.is_openvino_cpu()
-                ), "CPU device isn't supposed to use profile run."
+        assert not current_platform.is_openvino_cpu(), \
+            "CPU device isn't supposed to use profile run."
 
         import openvino.properties.device as device
         import openvino.properties.intel_gpu as intel_gpu
@@ -476,38 +471,34 @@ class OpenVINOWorker(LoRANotSupportedWorkerBase):
             top_k = model_config.get_vocab_size() - 1
             sampling_params = SamplingParams(top_p=0.99, top_k=top_k)
 
-            max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+            max_num_batched_tokens = \
+                self.scheduler_config.max_num_batched_tokens
             max_num_seqs = self.scheduler_config.max_num_seqs
-            tmp_cache_config = CacheConfig(
-                cache_config.block_size,
-                cache_config.gpu_memory_utilization,
-                cache_config.swap_space_bytes,
-                "auto",
-            )
+            tmp_cache_config = CacheConfig(cache_config.block_size,
+                                           cache_config.gpu_memory_utilization,
+                                           cache_config.swap_space_bytes,
+                                           "auto")
             tmp_cache_config.num_gpu_blocks = 1
             tmp_cache_config.num_cpu_blocks = 0
             tmp_cache_config.cache_dtype = cache_config.cache_dtype
 
             profiling_cache_engine = OpenVINOCacheEngine(
-                tmp_cache_config,
-                model_config,
-                parallel_config,
-                device_config,
-                ov_core,
-                ov_device,
-            )
+                tmp_cache_config, model_config, parallel_config, device_config,
+                ov_core, ov_device)
 
             # Profile memory usage with max_num_sequences sequences and the
             # total # number of tokens equal to max_num_batched_tokens.
             seqs: List[SequenceGroupMetadata] = []
             for group_id in range(max_num_seqs):
-                seq_len = max_num_batched_tokens // max_num_seqs + (
-                    group_id < max_num_batched_tokens % max_num_seqs)
+                seq_len = (max_num_batched_tokens // max_num_seqs +
+                           (group_id < max_num_batched_tokens % max_num_seqs))
                 block_size = cache_config.block_size
                 seq_num_blocks = (seq_len + block_size - 1) // block_size
 
-                dummy_data = input_registry.dummy_data_for_profiling(
-                    model_config, seq_len, mm_registry)
+                dummy_data = input_registry \
+                    .dummy_data_for_profiling(model_config,
+                                              seq_len,
+                                              mm_registry)
 
                 block_tables = [[0] * seq_num_blocks] * max_num_seqs
                 seq = SequenceGroupMetadata(
@@ -517,45 +508,38 @@ class OpenVINOWorker(LoRANotSupportedWorkerBase):
                     sampling_params=sampling_params,
                     block_tables=block_tables,
                     lora_request=None,
-                    multi_modal_data=dummy_data.multi_modal_data,
-                )
+                    multi_modal_data=dummy_data.multi_modal_data)
                 seqs.append(seq)
 
             self.model_runner.block_size = tmp_cache_config.block_size
 
-            bind_kv_cache(
-                self.compilation_config.static_forward_context,
-                profiling_cache_engine.kv_cache,
-            )
+            bind_kv_cache(self.compilation_config.static_forward_context,
+                          profiling_cache_engine.kv_cache)
             # Run the model with the dummy inputs.
             self.model_runner.execute_model(seqs,
                                             profiling_cache_engine.kv_cache)
 
             # Explicitly revert bind_kv_cache and delete temporary KV cache
             # manager to free KV cache when real inputs will be passed to OV
-            bind_kv_cache(
-                self.compilation_config.static_forward_context,
-                [[
-                    torch.tensor([])
-                    for _ in range(len(profiling_cache_engine.kv_cache))
-                ]],
-            )
+            bind_kv_cache(self.compilation_config.static_forward_context, [[
+                torch.tensor([])
+                for _ in range(len(profiling_cache_engine.kv_cache))
+            ]])
             del profiling_cache_engine
 
             logger.info(
                 "Start profiling run with dummy inputs to evaluate "
-                "memory usage for %s. It might take a while.",
-                ov_device,
-            )
+                "memory usage for %s. It might take a while.", ov_device)
 
         model_profile_run()
 
         gpu_device_type = ov_core.get_property(ov_device, device.type)
-        memory_statistics = ov_core.get_property(ov_device,
-                                                 intel_gpu.memory_statistics)
+        memory_statistics = \
+            ov_core.get_property(ov_device, intel_gpu.memory_statistics)
         memory_utilization = cache_config.gpu_memory_utilization
 
-        if gpu_device_type == device.Type.INTEGRATED and memory_utilization >= 0.9:
+        if gpu_device_type == device.Type.INTEGRATED and \
+            memory_utilization >= 0.9:
             logger.warning(
                 "iGPU is used with high gpu_memory_utilization=%f "
                 "value. This may cause low performance due to "
@@ -563,14 +547,12 @@ class OpenVINOWorker(LoRANotSupportedWorkerBase):
                 "memory. Please consider decreasing "
                 "gpu_memory_utilization or explicitly setting "
                 "`VLLM_OPENVINO_KVCACHE_SPACE` (GB) environment "
-                "variable.",
-                memory_utilization,
-            )
+                "variable.", memory_utilization)
 
         # sum up all used device memory
         device_memory_types = ["cl_mem", "usm_device"]
-        used_device_mem = sum(
-            memory_statistics.get(key, 0) for key in device_memory_types)
+        used_device_mem = \
+            sum(memory_statistics.get(key, 0) for key in device_memory_types)
 
         if gpu_device_type == device.Type.INTEGRATED:
             used_device_mem += memory_statistics.get("usm_host", 0)
@@ -581,8 +563,8 @@ class OpenVINOWorker(LoRANotSupportedWorkerBase):
         used_memory_threshold = 1.1
         used_device_mem *= used_memory_threshold
 
-        total_device_memory = ov_core.get_property(
-            ov_device, intel_gpu.device_total_mem_size)
+        total_device_memory = \
+            ov_core.get_property(ov_device, intel_gpu.device_total_mem_size)
 
         def format_memory_size(size) -> str:
             units = ["B", "KB", "MB", "GB"]
@@ -594,19 +576,18 @@ class OpenVINOWorker(LoRANotSupportedWorkerBase):
 
             return f"{size:.2f} {units[unit_index]}"
 
-        total_device_memory_str = format(
-            format_memory_size(total_device_memory))
-        used_device_memory_str = format(format_memory_size(used_device_mem))
+        total_device_memory_str = \
+            format(format_memory_size(total_device_memory))
+        used_device_memory_str = \
+            format(format_memory_size(used_device_mem))
 
         logger.info(
             "Total %s memory: %s. "
             "Amount of memory required to run the model with "
-            "max_num_batched_tokens=%d: %s.",
-            ov_device,
+            "max_num_batched_tokens=%d: %s.", ov_device,
             total_device_memory_str,
             self.scheduler_config.max_num_batched_tokens,
-            used_device_memory_str,
-        )
+            used_device_memory_str)
 
         if used_device_mem >= total_device_memory:
             raise RuntimeError(

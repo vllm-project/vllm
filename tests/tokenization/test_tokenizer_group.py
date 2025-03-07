@@ -84,7 +84,7 @@ async def test_tokenizer_group_pool(tokenizer_group_type):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tokenizer_group_type", ["ray"])
 async def test_tokenizer_group_ray_pool_env_var_propagation(
-    tokenizer_group_type, ):
+        tokenizer_group_type):
     """Test that env vars from caller process are propagated to
     tokenizer Ray actors."""
     env_var = "MY_ENV_VAR"
@@ -104,8 +104,7 @@ async def test_tokenizer_group_ray_pool_env_var_propagation(
         tokenizer_id="gpt2",
         enable_lora=False,
         max_num_seqs=1,
-        max_input_length=None,
-    )
+        max_input_length=None)
     with pytest.raises(AssertionError):
         tokenizer_pool.ping()
 
@@ -116,8 +115,7 @@ async def test_tokenizer_group_ray_pool_env_var_propagation(
             tokenizer_id="gpt2",
             enable_lora=False,
             max_num_seqs=1,
-            max_input_length=None,
-        )
+            max_input_length=None)
         tokenizer_pool.ping()
 
 
@@ -155,8 +153,7 @@ async def test_tokenizer_group_ray_pool_fault_tolerance(tokenizer_group_type):
         enable_lora=False,
         max_num_seqs=1,
         max_input_length=None,
-        fail_at=fail_at,
-    )
+        fail_at=fail_at)
     tokenizer_actors = tokenizer_group_pool.tokenizer_actors.copy()
 
     # Modify fail at to not fail at all (will be re-read when actor is
@@ -183,8 +180,7 @@ async def test_tokenizer_group_ray_pool_fault_tolerance(tokenizer_group_type):
         enable_lora=False,
         max_num_seqs=1,
         max_input_length=None,
-        fail_at=fail_at,
-    )
+        fail_at=fail_at)
 
     # We should fail after re-initialization.
     with pytest.raises(RuntimeError):
@@ -205,8 +201,7 @@ async def test_tokenizer_group_ray_pool_fault_tolerance(tokenizer_group_type):
         enable_lora=False,
         max_num_seqs=1,
         max_input_length=2,
-        fail_at=fail_at,
-    )
+        fail_at=fail_at)
     tokenizer_actors = tokenizer_group_pool.tokenizer_actors.copy()
 
     # Prompt too long error

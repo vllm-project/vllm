@@ -18,8 +18,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyTorch Starcoder2 model."""
-
+""" PyTorch Starcoder2 model."""
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -53,13 +52,11 @@ from .utils import (is_pp_missing_parameter,
 
 class Starcoder2Attention(nn.Module):
 
-    def __init__(
-        self,
-        config: Starcoder2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self,
+                 config: Starcoder2Config,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.config = config
 
@@ -109,15 +106,13 @@ class Starcoder2Attention(nn.Module):
             base=int(self.rope_theta),
             is_neox_style=True,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -134,12 +129,10 @@ class Starcoder2Attention(nn.Module):
 
 class Starcoder2MLP(nn.Module):
 
-    def __init__(
-        self,
-        config: Starcoder2Config,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self,
+                 config: Starcoder2Config,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.c_fc = ColumnParallelLinear(
             config.hidden_size,
@@ -166,21 +159,17 @@ class Starcoder2MLP(nn.Module):
 
 class Starcoder2DecoderLayer(nn.Module):
 
-    def __init__(
-        self,
-        config: Starcoder2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self,
+                 config: Starcoder2Config,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = Starcoder2Attention(
-            config,
-            cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-        )
+        self.self_attn = Starcoder2Attention(config,
+                                             cache_config,
+                                             quant_config=quant_config,
+                                             prefix=f"{prefix}.self_attn")
         self.mlp = Starcoder2MLP(config,
                                  quant_config=quant_config,
                                  prefix=f"{prefix}.mlp")
@@ -229,8 +218,7 @@ class Starcoder2Model(nn.Module):
             config.vocab_size,
             config.hidden_size,
             quant_config=quant_config,
-            prefix=f"{prefix}.embed_tokens",
-        )
+            prefix=f"{prefix}.embed_tokens")
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Starcoder2DecoderLayer(
@@ -239,8 +227,9 @@ class Starcoder2Model(nn.Module):
             prefix=f"{prefix}.layers",
         )
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -343,7 +332,7 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)

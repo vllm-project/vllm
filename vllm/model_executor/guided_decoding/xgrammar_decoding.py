@@ -16,7 +16,6 @@ from vllm.logger import init_logger
 try:
     import xgrammar as xgr
     from xgrammar.base import _core as xgr_core
-
     xgr_installed = True
 except ImportError:
     xgr_installed = False
@@ -38,25 +37,21 @@ logger = init_logger(__name__)
 
 # TODO: passing batch size to max threads here
 def get_local_xgrammar_guided_decoding_logits_processor(
-    guided_params: GuidedDecodingParams,
-    tokenizer: PreTrainedTokenizer,
-    model_config: ModelConfig,
-    reasoner: Reasoner | None,
-    max_threads: int = 8,
-):
-    config = GrammarConfig.from_guided_params(
-        guided_params=guided_params,
-        model_config=model_config,
-        tokenizer=tokenizer,
-        max_threads=max_threads,
-    )
+        guided_params: GuidedDecodingParams,
+        tokenizer: PreTrainedTokenizer,
+        model_config: ModelConfig,
+        reasoner: Reasoner | None,
+        max_threads: int = 8):
+    config = GrammarConfig.from_guided_params(guided_params=guided_params,
+                                              model_config=model_config,
+                                              tokenizer=tokenizer,
+                                              max_threads=max_threads)
     return XGrammarLogitsProcessor(config, reasoner)
 
 
 @dataclass(frozen=True)
 class TokenizerData:
     """Immutable container for cached tokenizer data."""
-
     encoded_vocab: list[str] = field(default_factory=list)
     stop_token_ids: list[int] | None = None
     # These fields are mutually exclusive: `backend_str` is used to create a
@@ -67,13 +62,12 @@ class TokenizerData:
 
     def __post_init__(self):
         # Check for mutual exclusive
-        assert not (self.backend_str and self.vocab_type
-                    ), "backend_str and vocab_type are mutual exclusive"
+        assert not (self.backend_str and self.vocab_type), \
+            "backend_str and vocab_type are mutual exclusive"
 
 
 class TokenizerDataCache:
     """Cache manager for tokenizer data to avoid repeated processing."""
-
     _cache: dict[int, TokenizerData] = {}
 
     @classmethod
@@ -99,8 +93,9 @@ class TokenizerDataCache:
             backend_str = ""
             vocab_type = xgr.VocabType.RAW
 
-            if (stop_token_ids is None and hasattr(tokenizer, "eos_token_id")
-                    and tokenizer.eos_token_id is not None):
+            if stop_token_ids is None and hasattr(
+                    tokenizer,
+                    "eos_token_id") and tokenizer.eos_token_id is not None:
                 stop_token_ids = [tokenizer.eos_token_id]
 
             if isinstance(tokenizer, PreTrainedTokenizerFast):
@@ -115,8 +110,7 @@ class TokenizerDataCache:
                 encoded_vocab=encoded_vocab,
                 stop_token_ids=stop_token_ids,
                 backend_str=backend_str,
-                vocab_type=vocab_type,
-            )
+                vocab_type=vocab_type)
 
         return cls._cache[tokenizer_hash]
 
@@ -128,7 +122,6 @@ class GrammarCompilerCache:
     This cache reduces the overhead of creating new compiler instances when
     using the same tokenizer configuration.
     """
-
     _cache: dict[str, xgr.GrammarCompiler] = {}
 
     @classmethod
@@ -152,18 +145,14 @@ class GrammarCompilerCache:
             if config_data.backend_str:
                 tokenizer_info = xgr.TokenizerInfo._create_from_handle(
                     xgr_core.TokenizerInfo.from_huggingface(
-                        config_data.encoded_vocab,
-                        config_data.backend_str,
-                        config.vocab_size,
-                        config_data.stop_token_ids,
-                    ))
+                        config_data.encoded_vocab, config_data.backend_str,
+                        config.vocab_size, config_data.stop_token_ids))
             else:
                 tokenizer_info = xgr.TokenizerInfo(
                     config_data.encoded_vocab,
                     config_data.vocab_type,
                     vocab_size=config.vocab_size,
-                    stop_token_ids=config_data.stop_token_ids,
-                )
+                    stop_token_ids=config_data.stop_token_ids)
             cls._cache[cache_key] = xgr.GrammarCompiler(
                 tokenizer_info, max_threads=config.max_threads)
 
@@ -173,7 +162,6 @@ class GrammarCompilerCache:
 @dataclass
 class GrammarConfig:
     """Serializable configuration for grammar compilation"""
-
     tokenizer_hash: int
     vocab_size: int
     json_str: str | None = None
@@ -184,13 +172,12 @@ class GrammarConfig:
     tokenizer_data: TokenizerData | None = None
 
     @classmethod
-    def from_guided_params(
-        cls,
-        guided_params: GuidedDecodingParams,
-        model_config: ModelConfig,
-        tokenizer: PreTrainedTokenizer,
-        max_threads: int = 8,
-    ) -> GrammarConfig:
+    def from_guided_params(cls,
+                           guided_params: GuidedDecodingParams,
+                           model_config: ModelConfig,
+                           tokenizer: PreTrainedTokenizer,
+                           max_threads: int = 8) -> GrammarConfig:
+
         tokenizer_hash = hash(tokenizer)
         tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
 
@@ -200,8 +187,8 @@ class GrammarConfig:
             else:
                 json_str = guided_params.json
 
-            any_whitespace = ("disable-any-whitespace"
-                              not in guided_params.backend_options())
+            any_whitespace = 'disable-any-whitespace' not in \
+                    guided_params.backend_options()
 
             # Check and log if model with xgrammar and whitespace have history
             # of runaway generation of whitespaces.
@@ -210,10 +197,10 @@ class GrammarConfig:
             # https://github.com/mlc-ai/xgrammar/issues/212
             model_with_warn = None
 
-            if "Mistral" in model_config.model:
-                model_with_warn = "Mistral"
-            elif "Qwen" in model_config.model:
-                model_with_warn = "Qwen"
+            if 'Mistral' in model_config.model:
+                model_with_warn = 'Mistral'
+            elif 'Qwen' in model_config.model:
+                model_with_warn = 'Qwen'
 
             if model_with_warn is not None and any_whitespace:
                 msg = (f"{model_with_warn} "
@@ -230,14 +217,12 @@ class GrammarConfig:
             except RuntimeError as err:
                 raise ValueError(str(err)) from err
 
-            return cls(
-                json_str=json_str,
-                vocab_size=model_config.hf_text_config.vocab_size,
-                tokenizer_hash=tokenizer_hash,
-                max_threads=max_threads,
-                tokenizer_data=tokenizer_data,
-                any_whitespace=any_whitespace,
-            )
+            return cls(json_str=json_str,
+                       vocab_size=model_config.hf_text_config.vocab_size,
+                       tokenizer_hash=tokenizer_hash,
+                       max_threads=max_threads,
+                       tokenizer_data=tokenizer_data,
+                       any_whitespace=any_whitespace)
         elif guided_params.grammar:
             # XGrammar only supports GBNF grammars, so we must convert Lark
             if grammar_is_likely_lark(guided_params.grammar):
@@ -260,13 +245,11 @@ class GrammarConfig:
             except RuntimeError as err:
                 raise ValueError(str(err)) from err
 
-            return cls(
-                grammar_str=grammar_str,
-                vocab_size=model_config.hf_text_config.vocab_size,
-                tokenizer_hash=tokenizer_hash,
-                max_threads=max_threads,
-                tokenizer_data=tokenizer_data,
-            )
+            return cls(grammar_str=grammar_str,
+                       vocab_size=model_config.hf_text_config.vocab_size,
+                       tokenizer_hash=tokenizer_hash,
+                       max_threads=max_threads,
+                       tokenizer_data=tokenizer_data)
         elif guided_params.json_object:
             return cls(
                 json_object=True,
@@ -298,21 +281,20 @@ class GrammarConfig:
     def escape_ebnf_string(s: str) -> str:
         """Escape special characters in a EBNF string."""
         # Escape double quotes and backslashes
-        return re.sub(r'(["\\])', r"\\\1", s)
+        return re.sub(r'(["\\])', r'\\\1', s)
 
     @staticmethod
     def choice_as_grammar(choice: List[str] | None) -> str:
         if choice is None:
             raise ValueError("Choice is not set")
         escaped_choices = (GrammarConfig.escape_ebnf_string(c) for c in choice)
-        grammar = "root ::= " + " | ".join(f'"{c}"' for c in escaped_choices)
+        grammar = ('root ::= ' + ' | '.join(f'"{c}"' for c in escaped_choices))
         return grammar
 
 
 @dataclass
 class XGrammarLogitsProcessor:
     """Wrapper class to support pickle protocol"""
-
     config: GrammarConfig
     reasoner: Reasoner | None = None
 
@@ -323,11 +305,11 @@ class XGrammarLogitsProcessor:
     prefilled: bool = field(default=False)
 
     def __getstate__(self) -> dict[str, Any]:
-        return {"config": self.config, "reasoner": self.reasoner}
+        return {'config': self.config, 'reasoner': self.reasoner}
 
     def __setstate__(self, state: dict[str, Any]):
-        self.config = state["config"]
-        self.reasoner = state["reasoner"]
+        self.config = state['config']
+        self.reasoner = state['reasoner']
 
         self.ctx = None
         self.matchers = []
@@ -341,8 +323,9 @@ class XGrammarLogitsProcessor:
             compiler = GrammarCompilerCache.get_compiler(self.config)
             if self.config.json_str is not None:
                 any_whitespace = self.config.any_whitespace
-                self.ctx = compiler.compile_json_schema(
-                    self.config.json_str, any_whitespace=any_whitespace)
+                self.ctx = compiler\
+                    .compile_json_schema(self.config.json_str,
+                                         any_whitespace=any_whitespace)
             elif self.config.grammar_str is not None:
                 self.ctx = compiler.compile_grammar(self.config.grammar_str)
             elif self.config.json_object:
@@ -353,9 +336,11 @@ class XGrammarLogitsProcessor:
 
     def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
+
         # Skip the structured logits processing if reasoning is not finished.
         # reasoner is not None only when `--enable-reasoning` is set.
-        if self.reasoner is not None and not self.reasoner.is_reasoning_end(
+        if self.reasoner is not None and \
+        not self.reasoner.is_reasoning_end(
                 input_ids):
             return scores
 
@@ -406,7 +391,7 @@ class XGrammarLogitsProcessor:
 
     def clone(self) -> XGrammarLogitsProcessor:
         """Create a new instance with shared compiled grammar
-        but separate state"""
+          but separate state"""
         new_processor = XGrammarLogitsProcessor(self.config, self.reasoner)
 
         # Share the compiled grammar context (immutable after compilation)
@@ -419,7 +404,7 @@ class XGrammarLogitsProcessor:
             ]
 
         # Create a new token bitmask with the same size
-        if hasattr(self, "token_bitmask") and self.token_bitmask is not None:
+        if hasattr(self, 'token_bitmask') and self.token_bitmask is not None:
             new_processor.token_bitmask = self.token_bitmask
 
         # Copy simple attributes

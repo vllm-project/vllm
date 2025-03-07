@@ -41,10 +41,10 @@ def url_images() -> dict[str, Image.Image]:
 
 def get_supported_suffixes() -> tuple[str, ...]:
     # We should at least test the file types mentioned in GPT-4 with Vision
-    OPENAI_SUPPORTED_SUFFIXES = (".png", ".jpeg", ".jpg", ".webp", ".gif")
+    OPENAI_SUPPORTED_SUFFIXES = ('.png', '.jpeg', '.jpg', '.webp', '.gif')
 
     # Additional file types that are supported by us
-    EXTRA_SUPPORTED_SUFFIXES = (".bmp", ".tiff")
+    EXTRA_SUPPORTED_SUFFIXES = ('.bmp', '.tiff')
 
     return OPENAI_SUPPORTED_SUFFIXES + EXTRA_SUPPORTED_SUFFIXES
 
@@ -77,14 +77,14 @@ async def test_fetch_image_base64(url_images: dict[str, Image.Image],
         try:
             mime_type = mimetypes.types_map[suffix]
         except KeyError:
-            pytest.skip("No MIME type")
+            pytest.skip('No MIME type')
 
     with NamedTemporaryFile(suffix=suffix) as f:
         try:
             url_image.save(f.name)
         except Exception as e:
-            if e.args[0] == "cannot write mode RGBA as JPEG":
-                pytest.skip("Conversion not supported")
+            if e.args[0] == 'cannot write mode RGBA as JPEG':
+                pytest.skip('Conversion not supported')
 
             raise
 
@@ -110,11 +110,9 @@ async def test_fetch_image_local_files(image_url: str):
         local_connector = MediaConnector(allowed_local_media_path=temp_dir)
 
         origin_image = connector.fetch_image(image_url)
-        origin_image.save(
-            os.path.join(temp_dir, os.path.basename(image_url)),
-            quality=100,
-            icc_profile=origin_image.info.get("icc_profile"),
-        )
+        origin_image.save(os.path.join(temp_dir, os.path.basename(image_url)),
+                          quality=100,
+                          icc_profile=origin_image.info.get('icc_profile'))
 
         image_async = await local_connector.fetch_image_async(
             f"file://{temp_dir}/{os.path.basename(image_url)}")
@@ -151,35 +149,35 @@ def test_repeat_and_pad_placeholder_tokens(model):
             2,
             "<image><image>",
             [32000, 32000],
-            [{"offset": 0, "length": 2}],
+            [{ "offset": 0, "length": 2 }],
         ),
         (
             "<image><image>",
             2,
             "<image><image><image>",
             [32000, 32000, 32000],
-            [{"offset": 0, "length": 2}],
+            [{ "offset": 0, "length": 2 }],
         ),
         (
             "<image><image>",
             [3, 2],
             "<image><image><image><image><image>",
             [32000, 32000, 32000, 32000, 32000],
-            [{"offset": 0, "length": 3}, {"offset": 3, "length": 2}],
+            [{ "offset": 0, "length": 3 }, { "offset": 3, "length": 2 }],
         ),
         (
             "Image:<image>Image:<image>!",
             [3, 2],
             "Image:<image><image><image>Image:<image><image>!",
             [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
-            [{"offset": 2, "length": 3}, {"offset": 7, "length": 2}],
+            [{ "offset": 2, "length": 3 }, { "offset": 7, "length": 2 }],
         ),
         (
             "<image>",
             [3, 2],
             "<image><image><image>",
             [32000, 32000, 32000],
-            [{"offset": 0, "length": 3}],
+            [{ "offset": 0, "length": 3 }],
         ),
     ]  # yapf: disable
 
@@ -213,6 +211,7 @@ class TestCase(NamedTuple):
 
 
 def test_merge_and_sort_multimodal_metadata():
+
     test_cases = [
         # Single modality should return result as is but flattened
         TestCase(
@@ -230,6 +229,7 @@ def test_merge_and_sort_multimodal_metadata():
             ],
             expected_hashes=["hash1", "hash2"],
         ),
+
         # Single modality without hashes return None for mm hash.
         TestCase(
             mm_positions={
@@ -246,6 +246,7 @@ def test_merge_and_sort_multimodal_metadata():
             ],
             expected_hashes=None,
         ),
+
         # Multiple modalities with hashes should return sorted modalities
         # and flattened ranges and hashes.
         TestCase(
@@ -257,7 +258,7 @@ def test_merge_and_sort_multimodal_metadata():
                 "audio": [
                     PlaceholderRange(offset=0, length=2),
                     PlaceholderRange(offset=2, length=3),
-                ],
+                ]
             },
             mm_hashes={
                 "image": ["image_hash1", "image_hash2"],
@@ -271,12 +272,10 @@ def test_merge_and_sort_multimodal_metadata():
                 PlaceholderRange(offset=11, length=5),
             ],
             expected_hashes=[
-                "audio_hash1",
-                "audio_hash2",
-                "image_hash1",
-                "image_hash2",
+                "audio_hash1", "audio_hash2", "image_hash1", "image_hash2"
             ],
         ),
+
         # Multiple modalities without hashes should return sorted modalities
         # and flattened ranges and None.
         TestCase(
@@ -288,7 +287,7 @@ def test_merge_and_sort_multimodal_metadata():
                 "audio": [
                     PlaceholderRange(offset=0, length=2),
                     PlaceholderRange(offset=2, length=3),
-                ],
+                ]
             },
             mm_hashes=None,
             expected_modalities=["audio", "image"],
@@ -300,6 +299,7 @@ def test_merge_and_sort_multimodal_metadata():
             ],
             expected_hashes=None,
         ),
+
         # Three modalities
         TestCase(
             mm_positions={
@@ -314,12 +314,12 @@ def test_merge_and_sort_multimodal_metadata():
                     PlaceholderRange(offset=3, length=4),
                     PlaceholderRange(offset=7, length=5),
                     PlaceholderRange(offset=12, length=6),
-                ],
+                ]
             },
             mm_hashes={
                 "image": ["image_hash1", "image_hash2"],
                 "audio": ["audio_hash1"],
-                "video": ["video_hash1", "video_hash2", "video_hash3"],
+                "video": ["video_hash1", "video_hash2", "video_hash3"]
             },
             expected_modalities=["audio", "video", "image"],
             expected_ranges=[
@@ -331,23 +331,14 @@ def test_merge_and_sort_multimodal_metadata():
                 PlaceholderRange(offset=22, length=8),
             ],
             expected_hashes=[
-                "audio_hash1",
-                "video_hash1",
-                "video_hash2",
-                "video_hash3",
-                "image_hash1",
-                "image_hash2",
+                "audio_hash1", "video_hash1", "video_hash2", "video_hash3",
+                "image_hash1", "image_hash2"
             ],
         ),
     ]
 
-    for (
-            mm_positions,
-            mm_hashes,
-            expected_modalities,
-            expected_ranges,
-            expected_hashes,
-    ) in test_cases:
+    for (mm_positions, mm_hashes, expected_modalities, expected_ranges,
+         expected_hashes) in test_cases:
         modalities, ranges, hashes = merge_and_sort_multimodal_metadata(
             mm_positions, mm_hashes)
 
@@ -357,7 +348,9 @@ def test_merge_and_sort_multimodal_metadata():
 
 
 def test_merge_and_sort_multimodal_metadata_with_interleaving():
+
     test_cases = [
+
         # <image> <audio> <image> <audio>
         TestCase(
             mm_positions={
@@ -368,7 +361,7 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                 "audio": [
                     PlaceholderRange(offset=5, length=2),
                     PlaceholderRange(offset=11, length=4),
-                ],
+                ]
             },
             mm_hashes={
                 "image": ["image_hash1", "image_hash2"],
@@ -378,6 +371,7 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
             expected_ranges=[],
             expected_hashes=None,
         ),
+
         # <image> <image> <video> <audio> <image>
         TestCase(
             mm_positions={
@@ -391,7 +385,7 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                 ],
                 "video": [
                     PlaceholderRange(offset=8, length=5),
-                ],
+                ]
             },
             mm_hashes=None,
             expected_modalities=[],

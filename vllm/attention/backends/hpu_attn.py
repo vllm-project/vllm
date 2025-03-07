@@ -72,7 +72,6 @@ class HPUAttentionBackend(AttentionBackend):
 @dataclass
 class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     """Metadata for HPUAttentionbackend."""
-
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
@@ -134,16 +133,14 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        self.prefill_usefusedsdpa = os.getenv("VLLM_PROMPT_USE_FUSEDSDPA",
-                                              "0").lower() in ["1", "true"]
+        self.prefill_usefusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
+                                              '0').lower() in ['1', 'true']
         self.fused_scaled_dot_product_attention = None
         if self.prefill_usefusedsdpa:
-            assert (
-                alibi_slopes is None
-            ), "Prefill with FusedSDPA not supported with alibi slopes!"
+            assert alibi_slopes is None, \
+                'Prefill with FusedSDPA not supported with alibi slopes!'
             try:
                 from habana_frameworks.torch.hpex.kernels import FusedSDPA
-
                 self.fused_scaled_dot_product_attention = ModuleFusedSDPA(
                     FusedSDPA)
             except ImportError:
@@ -214,29 +211,22 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             # Prompt run.
             if not self.prefill_usefusedsdpa:
                 # TODO: move this outside of model
-                assert (
-                    attn_metadata.attn_bias is not None
-                ), "attn_bias must be set before calling model.forward!"
+                assert attn_metadata.attn_bias is not None, \
+                        'attn_bias must be set before calling model.forward!'
                 attn_bias = attn_metadata.attn_bias
                 if self.alibi_slopes is not None:
-                    position_bias = _make_alibi_bias(
-                        self.alibi_slopes,
-                        self.num_kv_heads,
-                        attn_bias.dtype,
-                        attn_bias.shape[-1],
-                    )
+                    position_bias = _make_alibi_bias(self.alibi_slopes,
+                                                     self.num_kv_heads,
+                                                     attn_bias.dtype,
+                                                     attn_bias.shape[-1])
                     attn_bias = attn_bias.tile((1, self.num_kv_heads, 1, 1))
                     attn_bias.add_(position_bias)
             else:
                 attn_bias = None
 
             query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
-            kv_shape = (
-                batch_size,
-                seq_len_kv,
-                self.num_kv_heads,
-                self.head_size,
-            )
+            kv_shape = (batch_size, seq_len_kv, self.num_kv_heads,
+                        self.head_size)
             out = ops.prompt_attention(
                 query.view(query_shape),
                 key.view(kv_shape),
@@ -267,8 +257,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 batch2block_matmul_op=self.batch2block_matmul,
                 block2batch_matmul_op=self.block2batch_matmul,
                 keys_fetch_func=self.k_cache.fetch_from_cache,
-                values_fetch_func=self.v_cache.fetch_from_cache,
-            )
+                values_fetch_func=self.v_cache.fetch_from_cache)
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
 

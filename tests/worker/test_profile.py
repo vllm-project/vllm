@@ -43,7 +43,6 @@ def test_gpu_memory_profiling():
         return (free, mock_total_bytes)
 
     from unittest.mock import patch
-
     with patch("torch.cuda.mem_get_info", side_effect=mock_mem_info):
         # Load the model so we can profile it
         worker.init_device()
@@ -56,10 +55,8 @@ def test_gpu_memory_profiling():
     # 9.0 GiB should be the utilization target
     # 8.28 GiB should be available for the KV cache
     block_size = CacheEngine.get_cache_block_size(
-        engine_config.cache_config,
-        engine_config.model_config,
-        engine_config.parallel_config,
-    )
+        engine_config.cache_config, engine_config.model_config,
+        engine_config.parallel_config)
 
     expected_blocks = (8.28 * 1024**3) // block_size
 

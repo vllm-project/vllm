@@ -40,8 +40,8 @@ def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
 @pytest.fixture(scope="module")
 def tokenizer_name(model_name: str,
                    zephyr_lora_added_tokens_files: str):  # noqa: F811
-    return (zephyr_lora_added_tokens_files if
-            (model_name == "zephyr-lora2") else model_name)
+    return zephyr_lora_added_tokens_files if (
+        model_name == "zephyr-lora2") else model_name
 
 
 @pytest_asyncio.fixture
@@ -68,20 +68,18 @@ async def test_tokenize_completions(
         prompt = "vllm1 This is a test prompt."
         tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
 
-        response = requests.post(
-            server.url_for("tokenize"),
-            json={
-                "add_special_tokens": add_special,
-                "model": model_name,
-                "prompt": prompt,
-            },
-        )
+        response = requests.post(server.url_for("tokenize"),
+                                 json={
+                                     "add_special_tokens": add_special,
+                                     "model": model_name,
+                                     "prompt": prompt
+                                 })
         response.raise_for_status()
 
         assert response.json() == {
             "tokens": tokens,
             "count": len(tokens),
-            "max_model_len": 8192,
+            "max_model_len": 8192
         }
 
 
@@ -101,20 +99,16 @@ async def test_tokenize_chat(
 
     for add_generation in [False, True]:
         for add_special in [False, True]:
-            conversation = [
-                {
-                    "role": "user",
-                    "content": "Hi there!"
-                },
-                {
-                    "role": "assistant",
-                    "content": "Nice to meet you!"
-                },
-                {
-                    "role": "user",
-                    "content": "Can I ask a question? vllm1"
-                },
-            ]
+            conversation = [{
+                "role": "user",
+                "content": "Hi there!"
+            }, {
+                "role": "assistant",
+                "content": "Nice to meet you!"
+            }, {
+                "role": "user",
+                "content": "Can I ask a question? vllm1"
+            }]
             for continue_final in [False, True]:
                 if add_generation and continue_final:
                     continue
@@ -128,27 +122,26 @@ async def test_tokenize_chat(
                     add_generation_prompt=add_generation,
                     continue_final_message=continue_final,
                     conversation=conversation,
-                    tokenize=False,
-                )
+                    tokenize=False)
                 tokens = tokenizer.encode(prompt,
                                           add_special_tokens=add_special)
 
-                response = requests.post(
-                    server.url_for("tokenize"),
-                    json={
-                        "add_generation_prompt": add_generation,
-                        "continue_final_message": continue_final,
-                        "add_special_tokens": add_special,
-                        "messages": conversation,
-                        "model": model_name,
-                    },
-                )
+                response = requests.post(server.url_for("tokenize"),
+                                         json={
+                                             "add_generation_prompt":
+                                             add_generation,
+                                             "continue_final_message":
+                                             continue_final,
+                                             "add_special_tokens": add_special,
+                                             "messages": conversation,
+                                             "model": model_name
+                                         })
                 response.raise_for_status()
 
                 assert response.json() == {
                     "tokens": tokens,
                     "count": len(tokens),
-                    "max_model_len": 8192,
+                    "max_model_len": 8192
                 }
 
 
@@ -169,13 +162,11 @@ async def test_detokenize(
     prompt = "This is a test prompt. vllm1"
     tokens = tokenizer.encode(prompt, add_special_tokens=False)
 
-    response = requests.post(
-        server.url_for("detokenize"),
-        json={
-            "model": model_name,
-            "tokens": tokens
-        },
-    )
+    response = requests.post(server.url_for("detokenize"),
+                             json={
+                                 "model": model_name,
+                                 "tokens": tokens
+                             })
     response.raise_for_status()
 
     assert response.json() == {"prompt": prompt}

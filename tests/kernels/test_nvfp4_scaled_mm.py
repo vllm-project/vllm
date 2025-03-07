@@ -7,10 +7,8 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 if not current_platform.has_device_capability(100):
-    pytest.skip(
-        reason="Nvfp4 Requires compute capability of 10 or above.",
-        allow_module_level=True,
-    )
+    pytest.skip(reason="Nvfp4 Requires compute capability of 10 or above.",
+                allow_module_level=True)
 
 DTYPES = [torch.float16, torch.bfloat16]
 # m, n, k
@@ -19,34 +17,34 @@ PAD_SHAPES = [(150, 128, 64), (128, 128, 96)]
 SHAPES.extend(PAD_SHAPES)
 
 SEEDS = [42]
-CUDA_DEVICES = ["cuda:0"]
+CUDA_DEVICES = ['cuda:0']
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
 kE2M1ToFloatArray = [
-    0.0,
+    0.,
     0.5,
-    1.0,
+    1.,
     1.5,
-    2.0,
-    3.0,
-    4.0,
-    6.0,
+    2.,
+    3.,
+    4.,
+    6.,
 ]
 
 
 def e2m1_to_fp32(int4_value):
-    signBit = int4_value & 0x8
+    signBit = (int4_value & 0x8)
     int4_absValue = int4_value & 0x7
     float_result = kE2M1ToFloatArray[int4_absValue]
-    if signBit:
+    if (signBit):
         float_result = -float_result
     return float_result
 
 
 def break_fp4_bytes(a, dtype):
-    assert a.dtype == torch.uint8
+    assert (a.dtype == torch.uint8)
     m, n = a.shape
     a = a.flatten()
     # Get upper 4 bits
@@ -93,38 +91,23 @@ def dequantize_to_dtype(tensor_fp4,
     return out
 
 
-def get_ref_results(
-    a_fp4,
-    b_fp4,
-    a_sf,
-    b_sf,
-    a_global_scale,
-    b_global_scale,
-    m,
-    n,
-    dtype,
-    block_size,
-    device,
-):
+def get_ref_results(a_fp4, b_fp4, a_sf, b_sf, a_global_scale, b_global_scale,
+                    m, n, dtype, block_size, device):
     _, m_k = a_fp4.shape
     _, n_k = b_fp4.shape
-    assert m_k == n_k
-    a_in_dtype = dequantize_to_dtype(
-        a_fp4,
-        a_sf,
-        a_global_scale,
-        dtype=dtype,
-        device=device,
-        block_size=block_size,
-    )
-    b_in_dtype = dequantize_to_dtype(
-        b_fp4,
-        b_sf,
-        b_global_scale,
-        dtype=dtype,
-        device=device,
-        block_size=block_size,
-    )
+    assert (m_k == n_k)
+    a_in_dtype = dequantize_to_dtype(a_fp4,
+                                     a_sf,
+                                     a_global_scale,
+                                     dtype=dtype,
+                                     device=device,
+                                     block_size=block_size)
+    b_in_dtype = dequantize_to_dtype(b_fp4,
+                                     b_sf,
+                                     b_global_scale,
+                                     dtype=dtype,
+                                     device=device,
+                                     block_size=block_size)
     return torch.matmul(a_in_dtype, b_in_dtype.t())
 
 
@@ -150,23 +133,14 @@ def test_nvfp4_gemm(
                       torch.amax(a_dtype.flatten(), dim=-1)).to(torch.float32)
     b_global_scale = ((FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) /
                       torch.amax(b_dtype.flatten(), dim=-1)).to(torch.float32)
-    alpha = 1.0 / (a_global_scale * b_global_scale)
+    alpha = 1. / (a_global_scale * b_global_scale)
     a_fp4, a_scale_interleaved = ops.scaled_fp4_quant(a_dtype, a_global_scale)
     b_fp4, b_scale_interleaved = ops.scaled_fp4_quant(b_dtype, b_global_scale)
 
-    expected_out = get_ref_results(
-        a_fp4,
-        b_fp4,
-        a_scale_interleaved,
-        b_scale_interleaved,
-        a_global_scale,
-        b_global_scale,
-        m,
-        n,
-        dtype,
-        block_size,
-        device,
-    )
+    expected_out = get_ref_results(a_fp4, b_fp4, a_scale_interleaved,
+                                   b_scale_interleaved, a_global_scale,
+                                   b_global_scale, m, n, dtype, block_size,
+                                   device)
     out = ops.cutlass_scaled_fp4_mm(a_fp4, b_fp4, a_scale_interleaved,
                                     b_scale_interleaved, alpha, dtype)
 

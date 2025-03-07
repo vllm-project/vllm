@@ -39,6 +39,7 @@ async def test_completion_return_tokens_as_token_ids_completion(
         request_args["return_tokens_as_token_ids"] = True
 
     async with server.get_async_client() as client:
+
         completion = await client.completions.create(
             model=MODEL_NAME,
             # Include Unicode characters to test for dividing a single
@@ -49,8 +50,7 @@ async def test_completion_return_tokens_as_token_ids_completion(
             temperature=0,
             max_tokens=10,
             logprobs=1,
-            extra_body=request_args,
-        )
+            extra_body=request_args)
 
         text = completion.choices[0].text
         token_strs = completion.choices[0].logprobs.tokens
@@ -84,21 +84,17 @@ async def test_chat_return_tokens_as_token_ids_completion(server_fixture):
             # Include Unicode characters to test for dividing a single
             # character across multiple tokens: 🎉 is [28705, 31862] for the
             # Zephyr tokenizer
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You like to respond in only emojis, like 🎉",
-                },
-                {
-                    "role": "user",
-                    "content": "Please write some emojis: 🐱🐶🎉"
-                },
-            ],
+            messages=[{
+                "role": "system",
+                "content": "You like to respond in only emojis, like 🎉"
+            }, {
+                "role": "user",
+                "content": "Please write some emojis: 🐱🐶🎉"
+            }],
             temperature=0,
             max_tokens=8,
             logprobs=True,
-            extra_body=request_args,
-        )
+            extra_body=request_args)
 
         text = response.choices[0].message.content
         tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)

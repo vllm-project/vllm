@@ -62,25 +62,21 @@ def apply_w8a8_block_fp8_linear(
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],
                                                      column_major_scales=True)
-        output = ops.cutlass_scaled_mm(
-            q_input,
-            weight.T,
-            out_dtype=input.dtype,
-            scale_a=x_scale,
-            scale_b=weight_scale.T,
-        )
+        output = ops.cutlass_scaled_mm(q_input,
+                                       weight.T,
+                                       out_dtype=input.dtype,
+                                       scale_a=x_scale,
+                                       scale_b=weight_scale.T)
     else:
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],
                                                      column_major_scales=False)
-        output = w8a8_block_fp8_matmul(
-            q_input,
-            weight,
-            x_scale,
-            weight_scale,
-            block_size,
-            output_dtype=input.dtype,
-        )
+        output = w8a8_block_fp8_matmul(q_input,
+                                       weight,
+                                       x_scale,
+                                       weight_scale,
+                                       block_size,
+                                       output_dtype=input.dtype)
     if bias is not None:
         output = output + bias
     return output.to(dtype=input.dtype).view(*output_shape)
@@ -121,35 +117,30 @@ def apply_fp8_linear_generic(
     # View input as 2D matrix for fp8 methods
     input = input.view(-1, input.shape[-1])
 
-    weight_group_shape = _normalize_quant_group_shape(weight,
-                                                      weight_group_shape)
+    weight_group_shape = _normalize_quant_group_shape(\
+        weight, weight_group_shape)
     input_group_shape = _normalize_quant_group_shape(input, input_group_shape)
 
     def is_dim_blocked(dim, shape, group_shape):
         return group_shape < shape[dim] and group_shape > 1
 
-    if (is_dim_blocked(0, weight.shape, weight_group_shape[0])
-            and is_dim_blocked(1, weight.shape, weight_group_shape[1])
-            and input_group_shape == (1, weight_group_shape[1])):
+    if is_dim_blocked(0, weight.shape, weight_group_shape[0])\
+     and is_dim_blocked(1, weight.shape, weight_group_shape[1]) and\
+     input_group_shape == (1, weight_group_shape[1]):
         return apply_w8a8_block_fp8_linear(
             input,
             weight,
             list(weight_group_shape),
             weight_scale,
-            cutlass_block_fp8_supported=cutlass_block_fp8_supported,
-        )
+            cutlass_block_fp8_supported=cutlass_block_fp8_supported)
     else:
         # Despite having linear in the it doesn't conform to
         # `torch.nn.functional.linear` which is defined as `input @ weight.T`
         # so we explicitly transpose the weight matrix here
-        return apply_fp8_linear(
-            input,
-            weight.T,
-            weight_scale.T,
-            cutlass_fp8_supported=cutlass_fp8_supported,
-            use_per_token_if_dynamic=(input_group_shape == (1,
-                                                            input.shape[1])),
-        )
+        return apply_fp8_linear(input, weight.T, weight_scale.T,
+                    cutlass_fp8_supported=cutlass_fp8_supported,
+                         use_per_token_if_dynamic=\
+                             (input_group_shape == (1, input.shape[1])))
 
 
 def input_to_float8(
@@ -307,7 +298,7 @@ def per_token_group_quant_fp8(
     if dtype is None:
         dtype = (torch.float8_e4m3fnuz
                  if current_platform.is_rocm() else torch.float8_e4m3fn)
-    assert x.shape[-1] % group_size == 0, (
+    assert (x.shape[-1] % group_size == 0), (
         f"the last dimension of `x` {x.shape[-1]} must be divisible "
         f"by `group_size` {group_size}")
     assert x.stride(-1) == 1, "`x` groups must be contiguous"

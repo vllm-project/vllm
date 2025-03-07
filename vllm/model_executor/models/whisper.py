@@ -357,8 +357,8 @@ class WhisperEncoder(nn.Module):
         embed_dim = config.d_model
         self.num_mel_bins = config.num_mel_bins
         self.max_source_positions = config.max_source_positions
-        self.embed_scale = math.sqrt(
-            embed_dim) if config.scale_embedding else 1.0
+        self.embed_scale = (math.sqrt(embed_dim)
+                            if config.scale_embedding else 1.0)
 
         self.conv1 = nn.Conv1d(self.num_mel_bins,
                                embed_dim,
@@ -409,8 +409,8 @@ class WhisperDecoder(nn.Module):
         self.padding_idx = config.pad_token_id
         self.max_target_positions = config.max_target_positions
         self.max_source_positions = config.max_source_positions
-        self.embed_scale = math.sqrt(
-            config.d_model) if config.scale_embedding else 1.0
+        self.embed_scale = (math.sqrt(config.d_model)
+                            if config.scale_embedding else 1.0)
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model,
                                          self.padding_idx)
@@ -636,11 +636,9 @@ class WhisperMultiModalProcessor(
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    WhisperMultiModalProcessor,
-    info=WhisperProcessingInfo,
-    dummy_inputs=WhisperDummyInputsBuilder,
-)
+@MULTIMODAL_REGISTRY.register_processor(WhisperMultiModalProcessor,
+                                        info=WhisperProcessingInfo,
+                                        dummy_inputs=WhisperDummyInputsBuilder)
 class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
                                       SupportsMultiModal, SupportsV0Only):
     packed_modules_mapping = {
@@ -745,7 +743,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
 
 
 def _create_fake_bias_for_k_proj(
-    weights: Iterable[Tuple[str, torch.Tensor]],
+    weights: Iterable[Tuple[str, torch.Tensor]]
 ) -> Iterable[Tuple[str, torch.Tensor]]:
     """
     Create full zeros bias for k_proj weight in self-attn and x-attn layers.

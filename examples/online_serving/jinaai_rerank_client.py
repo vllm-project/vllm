@@ -5,7 +5,6 @@ Jina and Cohere https://jina.ai/reranker
 
 run: vllm serve BAAI/bge-reranker-base
 """
-
 import json
 
 import requests
@@ -21,9 +20,8 @@ data = {
     "What is the capital of France?",
     "documents": [
         "The capital of Brazil is Brasilia.",
-        "The capital of France is Paris.",
-        "Horses and cows are both animals",
-    ],
+        "The capital of France is Paris.", "Horses and cows are both animals"
+    ]
 }
 response = requests.post(url, headers=headers, json=data)
 

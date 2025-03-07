@@ -7,7 +7,7 @@ from vllm import CompletionOutput
 
 def get_test_batch(batch_logprobs_composition: str) -> list[tuple]:
     """Generate logprobs configs for a batch of requests
-
+    
     A given request's logprobs configuration is (1) num_sample_logprobs and (2)
     num_prompt_logprobs. The batch logprobs configuration is the list of request
     logprobs configs.
@@ -79,7 +79,7 @@ def assert_incr_detok_str_matches_non_incr_detok_str(
     msg: str,
 ) -> None:
     """Compare incrementally detok. text to non-incrementally detok. text
-
+    
     Fail if the strings mismatch after non-alphanumeric characters are stripped
     out.
 
@@ -98,15 +98,15 @@ def assert_incr_detok_str_matches_non_incr_detok_str(
                                           tokens
       msg: error message if `assert` fails
     """
-    rgx = r"[^a-zA-Z0-9]+"
-    assert re.sub(rgx, "", incremental_detokenization_str) == re.sub(
-        rgx, "", non_incremental_detokenization_str), msg
+    rgx = r'[^a-zA-Z0-9]+'
+    assert (re.sub(rgx, '', incremental_detokenization_str) == re.sub(
+        rgx, '', non_incremental_detokenization_str)), (msg)
 
 
 def compute_correct_cumulative_logprob(
-    completion_output: CompletionOutput, ) -> float:
+        completion_output: CompletionOutput) -> float:
     """Compute known-good value for evaluating cumulative logprob
-
+    
     Args:
       completion_output: completion output from engine
 

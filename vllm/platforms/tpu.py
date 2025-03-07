@@ -26,22 +26,14 @@ class TpuPlatform(Platform):
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
 
     supported_quantization: list[str] = [
-        "tpu_int8",
-        "compressed-tensors",
-        "compressed_tensors",
+        "tpu_int8", "compressed-tensors", "compressed_tensors"
     ]
 
     @classmethod
-    def get_attn_backend_cls(
-        cls,
-        selected_backend: _Backend,
-        head_size: int,
-        dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
-        block_size: int,
-        use_v1: bool,
-        use_mla: bool,
-    ) -> str:
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool,
+                             use_mla: bool) -> str:
         if (selected_backend != _Backend.PALLAS
                 and selected_backend != _Backend.PALLAS_VLLM_V1):
             logger.info("Cannot use %s backend on TPU.", selected_backend)
@@ -87,28 +79,28 @@ class TpuPlatform(Platform):
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
 
-        assert (vllm_config.speculative_config
-                is None), "TPU does not support speculative decoding"
+        assert vllm_config.speculative_config is None, \
+            "TPU does not support speculative decoding"
 
         if vllm_config.model_config.dtype in (torch.float16, torch.float32):
             logger.warning(
                 "The TPU backend currently does not support %s. "
-                "Using bfloat16 instead.",
-                vllm_config.model_config.dtype,
-            )
+                "Using bfloat16 instead.", vllm_config.model_config.dtype)
             vllm_config.model_config.dtype = torch.bfloat16
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
-                parallel_config.worker_cls = "vllm.v1.worker.tpu_worker.TPUWorker"
+                parallel_config.worker_cls = \
+                    "vllm.v1.worker.tpu_worker.TPUWorker"
             else:
                 if scheduler_config.is_multi_step:
-                    parallel_config.worker_cls = (
-                        "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker")
+                    parallel_config.worker_cls = \
+                        "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
                 else:
-                    parallel_config.worker_cls = "vllm.worker.tpu_worker.TPUWorker"
+                    parallel_config.worker_cls = \
+                        "vllm.worker.tpu_worker.TPUWorker"
 
         # Adjust scheduler config for V1
         # TODO: Add support for these
@@ -116,8 +108,8 @@ class TpuPlatform(Platform):
             logger.warning("[V1][TPU] Disable prefix caching")
             vllm_config.cache_config.enable_prefix_caching = False
 
-        assert (not vllm_config.speculative_config
-                ), "Speculative decoding is not yet supported for TPU backend"
+        assert not vllm_config.speculative_config, (
+            "Speculative decoding is not yet supported for TPU backend")
 
     @classmethod
     def is_pin_memory_available(cls):

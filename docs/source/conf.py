@@ -26,9 +26,9 @@ sys.path.append(os.path.abspath("../.."))
 
 # -- Project information -----------------------------------------------------
 
-project = "vLLM"
-copyright = f"{datetime.datetime.now().year}, vLLM Team"
-author = "the vLLM Team"
+project = 'vLLM'
+copyright = f'{datetime.datetime.now().year}, vLLM Team'
+author = 'the vLLM Team'
 
 # -- General configuration ---------------------------------------------------
 
@@ -52,7 +52,7 @@ myst_enable_extensions = [
 ]
 
 # Add any paths that contain templates here, relative to this directory.
-templates_path = ["_templates"]
+templates_path = ['_templates']
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
@@ -69,14 +69,14 @@ copybutton_prompt_is_regexp = True
 # a list of builtin themes.
 #
 html_title = project
-html_theme = "sphinx_book_theme"
-html_logo = "assets/logos/vllm-logo-text-light.png"
-html_favicon = "assets/logos/vllm-logo-only-light.ico"
+html_theme = 'sphinx_book_theme'
+html_logo = 'assets/logos/vllm-logo-text-light.png'
+html_favicon = 'assets/logos/vllm-logo-only-light.ico'
 html_theme_options = {
-    "path_to_docs": "docs/source",
-    "repository_url": "https://github.com/vllm-project/vllm",
-    "use_repository_button": True,
-    "use_edit_page_button": True,
+    'path_to_docs': 'docs/source',
+    'repository_url': 'https://github.com/vllm-project/vllm',
+    'use_repository_button': True,
+    'use_edit_page_button': True,
 }
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -86,10 +86,10 @@ html_js_files = ["custom.js"]
 html_css_files = ["custom.css"]
 
 myst_url_schemes = {
-    "http": None,
-    "https": None,
-    "mailto": None,
-    "ftp": None,
+    'http': None,
+    'https': None,
+    'mailto': None,
+    'ftp': None,
     "gh-issue": {
         "url":
         "https://github.com/vllm-project/vllm/issues/{{path}}#{{fragment}}",
@@ -115,7 +115,7 @@ myst_url_schemes = {
 }
 
 # see https://docs.readthedocs.io/en/stable/reference/environment-variables.html # noqa
-READTHEDOCS_VERSION_TYPE = os.environ.get("READTHEDOCS_VERSION_TYPE")
+READTHEDOCS_VERSION_TYPE = os.environ.get('READTHEDOCS_VERSION_TYPE')
 if READTHEDOCS_VERSION_TYPE == "tag":
     # remove the warning banner if the version is a tagged release
     header_file = os.path.join(os.path.dirname(__file__),
@@ -129,7 +129,6 @@ if READTHEDOCS_VERSION_TYPE == "tag":
 # Generate additional rst documentation here.
 def setup(app):
     from docs.source.generate_examples import generate_examples
-
     generate_examples()
 
 
@@ -146,8 +145,8 @@ def get_repo_base_and_branch(pr_number):
     response = requests.get(url)
     if response.status_code == 200:
         data = response.json()
-        _cached_base = data["head"]["repo"]["full_name"]
-        _cached_branch = data["head"]["ref"]
+        _cached_base = data['head']['repo']['full_name']
+        _cached_branch = data['head']['ref']
         return _cached_base, _cached_branch
     else:
         logger.error("Failed to fetch PR details: %s", response)
@@ -155,12 +154,12 @@ def get_repo_base_and_branch(pr_number):
 
 
 def linkcode_resolve(domain, info):
-    if domain != "py":
+    if domain != 'py':
         return None
-    if not info["module"]:
+    if not info['module']:
         return None
-    filename = info["module"].replace(".", "/")
-    module = info["module"]
+    filename = info['module'].replace('.', '/')
+    module = info['module']
 
     # try to determine the correct file and line number to link to
     obj = sys.modules[module]
@@ -169,7 +168,7 @@ def linkcode_resolve(domain, info):
     lineno: int = 0
     filename: str = ""
     try:
-        for part in info["fullname"].split("."):
+        for part in info['fullname'].split('.'):
             obj = getattr(obj, part)
 
             if not (inspect.isclass(obj) or inspect.isfunction(obj)
@@ -210,7 +209,7 @@ autodoc_mock_imports = [
     "vllm._C",
     "PIL",
     "numpy",
-    "triton",
+    'triton',
     "tqdm",
     "tensorizer",
     "pynvml",
@@ -229,8 +228,7 @@ for mock_target in autodoc_mock_imports:
             "Potentially problematic mock target (%s) found; "
             "autodoc_mock_imports cannot mock modules that have already "
             "been loaded into sys.modules when the sphinx build starts.",
-            mock_target,
-        )
+            mock_target)
 
 
 class MockedClassDocumenter(autodoc.ClassDocumenter):
@@ -246,10 +244,8 @@ autodoc.ClassDocumenter = MockedClassDocumenter
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
-    "typing_extensions": (
-        "https://typing-extensions.readthedocs.io/en/latest",
-        None,
-    ),
+    "typing_extensions":
+    ("https://typing-extensions.readthedocs.io/en/latest", None),
     "aiohttp": ("https://docs.aiohttp.org/en/stable", None),
     "pillow": ("https://pillow.readthedocs.io/en/stable", None),
     "numpy": ("https://numpy.org/doc/stable", None),

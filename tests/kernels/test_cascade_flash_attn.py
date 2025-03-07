@@ -97,7 +97,7 @@ def test_cascade(
     torch.set_default_device("cuda")
     if not is_fa_version_supported(fa_version):
         pytest.skip(f"Flash attention version {fa_version} not supported due "
-                    f'to: "{fa_version_unsupported_reason(fa_version)}"')
+                    f"to: \"{fa_version_unsupported_reason(fa_version)}\"")
 
     current_platform.seed_everything(0)
 
@@ -139,8 +139,8 @@ def test_cascade(
     assert common_prefix_len % block_size == 0
     num_common_kv_blocks = common_prefix_len // block_size
     # Make sure the first `num_common_kv_blocks` blocks are the same.
-    block_tables[:, :num_common_kv_blocks] = block_tables[
-        0, :num_common_kv_blocks]
+    block_tables[:, :num_common_kv_blocks] = \
+        block_tables[0, :num_common_kv_blocks]
 
     # Run the regular attention.
     ref_output = flash_attn_varlen_func(

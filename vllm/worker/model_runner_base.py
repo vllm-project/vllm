@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-T = TypeVar("T", bound="BroadcastableModelInput")
+T = TypeVar('T', bound="BroadcastableModelInput")
 
 
 def _add_attn_metadata_broadcastable_dict(
@@ -57,7 +57,7 @@ def _init_attn_metadata_from_tensor_dict(
 
 
 def _init_sampling_metadata_from_tensor_dict(  # type: ignore
-        tensor_dict: Dict[str, Any], ) -> Dict[str, Any]:
+        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
     """
     Helper method to initialize SamplingMetadata based on broadcastable
     SamplingMetadata fields.
@@ -85,14 +85,13 @@ def _add_sampling_metadata_broadcastable_dict(
     SamplingMetadata fields.
     """
     if sampling_metadata is not None:
-        tensor_dict[
-            "selected_token_indices"] = sampling_metadata.selected_token_indices
+        tensor_dict["selected_token_indices"] = (
+            sampling_metadata.selected_token_indices)
 
 
 def _init_frozen_model_input_from_tensor_dict(
-    frozen_model_input_cls: Type["ModelRunnerInputBase"],
-    tensor_dict: Dict[str, Any],
-) -> Dict[str, Any]:
+        frozen_model_input_cls: Type["ModelRunnerInputBase"],
+        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
     """
     Helper method to initialize a frozen ModelInput based on broadcastable
     """
@@ -142,12 +141,12 @@ class ModelRunnerInputBase(BroadcastableModelInput):
     ModelRunnerInputBase subclass, add their required fields, and specify how to
     serialize/deserialize a ModelInput for broadcast between workers.
     """
-
     pass
 
 
 class ModelRunnerInputBuilderBase(ABC, Generic[T]):
-    """A builder to create ModelRunnerInputBase objects."""
+    """A builder to create ModelRunnerInputBase objects.
+  """
 
     @abstractmethod
     def prepare(self,
@@ -278,5 +277,5 @@ class InputProcessingError(Exception):
         super().__init__(self.message)
 
     def __str__(self):
-        return ("Failed to prepare inputs for sequence group with request id: "
-                f"{self.request_id}, Error: {self.message}")
+        return "Failed to prepare inputs for sequence group with request id: " \
+                f"{self.request_id}, Error: {self.message}"

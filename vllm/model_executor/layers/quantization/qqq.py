@@ -29,7 +29,7 @@ MARLIN_QQQ_SUPPORTED_SYM = [True]
 
 class QQQConfig(QuantizationConfig):
     """Config class for QQQ
-
+    
     Reference: https://arxiv.org/pdf/2406.09904
     """
 
@@ -187,19 +187,16 @@ class QQQLinearMethod(LinearMethodBase):
             packed_dim=1,
             packed_factor=self.quant_config.pack_factor,
             marlin_tile_size=self.quant_config.tile_size,
-            weight_loader=weight_loader,
-        )
+            weight_loader=weight_loader)
 
-        s_channel = ChannelQuantScaleParameter(
-            data=torch.empty(
-                1,
-                output_size_per_partition,
-                device="cuda",
-                dtype=torch.float,
-            ),
-            weight_loader=weight_loader,
-            output_dim=1,
-        )
+        s_channel = ChannelQuantScaleParameter(data=torch.empty(
+            1,
+            output_size_per_partition,
+            device="cuda",
+            dtype=torch.float,
+        ),
+                                               weight_loader=weight_loader,
+                                               output_dim=1)
 
         if self.quant_config.group_size == -1:
             s_group_data = torch.tensor(
@@ -229,12 +226,10 @@ class QQQLinearMethod(LinearMethodBase):
             output_size_per_partition //
             self.quant_config.min_n_threads) * self.quant_config.max_parallel
 
-        workspace = BasevLLMParameter(
-            data=torch.zeros(max_workspace_size,
-                             device="cuda",
-                             dtype=torch.int),
-            weight_loader=weight_loader,
-        )
+        workspace = BasevLLMParameter(data=torch.zeros(max_workspace_size,
+                                                       device="cuda",
+                                                       dtype=torch.int),
+                                      weight_loader=weight_loader)
 
         layer.register_parameter("B", qweight)
         layer.register_parameter("s_channel", s_channel)
@@ -267,17 +262,8 @@ class QQQLinearMethod(LinearMethodBase):
 
         x_int8, s_tok, _ = ops.scaled_int8_quant(x_2d)
 
-        output_2d = ops.marlin_qqq_gemm(
-            x_int8,
-            qweight,
-            s_tok,
-            s_ch,
-            s_group,
-            workspace,
-            size_m,
-            size_n,
-            size_k,
-        )
+        output_2d = ops.marlin_qqq_gemm(x_int8, qweight, s_tok, s_ch, s_group,
+                                        workspace, size_m, size_n, size_k)
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
 

@@ -110,32 +110,26 @@ LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageEmbeddingInputs]
 
 class LlavaMultiModalProjector(nn.Module):
 
-    def __init__(
-        self,
-        vision_hidden_size: int,
-        text_hidden_size: int,
-        projector_hidden_act: str,
-        multimodal_projector_bias: bool,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self,
+                 vision_hidden_size: int,
+                 text_hidden_size: int,
+                 projector_hidden_act: str,
+                 multimodal_projector_bias: bool,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
 
-        self.linear_1 = ColumnParallelLinear(
-            vision_hidden_size,
-            text_hidden_size,
-            bias=multimodal_projector_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.linear_1",
-        )
+        self.linear_1 = ColumnParallelLinear(vision_hidden_size,
+                                             text_hidden_size,
+                                             bias=multimodal_projector_bias,
+                                             quant_config=quant_config,
+                                             prefix=f"{prefix}.linear_1")
         self.act = get_act_fn(projector_hidden_act)
-        self.linear_2 = RowParallelLinear(
-            text_hidden_size,
-            text_hidden_size,
-            bias=multimodal_projector_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.linear_2",
-        )
+        self.linear_2 = RowParallelLinear(text_hidden_size,
+                                          text_hidden_size,
+                                          bias=multimodal_projector_bias,
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.linear_2")
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.linear_1(image_features)
@@ -235,8 +229,8 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
         processor = self.info.get_hf_processor()
         image_token = processor.image_token
-        target_width, target_height = self.info.get_image_size_with_most_features(
-        )
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
 
         mm_data = {
             "image":
@@ -258,6 +252,7 @@ class LlavaProcessingInfo(BaseLlavaProcessingInfo):
 
 
 class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
+
     # Copied from BaseMultiModalProcessor
     @abstractmethod
     def _get_mm_fields_config(
@@ -344,10 +339,10 @@ class PixtralHFMultiModalProcessor(
 
                 # Original output: (1, num_images, C, H, W)
                 # New output: (num_images, C, H, W)
-                assert isinstance(pixel_values,
-                                  list) and len(pixel_values) == 1
-                assert isinstance(pixel_values[0], list) and len(
-                    pixel_values[0]) == len(images)
+                assert (isinstance(pixel_values, list)
+                        and len(pixel_values) == 1)
+                assert (isinstance(pixel_values[0], list)
+                        and len(pixel_values[0]) == len(images))
 
                 processed_outputs["pixel_values"] = pixel_values[0]
             else:
@@ -367,8 +362,8 @@ class PixtralHFMultiModalProcessor(
                 get_pixtral_hf_image_feature_grid_size(
                     hf_config.vision_config,
                     image_width=pixel_value.shape[-1],
-                    image_height=pixel_value.shape[-2],
-                ) for pixel_value in processed_outputs["pixel_values"]
+                    image_height=pixel_value.shape[-2])
+                for pixel_value in processed_outputs["pixel_values"]
             ]
             num_crops = torch.tensor([(ncols + 1) * nrows
                                       for ncols, nrows in tile_sizes])
@@ -480,7 +475,7 @@ def _build_llava_or_pixtral_hf_processor(
 def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
     """Determine the number of hidden layers to initialize up to in the
     visual encoder.
-
+    
     Args:
         hf_config: Model config with vision feature layer(s).
     """
@@ -493,8 +488,8 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
     elif isinstance(feature_layers, (list, tuple)):
         return max(
             _get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
-    raise TypeError(
-        f"vision_layer_feature type: {type(feature_layers)} is not supported")
+    raise TypeError(f"vision_layer_feature type: {type(feature_layers)}"
+                    " is not supported")
 
 
 def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
@@ -552,15 +547,14 @@ def init_vision_tower_for_llava(
     raise NotImplementedError(msg)
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    _build_llava_or_pixtral_hf_processor,
-    info=_build_llava_or_pixtral_hf_info,
-    dummy_inputs=LlavaDummyInputsBuilder,
-)
+@MULTIMODAL_REGISTRY.register_processor(_build_llava_or_pixtral_hf_processor,
+                                        info=_build_llava_or_pixtral_hf_info,
+                                        dummy_inputs=LlavaDummyInputsBuilder)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -587,16 +581,14 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             config,
             quant_config,
             require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
+            prefix=maybe_prefix(prefix, "vision_tower"))
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act,
             multimodal_projector_bias=config.multimodal_projector_bias,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"),
-        )
+            prefix=maybe_prefix(prefix, "multi_modal_projector"))
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
@@ -649,8 +641,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         num_crops = kwargs.pop("num_crops", None)
         if num_crops is not None and not isinstance(num_crops, torch.Tensor):
-            raise ValueError(
-                f"Incorrect type of num_crops. Got type: {type(num_crops)}")
+            raise ValueError("Incorrect type of num_crops. "
+                             f"Got type: {type(num_crops)}")
 
         if pixel_values is not None:
             if not isinstance(pixel_values, (torch.Tensor, list)):
@@ -706,6 +698,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                             PixtralHFVisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
+
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         image_features = vision_tower(pixel_values)
@@ -725,6 +718,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _process_image_input(self,
                              image_input: LlavaImageInputs) -> torch.Tensor:
+
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
@@ -766,8 +760,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         expanded_embedding = torch.full(
             (sum(num_crops), *features.shape[1:]),
             torch.nan,
-            dtype=features.dtype,
-        ).to(features.device)
+            dtype=features.dtype).to(features.device)
         expanded_embedding[feat_is_patch] = features
 
         num_crops_per_image = num_crops.tolist()
@@ -795,11 +788,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         else:
             nested_emb = [
                 self._get_mm_embeds(*args) for args in zip(
-                    vision_embeddings,
-                    image_input["feat_is_patch"],
-                    image_input["num_crops"],
-                    image_input["embed_is_patch"],
-                )
+                    vision_embeddings, image_input["feat_is_patch"],
+                    image_input["num_crops"], image_input["embed_is_patch"])
             ]
             return flatten_2d_lists(nested_emb)
 
@@ -817,11 +807,9 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                cast(NestedTensors, patch_embeddings),
-                self.config.image_token_index,
-            )
+                input_ids, inputs_embeds, cast(NestedTensors,
+                                               patch_embeddings),
+                self.config.image_token_index)
         return inputs_embeds
 
     def forward(
@@ -879,12 +867,10 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                                                       vision_embeddings)
             input_ids = None
 
-        hidden_states = self.language_model.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
+        hidden_states = self.language_model.model(input_ids,
+                                                  positions,
+                                                  intermediate_tensors,
+                                                  inputs_embeds=inputs_embeds)
 
         return hidden_states
 
@@ -960,7 +946,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         # https://github.com/TIGER-AI-Lab/Mantis.git
         def get_replacement_mantis(item_idx: int):
             return "".join([
-                f"(image {item_idx + 1}: <Image>",  # 7 tokens
+                f"(image {item_idx+1}: <Image>",  # 7 tokens
                 "<image>" * num_image_tokens,
                 "</Image>)",  # 3 tokens
             ])
@@ -1009,10 +995,8 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
 # To use this model, please use
 # `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'`
-@MULTIMODAL_REGISTRY.register_processor(
-    MantisMultiModalProcessor,
-    info=MantisProcessingInfo,
-    dummy_inputs=LlavaDummyInputsBuilder,
-)
+@MULTIMODAL_REGISTRY.register_processor(MantisMultiModalProcessor,
+                                        info=MantisProcessingInfo,
+                                        dummy_inputs=LlavaDummyInputsBuilder)
 class MantisForConditionalGeneration(LlavaForConditionalGeneration):
     pass

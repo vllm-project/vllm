@@ -10,12 +10,8 @@ from vllm.utils import Device, chunk_list
 @pytest.mark.parametrize("num_gpu_blocks", [1024])
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
-def test_allocate_mutable_block(
-    num_cpu_blocks: int,
-    num_gpu_blocks: int,
-    block_size: int,
-    allocator_type: str,
-):
+def test_allocate_mutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
+                                block_size: int, allocator_type: str):
     allocator = CpuGpuBlockAllocator.create(
         allocator_type=allocator_type,
         num_gpu_blocks=num_gpu_blocks,
@@ -53,12 +49,8 @@ def test_allocate_mutable_block(
 @pytest.mark.parametrize("num_gpu_blocks", [1024])
 @pytest.mark.parametrize("block_size", [2])
 @pytest.mark.parametrize("allocator_type", ["naive", "prefix_caching"])
-def test_allocate_immutable_block(
-    num_cpu_blocks: int,
-    num_gpu_blocks: int,
-    block_size: int,
-    allocator_type: str,
-):
+def test_allocate_immutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
+                                  block_size: int, allocator_type: str):
     allocator = CpuGpuBlockAllocator.create(
         allocator_type=allocator_type,
         num_gpu_blocks=num_gpu_blocks,

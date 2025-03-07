@@ -7,16 +7,13 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 
 
-@pytest.mark.parametrize(
-    "num_tokens,hidden_size,add_residual,dtype",
-    [
-        (7, 8, False, torch.half),
-        (83, 768, False, torch.half),
-        (83, 768, True, torch.half),
-        (83, 768, True, torch.bfloat16),
-        (83, 768, True, torch.float32),
-    ],
-)
+@pytest.mark.parametrize("num_tokens,hidden_size,add_residual,dtype", [
+    (7, 8, False, torch.half),
+    (83, 768, False, torch.half),
+    (83, 768, True, torch.half),
+    (83, 768, True, torch.bfloat16),
+    (83, 768, True, torch.float32),
+])
 @torch.inference_mode()
 def test_rms_norm(
     num_tokens: int,

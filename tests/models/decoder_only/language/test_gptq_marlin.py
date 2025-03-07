@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compares the outputs of gptq vs gptq_marlin
+"""Compares the outputs of gptq vs gptq_marlin 
 Note: GPTQ and Marlin do not have bitwise correctness.
 As a result, in this test, we just confirm that the top selected tokens of the
 Marlin/GPTQ models are in the top 5 selections of each other.
@@ -9,7 +9,6 @@ up to 3 times to see if we pass.
 
 Run `pytest tests/models/test_gptq_marlin.py`.
 """
-
 import os
 
 import pytest
@@ -26,19 +25,19 @@ MAX_MODEL_LEN = 1024
 MODELS = [
     # act_order==True, group_size=128
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "main"),
+
     # 8-bit, act_order==True, group_size=channelwise
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit--1g-actorder_True"),
+
     # 4-bit, act_order==True, group_size=128
-    ("TechxGenus/gemma-1.1-2b-it-GPTQ", "main"),
+    ("TechxGenus/gemma-1.1-2b-it-GPTQ", "main")
 ]
 
 
 @pytest.mark.quant_model
 @pytest.mark.flaky(reruns=3)
-@pytest.mark.skipif(
-    not is_quant_method_supported("gptq_marlin"),
-    reason="gptq_marlin is not supported on this GPU type.",
-)
+@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
+                    reason="gptq_marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
@@ -54,14 +53,13 @@ def test_models(
     model_name, revision = model
 
     # Run marlin.
-    with vllm_runner(
-            model_name=model_name,
-            revision=revision,
-            dtype=dtype,
-            quantization="marlin",
-            max_model_len=MAX_MODEL_LEN,
-            tensor_parallel_size=1,
-    ) as gptq_marlin_model:
+    with vllm_runner(model_name=model_name,
+                     revision=revision,
+                     dtype=dtype,
+                     quantization="marlin",
+                     max_model_len=MAX_MODEL_LEN,
+                     tensor_parallel_size=1) as gptq_marlin_model:
+
         gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
     _ROPE_DICT.clear()  # clear rope cache to avoid rope dtype error
@@ -70,14 +68,12 @@ def test_models(
     # The naive gptq kernel doesn't support bf16 yet.
     # Here we always compare fp16/bf16 gpt marlin kernel
     # to fp16 gptq kernel.
-    with vllm_runner(
-            model_name=model_name,
-            revision=revision,
-            dtype="half",
-            quantization="gptq",
-            max_model_len=MAX_MODEL_LEN,
-            tensor_parallel_size=1,
-    ) as gptq_model:
+    with vllm_runner(model_name=model_name,
+                     revision=revision,
+                     dtype="half",
+                     quantization="gptq",
+                     max_model_len=MAX_MODEL_LEN,
+                     tensor_parallel_size=1) as gptq_model:
         gptq_outputs = gptq_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
 

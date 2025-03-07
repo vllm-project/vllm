@@ -45,11 +45,9 @@ class PTPCFp8Config(Fp8Config):
             raise ValueError(
                 "ptpc_fp8 as of now only support dynamic quantization.")
 
-        super().__init__(
-            is_checkpoint_fp8_serialized=False,
-            activation_scheme=activation_scheme,
-            ignored_layers=ignored_layers,
-        )
+        super().__init__(is_checkpoint_fp8_serialized=False,
+                         activation_scheme=activation_scheme,
+                         ignored_layers=ignored_layers)
 
     @classmethod
     def get_name(cls) -> str:
@@ -79,7 +77,7 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
     """Linear method for Per-Token and Per-Channel FP8 Quantization.
     Only supports loading quantized BF16 model checkpoints with dynamic
     activation scaling. To load FP16 model checkpoints, user must specify
-    to convert the FP16 model weight loading into BF16.
+    to convert the FP16 model weight loading into BF16. 
     The weight scaling factor will be initialized after
     the model weights are loaded.
 
@@ -100,9 +98,8 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         layer.weight = torch.nn.Parameter(layer.weight.data,
                                           requires_grad=False)
 
-        assert (
-            layer.weight.data.dtype == torch.bfloat16
-        ), f"Currently torch._scaled_mm (hipBLASLt) rowwise gemm only support output dtype of bfloat16. {str(layer.weight.data.dtype)} is specified."  # noqa: E501
+        assert layer.weight.data.dtype == torch.bfloat16, \
+            f"Currently torch._scaled_mm (hipBLASLt) rowwise gemm only support output dtype of bfloat16. {str(layer.weight.data.dtype)} is specified." # noqa: E501
         # Quantize the weights.
         qweight, weight_scale = ops.scaled_fp8_quant(
             layer.weight, scale=None, use_per_token_if_dynamic=True)
@@ -113,19 +110,16 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
         layer.input_scale = None
 
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        return apply_fp8_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=None,
-            input_scale_ub=None,
-            bias=bias,
-            cutlass_fp8_supported=False,
-            use_per_token_if_dynamic=True,
-        )
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        return apply_fp8_linear(input=x,
+                                weight=layer.weight,
+                                weight_scale=layer.weight_scale,
+                                input_scale=None,
+                                input_scale_ub=None,
+                                bias=bias,
+                                cutlass_fp8_supported=False,
+                                use_per_token_if_dynamic=True)

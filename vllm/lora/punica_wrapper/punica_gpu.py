@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Based on:
-Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
-Punica: Multi-Tenant LoRA Serving.
+Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
+Punica: Multi-Tenant LoRA Serving. 
 https://arxiv.org/abs/2310.18547
 """
 
@@ -97,15 +97,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         y_slice_size: Optional[int],
         add_inputs: bool,
     ):
-        bgmv_expand_slice(
-            x,
-            w_t_all,
-            y,
-            self.token_lora_indices,
-            y_offset,
-            y_slice_size,
-            add_inputs,
-        )
+        bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
+                          y_slice_size, add_inputs)
 
     def add_shrink(
         self,
@@ -200,12 +193,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 )
                 offset_start += output_slices[slice_idx]
         if lora_magnitudes_stacked is not None:
-            self._apply_magnitude(
-                self.token_lora_indices,
-                y,
-                output_slices,
-                lora_magnitudes_stacked,
-            )
+            self._apply_magnitude(self.token_lora_indices, y, output_slices,
+                                  lora_magnitudes_stacked)
         y = y.view_as(y_org)
 
     def add_lora_embedding(
@@ -322,12 +311,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         )
         if lora_magnitudes_stacked is not None:
             assert len(lora_magnitudes_stacked) == len(output_slices)
-            self._apply_magnitude(
-                self.token_lora_indices,
-                y,
-                output_slices,
-                lora_magnitudes_stacked,
-            )
+            self._apply_magnitude(self.token_lora_indices, y, output_slices,
+                                  lora_magnitudes_stacked)
 
     def add_lora_logits(
         self,

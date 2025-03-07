@@ -140,7 +140,8 @@ class CompressedTensors24(CompressedTensorsScheme):
             # input quant will be non-none
             if self.input_quant and not self.input_quant.dynamic:
                 # register input quant scale
-                assert self.input_quant.strategy == QuantizationStrategy.TENSOR.value
+                assert (self.input_quant.strategy ==
+                        QuantizationStrategy.TENSOR.value)
                 input_scale = BasevLLMParameter(
                     data=torch.empty(1, dtype=torch.float32),
                     weight_loader=weight_loader,
@@ -204,7 +205,8 @@ class CompressedTensors24(CompressedTensorsScheme):
                     layer.weight_scale.data, requires_grad=False)
 
         # Set all negative zero values to 0 prior to compression
-        if layer.weight.dtype.is_floating_point and layer.weight.dtype.itemsize >= 2:
+        if (layer.weight.dtype.is_floating_point
+                and layer.weight.dtype.itemsize >= 2):
             layer.weight.data[layer.weight.data == -0.0] = 0.0
 
         w_compressed, meta = ops.cutlass_sparse_compress(layer.weight.data)
@@ -306,7 +308,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         :param bitmask: The 2:4 bitmask associated with the compressed weights,
             representing the positions of non-zero elements in the compressed
             tensor.
-        :param layer: The layer whose weights need to be processed after
+        :param layer: The layer whose weights need to be processed after 
             loading.
         :return: The decompressed 2:4 sparse weight tensor.
         """

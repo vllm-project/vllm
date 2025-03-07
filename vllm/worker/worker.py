@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """A GPU worker class."""
-
 import gc
 import os
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
@@ -62,21 +61,18 @@ class Worker(LocalOrDistributedWorkerBase):
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
-
             init_cached_hf_modules()
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
         speculative_config = self.speculative_config
         model_config = self.model_config
-        speculative_args = (
-            {} if speculative_config is None or
-            (speculative_config.draft_model_config.hf_config.model_type
-             == model_config.hf_config.model_type) or
-            (speculative_config.draft_model_config.hf_config.model_type not in
-             ("medusa", "mlp_speculator", "eagle", "deepseek_mtp")) else {
-                 "return_hidden_states": True
-             })
+        speculative_args = {} if speculative_config is None \
+            or (speculative_config.draft_model_config.hf_config.model_type ==
+                model_config.hf_config.model_type) \
+            or (speculative_config.draft_model_config.hf_config.model_type
+                not in ("medusa", "mlp_speculator", "eagle", "deepseek_mtp")) \
+                    else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if model_config.runner_type == "pooling":
@@ -103,10 +99,8 @@ class Worker(LocalOrDistributedWorkerBase):
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info(
-                "Profiling enabled. Traces will be saved to: %s",
-                torch_profiler_trace_dir,
-            )
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        torch_profiler_trace_dir)
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
@@ -114,8 +108,7 @@ class Worker(LocalOrDistributedWorkerBase):
                 ],
                 with_stack=True,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir, use_gzip=True),
-            )
+                    torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
 
@@ -139,10 +132,8 @@ class Worker(LocalOrDistributedWorkerBase):
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
             "Sleep mode freed %.2f GiB memory, "
-            "%.2f GiB memory is still in use.",
-            freed_bytes / GiB_bytes,
-            used_bytes / GiB_bytes,
-        )
+            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
+            used_bytes / GiB_bytes)
 
     def wake_up(self) -> None:
         allocator = CuMemAllocator.get_instance()
@@ -172,25 +163,21 @@ class Worker(LocalOrDistributedWorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_worker_distributed_environment(
-            self.vllm_config,
-            self.rank,
-            self.distributed_init_method,
-            self.local_rank,
-        )
+        init_worker_distributed_environment(self.vllm_config, self.rank,
+                                            self.distributed_init_method,
+                                            self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
-            assert (
-                allocator.get_current_usage() == 0
-            ), "Sleep mode can only be used for one instance per process."
+            assert allocator.get_current_usage() == 0, (
+                "Sleep mode can only be "
+                "used for one instance per process.")
             context = allocator.use_memory_pool(tag="weights")
         else:
             from contextlib import nullcontext
-
             context = nullcontext()
         with context:
             self.model_runner.load_model()
@@ -238,14 +225,13 @@ class Worker(LocalOrDistributedWorkerBase):
         # of the model.
         with memory_profiling(
                 self.baseline_snapshot,
-                weights_memory=self.model_runner.model_memory_usage,
-        ) as result:
+                weights_memory=self.model_runner.model_memory_usage) as result:
             self.model_runner.profile_run()
 
         self._assert_memory_footprint_increased_during_profiling()
 
-        memory_for_current_instance = (
-            total_gpu_memory * self.cache_config.gpu_memory_utilization)
+        memory_for_current_instance = total_gpu_memory * \
+            self.cache_config.gpu_memory_utilization
         available_kv_cache_memory = (memory_for_current_instance -
                                      result.non_kv_cache_memory)
 
@@ -303,12 +289,10 @@ class Worker(LocalOrDistributedWorkerBase):
         This also warms up the model, which may record CUDA graphs.
         """
         raise_if_cache_size_invalid(
-            num_gpu_blocks,
-            self.cache_config.block_size,
+            num_gpu_blocks, self.cache_config.block_size,
             self.cache_config.is_attention_free,
             self.model_config.max_model_len,
-            self.parallel_config.pipeline_parallel_size,
-        )
+            self.parallel_config.pipeline_parallel_size)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -318,7 +302,6 @@ class Worker(LocalOrDistributedWorkerBase):
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
             from contextlib import nullcontext
-
             context = nullcontext()
         with context:
             self._init_cache_engine()
@@ -327,12 +310,9 @@ class Worker(LocalOrDistributedWorkerBase):
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = [
-            CacheEngine(
-                self.cache_config,
-                self.model_config,
-                self.parallel_config,
-                self.device_config,
-            ) for _ in range(self.parallel_config.pipeline_parallel_size)
+            CacheEngine(self.cache_config, self.model_config,
+                        self.parallel_config, self.device_config)
+            for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
@@ -379,19 +359,15 @@ class Worker(LocalOrDistributedWorkerBase):
         blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
                                          device="cpu",
                                          dtype=torch.int64).view(-1, 2)
-        blocks_to_swap_out = torch.tensor(
-            execute_model_req.blocks_to_swap_out,
-            device="cpu",
-            dtype=torch.int64,
-        ).view(-1, 2)
+        blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
+                                          device="cpu",
+                                          dtype=torch.int64).view(-1, 2)
         # `blocks_to_copy` is a gpu tensor. The src and tgt of
         # blocks to copy are in the same device, and `blocks_to_copy`
         # can be used directly within cuda kernels.
-        blocks_to_copy = torch.tensor(
-            execute_model_req.blocks_to_copy,
-            device=self.device,
-            dtype=torch.int64,
-        ).view(-1, 2)
+        blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                      device=self.device,
+                                      dtype=torch.int64).view(-1, 2)
 
         return WorkerInput(
             num_seq_groups=num_seq_groups,
@@ -419,11 +395,10 @@ class Worker(LocalOrDistributedWorkerBase):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
 
     def _get_cached_seq_group_metadata(
-        self,
-        seq_group_metadata_list: List[Union[SequenceGroupMetadata,
-                                            SequenceGroupMetadataDelta]],
-        finished_request_ids: List[str],
-    ) -> List[SequenceGroupMetadata]:
+            self,
+            seq_group_metadata_list: List[Union[SequenceGroupMetadata,
+                                                SequenceGroupMetadataDelta]],
+            finished_request_ids: List[str]) -> List[SequenceGroupMetadata]:
         """Return a list of cached Sequence Group Metadata after updating its
         state.
 
@@ -468,10 +443,10 @@ class Worker(LocalOrDistributedWorkerBase):
         if execute_model_req is not None:
             new_seq_group_metadata_list = self._get_cached_seq_group_metadata(
                 execute_model_req.seq_group_metadata_list,
-                execute_model_req.finished_requests_ids,
-            )
+                execute_model_req.finished_requests_ids)
 
-            execute_model_req.seq_group_metadata_list = new_seq_group_metadata_list
+            execute_model_req.seq_group_metadata_list = (
+                new_seq_group_metadata_list)
         output = super()._execute_model_spmd(execute_model_req,
                                              intermediate_tensors)
         return output
@@ -510,7 +485,8 @@ class Worker(LocalOrDistributedWorkerBase):
         return self.model_runner.vocab_size
 
     def get_cache_block_size_bytes(self) -> int:
-        """Get the size of the KV cache block size in bytes."""
+        """Get the size of the KV cache block size in bytes.
+        """
         return CacheEngine.get_cache_block_size(self.cache_config,
                                                 self.model_config,
                                                 self.parallel_config)
@@ -528,10 +504,8 @@ def init_worker_distributed_environment(
 
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank)
-    ensure_model_parallel_initialized(
-        parallel_config.tensor_parallel_size,
-        parallel_config.pipeline_parallel_size,
-    )
+    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
+                                      parallel_config.pipeline_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)
 
@@ -556,13 +530,8 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
                 "`dtype` flag in CLI, for example: --dtype=half.")
 
 
-def raise_if_cache_size_invalid(
-    num_gpu_blocks,
-    block_size,
-    is_attention_free,
-    max_model_len,
-    pipeline_parallel_size,
-) -> None:
+def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
+                                max_model_len, pipeline_parallel_size) -> None:
     if is_attention_free and num_gpu_blocks != 0:
         raise ValueError("No memory should be allocated for the cache blocks "
                          f"for an attention-free model, but {num_gpu_blocks} "

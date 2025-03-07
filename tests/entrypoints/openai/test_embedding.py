@@ -88,9 +88,8 @@ async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
 async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
     # test list[str]
     input_texts = [
-        "The cat sat on the mat.",
-        "A feline was resting on a rug.",
-        "Stars twinkle brightly in the night sky.",
+        "The cat sat on the mat.", "A feline was resting on a rug.",
+        "Stars twinkle brightly in the night sky."
     ]
     embedding_response = await client.embeddings.create(
         model=model_name,
@@ -108,12 +107,8 @@ async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
     assert embeddings.usage.total_tokens == 33
 
     # test list[list[int]]
-    input_tokens = [
-        [4, 5, 7, 9, 20],
-        [15, 29, 499],
-        [24, 24, 24, 24, 24],
-        [25, 32, 64, 77],
-    ]
+    input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
+                    [25, 32, 64, 77]]
     embedding_response = await client.embeddings.create(
         model=model_name,
         input=input_tokens,
@@ -135,20 +130,16 @@ async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
 async def test_conversation_embedding(server: RemoteOpenAIServer,
                                       client: openai.AsyncOpenAI,
                                       model_name: str):
-    messages = [
-        {
-            "role": "user",
-            "content": "The cat sat on the mat.",
-        },
-        {
-            "role": "assistant",
-            "content": "A feline was resting on a rug.",
-        },
-        {
-            "role": "user",
-            "content": "Stars twinkle brightly in the night sky.",
-        },
-    ]
+    messages = [{
+        "role": "user",
+        "content": "The cat sat on the mat.",
+    }, {
+        "role": "assistant",
+        "content": "A feline was resting on a rug.",
+    }, {
+        "role": "user",
+        "content": "Stars twinkle brightly in the night sky.",
+    }]
 
     chat_response = requests.post(
         server.url_for("v1/embeddings"),
@@ -193,7 +184,7 @@ async def test_batch_base64_embedding(client: openai.AsyncOpenAI,
                                       model_name: str):
     input_texts = [
         "Hello my name is",
-        "The best thing about vLLM is that it supports many different models",
+        "The best thing about vLLM is that it supports many different models"
     ]
 
     responses_float = await client.embeddings.create(input=input_texts,
@@ -237,8 +228,7 @@ async def test_single_embedding_truncation(client: openai.AsyncOpenAI,
     embedding_response = await client.embeddings.create(
         model=model_name,
         input=input_texts,
-        extra_body={"truncate_prompt_tokens": 10},
-    )
+        extra_body={"truncate_prompt_tokens": 10})
     embeddings = EmbeddingResponse.model_validate(
         embedding_response.model_dump(mode="json"))
 
@@ -250,33 +240,13 @@ async def test_single_embedding_truncation(client: openai.AsyncOpenAI,
     assert embeddings.usage.total_tokens == 10
 
     input_tokens = [
-        1,
-        24428,
-        289,
-        18341,
-        26165,
-        285,
-        19323,
-        283,
-        289,
-        26789,
-        3871,
-        28728,
-        9901,
-        340,
-        2229,
-        385,
-        340,
-        315,
-        28741,
-        28804,
-        2,
+        1, 24428, 289, 18341, 26165, 285, 19323, 283, 289, 26789, 3871, 28728,
+        9901, 340, 2229, 385, 340, 315, 28741, 28804, 2
     ]
     embedding_response = await client.embeddings.create(
         model=model_name,
         input=input_tokens,
-        extra_body={"truncate_prompt_tokens": 10},
-    )
+        extra_body={"truncate_prompt_tokens": 10})
     embeddings = EmbeddingResponse.model_validate(
         embedding_response.model_dump(mode="json"))
 
@@ -300,9 +270,7 @@ async def test_single_embedding_truncation_invalid(client: openai.AsyncOpenAI,
         response = await client.embeddings.create(
             model=model_name,
             input=input_texts,
-            extra_body={"truncate_prompt_tokens": 8193},
-        )
+            extra_body={"truncate_prompt_tokens": 8193})
         assert "error" in response.object
-        assert ("truncate_prompt_tokens value is greater than max_model_len. "
-                "Please, select a smaller truncation size."
-                in response.message)
+        assert "truncate_prompt_tokens value is greater than max_model_len. "\
+               "Please, select a smaller truncation size." in response.message

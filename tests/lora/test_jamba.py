@@ -13,13 +13,13 @@ MAX_TOKENS = 40
 
 def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int,
               prompts: list[str]) -> list[str]:
+
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=MAX_TOKENS)
     outputs = llm.generate(
         prompts,
         sampling_params,
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None,
-    )
+        if lora_id else None)
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -50,5 +50,5 @@ def test_jamba_lora(jamba_lora_files, tp_size):
     expected_jamba_output = [
         """Once upon a time, in a lush green meadow, there lived a sheep named Clara and a goat named Billy. Clara was a gentle creature, always nibbling on the soft grass and humming"""  # noqa: E501
     ]
-    assert (do_sample(llm, jamba_lora_files, lora_id=1,
-                      prompts=prompts) == expected_jamba_output)
+    assert do_sample(llm, jamba_lora_files, lora_id=1,
+                     prompts=prompts) == expected_jamba_output

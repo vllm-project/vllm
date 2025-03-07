@@ -13,7 +13,6 @@ logger = init_logger(__name__)
 
 try:
     import flashinfer.sampling
-
     is_flashinfer_available = True
 except ImportError:
     is_flashinfer_available = False
@@ -151,7 +150,7 @@ def flashinfer_sample(
     Statistically, this function is equivalent to the `random_sample` function.
     However, this function is faster because it avoids sorting the logits tensor
     via rejection sampling.
-
+    
     NOTE: The outputs of this function do not necessarily match the outputs of
     the `random_sample` function. It only guarantees that the outputs are
     statistically equivalent.
@@ -181,8 +180,9 @@ def flashinfer_sample(
             probs, uniform_samples, k, deterministic=True)
     else:
         # Both top-k and top-p.
-        next_token_ids, success = flashinfer.sampling.top_k_top_p_sampling_from_probs(
-            probs, uniform_samples, k, p, deterministic=True)
+        next_token_ids, success = (
+            flashinfer.sampling.top_k_top_p_sampling_from_probs(
+                probs, uniform_samples, k, p, deterministic=True))
 
     # NOTE: CPU-GPU synchronization happens here.
     if not success.all():

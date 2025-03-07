@@ -3,7 +3,6 @@
 
 Run `pytest tests/models/encoder_decoder/audio/test_whisper.py`.
 """
-
 from typing import Optional
 
 import pytest
@@ -15,7 +14,8 @@ from ....utils import fork_new_process_for_each_test, multi_gpu_test
 
 PROMPTS = [
     {
-        "prompt": "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>",
+        "prompt":
+        "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>",
         "multi_modal_data": {
             "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
         },
@@ -27,8 +27,9 @@ PROMPTS = [
                 "audio": AudioAsset("winning_call").audio_and_sample_rate,
             },
         },
-        "decoder_prompt": "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>",
-    },
+        "decoder_prompt":
+        "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>",
+    }
 ]
 
 EXPECTED = {
@@ -42,7 +43,7 @@ EXPECTED = {
         " is June and the third base. They're going to wave him in. The throw"
         " to the plate will be late. The Mariners are going to play for the"
         " American League Championship. I don't believe it. It just continues"
-        " by all five.",
+        " by all five."
     ],
     "openai/whisper-small": [
         " The first words I spoke in the original pornograph. A little piece"
@@ -52,7 +53,7 @@ EXPECTED = {
         " comes joy. Here is Junior to third base. They're gonna wave him"
         " in. The throw to the plate will be late. The Mariners are going to"
         " play for the American League Championship. I don't believe it. It"
-        " just continues. My, oh my.",
+        " just continues. My, oh my."
     ],
     "openai/whisper-medium": [
         " The first words I spoke in the original phonograph, a little piece"
@@ -63,7 +64,7 @@ EXPECTED = {
         " Jorgen at third base. They're going to wave him in. The throw to the"
         " plate will be late. The Mariners are going to play for the American"
         " League Championship. I don't believe it. It just continues. My, oh"
-        " my.",
+        " my."
     ],
     "openai/whisper-large-v3": [
         " The first words I spoke in the original phonograph, a little piece"
@@ -74,7 +75,7 @@ EXPECTED = {
         " Junior to third base. They're going to wave him in. The throw to the"
         " plate will be late. The Mariners are going to play for the American"
         " League Championship. I don't believe it. It just continues. My, oh,"
-        " my.",
+        " my."
     ],
     "openai/whisper-large-v3-turbo": [
         " The first words I spoke in the original phonograph, a little piece"
@@ -85,8 +86,8 @@ EXPECTED = {
         " Junior to third base. They're going to wave him in. The throw to the"
         " plate will be late. The Mariners are going to play for the American"
         " League Championship. I don't believe it. It just continues. My, oh,"
-        " my.",
-    ],
+        " my."
+    ]
 }
 
 
@@ -131,8 +132,6 @@ def test_models(model) -> None:
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
 def test_models_distributed(model, distributed_executor_backend) -> None:
-    run_test(
-        model,
-        tensor_parallel_size=2,
-        distributed_executor_backend=distributed_executor_backend,
-    )
+    run_test(model,
+             tensor_parallel_size=2,
+             distributed_executor_backend=distributed_executor_backend)

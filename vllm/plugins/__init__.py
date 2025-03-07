@@ -16,7 +16,6 @@ plugins_loaded = False
 
 def load_plugins_by_group(group: str) -> Dict[str, Callable]:
     import sys
-
     if sys.version_info < (3, 10):
         from importlib_metadata import entry_points
     else:
@@ -69,15 +68,15 @@ def load_general_plugins():
         # does not support torch.compile
         # Eager backend (PT_HPU_LAZY_MODE = 0) must be selected for
         # torch.compile support
-        is_lazy = os.environ.get("PT_HPU_LAZY_MODE", "1") == "1"
+        is_lazy = os.environ.get('PT_HPU_LAZY_MODE', '1') == '1'
         if is_lazy:
             torch._dynamo.config.disable = True
             # NOTE(kzawora) multi-HPU inference with HPUGraphs (lazy-only)
             # requires enabling lazy collectives
             # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html # noqa: E501
-            os.environ["PT_HPU_ENABLE_LAZY_COLLECTIVES"] = "true"
+            os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
 
-    plugins = load_plugins_by_group(group="vllm.general_plugins")
+    plugins = load_plugins_by_group(group='vllm.general_plugins')
     # general plugins, we only need to execute the loaded functions
     for func in plugins.values():
         func()

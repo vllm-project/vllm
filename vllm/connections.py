@@ -59,12 +59,10 @@ class HTTPConnection:
         client = self.get_sync_client()
         extra_headers = extra_headers or {}
 
-        return client.get(
-            url,
-            headers=self._headers(**extra_headers),
-            stream=stream,
-            timeout=timeout,
-        )
+        return client.get(url,
+                          headers=self._headers(**extra_headers),
+                          stream=stream,
+                          timeout=timeout)
 
     async def get_async_response(
         self,

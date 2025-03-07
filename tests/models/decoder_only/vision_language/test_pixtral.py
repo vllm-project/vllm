@@ -3,7 +3,6 @@
 
 Run `pytest tests/models/test_mistral.py`.
 """
-
 import json
 import uuid
 from dataclasses import asdict
@@ -59,16 +58,13 @@ def _create_msg_format_hf(urls: list[str]) -> list[dict[str, Any]]:
     return [{
         "role":
         "user",
-        "content": [
-            {
-                "type": "text",
-                "content": PROMPT,
-            },
-            *({
-                "type": "image",
-                "image": download_image(url)
-            } for url in urls),
-        ],
+        "content": [{
+            "type": "text",
+            "content": PROMPT,
+        }, *({
+            "type": "image",
+            "image": download_image(url)
+        } for url in urls)],
     }]
 
 
@@ -140,14 +136,11 @@ def _dump_outputs_w_logprobs(
     outputs: OutputsLogprobs,
     filename: "StrPath",
 ) -> None:
-    json_data = [(
-        tokens,
-        text,
-        [{
-            k: asdict(v)
-            for k, v in token_logprobs.items()
-        } for token_logprobs in (logprobs or [])],
-    ) for tokens, text, logprobs in outputs]
+    json_data = [(tokens, text, [{
+        k: asdict(v)
+        for k, v in token_logprobs.items()
+    } for token_logprobs in (logprobs or [])])
+                 for tokens, text, logprobs in outputs]
 
     with open(filename, "w") as f:
         json.dump(json_data, f)
@@ -157,14 +150,10 @@ def load_outputs_w_logprobs(filename: "StrPath") -> OutputsLogprobs:
     with open(filename, "rb") as f:
         json_data = json.load(f)
 
-    return [(
-        tokens,
-        text,
-        [{
-            int(k): Logprob(**v)
-            for k, v in token_logprobs.items()
-        } for token_logprobs in logprobs],
-    ) for tokens, text, logprobs in json_data]
+    return [(tokens, text, [{
+        int(k): Logprob(**v)
+        for k, v in token_logprobs.items()
+    } for token_logprobs in logprobs]) for tokens, text, logprobs in json_data]
 
 
 @large_gpu_test(min_gb=80)
@@ -194,12 +183,10 @@ def test_chat(
             outputs.extend(output)
 
     logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
-    check_logprobs_close(
-        outputs_0_lst=EXPECTED_CHAT_LOGPROBS,
-        outputs_1_lst=logprobs,
-        name_0="h100_ref",
-        name_1="output",
-    )
+    check_logprobs_close(outputs_0_lst=EXPECTED_CHAT_LOGPROBS,
+                         outputs_1_lst=logprobs,
+                         name_0="h100_ref",
+                         name_1="output")
 
 
 @large_gpu_test(min_gb=80)
@@ -235,44 +222,29 @@ def test_model_engine(vllm_runner, model: str, dtype: str) -> None:
             break
 
     logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
-    check_logprobs_close(
-        outputs_0_lst=EXPECTED_ENGINE_LOGPROBS,
-        outputs_1_lst=logprobs,
-        name_0="h100_ref",
-        name_1="output",
-    )
+    check_logprobs_close(outputs_0_lst=EXPECTED_ENGINE_LOGPROBS,
+                         outputs_1_lst=logprobs,
+                         name_0="h100_ref",
+                         name_1="output")
 
 
 @large_gpu_test(min_gb=48)
 @pytest.mark.parametrize(
     "prompt,expected_ranges",
-    [
-        (
-            _create_engine_inputs_hf(IMG_URLS[:1]),
-            [{
-                "offset": 10,
-                "length": 494
-            }],
-        ),
-        (
-            _create_engine_inputs_hf(IMG_URLS[1:4]),
-            [
-                {
-                    "offset": 10,
-                    "length": 266
-                },
-                {
-                    "offset": 276,
-                    "length": 1056
-                },
-                {
-                    "offset": 1332,
-                    "length": 418
-                },
-            ],
-        ),
-    ],
-)
+    [(_create_engine_inputs_hf(IMG_URLS[:1]), [{
+        "offset": 10,
+        "length": 494
+    }]),
+     (_create_engine_inputs_hf(IMG_URLS[1:4]), [{
+         "offset": 10,
+         "length": 266
+     }, {
+         "offset": 276,
+         "length": 1056
+     }, {
+         "offset": 1332,
+         "length": 418
+     }])])
 def test_multi_modal_placeholders(
         vllm_runner, prompt, expected_ranges: list[PlaceholderRange]) -> None:
     with vllm_runner(
@@ -286,12 +258,13 @@ def test_multi_modal_placeholders(
         output: RequestOutput = outputs[0]
         assert hasattr(output,
                        "multi_modal_placeholders"), f"{output.__dict__=}"
-        assert ("image" in output.multi_modal_placeholders
-                ), f"{output.multi_modal_placeholders.keys()=}"
-        image_placeholder_ranges: list[PlaceholderRange] = (
-            output.multi_modal_placeholders["image"])
+        assert "image" in output.multi_modal_placeholders, \
+            f"{output.multi_modal_placeholders.keys()=}"
+        image_placeholder_ranges: list[
+            PlaceholderRange] = output.multi_modal_placeholders["image"]
         assert len(image_placeholder_ranges) == len(
             expected_ranges), f"{image_placeholder_ranges=}"
         for real_range, expected_range in zip(image_placeholder_ranges,
                                               expected_ranges):
-            assert real_range == expected_range, f"{real_range=} {expected_range=}"
+            assert real_range == expected_range, \
+                f"{real_range=} {expected_range=}"

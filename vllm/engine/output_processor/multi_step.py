@@ -73,23 +73,21 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             "Prompt logprob is not supported by multi step workers. "
             "(e.g., speculative decode uses multi step workers).")
 
-    def process_outputs(
-        self,
-        sequence_group: SequenceGroup,
-        outputs: List[SequenceGroupOutput],
-        is_async: bool = False,
-    ) -> None:
+    def process_outputs(self,
+                        sequence_group: SequenceGroup,
+                        outputs: List[SequenceGroupOutput],
+                        is_async: bool = False) -> None:
         """Append new tokens in the outputs to sequences in the sequence group.
 
         This only supports sequence groups of size 1. It supports greater than
         one new token per sequence.
 
         This applies logic like stop condition checking and detokenization.
-        It also handles cases where there are tokens emitted after
+        It also handles cases where there are tokens emitted after 
         the EOS token.
 
-        is_async - Indicates whether this postprocessor runs in
-            parallel with the GPU forward pass and is processing
+        is_async - Indicates whether this postprocessor runs in 
+            parallel with the GPU forward pass and is processing 
             tokens from the previous step. If this is true, then
             no tokens need to be appended since it is already done
             externally (before the next schedule() call)
@@ -103,8 +101,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 status=SequenceStatus.FINISHED_ABORTED)
 
         assert seqs, "Expected RUNNING or FINISHED_ABORTED sequences"
-        assert len(
-            seqs) == 1, "Beam search not supported in multi-step decoding."
+        assert len(seqs) == 1, (
+            "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
         seq_id = seq.seq_id
         # This method is defined in the more generic
@@ -159,12 +157,9 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             sampling_params=sampling_params,
         )
 
-    def _process_seq_outputs(
-        self,
-        seq: Sequence,
-        valid_samples: List[SequenceOutput],
-        sampling_params: SamplingParams,
-    ) -> None:
+    def _process_seq_outputs(self, seq: Sequence,
+                             valid_samples: List[SequenceOutput],
+                             sampling_params: SamplingParams) -> None:
         output_token_ids = [sample.output_token for sample in valid_samples]
         output_logprobs = [sample.logprobs for sample in valid_samples]
 

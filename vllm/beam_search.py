@@ -16,7 +16,6 @@ class BeamSearchSequence:
     The text field is optional and will only be filled when the sequence is
     about to be returned to the user.
     """
-
     # The tokens includes the prompt.
     tokens: list[int]
     logprobs: list[dict[int, Logprob]]
@@ -34,7 +33,6 @@ class BeamSearchOutput:
     It contains the list of the best beam search sequences.
     The length of the list is equal to the beam width.
     """
-
     sequences: list[BeamSearchSequence]
 
 

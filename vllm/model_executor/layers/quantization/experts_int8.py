@@ -53,63 +53,49 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: ExpertsInt8Config):
         self.quant_config = quant_config
 
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size_per_partition: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+
         int8_dtype = torch.int8
 
-        assert "weight_loader" in extra_weight_attrs
-        weight_loader = extra_weight_attrs["weight_loader"]
+        assert 'weight_loader' in extra_weight_attrs
+        weight_loader = extra_weight_attrs['weight_loader']
         wrapped_weight_loader = ExpertsInt8MoEMethod.quantizing_weight_loader(
             layer, weight_loader)
-        extra_weight_attrs["weight_loader"] = wrapped_weight_loader
+        extra_weight_attrs['weight_loader'] = wrapped_weight_loader
 
         # Fused gate_up_proj (column parallel)
-        w13_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                hidden_size,
-                dtype=int8_dtype,
-            ),
-            requires_grad=False,
-        )
+        w13_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_size,
+            dtype=int8_dtype),
+                                        requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         # down_proj (row parallel)
-        w2_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition,
-                dtype=int8_dtype,
-            ),
-            requires_grad=False,
-        )
+        w2_weight = torch.nn.Parameter(torch.empty(
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            dtype=int8_dtype),
+                                       requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-        w13_scale = torch.nn.Parameter(
-            torch.zeros(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
+        w13_scale = torch.nn.Parameter(torch.zeros(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            dtype=torch.float32),
+                                       requires_grad=False)
         layer.register_parameter("w13_scale", w13_scale)
 
-        w2_scale = torch.nn.Parameter(
-            torch.zeros(num_experts, hidden_size, dtype=torch.float32),
-            requires_grad=False,
-        )
+        w2_scale = torch.nn.Parameter(torch.zeros(num_experts,
+                                                  hidden_size,
+                                                  dtype=torch.float32),
+                                      requires_grad=False)
         layer.register_parameter("w2_scale", w2_scale)
 
     def apply(
@@ -141,34 +127,28 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-        )
+            e_score_correction_bias=e_score_correction_bias)
 
-        return fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            activation=activation,
-            use_int8_w8a16=True,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            w1_scale=layer.w13_scale,
-            w2_scale=layer.w2_scale,
-        )
+        return fused_experts(x,
+                             layer.w13_weight,
+                             layer.w2_weight,
+                             topk_weights=topk_weights,
+                             topk_ids=topk_ids,
+                             inplace=True,
+                             activation=activation,
+                             use_int8_w8a16=True,
+                             global_num_experts=global_num_experts,
+                             expert_map=expert_map,
+                             w1_scale=layer.w13_scale,
+                             w2_scale=layer.w2_scale)
 
     @staticmethod
     def quantizing_weight_loader(layer, weight_loader):
 
-        def quantize_and_call_weight_loader(
-            param: torch.nn.Parameter,
-            loaded_weight: torch.Tensor,
-            weight_name: str,
-            shard_id: int,
-            expert_id: int,
-        ):
+        def quantize_and_call_weight_loader(param: torch.nn.Parameter,
+                                            loaded_weight: torch.Tensor,
+                                            weight_name: str, shard_id: int,
+                                            expert_id: int):
             tp_rank = get_tensor_model_parallel_rank()
             shard_size = layer.intermediate_size_per_partition
             shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
@@ -202,7 +182,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
 
 def quantize_in_place_and_get_scales(weight: torch.Tensor) -> torch.Tensor:
     vmax = torch.iinfo(torch.int8).max
-    scales = torch.max(torch.abs(weight), dim=1, keepdim=True)[0] / vmax
+    scales = (torch.max(torch.abs(weight), dim=1, keepdim=True)[0] / vmax)
 
     weight.div_(scales)
     weight.round_()

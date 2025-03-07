@@ -11,8 +11,7 @@ from vllm.adapter_commons.request import AdapterRequest
 class LoRARequest(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True,
-):  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """
     Request for a LoRA adapter.
 
@@ -24,7 +23,6 @@ class LoRARequest(
     lora_int_id must be globally unique for a given adapter.
     This is currently not enforced in vLLM.
     """
-
     __metaclass__ = AdapterRequest
 
     lora_name: str
@@ -41,8 +39,7 @@ class LoRARequest(
                 "and will be removed in a future version. "
                 "Please use 'lora_path' instead.",
                 DeprecationWarning,
-                stacklevel=2,
-            )
+                stacklevel=2)
             if not self.lora_path:
                 self.lora_path = self.lora_local_path or ""
 
@@ -68,8 +65,7 @@ class LoRARequest(
             "and will be removed in a future version. "
             "Please use 'path' instead.",
             DeprecationWarning,
-            stacklevel=2,
-        )
+            stacklevel=2)
         return self.lora_path
 
     @local_path.setter
@@ -79,8 +75,7 @@ class LoRARequest(
             "and will be removed in a future version. "
             "Please use 'path' instead.",
             DeprecationWarning,
-            stacklevel=2,
-        )
+            stacklevel=2)
         self.lora_path = value
 
     def __eq__(self, value: object) -> bool:

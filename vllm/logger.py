@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """Logging configuration for vLLM."""
-
 import datetime
 import json
 import logging
@@ -48,7 +47,7 @@ DEFAULT_LOGGING_CONFIG = {
         },
     },
     "version": 1,
-    "disable_existing_loggers": False,
+    "disable_existing_loggers": False
 }
 
 
@@ -105,16 +104,13 @@ def _configure_vllm_root_logger() -> None:
         if not path.exists(VLLM_LOGGING_CONFIG_PATH):
             raise RuntimeError(
                 "Could not load logging config. File does not exist: %s",
-                VLLM_LOGGING_CONFIG_PATH,
-            )
+                VLLM_LOGGING_CONFIG_PATH)
         with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8") as file:
             custom_config = json.loads(file.read())
 
         if not isinstance(custom_config, dict):
-            raise ValueError(
-                "Invalid logging config. Expected dict, got %s.",
-                type(custom_config).__name__,
-            )
+            raise ValueError("Invalid logging config. Expected dict, got %s.",
+                             type(custom_config).__name__)
         logging_config = custom_config
 
     for formatter in logging_config.get("formatters", {}).values():
@@ -153,7 +149,7 @@ logger = init_logger(__name__)
 
 
 def _trace_calls(log_path, root_dir, frame, event, arg=None):
-    if event in ["call", "return"]:
+    if event in ['call', 'return']:
         # Extract the filename, line number, function name, and the code object
         filename = frame.f_code.co_filename
         lineno = frame.f_lineno
@@ -173,9 +169,9 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
                 last_filename = ""
                 last_lineno = 0
                 last_func_name = ""
-            with open(log_path, "a") as f:
+            with open(log_path, 'a') as f:
                 ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-                if event == "call":
+                if event == 'call':
                     f.write(f"{ts} Call to"
                             f" {func_name} in {filename}:{lineno}"
                             f" from {last_func_name} in {last_filename}:"

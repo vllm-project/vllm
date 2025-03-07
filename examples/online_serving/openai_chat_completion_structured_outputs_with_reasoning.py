@@ -34,7 +34,7 @@ models = client.models.list()
 model = models.data[0].id
 
 # Guided decoding by Regex
-prompt = "What is the capital of France?"
+prompt = ("What is the capital of France?")
 
 completion = client.chat.completions.create(
     model=model,
@@ -57,7 +57,7 @@ class People(BaseModel):
 
 json_schema = People.model_json_schema()
 
-prompt = "Generate a JSON with the name and age of one random person."
+prompt = ("Generate a JSON with the name and age of one random person.")
 completion = client.chat.completions.create(
     model=model,
     messages=[{

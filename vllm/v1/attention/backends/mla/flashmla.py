@@ -58,16 +58,14 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
 
-    def _build_decode(
-        self,
-        input_positions: torch.Tensor,
-        block_table: torch.Tensor,
-        seq_lens: torch.Tensor,
-    ) -> FlashMLADecodeMetadata:
-        tile_scheduler_metadata, num_splits = get_mla_metadata(
+    def _build_decode(self, input_positions: torch.Tensor,
+                      block_table: torch.Tensor,
+                      seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
+        tile_scheduler_metadata, num_splits = \
+            get_mla_metadata(
             seq_lens,
             self.num_q_heads,
-            1,  # MQA for the decode path
+            1, # MQA for the decode path
         )
 
         return FlashMLADecodeMetadata(
@@ -82,42 +80,29 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
 class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
     def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
-        kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]],
-        logits_soft_cap: Optional[float],
-        attn_type: str,
-        # MLA Specific Arguments
-        **mla_args,
-    ) -> None:
-        super().__init__(
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            sliding_window,
-            kv_cache_dtype,
-            blocksparse_params,
-            logits_soft_cap,
-            attn_type,
-            **mla_args,
-        )
+            self,
+            num_heads: int,
+            head_size: int,
+            scale: float,
+            num_kv_heads: int,
+            alibi_slopes: Optional[list[float]],
+            sliding_window: Optional[int],
+            kv_cache_dtype: str,
+            blocksparse_params: Optional[dict[str, Any]],
+            logits_soft_cap: Optional[float],
+            attn_type: str,
+            # MLA Specific Arguments
+            **mla_args) -> None:
+        super().__init__(num_heads, head_size, scale, num_kv_heads,
+                         alibi_slopes, sliding_window, kv_cache_dtype,
+                         blocksparse_params, logits_soft_cap, attn_type,
+                         **mla_args)
 
-        assert is_flashmla_supported(
-        ), "FlashMLA is not supported on this device"
+        assert is_flashmla_supported(), \
+            "FlashMLA is not supported on this device"
 
         unsupported_features = [
-            alibi_slopes,
-            sliding_window,
-            blocksparse_params,
-            logits_soft_cap,
+            alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
         ]
         if any(unsupported_features):
             raise NotImplementedError(
@@ -145,8 +130,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        q = torch.cat([q_nope, q_pe],
-                      dim=-1).unsqueeze(1)  # Add seqlen dim of 1 (decode)
+        q = torch.cat([q_nope, q_pe], dim=-1)\
+            .unsqueeze(1) # Add seqlen dim of 1 (decode)
 
         o, _ = flash_mla_with_kvcache(
             q=q,

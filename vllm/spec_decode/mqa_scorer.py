@@ -17,9 +17,8 @@ class MQAScorer(SpeculativeScorer):
         proposals: SpeculativeProposals,
     ) -> SpeculativeScores:
         target_seq_group_metadata_list = []
-        target_seq_id_start = (
-            max(get_all_seq_ids(execute_model_req.seq_group_metadata_list)) +
-            1)
+        target_seq_id_start = max(
+            get_all_seq_ids(execute_model_req.seq_group_metadata_list)) + 1
         all_proposal_tokens = proposals.proposal_token_ids.tolist()
         all_proposal_lengths = proposals.proposal_lens.tolist()
         for i, seq_group_metadata in enumerate(
@@ -108,15 +107,16 @@ class MQAScorer(SpeculativeScorer):
                                  for sg in target_seq_group_metadata_list)
             # TODO (NickLucche) we should surface `disable_logprobs` as to not
             # break abstraction to get its value.
-            if not self._scorer_worker.model_runner.disable_logprobs and has_prompt_log:
+            if (not self._scorer_worker.model_runner.disable_logprobs\
+                and has_prompt_log):
                 prompt_logprobs = [
                     o.prompt_logprobs for o in target_sampler_output.outputs
                 ]
 
             # Split loop into prefill|decode for readability.
             start_loc, i = 0, 0
-            while (i < len(target_seq_group_metadata_list)
-                   and target_seq_group_metadata_list[i].is_prompt):
+            while i < len(target_seq_group_metadata_list
+                          ) and target_seq_group_metadata_list[i].is_prompt:
                 seq_meta = target_seq_group_metadata_list[i]
                 end_loc = start_loc
                 if has_prompt_log:
@@ -135,10 +135,8 @@ class MQAScorer(SpeculativeScorer):
                 start_loc = end_loc
             # Decodes.
             while i < len(target_seq_group_metadata_list):
-                proposed_len, seq_meta = (
-                    all_proposal_lengths[i],
-                    target_seq_group_metadata_list[i],
-                )
+                proposed_len, seq_meta = all_proposal_lengths[
+                    i], target_seq_group_metadata_list[i]
                 output_len = proposed_len + 1
                 end_loc = start_loc + output_len
                 all_tokens[
@@ -154,10 +152,8 @@ class MQAScorer(SpeculativeScorer):
             hidden_states = target_sampler_output.hidden_states.reshape(
                 bs, (k + 1), -1)
 
-        return SpeculativeScores(
-            probs=all_probs,
-            token_ids=all_tokens,
-            logprobs=all_logprobs,
-            hidden_states=hidden_states,
-            prompt_logprobs=prompt_logprobs,
-        )
+        return SpeculativeScores(probs=all_probs,
+                                 token_ids=all_tokens,
+                                 logprobs=all_logprobs,
+                                 hidden_states=hidden_states,
+                                 prompt_logprobs=prompt_logprobs)

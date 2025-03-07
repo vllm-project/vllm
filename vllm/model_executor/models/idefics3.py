@@ -103,8 +103,8 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         hf_processor = self.get_hf_processor()
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
         grid_w, grid_h = self._get_image_feature_grid_size(
-            image_width=image_processor.size["longest_edge"],
-            image_height=image_processor.size["longest_edge"],
+            image_width=image_processor.size['longest_edge'],
+            image_height=image_processor.size['longest_edge'],
         )
         num_image_token = (grid_w * grid_h + 1) * hf_processor.image_seq_len
         # Calculate Non-image-token length
@@ -115,20 +115,18 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         glob_token_len = len(tokenizer.tokenize(hf_processor.global_image_tag))
         # linebreak and <fake_token_around_image> always cost 1 token
         fake_token_len = lb_len = 1
-        non_image_token = ((grid_w * grid_h) *
-                           (tile_token_len + fake_token_len) + glob_token_len +
-                           (grid_h + 1) * lb_len + fake_token_len)
+        non_image_token = (grid_w * grid_h) * (
+            tile_token_len + fake_token_len) + glob_token_len + (
+                grid_h + 1) * lb_len + fake_token_len
         return {"image": num_image_token + non_image_token}
 
-    def _resize_output_size(
-        self,
-        *,
-        height: int,
-        width: int,
-        max_len: Optional[int] = None,
-        min_len: Optional[int] = 1,
-        max_size: Optional[int] = None,
-    ) -> tuple[int, int]:
+    def _resize_output_size(self,
+                            *,
+                            height: int,
+                            width: int,
+                            max_len: Optional[int] = None,
+                            min_len: Optional[int] = 1,
+                            max_size: Optional[int] = None) -> tuple[int, int]:
         # Set default value for max_len if not provided
         max_len = max(height, width) if max_len is None else max_len
         aspect_ratio = width / height
@@ -164,7 +162,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
     ) -> tuple[int, int]:
         hf_processor = self.get_hf_processor()
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
-        max_image_size = image_processor.size["longest_edge"]
+        max_image_size = image_processor.size['longest_edge']
         if resolution_max_side > max_image_size:
             raise ValueError(
                 "`resolution_max_side` cannot be larger than `max_image_size`")
@@ -187,8 +185,8 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
     ) -> tuple[int, int]:
         hf_processor = self.get_hf_processor(size=size)
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
-        max_image_size = image_processor.max_image_size["longest_edge"]
-        size = image_processor.size["longest_edge"]
+        max_image_size = image_processor.max_image_size['longest_edge']
+        size = image_processor.size['longest_edge']
         assert size % max_image_size == 0, (
             "`longest_edge` in image_processor's `size` must be divisible by "
             "`longest_edge` in `max_image_size`, this may be caused by "
@@ -218,7 +216,7 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]
         num_images = mm_counts.get("image", 0)
         hf_processor = self.info.get_hf_processor()
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
-        longest_edge = image_processor.max_image_size["longest_edge"]
+        longest_edge = image_processor.max_image_size['longest_edge']
         image_token: str = hf_processor.image_token.content
 
         mm_data = {
@@ -410,8 +408,7 @@ class Idefics3Model(nn.Module):
         self.vision_model = Idefics3VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
+            prefix=maybe_prefix(prefix, "vision_model"))
         self.connector = Idefics3Connector(
             config,
             quant_config,
@@ -430,6 +427,7 @@ class Idefics3Model(nn.Module):
     def _validate_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
+
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
 
@@ -481,8 +479,7 @@ class Idefics3Model(nn.Module):
             return Idefics3ImagePixelInputs(
                 type="pixel_values",
                 data=self._validate_pixel_values(pixel_values),
-                pixel_attention_mask=pixel_attention_mask,
-            )
+                pixel_attention_mask=pixel_attention_mask)
 
         raise AssertionError("This line should be unreachable.")
 
@@ -507,11 +504,8 @@ class Idefics3Model(nn.Module):
         # Handle the vision attention mask
         if pixel_attention_mask is None:
             pixel_attention_mask = torch.ones(
-                size=(
-                    pixel_values.size(0),
-                    pixel_values.size(2),
-                    pixel_values.size(3),
-                ),
+                size=(pixel_values.size(0), pixel_values.size(2),
+                      pixel_values.size(3)),
                 dtype=torch.bool,
                 device=pixel_values.device,
             )
@@ -570,6 +564,7 @@ class Idefics3Model(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+
         hidden_states = self.text_model(
             input_ids,
             positions,
@@ -582,8 +577,7 @@ class Idefics3Model(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(
     Idefics3MultimodalProcessor,
     info=Idefics3ProcessingInfo,
-    dummy_inputs=Idefics3DummyInputsBuilder,
-)
+    dummy_inputs=Idefics3DummyInputsBuilder)
 class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                        SupportsLoRA):
     packed_modules_mapping = {
@@ -639,11 +633,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                self.config.image_token_id,
-            )
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.config.image_token_id)
         return inputs_embeds
 
     def forward(
@@ -665,12 +656,10 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                       vision_embeddings)
             input_ids = None
 
-        hidden_states = self.model.text_model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
+        hidden_states = self.model.text_model(input_ids,
+                                              positions,
+                                              intermediate_tensors,
+                                              inputs_embeds=inputs_embeds)
 
         return hidden_states
 
@@ -700,5 +689,4 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         return MultiModelKeys.from_string_field(
             language_model="model.text_model",
             connector="model.connector",
-            tower_model="model.vision_model",
-        )
+            tower_model="model.vision_model")

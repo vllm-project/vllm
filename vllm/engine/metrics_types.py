@@ -3,7 +3,7 @@
 These types are defined in this file to avoid importing vllm.engine.metrics
 and therefore importing prometheus_client.
 
-This is required due to usage of Prometheus multiprocess mode to enable
+This is required due to usage of Prometheus multiprocess mode to enable 
 metrics after splitting out the uvicorn process from the engine process.
 
 Prometheus multiprocess mode requires setting PROMETHEUS_MULTIPROC_DIR
@@ -24,7 +24,6 @@ from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 @dataclass
 class Stats:
     """Created by LLMEngine for use by StatLogger."""
-
     now: float
 
     # System stats (should have _sys suffix)

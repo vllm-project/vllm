@@ -42,17 +42,14 @@ class KVConnectorFactory:
 KVConnectorFactory.register_connector(
     "PyNcclConnector",
     "vllm.distributed.kv_transfer.kv_connector.simple_connector",
-    "SimpleConnector",
-)
+    "SimpleConnector")
 
 KVConnectorFactory.register_connector(
     "MooncakeConnector",
     "vllm.distributed.kv_transfer.kv_connector.simple_connector",
-    "SimpleConnector",
-)
+    "SimpleConnector")
 
 KVConnectorFactory.register_connector(
     "LMCacheConnector",
     "vllm.distributed.kv_transfer.kv_connector.lmcache_connector",
-    "LMCacheConnector",
-)
+    "LMCacheConnector")

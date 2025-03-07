@@ -5,7 +5,6 @@ See https://github.com/vllm-project/vllm/issues/11926 for more details.
 
 Run `pytest tests/quantization/test_register_quantization_config.py`.
 """
-
 from typing import Any, Optional
 
 import pytest
@@ -28,12 +27,10 @@ class FakeQuantLinearMethod(UnquantizedLinearMethod):
         super().__init__()
         self.num_bits = num_bits
 
-    def apply(
-        self,
-        layer: "torch.nn.Module",
-        x: "torch.Tensor",
-        bias: Optional["torch.Tensor"] = None,
-    ) -> "torch.Tensor":
+    def apply(self,
+              layer: "torch.nn.Module",
+              x: "torch.Tensor",
+              bias: Optional["torch.Tensor"] = None) -> "torch.Tensor":
         """Perform fake quantization before the linear layer."""
 
         # Calculate the scales dynamically
@@ -42,11 +39,8 @@ class FakeQuantLinearMethod(UnquantizedLinearMethod):
         scales = (max_val - min_val) / (2**self.num_bits - 1)
 
         # Fake quantize the input
-        quant_x = torch.clamp(
-            torch.round(x / scales),
-            -(2**(self.num_bits - 1)),
-            2**(self.num_bits - 1) - 1,
-        )
+        quant_x = torch.clamp(torch.round(x / scales), -2**(self.num_bits - 1),
+                              2**(self.num_bits - 1) - 1)
         dequant_x = quant_x * scales
 
         return F.linear(dequant_x, layer.weight, bias)
@@ -103,19 +97,17 @@ def test_register_quantization_config():
         register_quantization_config("custom_quant")(CustomQuantConfig)
 
 
-@pytest.mark.parametrize(
-    argnames="model",
-    argvalues=[
-        "meta-llama/Llama-3.2-1B-Instruct",
-    ],
-)
+@pytest.mark.parametrize(argnames="model",
+                         argvalues=[
+                             "meta-llama/Llama-3.2-1B-Instruct",
+                         ])
 def test_custom_quant(vllm_runner, model):
     """Test infer with the custom quantization method."""
     with vllm_runner(model_name=model,
                      quantization="custom_quant",
                      enforce_eager=True) as llm:
-        model = (llm.model.llm_engine.model_executor.driver_worker.
-                 model_runner.model)  # noqa: E501
+
+        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
         layer = model.model.layers[0]
         qkv_proj = layer.self_attn.qkv_proj
 

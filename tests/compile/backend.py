@@ -23,15 +23,13 @@ class TestBackend:
                                                              None]]):
         self.custom_passes = list(passes)
         from torch._inductor import config
-
         self.inductor_config = config.shallow_copy_dict()
-        self.inductor_config["force_disable_caches"] = True
-        self.inductor_config["post_grad_custom_post_pass"] = self.post_pass
+        self.inductor_config['force_disable_caches'] = True
+        self.inductor_config['post_grad_custom_post_pass'] = self.post_pass
 
     def __call__(self, graph: fx.GraphModule, example_inputs):
         self.graph_pre_compile = deepcopy(graph)
         from torch._inductor.compile_fx import compile_fx
-
         return compile_fx(graph,
                           example_inputs,
                           config_patches=self.inductor_config)

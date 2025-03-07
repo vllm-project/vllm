@@ -19,9 +19,9 @@ def deep_compare(dict1: Any, dict2: Any) -> bool:
 
 
 def should_ignore_layer(
-        layer_name: Optional[str],
-        ignore: Iterable[str],
-        fused_mapping: Mapping[str, List[str]] = MappingProxyType({}),
+    layer_name: Optional[str],
+    ignore: Iterable[str],
+    fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
 ) -> bool:
     if layer_name is None:
         return False
@@ -72,7 +72,7 @@ def should_ignore_layer(
 def check_equal_or_regex_match(layer_name: str,
                                targets: Iterable[str]) -> bool:
     """
-    Checks whether a layer_name is exactly equal or a regex match for
+    Checks whether a layer_name is exactly equal or a regex match for 
     if target starts with 're:' to any target in list.
     """
     for target in targets:

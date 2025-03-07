@@ -78,9 +78,8 @@ class MediaConnector:
     ) -> _M:
         allowed_local_media_path = self.allowed_local_media_path
         if allowed_local_media_path is None:
-            raise RuntimeError(
-                "Cannot load local files without `--allowed-local-media-path`."
-            )
+            raise RuntimeError("Cannot load local files without "
+                               "`--allowed-local-media-path`.")
 
         filepath = Path(url_spec.path)
         if allowed_local_media_path not in filepath.resolve().parents:
@@ -333,9 +332,7 @@ def repeat_and_pad_placeholder_tokens(
             logger.warning(
                 "Please follow the prompt format that is "
                 "documented on HuggingFace which does not involve "
-                "repeating %s tokens.",
-                placeholder_token_str,
-            )
+                "repeating %s tokens.", placeholder_token_str)
         if placeholder_token_count < len(repeat_count):
             logger.warning(
                 "The number of multi-modal placeholder tokens in the prompt "
@@ -407,23 +404,23 @@ def merge_and_sort_multimodal_metadata(
     mm_hashes: Optional["MultiModalHashDict"],
 ) -> tuple[list[str], list[PlaceholderRange], Optional[list[str]]]:
     """Given a MultiModalPlaceholderDict, merge all PlaceholderRange
-    objects from all available modalities into a single list of
-    PlaceholderRange, sorted by their offset (starting index in the input
+    objects from all available modalities into a single list of 
+    PlaceholderRange, sorted by their offset (starting index in the input 
     sequence) in the ascending order.
 
-    Optionally if a MultiModalHashDict is given, same operation will be
+    Optionally if a MultiModalHashDict is given, same operation will be 
     applied to the object and the sorted list of hashes will be returned.
 
     Raises:
         ValueError: If the input prompt has interleaved placeholders from
-            different modalities (e.g, "<image><audio><image> Describe the
+            different modalities (e.g, "<image><audio><image> Describe the 
             content.")
-
+    
     Returns:
         list[str]: Sorted list of involved modalities.
-        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from
+        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from 
             mm_positions.
-        Optional[list[str]]: Sorted list of all hashes from mm_hashes if
+        Optional[list[str]]: Sorted list of all hashes from mm_hashes if 
             given, None otherwise.
     """
 
@@ -437,28 +434,24 @@ def merge_and_sort_multimodal_metadata(
         if mm_hashes is None:
             return modalities, list(mm_positions[modalities[0]]), None
         else:
-            return (
-                modalities,
-                list(mm_positions[modalities[0]]),
-                list(mm_hashes[modalities[0]]),
-            )
+            return modalities, list(mm_positions[modalities[0]]), list(
+                mm_hashes[modalities[0]])
 
     placeholder_lists_with_modality = [(modality, mm_positions[modality])
                                        for modality in modalities]
 
     if mm_hashes is None:
         sorted_placeholder_lists = sorted(placeholder_lists_with_modality,
-                                          key=lambda x: x[1][0]["offset"])
+                                          key=lambda x: x[1][0]['offset'])
         sorted_hash_lists = None
     else:
         hashes_lists = [
             mm_hashes[modality] for modality in modalities
             if modality in mm_hashes
         ]
-        sorted_pairs = sorted(
-            zip(placeholder_lists_with_modality, hashes_lists),
-            key=lambda x: x[0][1][0]["offset"],
-        )
+        sorted_pairs = sorted(zip(placeholder_lists_with_modality,
+                                  hashes_lists),
+                              key=lambda x: x[0][1][0]['offset'])
         sorted_placeholder_tuple, sorted_hash_tuple = zip(*sorted_pairs)
         sorted_placeholder_lists = list(sorted_placeholder_tuple)
         sorted_hash_lists = list(sorted_hash_tuple)
@@ -469,8 +462,8 @@ def merge_and_sort_multimodal_metadata(
     # interleaving of placeholders from different modalities.
     merged_placeholders: list[PlaceholderRange] = []
     for modality, placeholder_list in sorted_placeholder_lists:
-        if (merged_placeholders and placeholder_list[0]["offset"]
-                < merged_placeholders[-1]["offset"]):
+        if merged_placeholders and placeholder_list[0][
+                'offset'] < merged_placeholders[-1]['offset']:
             raise ValueError(
                 "Interleaved mixed-modality inference is currently not "
                 "supported.")
@@ -487,16 +480,16 @@ def merge_and_sort_multimodal_metadata(
 
 
 def group_mm_inputs_by_modality(
-    mm_inputs: list["MultiModalKwargs"], ) -> list[list["MultiModalKwargs"]]:
-    """Group consecutive MultiModalKwargs from mm_inputs with the same modality
-    together into the same list for batching purpose. For MultiModalKwargs with
+        mm_inputs: list["MultiModalKwargs"]) -> list[list["MultiModalKwargs"]]:
+    """Group consecutive MultiModalKwargs from mm_inputs with the same modality 
+    together into the same list for batching purpose. For MultiModalKwargs with 
     multiple modalities, put them into their own list.
 
     Args:
         mm_inputs: List of MultiModalKwargs.
 
     Returns:
-        list[list[MultiModalKwargs]]: List of list of MultiModalKwargs, each
+        list[list[MultiModalKwargs]]: List of list of MultiModalKwargs, each 
         inner list contains consecutive MultiModalKwargs with same modality, or
         one with multimodal modalities.
     """

@@ -29,11 +29,10 @@ class TorchCompileWrapperWithCustomDispatcher:
         `torch.compile` over the forward method.
     """
 
-    def __init__(
-        self,
-        compiled_callable: Optional[Callable] = None,
-        compilation_level: int = 0,
-    ):
+    def __init__(self,
+                 compiled_callable: Optional[Callable] = None,
+                 compilation_level: int = 0):
+
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
         if compiled_callable is None:
@@ -45,8 +44,7 @@ class TorchCompileWrapperWithCustomDispatcher:
             compiled_callable = torch.compile(
                 self.forward,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=backend,
-            )
+                backend=backend)
 
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
@@ -56,8 +54,8 @@ class TorchCompileWrapperWithCustomDispatcher:
         # read the env var to determine whether to use the custom dispatcher
         # subclasses can use this to switch between the custom dispatcher
         # and the default Dynamo guard mechanism.
-        self.use_custom_dispatcher: bool = (compilation_level
-                                            >= CompilationLevel.DYNAMO_ONCE)
+        self.use_custom_dispatcher: bool = \
+            compilation_level >= CompilationLevel.DYNAMO_ONCE
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.
@@ -100,7 +98,6 @@ class TorchCompileWrapperWithCustomDispatcher:
                     # but there's no 100% guarantee, since decompliation is
                     # not a reversible process.
                     import depyf
-
                     src = depyf.decompile(new_code)
                     with open(decompiled_file, "w") as f:
                         f.write(src)
@@ -110,14 +107,11 @@ class TorchCompileWrapperWithCustomDispatcher:
                 except Exception:
                     pass
 
-        if (self.vllm_config.compilation_config.use_cudagraph
-                and "update" in new_code.co_names):
+        if self.vllm_config.compilation_config.use_cudagraph and \
+            "update" in new_code.co_names:
             import depyf
-
             src = depyf.decompile(new_code)
-            msg = (
-                "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified (please search for the usage of the function `update`):\n"
-                + src)  # noqa
+            msg = "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified (please search for the usage of the function `update`):\n" + src  # noqa
             raise RuntimeError(msg)
 
     @contextmanager
@@ -129,7 +123,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         the code object in the function and call it.
 
         See https://dev-discuss.pytorch.org/t/what-is-the-relationship-requirement-among-original-bytecode-transformed-bytecode-and-bytecode-returned-by-hooks-in-dynamo/1693/7 for more details.
-        """  # noqa
+        """ # noqa
         self.__class__.forward.__code__ = self.compiled_codes[index]
         yield
         self.__class__.forward.__code__ = self.original_code_object

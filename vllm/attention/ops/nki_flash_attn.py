@@ -70,13 +70,14 @@ def transform_block_tables_for_indirect_load(
     fully utilize hardware parallelization. The solution is to tile `block_size`
     into `(block_size_tiling_factor, tiled_block_size)` s.t. `M *
     block_size_tiling_factor = B_P_SIZE`. After tiling, KV cache has shape
-    `(num_block, num_head, block_size_tiling_factor, tiled_block_size, D)`.
+    `(num_block, num_head, block_size_tiling_factor, tiled_block_size, D)`. 
 
     Note:
     We don't further tile D dimension as small DMA size also hurts performance.
     """
     B_P_SIZE = 128
-    num_partitions, num_tiles_per_partition, num_blocks_per_tile = block_tables.shape
+    num_partitions, num_tiles_per_partition, num_blocks_per_tile = (
+        block_tables.shape)
     assert num_tiles_per_partition == B_P_SIZE
     assert is_power_of_2(
         num_blocks_per_tile), f"{num_blocks_per_tile=} is not power of 2"
@@ -276,7 +277,8 @@ def _flash_attention_core(
         if use_causal_mask:
             # mask are used to only apply computation to the lower half of the
             # matrix, which reduce the arithmetic intensity by up to 50%
-            multiplication_required_selection = q_tile_idx * B_P_SIZE >= k_i * B_F_SIZE
+            multiplication_required_selection = (q_tile_idx * B_P_SIZE
+                                                 >= k_i * B_F_SIZE)
         else:
             multiplication_required_selection = True
 
@@ -696,6 +698,7 @@ def flash_paged_attention(
                 nl.ds(context_kv_len, LARGE_TILE_SZ),
             ])
             for i_q_h in nl.affine_range(q_h_per_k_h):
+
                 q_tile = nl.ndarray((B_D_SIZE, B_P_SIZE), dtype=kernel_dtype)
                 q_hbm_tile = query[batch_id, head_id * q_h_per_k_h + i_q_h]
                 q_sbuf_tile = nl.load(q_hbm_tile[:,
@@ -777,7 +780,7 @@ def reorder_context_mask(mask, LARGE_TILE_SZ, block_size):
 
     We vectorize KV cache read to improve DMA utilization. However, the layout
     that maximizes DMA bandwidth changes the order tokens are consumed.
-
+    
     The token layout (inner 2 dimensions) after vectorized load is (B_P_SIZE,
     tiled_block_size) in a tile of `B_P_SIZE * tiled_block_size` tokens. And
     each step the engine consumes a column (rather than a row) of B_P_SIZE
@@ -842,7 +845,7 @@ def flash_attn_varlen_nkifunc(
 
     Notes:
       - attn_mask must be reordered outside using `reorder_context_mask`
-      - Key/value cache layout must be (n_blocks, n_kv_heads, block_size, d)
+      - Key/value cache layout must be (n_blocks, n_kv_heads, block_size, d) 
         for better DMA throughput
     """
     if n_kv_head is None:

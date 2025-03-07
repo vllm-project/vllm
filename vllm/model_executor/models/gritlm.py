@@ -221,6 +221,7 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
         positions: torch.Tensor,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+
         # Change attention to non-causal for pooling tasks.
         if self.runner_type == "pooling":
             attn_metadata = get_forward_context().attn_metadata

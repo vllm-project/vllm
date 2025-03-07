@@ -282,7 +282,8 @@ class H2OVLProcessor(BaseInternVLProcessor):
                              is None else max_dynamic_patch)
         dynamic_image_size = (self.dynamic_image_size if dynamic_image_size
                               is None else dynamic_image_size)
-        use_thumbnail = self.use_thumbnail if use_thumbnail is None else use_thumbnail
+        use_thumbnail = (self.use_thumbnail
+                         if use_thumbnail is None else use_thumbnail)
 
         return resolve_h2ovl_min_max_num(
             min_dynamic_patch=min_dynamic_patch,
@@ -323,7 +324,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
         image_height: int,
         use_msac: Optional[bool] = None,
     ) -> int:
-        use_msac = self.use_msac if use_msac is None else use_msac
+        use_msac = (self.use_msac if use_msac is None else use_msac)
 
         use_thumbnail = self.use_thumbnail
 
@@ -464,14 +465,12 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
 class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
                                ):
 
-    def __init__(
-        self,
-        info: H2OVLProcessingInfo,
-        dummy_inputs: "BaseDummyInputsBuilder[H2OVLProcessingInfo]",
-        *,
-        cache: Optional[ProcessingCache] = None,
-        enable_sanity_checks: bool = True,
-    ) -> None:
+    def __init__(self,
+                 info: H2OVLProcessingInfo,
+                 dummy_inputs: "BaseDummyInputsBuilder[H2OVLProcessingInfo]",
+                 *,
+                 cache: Optional[ProcessingCache] = None,
+                 enable_sanity_checks: bool = True) -> None:
         super().__init__(
             info,
             dummy_inputs,
@@ -548,8 +547,7 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
 @MULTIMODAL_REGISTRY.register_processor(
     H2OVLMultiModalProcessor,
     info=H2OVLProcessingInfo,
-    dummy_inputs=InternVLDummyInputsBuilder,
-)
+    dummy_inputs=InternVLDummyInputsBuilder)
 class H2OVLChatModel(InternVLChatModel):
 
     def _init_vision_model(

@@ -69,8 +69,7 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         )
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size,
-        )
+            self.parallel_config.pipeline_parallel_size)
 
         # Device initialization should happen after initializing the distributed
         # runtime.
@@ -100,10 +99,8 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             # For TPU, we can only have 1 active profiler session for 1 profiler
             # server. So we only profile on rank0.
             self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info(
-                "Profiling enabled. Traces will be saved to: %s",
-                self.profile_dir,
-            )
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        self.profile_dir)
             self.profiler = xp.start_server(9012)
 
     def start_profile(self):
@@ -130,10 +127,11 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # it by reference, rather by specializing on the value ``None``.
         # the `dtype` argument does not matter, and we use `float32` as
         # a placeholder (it has wide hardware support).
-        kv_caches = [(
-            torch.tensor([], dtype=torch.float32, device=self.device),
-            torch.tensor([], dtype=torch.float32, device=self.device),
-        ) for _ in range(num_layers)]
+        kv_caches = [(torch.tensor([], dtype=torch.float32,
+                                   device=self.device),
+                      torch.tensor([], dtype=torch.float32,
+                                   device=self.device))
+                     for _ in range(num_layers)]
         bind_kv_cache(self.compilation_config.static_forward_context,
                       [kv_caches])
         self.model_runner._dummy_run(

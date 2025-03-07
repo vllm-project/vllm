@@ -45,11 +45,11 @@ class RoundRobinProxy:
 async def main():
     proxy = RoundRobinProxy([8100, 8200])
     app = web.Application()
-    app.router.add_route("*", "/{path:.*}", proxy.handle_request)
+    app.router.add_route('*', '/{path:.*}', proxy.handle_request)
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "localhost", 8000)
+    site = web.TCPSite(runner, 'localhost', 8000)
     await site.start()
 
     print("Proxy server started on http://localhost:8000")
@@ -58,5 +58,5 @@ async def main():
     await asyncio.Event().wait()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     asyncio.run(main())

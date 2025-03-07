@@ -16,38 +16,30 @@ class MambaCacheParams:
     state_indices_tensor: torch.Tensor = torch.Tensor()
 
     def at_layer_idx(self, layer_idx):
-        return MambaCacheParams(
-            self.conv_state[layer_idx],
-            self.ssm_state[layer_idx],
-            self.state_indices_tensor,
-        )
+        return MambaCacheParams(self.conv_state[layer_idx],
+                                self.ssm_state[layer_idx],
+                                self.state_indices_tensor)
 
 
 class MambaCacheManager:
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        dtype: torch.dtype,
-        num_mamba_layers: int,
-        conv_state_shape: Tuple[int, int],
-        temporal_state_shape: Tuple[int, int],
-    ):
+    def __init__(self, vllm_config: VllmConfig, dtype: torch.dtype,
+                 num_mamba_layers: int, conv_state_shape: Tuple[int, int],
+                 temporal_state_shape: Tuple[int, int]):
+
         # Determine max batch size to set size of MambaCache
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         if not vllm_config.model_config.enforce_eager:
             max_batch_size = vllm_config.pad_for_cudagraph(max_batch_size)
 
-        conv_state = torch.empty(
-            size=(num_mamba_layers, max_batch_size) + conv_state_shape,
-            dtype=dtype,
-            device="cuda",
-        )
-        temporal_state = torch.empty(
-            size=(num_mamba_layers, max_batch_size) + temporal_state_shape,
-            dtype=dtype,
-            device="cuda",
-        )
+        conv_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
+                                 conv_state_shape,
+                                 dtype=dtype,
+                                 device="cuda")
+        temporal_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
+                                     temporal_state_shape,
+                                     dtype=dtype,
+                                     device="cuda")
 
         self.mamba_cache = (conv_state, temporal_state)
 
@@ -84,7 +76,7 @@ class MambaCacheManager:
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         """
-        Copy the relevant state_indices into the CUDA graph input buffer
+        Copy the relevant state_indices into the CUDA graph input buffer 
         """
         assert all(
             key in kwargs
@@ -155,10 +147,8 @@ class MambaCacheManager:
             return self.mamba_cache_indices_mapping[cur_rid][seq_id]
 
     def _prepare_current_run_mamba_cache(
-        self,
-        request_ids_to_seq_ids: Dict[str, list[int]],
-        finished_requests_ids: List[str],
-    ) -> List[int]:
+            self, request_ids_to_seq_ids: Dict[str, list[int]],
+            finished_requests_ids: List[str]) -> List[int]:
         return [
             self._assign_seq_id_to_cache_index(req_id, seq_id,
                                                finished_requests_ids)

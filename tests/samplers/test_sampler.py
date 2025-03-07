@@ -29,7 +29,8 @@ class MockLogitsSampler(Sampler):
 
 
 def _prepare_test(
-    batch_size: int, ) -> tuple[torch.Tensor, torch.Tensor, MockLogitsSampler]:
+        batch_size: int
+) -> tuple[torch.Tensor, torch.Tensor, MockLogitsSampler]:
     input_tensor = torch.rand((batch_size, 1024), dtype=torch.float16)
     fake_logits = torch.full((batch_size, VOCAB_SIZE),
                              1e-2,
@@ -70,8 +71,7 @@ def _do_sample(
         seq_lens,
         query_lens=seq_lens,
         device=device,
-        pin_memory=is_pin_memory_available(),
-    )
+        pin_memory=is_pin_memory_available())
     return sampler(logits=input_tensor, sampling_metadata=sampling_metadata)
 
 
@@ -168,13 +168,11 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
     set_random_seed(seed)
     torch.set_default_device(device)
 
-    def create_sampling_params(
-        min_tokens,
-        eos_token_id=0,
-        *,
-        stop_token_ids: Optional[list[int]] = None,
-        prompt_logprobs: Optional[int] = None,
-    ):
+    def create_sampling_params(min_tokens,
+                               eos_token_id=0,
+                               *,
+                               stop_token_ids: Optional[list[int]] = None,
+                               prompt_logprobs: Optional[int] = None):
         sampling_params = SamplingParams(
             min_tokens=min_tokens,
             max_tokens=9999,  # keep higher than max of min_tokens
@@ -216,8 +214,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             sampling_params = create_sampling_params(
                 min_tokens=min_tokens,
                 eos_token_id=eos_token_id,
-                stop_token_ids=stop_token_ids,
-            )
+                stop_token_ids=stop_token_ids)
 
             seq_data: dict[int, SequenceData] = {}
             seq_group_penalization: list[bool] = []
@@ -257,7 +254,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 sampling_params=create_sampling_params(0),
                 block_tables={},
             ),
-        ],
+        ]
     }
 
     prompt_with_penalization = {
@@ -272,7 +269,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 sampling_params=create_sampling_params(1),
                 block_tables={},
             ),
-        ],
+        ]
     }
 
     prompt_with_penalization_and_prompt_logprobs = {
@@ -287,7 +284,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 sampling_params=create_sampling_params(1, prompt_logprobs=3),
                 block_tables={},
             ),
-        ],
+        ]
     }
 
     stop_penalizing_after_min_tokens = {
@@ -303,7 +300,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 sampling_params=create_sampling_params(1),
                 block_tables={},
             )
-        ],
+        ]
     }
 
     stop_token_ids = [42, 99, 42, 0]  # intentional duplication
@@ -328,8 +325,8 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 sampling_params=create_sampling_params(
                     0, stop_token_ids=stop_token_ids),
                 block_tables={},
-            ),
-        ],
+            )
+        ]
     }
 
     stop_token_ids = [1, 999, 37, 37]  # intentional duplication
@@ -364,7 +361,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                     10, prompt_logprobs=5, stop_token_ids=stop_token_ids),
                 block_tables={},
             ),
-        ],
+        ]
     }
 
     if seed == 0:
@@ -379,14 +376,12 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
     else:
         test_cases = [generate_test_case()]
 
-    def run_test_case(
-        *,
-        expected_penalization: list[bool],
-        seq_group_metadata_list: list[SequenceGroupMetadata],
-    ):
-        assert expected_penalization, "Invalid test case, need expected_penalization"
-        assert (seq_group_metadata_list
-                ), "Invalid test case, need seq_group_metadata_list"
+    def run_test_case(*, expected_penalization: list[bool],
+                      seq_group_metadata_list: list[SequenceGroupMetadata]):
+        assert expected_penalization, \
+            "Invalid test case, need expected_penalization"
+        assert seq_group_metadata_list, \
+            "Invalid test case, need seq_group_metadata_list"
 
         batch_size = 0
         seq_lens: list[int] = []
@@ -411,9 +406,11 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             sampling_params_per_row.extend(
                 itertools.repeat(sampling_params, num_rows))
 
-        assert len(expected_penalization) == batch_size, (
-            "Invalid test case, expected_penalization does not match computed"
-            "batch size")
+        assert len(
+            expected_penalization
+        ) == batch_size, \
+            ("Invalid test case, expected_penalization does not match computed"
+             "batch size")
 
         _, fake_logits, sampler = _prepare_test(batch_size)
         sampling_metadata = SamplingMetadata.prepare(
@@ -421,31 +418,31 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             seq_lens=seq_lens if seq_lens else None,
             query_lens=seq_lens if seq_lens else [1] * batch_size,
             device=device,
-            pin_memory=is_pin_memory_available(),
-        )
+            pin_memory=is_pin_memory_available())
         # the logits tensor is modified in-place by the sampler
         _ = sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
 
         for logits_idx, (should_penalize, sampling_params) in enumerate(
                 zip(expected_penalization, sampling_params_per_row)):
+
             tokens_to_check = sampling_params.all_stop_token_ids
 
             if should_penalize:
                 for token_id in tokens_to_check:
                     assert fake_logits[logits_idx, token_id] == -float(
-                        "inf"
+                        'inf'
                     ), f"Expected token {token_id} for logits row {logits_idx}"
                     " to be penalized"
                 # no other tokens should be set to -inf
                 assert torch.count_nonzero(
-                    fake_logits[logits_idx, :] == -float("inf")) == len(
+                    fake_logits[logits_idx, :] == -float('inf')) == len(
                         tokens_to_check
                     ), f"Expected only {len(tokens_to_check)} to be penalized"
             else:
                 # no tokens should be set to -inf
-                assert (torch.count_nonzero(
-                    fake_logits[logits_idx, :] == -float("inf")) == 0
-                        ), "No tokens should have been penalized"
+                assert torch.count_nonzero(
+                    fake_logits[logits_idx, :] ==
+                    -float('inf')) == 0, "No tokens should have been penalized"
 
     for test_case in test_cases:
         run_test_case(**test_case)
@@ -504,8 +501,7 @@ def test_sampler_mixed(seed: int, device: str):
             query_lens=seq_lens,
             device=device,
             pin_memory=is_pin_memory_available(),
-            generators=generators,
-        )
+            generators=generators)
         sampler_output = sampler(logits=fake_logits,
                                  sampling_metadata=sampling_metadata)
 
@@ -513,8 +509,8 @@ def test_sampler_mixed(seed: int, device: str):
                 zip(sampler_output, seq_group_metadata_list)):
             assert metadata.sampling_params is not None
 
-            if metadata.sampling_params.seed is not None and expected_tokens[
-                    i] is None:
+            if (metadata.sampling_params.seed is not None
+                    and expected_tokens[i] is None):
                 # Record seeded random result to compare with results of
                 # second invocation
                 expected_tokens[i] = [
@@ -543,12 +539,8 @@ def test_sampler_mixed(seed: int, device: str):
 
     # Shuffle the batch and resample
     target_index = list(range(batch_size))
-    for list_to_shuffle in (
-            target_index,
-            seq_group_metadata_list,
-            expected_tokens,
-            seq_lens,
-    ):
+    for list_to_shuffle in (target_index, seq_group_metadata_list,
+                            expected_tokens, seq_lens):
         random.Random(seed).shuffle(list_to_shuffle)
     target_index = torch.tensor(target_index)
     input_tensor.data = input_tensor.index_select(0, target_index)
@@ -570,13 +562,11 @@ def test_sampler_top_k_top_p(seed: int, device: str):
     input_tensor = torch.rand((batch_size, 1024),
                               device=device,
                               dtype=torch.float16)
-    fake_logits = torch.normal(
-        0,
-        5,
-        size=(batch_size, vocab_size),
-        device=input_tensor.device,
-        dtype=input_tensor.dtype,
-    )
+    fake_logits = torch.normal(0,
+                               5,
+                               size=(batch_size, vocab_size),
+                               device=input_tensor.device,
+                               dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(fake_logits)
 
     generation_model = GenerationMixin()
@@ -619,28 +609,20 @@ def test_sampler_top_k_top_p(seed: int, device: str):
         seq_lens,
         query_lens=seq_lens,
         device=device,
-        pin_memory=is_pin_memory_available(),
-    )
+        pin_memory=is_pin_memory_available())
 
     sample_probs = None
 
     def mock_sample(probs, *args, **kwargs):
         nonlocal sample_probs
         sample_probs = probs
-        return (
-            [[prob.topk(1, dim=-1).indices.tolist(), [0]] for prob in probs],
-            None,
-        )
+        return ([[prob.topk(1, dim=-1).indices.tolist(), [0]]
+                 for prob in probs], None)
 
     # top-k and top-p is only calculated when flashinfer kernel is not available
-    with (
-            patch("vllm.model_executor.layers.sampler._sample", mock_sample),
-            patch(
-                "vllm.model_executor.layers.sampler."
-                "flashinfer_top_k_top_p_sampling",
-                None,
-            ),
-    ):
+    with patch("vllm.model_executor.layers.sampler._sample", mock_sample), \
+         patch("vllm.model_executor.layers.sampler."
+               "flashinfer_top_k_top_p_sampling", None):
         sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
 
     assert sample_probs is not None
@@ -674,9 +656,8 @@ def test_flashinfer_fallback(seed: int, device: str):
                                 sampling_params, device)
 
     with patch(
-            "vllm.model_executor.layers.sampler.flashinfer_top_k_top_p_sampling",
-            failing_flashinfer_sampling,
-    ):
+            "vllm.model_executor.layers.sampler."
+            "flashinfer_top_k_top_p_sampling", failing_flashinfer_sampling):
         fallback_sampler_output = _do_sample(batch_size, fake_logits, sampler,
                                              sampling_params, device)
 
@@ -685,9 +666,11 @@ def test_flashinfer_fallback(seed: int, device: str):
 
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_repetition_penalty_mixed(device: str):
+
     vocab_size = 8
 
     def test_sampling_params(sampling_params: list[SamplingParams]):
+
         seq_group_metadata_list: list[SequenceGroupMetadata] = []
         seq_lens: list[int] = []
         for i in range(2):
@@ -706,8 +689,7 @@ def test_sampler_repetition_penalty_mixed(device: str):
             seq_lens,
             query_lens=seq_lens,
             device=device,
-            pin_memory=is_pin_memory_available(),
-        )
+            pin_memory=is_pin_memory_available())
 
         fake_logits = torch.full((2, vocab_size),
                                  1e-2,
@@ -765,8 +747,8 @@ def test_sampler_include_gpu_probs_tensor(device: str):
     mock_inplace = Mock()
     with patch(
             "vllm.model_executor.layers.sampler._modify_greedy_probs_inplace",
-            mock_inplace,
-    ):
+            mock_inplace):
+
         sampler_output = _do_sample(batch_size, fake_logits, sampler,
                                     sampling_params, device)
         mock_inplace.assert_not_called()

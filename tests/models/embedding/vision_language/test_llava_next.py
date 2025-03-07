@@ -8,7 +8,7 @@ from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import large_gpu_test
 from ..utils import check_embeddings_close
 
-llama3_template = "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n"  # noqa: E501
+llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n'  # noqa: E501
 
 HF_TEXT_PROMPTS = [
     # T -> X
@@ -55,7 +55,8 @@ def _run_test(
     with hf_runner(model, dtype=dtype,
                    auto_cls=AutoModelForVision2Seq) as hf_model:
         # Patch the issue where generation_config.json is missing
-        hf_model.processor.patch_size = hf_model.model.config.vision_config.patch_size
+        hf_model.processor.patch_size = \
+            hf_model.model.config.vision_config.patch_size
 
         # Patch the issue where image_token_id
         # exceeds the maximum allowed vocab size

@@ -8,12 +8,11 @@ def stateless_init_process_group(master_address, master_port, rank, world_size,
     vLLM provides `StatelessProcessGroup` to create a process group
     without considering the global process group in torch.distributed.
     It is recommended to create `StatelessProcessGroup`, and then initialize
-    the data-plane communication (NCCL) between external (train processes)
+    the data-plane communication (NCCL) between external (train processes) 
     and vLLM workers.
     """
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.utils import StatelessProcessGroup
-
     pg = StatelessProcessGroup.create(host=master_address,
                                       port=master_port,
                                       rank=rank,
@@ -35,7 +34,6 @@ class WorkerExtension:
     def init_weight_update_group(self, master_address, master_port,
                                  rank_offset, world_size):
         from vllm.distributed.parallel_state import get_world_group
-
         rank = get_world_group().rank + rank_offset
         self.model_update_group = stateless_init_process_group(
             master_address,
@@ -78,7 +76,6 @@ class ColocateWorkerExtension:
 
     def report_device_id(self) -> str:
         from vllm.platforms import current_platform
-
         self.device_uuid = current_platform.get_device_uuid(self.device.index)
         return self.device_uuid
 

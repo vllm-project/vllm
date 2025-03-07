@@ -240,11 +240,9 @@ if __name__ == "__main__":
         default=4096,
         help="Hidden size (2nd dimension) of the sequence",
     )
-    parser.add_argument(
-        "--use-residual",
-        action="store_true",
-        help="Whether to use residual connection",
-    )
+    parser.add_argument("--use-residual",
+                        action="store_true",
+                        help="Whether to use residual connection")
     parser.add_argument(
         "--save-path",
         type=str,
@@ -255,12 +253,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Run correctness test
-    calculate_diff(
-        batch_size=args.batch_size,
-        seq_len=args.seq_len,
-        hidden_size=args.hidden_size,
-        use_residual=args.use_residual,
-    )
+    calculate_diff(batch_size=args.batch_size,
+                   seq_len=args.seq_len,
+                   hidden_size=args.hidden_size,
+                   use_residual=args.use_residual)
 
     # Get the benchmark function with proper use_residual setting
     benchmark = get_benchmark(args.use_residual)

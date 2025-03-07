@@ -2,7 +2,6 @@
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""
-
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -97,15 +96,13 @@ class GLMAttention(nn.Module):
             base=10000 * rope_ratio,
             is_neox_style=is_neox_style,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -193,12 +190,10 @@ class GLMBlock(nn.Module):
                                                eps=config.layernorm_epsilon)
 
         # Self attention.
-        self.self_attention = GLMAttention(
-            config,
-            cache_config,
-            quant_config,
-            prefix=f"{prefix}.self_attention",
-        )
+        self.self_attention = GLMAttention(config,
+                                           cache_config,
+                                           quant_config,
+                                           prefix=f"{prefix}.self_attention")
         self.hidden_dropout = config.hidden_dropout
 
         # Layernorm on the attention output
@@ -274,8 +269,9 @@ class GLMTransformer(nn.Module):
             self.final_layernorm = layer_norm_func(
                 config.hidden_size, eps=config.layernorm_epsilon)
 
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.hidden_size))
 
     def forward(
         self,
@@ -307,12 +303,10 @@ class ChatGLMModel(nn.Module):
 
         self.config = config
 
-        self.embedding = VocabParallelEmbedding(
-            config.padded_vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.embedding",
-        )
+        self.embedding = VocabParallelEmbedding(config.padded_vocab_size,
+                                                config.hidden_size,
+                                                quant_config=quant_config,
+                                                prefix=f"{prefix}.embedding")
 
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
@@ -322,12 +316,10 @@ class ChatGLMModel(nn.Module):
                                       quant_config,
                                       prefix=f"{prefix}.encoder")
 
-        self.output_layer = ParallelLMHead(
-            config.padded_vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.output_layer",
-        )
+        self.output_layer = ParallelLMHead(config.padded_vocab_size,
+                                           config.hidden_size,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.output_layer")
 
         self.make_empty_intermediate_tensors = (
             self.encoder.make_empty_intermediate_tensors)
@@ -371,7 +363,7 @@ class ChatGLMModel(nn.Module):
         loaded_params: Set[str] = set()
 
         for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -400,6 +392,7 @@ class ChatGLMModel(nn.Module):
 
 
 class ChatGLMBaseModel(nn.Module):
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".word_embeddings": ""}, )
 
@@ -426,7 +419,8 @@ class ChatGLMBaseModel(nn.Module):
                                             prefix=maybe_prefix(
                                                 prefix, "transformer"))
         if self.config.tie_word_embeddings:
-            self.transformer.output_layer.weight = self.transformer.embedding.weight
+            self.transformer.output_layer.weight = (
+                self.transformer.embedding.weight)
         self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
         self.sampler = get_sampler()
@@ -458,7 +452,7 @@ class ChatGLMBaseModel(nn.Module):
 class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
-        "dense_h_to_4h": ["dense_h_to_4h"],
+        "dense_h_to_4h": ["dense_h_to_4h"]
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

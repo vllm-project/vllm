@@ -55,32 +55,24 @@ class Int8TpuConfig(QuantizationConfig):
 
 
 class TPUInt8LinearMethod(LinearMethodBase):
-    """Int8 Linear method for TPU Quant."""
+    """Int8 Linear method for TPU Quant. """
 
     def __init__(self, quant_config: Int8TpuConfig):
         self.quant_config = quant_config
 
-    def create_weights(
-        self,
-        layer: Module,
-        input_size_per_partition: int,
-        output_partition_sizes: List[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
+    def create_weights(self, layer: Module, input_size_per_partition: int,
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
+
         weight_loader = extra_weight_attrs.get("weight_loader")
-        weight = ModelWeightParameter(
-            data=torch.empty(
-                sum(output_partition_sizes),
-                input_size_per_partition,
-                dtype=params_dtype,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
+        weight = ModelWeightParameter(data=torch.empty(
+            sum(output_partition_sizes),
+            input_size_per_partition,
+            dtype=params_dtype),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
         layer.register_parameter("weight", weight)
 
     def _quantize_weight(
@@ -108,12 +100,10 @@ class TPUInt8LinearMethod(LinearMethodBase):
         layer.weight = Parameter(qweight, requires_grad=False)
         layer.scale = Parameter(qscale, requires_grad=False)
 
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         try:
             import torch_xla.experimental.xla_quantized_matmul  # noqa: F401
         except ImportError as err:

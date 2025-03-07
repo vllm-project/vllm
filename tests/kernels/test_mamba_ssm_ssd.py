@@ -71,7 +71,7 @@ def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
     # 4. Compute state -> output conversion per chunk
     # (left term of low-rank factorization of off-diagonal blocks; C terms)
     state_decay_out = torch.exp(A_cumsum)
-    Y_off = torch.einsum("bclhn,bchpn,bhcl->bclhp", C, states, state_decay_out)
+    Y_off = torch.einsum('bclhn,bchpn,bhcl->bclhp', C, states, state_decay_out)
 
     # Add output of intra-chunk and inter-chunk terms
     # (diagonal and off-diagonal blocks)
@@ -84,9 +84,10 @@ def generate_random_inputs(batch_size,
                            n_heads,
                            d_head,
                            itype,
-                           device="cuda"):
+                           device='cuda'):
+
     current_platform.seed_everything(0)
-    A = -torch.exp(torch.rand(n_heads, dtype=itype, device=device))
+    A = (-torch.exp(torch.rand(n_heads, dtype=itype, device=device)))
     dt = F.softplus(
         torch.randn(batch_size, seqlen, n_heads, dtype=itype, device=device) -
         4)
@@ -103,17 +104,16 @@ def generate_random_inputs(batch_size,
     return A, dt, X, B, C
 
 
-def generate_continous_batched_examples(
-    example_lens_by_batch,
-    num_examples,
-    full_length,
-    last_taken,
-    exhausted,
-    n_heads,
-    d_head,
-    itype,
-    device="cuda",
-):
+def generate_continous_batched_examples(example_lens_by_batch,
+                                        num_examples,
+                                        full_length,
+                                        last_taken,
+                                        exhausted,
+                                        n_heads,
+                                        d_head,
+                                        itype,
+                                        device='cuda'):
+
     # this function generates a random examples of certain length
     # and then cut according to "example_lens_by_batch" and feed
     # them in continuous batches to the kernels
@@ -133,6 +133,7 @@ def generate_continous_batched_examples(
     # e.g., example_lens=(8, 4) means take 8 samples from first eg,
     #       4 examples from second eg, etc
     def get_continuous_batch(example_lens: tuple[int, ...]):
+
         indices = []
         for i, x in enumerate(example_lens):
             c = last_taken.get(i, 0)
@@ -153,6 +154,7 @@ def generate_continous_batched_examples(
 
     IND_E = None
     for spec in example_lens_by_batch:
+
         # get the (maybe partial) example seen in this cont batch
         dt2, X2, B2, C2 = get_continuous_batch(spec)
 
@@ -174,12 +176,8 @@ def generate_continous_batched_examples(
             IND_S = [x % full_length for x in IND_E]
         IND_E = [end_boundary(x + y) for x, y in zip(IND_S, spec)]
 
-        yield (
-            [Y_min[s, IND_S[s]:IND_E[s]] for s in range(num_examples)],
-            cu_seqlens,
-            sed_idx.unsqueeze(0),
-            (A, dt2, X2, B2, C2),
-        )
+        yield ([Y_min[s, IND_S[s]:IND_E[s]] for s in range(num_examples)],
+               cu_seqlens, sed_idx.unsqueeze(0), (A, dt2, X2, B2, C2))
 
 
 @pytest.mark.parametrize("itype",
@@ -189,6 +187,7 @@ def generate_continous_batched_examples(
 @pytest.mark.parametrize("seq_len_chunk_size", [(119, 17), (128, 32)])
 def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
                                          itype):
+
     # this tests the kernels on a single example (no batching)
 
     # set seed
@@ -218,12 +217,10 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
 
     # just test the last head
     # NOTE, in the kernel we always cast states to fp32
-    torch.allclose(
-        final_state[:, -1],
-        final_state_min[:, -1].to(torch.float32),
-        atol=1e-3,
-        rtol=1e-3,
-    )
+    torch.allclose(final_state[:, -1],
+                   final_state_min[:, -1].to(torch.float32),
+                   atol=1e-3,
+                   rtol=1e-3)
 
 
 @pytest.mark.parametrize("itype", [torch.float32, torch.float16])
@@ -232,46 +229,32 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
 @pytest.mark.parametrize(
     "seq_len_chunk_size_cases",
     [
+
         # small-ish chunk_size (8)
         (64, 8, 2, [(64, 32), (64, 32)]),
         (64, 8, 2, [(32, 32), (32, 32), (32, 32)]),
         (64, 8, 2, [(8, 8), (8, 8), (8, 8)]),  # chunk size boundary
-        (
-            64,
-            8,
-            2,
-            [(4, 4), (4, 4), (4, 4), (4, 4)],
-        ),  # chunk_size larger than cont batches
-        (
-            64,
-            8,
-            5,
-            [
-                (64, 32, 16, 8, 8),
-                (8, 16, 32, 16, 8),
-                (8, 8, 16, 32, 16),
-            ],
-        ),  # mode examples with varied lengths
+        (64, 8, 2, [(4, 4), (4, 4), (4, 4),
+                    (4, 4)]),  # chunk_size larger than cont batches
+        (64, 8, 5, [
+            (64, 32, 16, 8, 8),
+            (8, 16, 32, 16, 8),
+            (8, 8, 16, 32, 16),
+        ]),  # mode examples with varied lengths
+
         # odd chunk_size
         (64, 29, 2, [(11, 4), (13, 23), (19, 22),
                      (21, 15)]),  # irregular sizes
+
         # large-ish chunk_size (256)
-        (
-            64,
-            256,
-            1,
-            [(5, ), (1, ), (1, ), (1, )],
-        ),  # irregular sizes with small sequences
-        (
-            64,
-            256,
-            2,
-            [(5, 30), (1, 2), (1, 2), (1, 2)],
-        ),  # irregular sizes with small sequences
-    ],
-)
+        (64, 256, 1, [(5, ), (1, ), (1, ),
+                      (1, )]),  # irregular sizes with small sequences
+        (64, 256, 2, [(5, 30), (1, 2), (1, 2),
+                      (1, 2)]),  # irregular sizes with small sequences
+    ])
 def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
                                      itype):
+
     # this test with multiple examples in a continuous batch
     # (i.e. chunked prefill)
 
@@ -283,27 +266,12 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
     exhausted: dict = {}  # map: eg -> boolean indicating example is exhausted
 
     states = None
-    for (
-            Y_min,
-            cu_seqlens,
-            sed_idx,
-        (
-            A,
-            dt,
-            X,
-            B,
-            C,
-        ),
-    ) in generate_continous_batched_examples(
-            cases,
-            num_examples,
-            seqlen,
-            last_taken,
-            exhausted,
-            n_heads,
-            d_head,
-            itype,
-    ):
+    for Y_min, cu_seqlens, sed_idx, (A, dt, X, B,
+                                     C) in generate_continous_batched_examples(
+                                         cases, num_examples, seqlen,
+                                         last_taken, exhausted, n_heads,
+                                         d_head, itype):
+
         Y, new_states = mamba_chunk_scan_combined(
             X,
             dt,
@@ -320,6 +288,7 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
 
         # just test the last in sequence
         for i in range(num_examples):
+
             # just test one dim and dstate
             Y_eg = Y[0, cu_seqlens[i]:cu_seqlens[i + 1], 0, 0]
             Y_min_eg = Y_min[i][:, 0, 0]
@@ -329,5 +298,5 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
         states = new_states
         for i, clear in exhausted.items():
             if clear:
-                states[i].fill_(0.0)
+                states[i].fill_(0.)
                 exhausted[i] = False

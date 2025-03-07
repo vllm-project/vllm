@@ -9,14 +9,13 @@ from transformers import AutoConfig, PretrainedConfig
 class EAGLEConfig(PretrainedConfig):
     model_type = "eagle"
 
-    def __init__(
-        self,
-        model: Union[PretrainedConfig, dict, None] = None,
-        truncated_vocab_size: Optional[int] = None,
-        **kwargs,
-    ):
-        model_config = (None if model is None else (AutoConfig.for_model(
-            **model) if isinstance(model, dict) else model))
+    def __init__(self,
+                 model: Union[PretrainedConfig, dict, None] = None,
+                 truncated_vocab_size: Optional[int] = None,
+                 **kwargs):
+
+        model_config = None if model is None else (AutoConfig.for_model(
+            **model) if isinstance(model, dict) else model)
 
         for k, v in kwargs.items():
             if k != "architectures" and k != "model_type" and hasattr(
@@ -28,9 +27,8 @@ class EAGLEConfig(PretrainedConfig):
         if self.model is None:
             self.truncated_vocab_size = None
         else:
-            self.truncated_vocab_size = (self.model.vocab_size
-                                         if truncated_vocab_size is None else
-                                         truncated_vocab_size)
+            self.truncated_vocab_size = self.model.vocab_size if \
+                truncated_vocab_size is None else truncated_vocab_size
 
         if "architectures" not in kwargs:
             kwargs["architectures"] = ["EAGLEModel"]

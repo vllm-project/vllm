@@ -49,7 +49,7 @@ else:
     from transformers import AutoConfig
 
 MISTRAL_CONFIG_NAME = "params.json"
-HF_TOKEN = os.getenv("HF_TOKEN", None)
+HF_TOKEN = os.getenv('HF_TOKEN', None)
 
 logger = init_logger(__name__)
 
@@ -78,7 +78,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "solar": SolarConfig,
     "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
-    **_CONFIG_REGISTRY_OVERRIDE_HF,
+    **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
 
@@ -88,12 +88,10 @@ class ConfigFormat(str, enum.Enum):
     MISTRAL = "mistral"
 
 
-def with_retry(
-    func: Callable[[], Any],
-    log_msg: str,
-    max_retries: int = 2,
-    retry_delay: int = 2,
-):
+def with_retry(func: Callable[[], Any],
+               log_msg: str,
+               max_retries: int = 2,
+               retry_delay: int = 2):
     for attempt in range(max_retries):
         try:
             return func()
@@ -101,13 +99,8 @@ def with_retry(
             if attempt == max_retries - 1:
                 logger.error("%s: %s", log_msg, e)
                 raise
-            logger.error(
-                "%s: %s, retrying %d of %d",
-                log_msg,
-                e,
-                attempt + 1,
-                max_retries,
-            )
+            logger.error("%s: %s, retrying %d of %d", log_msg, e, attempt + 1,
+                         max_retries)
             time.sleep(retry_delay)
             retry_delay *= 2
 
@@ -127,14 +120,13 @@ def list_repo_files(
         if (local_path := Path(repo_id)).exists():
             return [
                 str(file.relative_to(local_path))
-                for file in local_path.rglob("*") if file.is_file()
+                for file in local_path.rglob('*') if file.is_file()
             ]
         # if model is remote, use hf_hub api to list files
         try:
             if VLLM_USE_MODELSCOPE:
                 from vllm.transformers_utils.utils import (
                     modelscope_list_repo_files)
-
                 return modelscope_list_repo_files(repo_id,
                                                   revision=revision,
                                                   token=token)
@@ -351,7 +343,7 @@ def get_config(
 
 def try_get_local_file(model: Union[str, Path],
                        file_name: str,
-                       revision: Optional[str] = "main") -> Optional[Path]:
+                       revision: Optional[str] = 'main') -> Optional[Path]:
     file_path = Path(model) / file_name
     if file_path.is_file():
         return file_path
@@ -369,7 +361,7 @@ def try_get_local_file(model: Union[str, Path],
 
 def get_hf_file_to_dict(file_name: str,
                         model: Union[str, Path],
-                        revision: Optional[str] = "main"):
+                        revision: Optional[str] = 'main'):
     """
     Downloads a file from the Hugging Face Hub and returns
     its contents as a dictionary.
@@ -393,12 +385,8 @@ def get_hf_file_to_dict(file_name: str,
             hf_hub_file = hf_hub_download(model, file_name, revision=revision)
         except huggingface_hub.errors.OfflineModeIsEnabled:
             return None
-        except (
-                RepositoryNotFoundError,
-                RevisionNotFoundError,
-                EntryNotFoundError,
-                LocalEntryNotFoundError,
-        ) as e:
+        except (RepositoryNotFoundError, RevisionNotFoundError,
+                EntryNotFoundError, LocalEntryNotFoundError) as e:
             logger.debug("File or repository not found in hf_hub_download", e)
             return None
         except HfHubHTTPError as e:
@@ -406,8 +394,7 @@ def get_hf_file_to_dict(file_name: str,
                 "Cannot connect to Hugging Face Hub. Skipping file "
                 "download for '%s':",
                 file_name,
-                exc_info=e,
-            )
+                exc_info=e)
             return None
         file_path = Path(hf_hub_file)
 
@@ -419,7 +406,7 @@ def get_hf_file_to_dict(file_name: str,
 
 
 @cache
-def get_pooling_config(model: str, revision: Optional[str] = "main"):
+def get_pooling_config(model: str, revision: Optional[str] = 'main'):
     """
     This function gets the pooling and normalize
     config from the model - only applies to
@@ -448,19 +435,16 @@ def get_pooling_config(model: str, revision: Optional[str] = "main"):
 
     logger.info("Found sentence-transformers modules configuration.")
 
-    pooling = next(
-        (item for item in modules_dict
-         if item["type"] == "sentence_transformers.models.Pooling"),
-        None,
-    )
+    pooling = next((item for item in modules_dict
+                    if item["type"] == "sentence_transformers.models.Pooling"),
+                   None)
     normalize = bool(
-        next(
-            (item for item in modules_dict
-             if item["type"] == "sentence_transformers.models.Normalize"),
-            False,
-        ))
+        next((item for item in modules_dict
+              if item["type"] == "sentence_transformers.models.Normalize"),
+             False))
 
     if pooling:
+
         pooling_file_name = "{}/config.json".format(pooling["path"])
         pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision)
         pooling_type_name = next(
@@ -485,7 +469,7 @@ def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
     if "lasttoken" in pooling_name:
         pooling_name = "last"
 
-    supported_pooling_types = ["LAST", "ALL", "CLS", "STEP", "MEAN"]
+    supported_pooling_types = ['LAST', 'ALL', 'CLS', 'STEP', 'MEAN']
     pooling_type_name = pooling_name.upper()
 
     try:
@@ -499,7 +483,7 @@ def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
 
 @cache
 def get_sentence_transformer_tokenizer_config(model: str,
-                                              revision: Optional[str] = "main"
+                                              revision: Optional[str] = 'main'
                                               ):
     """
     Returns the tokenization configuration dictionary for a
@@ -527,9 +511,9 @@ def get_sentence_transformer_tokenizer_config(model: str,
     encoder_dict = None
 
     for config_file in sentence_transformer_config_files:
-        if (try_get_local_file(model=model,
-                               file_name=config_file,
-                               revision=revision) is not None):
+        if try_get_local_file(model=model,
+                              file_name=config_file,
+                              revision=revision) is not None:
             encoder_dict = get_hf_file_to_dict(config_file, model, revision)
             if encoder_dict:
                 break
@@ -563,32 +547,32 @@ def get_sentence_transformer_tokenizer_config(model: str,
 def maybe_register_config_serialize_by_value() -> None:
     """Try to register HF model configuration class to serialize by value
 
-    If trust_remote_code is set, and the model's config file specifies an
-    `AutoConfig` class, then the config class is typically an instance of
-    a custom class imported from the HF modules cache.
+        If trust_remote_code is set, and the model's config file specifies an
+        `AutoConfig` class, then the config class is typically an instance of
+        a custom class imported from the HF modules cache.
 
-    Examples:
+        Examples:
 
-    >>> from transformers import AutoConfig
-    >>> klass = AutoConfig.from_pretrained('meta-llama/Meta-Llama-3-8B', trust_remote_code=True)
-    >>> klass.__class__ # transformers.models.llama.configuration_llama.LlamaConfig
-    >>> import transformers_modules # error, not initialized
-    >>> klass = AutoConfig.from_pretrained('deepseek-ai/DeepSeek-V2.5', trust_remote_code=True)
-    >>> import transformers_modules # success, initialized
-    >>> klass.__class__ # transformers_modules.deepseek-ai.DeepSeek-V2.5.98b11844770b2c3ffc18b175c758a803640f4e77.configuration_deepseek.DeepseekV2Config
+        >>> from transformers import AutoConfig
+        >>> klass = AutoConfig.from_pretrained('meta-llama/Meta-Llama-3-8B', trust_remote_code=True)
+        >>> klass.__class__ # transformers.models.llama.configuration_llama.LlamaConfig
+        >>> import transformers_modules # error, not initialized
+        >>> klass = AutoConfig.from_pretrained('deepseek-ai/DeepSeek-V2.5', trust_remote_code=True)
+        >>> import transformers_modules # success, initialized
+        >>> klass.__class__ # transformers_modules.deepseek-ai.DeepSeek-V2.5.98b11844770b2c3ffc18b175c758a803640f4e77.configuration_deepseek.DeepseekV2Config
 
-    In the DeepSeek example, the config class is an instance of a custom
-    class that is not serializable by default. This class will not be
-    importable in spawned workers, and won't exist at all on
-    other nodes, which breaks serialization of the config.
+        In the DeepSeek example, the config class is an instance of a custom
+        class that is not serializable by default. This class will not be
+        importable in spawned workers, and won't exist at all on
+        other nodes, which breaks serialization of the config.
 
-    In this function we tell the cloudpickle serialization library to pass
-    instances of these generated classes by value instead of by reference,
-    i.e. the class definition is serialized along with its data so that the
-    class module does not need to be importable on the receiving end.
+        In this function we tell the cloudpickle serialization library to pass
+        instances of these generated classes by value instead of by reference,
+        i.e. the class definition is serialized along with its data so that the
+        class module does not need to be importable on the receiving end.
 
-    See: https://github.com/cloudpipe/cloudpickle?tab=readme-ov-file#overriding-pickles-serialization-mechanism-for-importable-constructs
-    """  # noqa
+        See: https://github.com/cloudpipe/cloudpickle?tab=readme-ov-file#overriding-pickles-serialization-mechanism-for-importable-constructs
+    """ # noqa
     try:
         import transformers_modules
     except ImportError:
@@ -597,12 +581,10 @@ def maybe_register_config_serialize_by_value() -> None:
 
     try:
         import cloudpickle
-
         cloudpickle.register_pickle_by_value(transformers_modules)
 
         # ray vendors its own version of cloudpickle
         from vllm.executor.ray_utils import ray
-
         if ray:
             ray.cloudpickle.register_pickle_by_value(transformers_modules)
 
@@ -627,8 +609,7 @@ def maybe_register_config_serialize_by_value() -> None:
             " trust_remote_code with by-value serialization. This may"
             " lead to a later error. If remote code is not needed"
             " remove `--trust-remote-code`",
-            exc_info=e,
-        )
+            exc_info=e)
 
 
 def load_params_config(model: Union[str, Path], revision: Optional[str],
@@ -675,7 +656,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
             # This maps to the FP8 static per-tensor quantization scheme
             quantization_config = {
                 "quant_method": "fp8",
-                "activation_scheme": "static",
+                "activation_scheme": "static"
             }
         else:
             raise ValueError(
@@ -684,9 +665,8 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
         config_dict["quantization_config"] = quantization_config
 
     config_type: Literal["text",
-                         "multimodal"] = ("multimodal"
-                                          if config_dict.get("vision_encoder")
-                                          is not None else "text")
+                         "multimodal"] = "multimodal" if config_dict.get(
+                             "vision_encoder") is not None else "text"
 
     if config_dict.get("moe") is not None:
         config_dict["architectures"] = ["MixtralForCausalLM"]
@@ -698,7 +678,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
 
         config_dict = {
             "text_config": config_dict,
-            "vision_config": multimodal_config,
+            "vision_config": multimodal_config
         }
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
@@ -770,10 +750,11 @@ def try_get_generation_config(
 def get_cross_encoder_activation_function(config: PretrainedConfig):
     if (hasattr(config, "sbert_ce_default_activation_function")
             and config.sbert_ce_default_activation_function is not None):
+
         function_name = config.sbert_ce_default_activation_function
-        assert function_name.startswith("torch.nn.modules."), (
-            "Loading of activation functions is restricted to "
-            "torch.nn.modules for security reasons")
+        assert function_name.startswith("torch.nn.modules."), \
+            "Loading of activation functions is restricted to " \
+            "torch.nn.modules for security reasons"
         return resolve_obj_by_qualname(function_name)()
     else:
         return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()

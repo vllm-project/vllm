@@ -41,7 +41,6 @@ PromptSeq = Union[str, list[int]]
 @dataclass
 class PromptIndex:
     """Resolves to an index in the prompt."""
-
     get_match_index: Callable[[AnyTokenizer, PromptSeq], Optional[int]]
 
 
@@ -360,7 +359,6 @@ class _BoundPromptSequence:
     A :data:`_PromptSeq` bound to a tokenizer to automatically
     convert between token sequence and text representations.
     """
-
     tokenizer: AnyTokenizer = field(repr=False)
 
     _text: Optional[str]
@@ -379,8 +377,8 @@ class _BoundPromptSequence:
 
     def __post_init__(self) -> None:
         if self._text is None and self._token_ids is None:
-            raise ValueError(
-                "At least one of 'text' and 'token_ids' must be specified")
+            raise ValueError("At least one of 'text' and 'token_ids' must be "
+                             "specified")
 
     @property
     def text(self) -> str:
@@ -412,7 +410,6 @@ class BoundPromptUpdate:
     :attr:`target` and the result of :meth:`get_content` between
     token sequence and text representations.
     """
-
     _origin: PromptUpdate
     tokenizer: AnyTokenizer = field(repr=False)
 
@@ -939,14 +936,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     Not to be confused with :class:`transformers.ProcessorMixin`.
     """
 
-    def __init__(
-        self,
-        info: _I,
-        dummy_inputs: "BaseDummyInputsBuilder[_I]",
-        *,
-        cache: Optional[ProcessingCache] = None,
-        enable_sanity_checks: bool = True,
-    ) -> None:
+    def __init__(self,
+                 info: _I,
+                 dummy_inputs: "BaseDummyInputsBuilder[_I]",
+                 *,
+                 cache: Optional[ProcessingCache] = None,
+                 enable_sanity_checks: bool = True) -> None:
         if get_repls := getattr(self, "_get_prompt_replacements", None):
             logger.warning_once("`_get_prompt_replacements` has been renamed "
                                 "to `_get_prompt_updates`. The old name will "
@@ -1110,7 +1105,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
         processed_data.update(passthrough_data)
 
-        (prompt_ids, ) = processed_data.pop("input_ids").tolist()
+        prompt_ids, = processed_data.pop("input_ids").tolist()
 
         mm_kwargs = MultiModalKwargs.from_hf_inputs(
             processed_data,
@@ -1308,8 +1303,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 item_count == mm_missing_counts[modality]
                 for modality, item_count in mm_missing_next_idx.items()), dict(
                     mm_missing_next_idx=mm_missing_next_idx,
-                    mm_missing_counts=mm_missing_counts,
-                )
+                    mm_missing_counts=mm_missing_counts)
 
         mm_kwargs = MultiModalKwargs.from_items(merged_kw_items)
 
@@ -1465,11 +1459,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             model_id = self.info.model_id
             mm_hashes = {
                 modality: [
-                    MultiModalHasher.hash_kwargs(
-                        model_id=model_id,
-                        **{modality: item},
-                        **hf_processor_mm_kwargs,
-                    ) for item in items
+                    MultiModalHasher.hash_kwargs(model_id=model_id,
+                                                 **{modality: item},
+                                                 **hf_processor_mm_kwargs)
+                    for item in items
                 ]
                 for modality, items in mm_items.items()
             }
@@ -1543,7 +1536,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
         """
-        Create input prompt for the encoder. HF processor will be applied on
+        Create input prompt for the encoder. HF processor will be applied on 
         this prompt during profiling and generation.
         """
         raise NotImplementedError
@@ -1591,8 +1584,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_inputs = MultiModalEncDecInputs(
             encoder_prompt=encoder_inputs["prompt"],
             encoder_prompt_token_ids=encoder_inputs["prompt_token_ids"],
-            **encoder_inputs,
-        )
+            **encoder_inputs)
         mm_inputs.update({
             "prompt": decoder_prompt,
             "prompt_token_ids": decoder_prompt_ids

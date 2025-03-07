@@ -13,12 +13,12 @@ logger = init_logger(__name__)
 class BaseKVCacheMethod(QuantizeMethodBase):
     """
     Quant method that adds `_k_scale` and `_v_scale` attributes to the
-    Attention layer to support loading those scaling factors from checkpoints.
+    Attention layer to support loading those scaling factors from checkpoints. 
     The k/v_scale will be used to:
         - quantize k/v_cache entries before saving them to the cache
         - dequantize k/v_cache entries before fetching them from the cache
 
-    :param quant_config: the appropriate QuantizationConfig
+    :param quant_config: the appropriate QuantizationConfig 
     """
 
     def __init__(self, quant_config: QuantizationConfig):
@@ -72,15 +72,16 @@ class BaseKVCacheMethod(QuantizeMethodBase):
 
             if not isinstance(k_scale, float) or not isinstance(
                     v_scale, float):
-                raise ValueError(
-                    "Only support per-tensor scaling factor for fp8 KV cache")
+                raise ValueError("Only support per-tensor scaling factor "
+                                 "for fp8 KV cache")
 
             # These are used in the final Attention.forward()
             layer._k_scale.copy_(k_scale)
             layer._v_scale.copy_(v_scale)
             layer._k_scale_float = k_scale
             layer._v_scale_float = v_scale
-            if k_scale == 1.0 and v_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
+            if (k_scale == 1.0 and v_scale == 1.0
+                    and "e5m2" not in layer.kv_cache_dtype):
                 logger.warning_once(
                     "Using KV cache scaling factor 1.0 for fp8_e4m3. This "
                     "may cause accuracy issues. Please make sure k/v_scale "

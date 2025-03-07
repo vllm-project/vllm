@@ -21,7 +21,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only persimmon model compatible with HuggingFace weights."""
-
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -54,22 +53,16 @@ from .utils import (is_pp_missing_parameter,
 
 class PersimmonMLP(nn.Module):
 
-    def __init__(
-        self,
-        config: PersimmonConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self,
+                 config: PersimmonConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
-        self.dense_h_to_4h = ColumnParallelLinear(
-            config.hidden_size,
-            config.intermediate_size,
-            quant_config=quant_config,
-        )
-        self.dense_4h_to_h = RowParallelLinear(
-            config.intermediate_size,
-            config.hidden_size,
-            quant_config=quant_config,
-        )
+        self.dense_h_to_4h = ColumnParallelLinear(config.hidden_size,
+                                                  config.intermediate_size,
+                                                  quant_config=quant_config)
+        self.dense_4h_to_h = RowParallelLinear(config.intermediate_size,
+                                               config.hidden_size,
+                                               quant_config=quant_config)
         self.act = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states) -> torch.Tensor:
@@ -81,13 +74,11 @@ class PersimmonMLP(nn.Module):
 
 class PersimmonAttention(nn.Module):
 
-    def __init__(
-        self,
-        config: PersimmonConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self,
+                 config: PersimmonConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.config = config
         tensor_parallel_world_size = get_tensor_model_parallel_world_size()
@@ -130,14 +121,12 @@ class PersimmonAttention(nn.Module):
             base=self.rope_theta,
         )
         self.scaling = self.head_dim**-0.5
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            scale=self.scaling,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              scale=self.scaling,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         # [seq_length, hidden_size] -> [seq_length, num_heads, head_dim]
@@ -177,21 +166,17 @@ class PersimmonAttention(nn.Module):
 
 class PersimmonDecoderLayer(nn.Module):
 
-    def __init__(
-        self,
-        config: PersimmonConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self,
+                 config: PersimmonConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = PersimmonAttention(
-            config=config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-        )
+        self.self_attn = PersimmonAttention(config=config,
+                                            cache_config=cache_config,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.self_attn")
         self.mlp = PersimmonMLP(config, quant_config=quant_config)
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
@@ -243,12 +228,12 @@ class PersimmonModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: PersimmonDecoderLayer(
                 config, cache_config, quant_config, prefix=prefix),
-            prefix=f"{prefix}.layers",
-        )
+            prefix=f"{prefix}.layers")
         self.final_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -335,7 +320,8 @@ class PersimmonForCausalLM(nn.Module, SupportsPP):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue

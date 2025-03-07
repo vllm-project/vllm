@@ -144,16 +144,10 @@ class Platform:
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     @classmethod
-    def get_attn_backend_cls(
-        cls,
-        selected_backend: _Backend,
-        head_size: int,
-        dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
-        block_size: int,
-        use_v1: bool,
-        use_mla: bool,
-    ) -> str:
+    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
+                             block_size: int, use_v1: bool,
+                             use_mla: bool) -> str:
         """Get the attention backend class of a device."""
         return ""
 
@@ -279,7 +273,8 @@ class Platform:
         """
         Verify whether the quantization is supported by the current platform.
         """
-        if cls.supported_quantization and quant not in cls.supported_quantization:
+        if cls.supported_quantization and \
+            quant not in cls.supported_quantization:
             raise ValueError(
                 f"{quant} quantization is currently not supported in "
                 f"{cls.device_name}.")

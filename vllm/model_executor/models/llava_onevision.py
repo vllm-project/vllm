@@ -242,10 +242,10 @@ class LlavaOnevisionDummyInputsBuilder(
         image_token = processor.image_token
         video_token = processor.video_token
 
-        target_width, target_height = self.info.get_image_size_with_most_features(
-        )
-        target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len)
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+        target_num_frames = \
+            self.info.get_num_frames_with_most_features(seq_len)
 
         mm_data = {
             "image":
@@ -258,7 +258,7 @@ class LlavaOnevisionDummyInputsBuilder(
                 height=target_height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
-            ),
+            )
         }
 
         return ProcessorInputs(
@@ -408,17 +408,13 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     def __init__(self, config: LlavaOnevisionConfig):
         super().__init__()
 
-        self.linear_1 = nn.Linear(
-            config.vision_config.hidden_size,
-            config.text_config.hidden_size,
-            bias=config.multimodal_projector_bias,
-        )
+        self.linear_1 = nn.Linear(config.vision_config.hidden_size,
+                                  config.text_config.hidden_size,
+                                  bias=config.multimodal_projector_bias)
         self.act = get_act_fn(config.projector_hidden_act)
-        self.linear_2 = nn.Linear(
-            config.text_config.hidden_size,
-            config.text_config.hidden_size,
-            bias=config.multimodal_projector_bias,
-        )
+        self.linear_2 = nn.Linear(config.text_config.hidden_size,
+                                  config.text_config.hidden_size,
+                                  bias=config.multimodal_projector_bias)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear_1(image_features)
@@ -430,8 +426,7 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(
     LlavaOnevisionMultiModalProcessor,
     info=LlavaOnevisionProcessingInfo,
-    dummy_inputs=LlavaOnevisionDummyInputsBuilder,
-)
+    dummy_inputs=LlavaOnevisionDummyInputsBuilder)
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsPP):
 
@@ -449,8 +444,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             config,
             quant_config,
             require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
+            prefix=maybe_prefix(prefix, "vision_tower"))
         self.multi_modal_projector = LlavaOnevisionMultiModalProjector(config)
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
@@ -490,6 +484,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _validate_image_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
+
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
 
@@ -548,6 +543,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _validate_video_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]
     ) -> Union[torch.Tensor, List[torch.Tensor]]:
+
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
 
@@ -571,7 +567,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         """
         A legal video input should have the following dimensions:
         {
-            "pixel_values_videos" :
+            "pixel_values_videos" : 
                 List[b, Tensor(nb_frames, nb_channels, height, width)]
         }
         """
@@ -581,7 +577,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         if not (is_list_of(pixel_values,
-                           (torch.Tensor))  # different shape videos
+                           (torch.Tensor))  # different shape videos 
                 or isinstance(pixel_values,
                               torch.Tensor)):  # same shape videos
             raise ValueError("Incorrect type of pixel values. "
@@ -598,12 +594,12 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
         for input_key in kwargs:
-            if (input_key in ("pixel_values", "image_embeds")
-                    and "images" not in modalities):
+            if input_key in ("pixel_values",
+                             "image_embeds") and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(
                     **kwargs)
-            if (input_key in ("pixel_values_videos", "video_embeds")
-                    and "videos" not in modalities):
+            if input_key in ("pixel_values_videos",
+                             "video_embeds") and "videos" not in modalities:
                 modalities["videos"] = self._parse_and_validate_video_input(
                     **kwargs)
 
@@ -623,6 +619,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
+
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         image_features = vision_tower(pixel_values)
@@ -632,21 +629,19 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         )
 
     # Based on: https://github.com/haotian-liu/LLaVA/blob/main/llava/model/llava_arch.py
-    def _merge_image_patch_embeddings(
-        self,
-        image_size: torch.Tensor,
-        patch_embeddings: torch.Tensor,
-        *,
-        image_newline=None,
-        vision_aspect_ratio="anyres_max_9",
-        strategy: str,
-    ) -> torch.Tensor:
+    def _merge_image_patch_embeddings(self,
+                                      image_size: torch.Tensor,
+                                      patch_embeddings: torch.Tensor,
+                                      *,
+                                      image_newline=None,
+                                      vision_aspect_ratio="anyres_max_9",
+                                      strategy: str) -> torch.Tensor:
         if strategy == "flat":
             return patch_embeddings.flatten(0, 1)
 
         if strategy.startswith("spatial"):
-            height = width = (self.config.vision_config.image_size //
-                              self.config.vision_config.patch_size)
+            height = width = self.config.vision_config.image_size \
+                // self.config.vision_config.patch_size
 
             base_patch_embeds = patch_embeddings[0]
             if height * width != base_patch_embeds.shape[0]:
@@ -669,13 +664,13 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                 num_patches = num_patch_height * num_patch_width
 
                 # Image patches might be padded for batch processing
-                other_patch_embeds = other_patch_embeds[:num_patches].view(
-                    num_patch_height, num_patch_width, height, width, -1)
+                other_patch_embeds = other_patch_embeds[:num_patches] \
+                    .view(num_patch_height, num_patch_width, height, width, -1)
 
                 if "unpad" in strategy:
-                    other_patch_embeds = (other_patch_embeds.permute(
-                        4, 0, 2, 1, 3).contiguous().flatten(1,
-                                                            2).flatten(2, 3))
+                    other_patch_embeds = other_patch_embeds \
+                        .permute(4, 0, 2, 1, 3).contiguous() \
+                        .flatten(1, 2).flatten(2, 3)
                     other_patch_embeds = unpad_image(other_patch_embeds,
                                                      (orig_height, orig_width))
                     max_num_patches = int(
@@ -686,41 +681,36 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                     if ratio > 1.1:
                         other_patch_embeds = other_patch_embeds[None]
                         other_patch_embeds = nn.functional.interpolate(
-                            other_patch_embeds,
-                            [
+                            other_patch_embeds, [
                                 int(curr_height // ratio),
-                                int(curr_width // ratio),
+                                int(curr_width // ratio)
                             ],
-                            mode="bilinear",
-                        )[0]
+                            mode="bilinear")[0]
                     if image_newline is not None:
                         other_patch_embeds = torch.cat(
                             (
                                 other_patch_embeds,
-                                image_newline[:, None, None].expand(
-                                    *other_patch_embeds.shape[:-1], 1).to(
-                                        other_patch_embeds.device),
+                                image_newline[:, None, None] \
+                                .expand(*other_patch_embeds.shape[:-1], 1) \
+                                .to(other_patch_embeds.device),
                             ),
-                            dim=-1,
-                        )
-                    other_patch_embeds = other_patch_embeds.flatten(
-                        1, 2).transpose(0, 1)
+                        dim=-1)
+                    other_patch_embeds = other_patch_embeds \
+                        .flatten(1, 2).transpose(0, 1)
                 else:
-                    other_patch_embeds = (other_patch_embeds.permute(
-                        0, 2, 1, 3, 4).contiguous().flatten(0, 3))
+                    other_patch_embeds = other_patch_embeds \
+                        .permute(0, 2, 1, 3, 4).contiguous() \
+                        .flatten(0, 3)
 
                 merged_patch_embeddings = torch.cat(
                     (base_patch_embeds, other_patch_embeds), dim=0)
             else:
                 if "unpad" in strategy:
                     merged_patch_embeddings = torch.cat(
-                        (
-                            base_patch_embeds,
-                            self.image_newline[None].to(
-                                base_patch_embeds.device),
-                        ),
-                        dim=0,
-                    )
+                        (base_patch_embeds,
+                         self.image_newline[None] \
+                            .to(base_patch_embeds.device)
+                    ), dim=0)
                 else:
                     merged_patch_embeddings = base_patch_embeds
 
@@ -779,8 +769,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                 image_sizes[i],
                 patch_features_batch,
                 image_newline=self.image_newline,
-                strategy="spatial_unpad",
-            ) for i, patch_features_batch in enumerate(patch_embeddings)
+                strategy="spatial_unpad")
+            for i, patch_features_batch in enumerate(patch_embeddings)
         ]
 
     def _add_image_newline(
@@ -793,8 +783,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         if strategy == "one_token":
             video_features = video_features.reshape(
                 videos, frames * video_features.shape[1], -1)
-            image_newline = (self.image_newline[None, None, :].repeat(
-                videos, 1, 1).to(video_features.device))
+            image_newline = self.image_newline[None, None, :].repeat(
+                videos, 1, 1).to(video_features.device)
             video_features = torch.cat((video_features, image_newline), dim=1)
             return video_features
         raise ValueError(f"Unexpected video newline strategy: {strategy}")
@@ -804,6 +794,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
+
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         video_features = vision_tower(pixel_values)
@@ -825,12 +816,10 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values = video_pixels.view(b * num_videos * frames, c, h, w)
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, pixel_values)
-            stacked_embeddings = self._add_image_newline(
-                stacked_embeddings,
-                videos=b * num_videos,
-                frames=frames,
-                strategy="one_token",
-            )
+            stacked_embeddings = self._add_image_newline(stacked_embeddings,
+                                                         videos=b * num_videos,
+                                                         frames=frames,
+                                                         strategy="one_token")
             return stacked_embeddings
         elif is_list_of(video_pixels, torch.Tensor):
             stacked_embeddings = []
@@ -839,12 +828,10 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                 pixel_values = video_pixel.view(num_videos * frames, c, h, w)
                 embeddings = self._video_pixels_to_features(
                     self.vision_tower, pixel_values)
-                embeddings = self._add_image_newline(
-                    embeddings,
-                    videos=num_videos,
-                    frames=frames,
-                    strategy="one_token",
-                )
+                embeddings = self._add_image_newline(embeddings,
+                                                     videos=num_videos,
+                                                     frames=frames,
+                                                     strategy="one_token")
                 stacked_embeddings.append(embeddings)
             return stacked_embeddings
         else:
@@ -863,7 +850,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         scaled_shape = [math.ceil(height / stride), math.ceil(width / stride)]
         image_feature = nn.functional.interpolate(image_features,
                                                   size=scaled_shape,
-                                                  mode="bilinear")
+                                                  mode='bilinear')
         image_feature = image_feature.permute(0, 2, 3, 1)
         image_feature = image_feature.view(batch_frames, -1, dim)
         return image_feature
@@ -900,11 +887,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                [self.config.image_token_index, self.config.video_token_index],
-            )
+                input_ids, inputs_embeds, multimodal_embeddings,
+                [self.config.image_token_index, self.config.video_token_index])
         return inputs_embeds
 
     def get_input_embeddings_v0(
@@ -913,6 +897,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_input: Optional[NestedTensors] = None,
         video_input: Optional[NestedTensors] = None,
     ) -> torch.Tensor:
+
         inputs_embeds = self.get_input_embeddings(input_ids)
         if image_input is not None:
             image_embeds = self._process_image_input(image_input)
@@ -967,12 +952,10 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                     video_input=video_input)
                 input_ids = None
 
-        hidden_states = self.language_model.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
+        hidden_states = self.language_model.model(input_ids,
+                                                  positions,
+                                                  intermediate_tensors,
+                                                  inputs_embeds=inputs_embeds)
 
         return hidden_states
 

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for InternVL's multimodal preprocessing kwargs."""
-
 from collections.abc import Mapping
 from typing import Optional
 

@@ -14,7 +14,6 @@ vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
 (audio inference with Ultravox)
 vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b --max-model-len 4096
 """
-
 import base64
 
 import requests
@@ -41,7 +40,7 @@ def encode_base64_content_from_url(content_url: str) -> str:
 
     with requests.get(content_url) as response:
         response.raise_for_status()
-        result = base64.b64encode(response.content).decode("utf-8")
+        result = base64.b64encode(response.content).decode('utf-8')
 
     return result
 
@@ -63,6 +62,7 @@ def run_text_only() -> None:
 
 # Single-image input inference
 def run_single_image() -> None:
+
     ## Use image url in the payload
     image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
     chat_completion_from_url = client.chat.completions.create(
@@ -127,7 +127,7 @@ def run_multi_image() -> None:
             "content": [
                 {
                     "type": "text",
-                    "text": "What are the animals in these images?",
+                    "text": "What are the animals in these images?"
                 },
                 {
                     "type": "image_url",
@@ -229,7 +229,7 @@ def run_audio() -> None:
                     "input_audio": {
                         # Any format supported by librosa is supported
                         "data": audio_base64,
-                        "format": "wav",
+                        "format": "wav"
                     },
                 },
             ],
@@ -310,15 +310,13 @@ def main(args) -> None:
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description="Demo on using OpenAI client for online serving with "
-        "multimodal language models served with vLLM.")
-    parser.add_argument(
-        "--chat-type",
-        "-c",
-        type=str,
-        default="single-image",
-        choices=list(example_function_map.keys()),
-        help="Conversation type with multimodal data.",
-    )
+        description='Demo on using OpenAI client for online serving with '
+        'multimodal language models served with vLLM.')
+    parser.add_argument('--chat-type',
+                        '-c',
+                        type=str,
+                        default="single-image",
+                        choices=list(example_function_map.keys()),
+                        help='Conversation type with multimodal data.')
     args = parser.parse_args()
     main(args)

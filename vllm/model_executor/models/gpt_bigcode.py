@@ -19,7 +19,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPTBigCode model compatible with HuggingFace weights."""
-
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -60,10 +59,11 @@ class GPTBigCodeAttention(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         total_num_heads = config.num_attention_heads
-        self.tensor_model_parallel_world_size = get_tensor_model_parallel_world_size(
-        )
+        self.tensor_model_parallel_world_size = (
+            get_tensor_model_parallel_world_size())
         assert total_num_heads % self.tensor_model_parallel_world_size == 0
-        self.num_heads = total_num_heads // self.tensor_model_parallel_world_size
+        self.num_heads = (total_num_heads //
+                          self.tensor_model_parallel_world_size)
         self.head_dim = self.hidden_size // total_num_heads
         self.scale = self.head_dim**-0.5
 
@@ -90,15 +90,13 @@ class GPTBigCodeAttention(nn.Module):
             bias=True,
             quant_config=quant_config,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            scale=self.scale,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              scale=self.scale,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -108,8 +106,7 @@ class GPTBigCodeAttention(nn.Module):
         q, k, v = qkv.split(
             [
                 self.hidden_size // self.tensor_model_parallel_world_size,
-                self.kv_dim,
-                self.kv_dim,
+                self.kv_dim, self.kv_dim
             ],
             dim=-1,
         )
@@ -160,7 +157,8 @@ class GPTBigCodeBlock(nn.Module):
     ):
         super().__init__()
         hidden_size = config.hidden_size
-        inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
+        inner_dim = (config.n_inner if config.n_inner is not None else 4 *
+                     hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = GPTBigCodeAttention(config,
@@ -203,14 +201,12 @@ class GPTBigCodeModel(nn.Module):
         assert not config.add_cross_attention
 
         self.embed_dim = config.hidden_size
-        lora_vocab = ((lora_config.lora_extra_vocab_size *
-                       (lora_config.max_loras or 1)) if lora_config else 0)
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
-        self.wte = VocabParallelEmbedding(
-            self.vocab_size,
-            self.embed_dim,
-            org_num_embeddings=config.vocab_size,
-        )
+        self.wte = VocabParallelEmbedding(self.vocab_size,
+                                          self.embed_dim,
+                                          org_num_embeddings=config.vocab_size)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
@@ -219,8 +215,9 @@ class GPTBigCodeModel(nn.Module):
             prefix=f"{prefix}.h",
         )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states"], config.n_embd)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.n_embd))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
@@ -275,8 +272,7 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head = ParallelLMHead(
                 self.transformer.vocab_size,
                 self.transformer.embed_dim,
-                org_num_embeddings=self.config.vocab_size,
-            )
+                org_num_embeddings=self.config.vocab_size)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -335,9 +331,9 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                     default_weight_loader)
             # TODO (@robertgshaw2-neuralmagic): move to fp8 linear method
             if "c_attn.input_scale" in name or "c_attn.weight_scale" in name:
-                weight_loader(param, loaded_weight, "q")
-                weight_loader(param, loaded_weight, "k")
-                weight_loader(param, loaded_weight, "v")
+                weight_loader(param, loaded_weight, 'q')
+                weight_loader(param, loaded_weight, 'k')
+                weight_loader(param, loaded_weight, 'v')
             else:
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)

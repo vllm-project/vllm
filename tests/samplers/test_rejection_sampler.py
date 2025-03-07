@@ -23,9 +23,9 @@ def mock_causal_accepted_tensor(
     """
     batch_size = last_accepted_indices.shape[0]
 
-    accepted = torch.arange(k).expand(
-        batch_size,
-        k) <= last_accepted_indices.unsqueeze(-1).broadcast_to(batch_size, k)
+    accepted = (torch.arange(k).expand(batch_size, k)
+                <= last_accepted_indices.unsqueeze(-1).broadcast_to(
+                    batch_size, k))
 
     # Sprinkle accepted values after the contiguous initial accepted values.
     # This replicates the behavior of rejection sampling, which may "accept"
@@ -42,14 +42,14 @@ def mock_causal_accepted_tensor(
 @pytest.mark.parametrize("seed", list(range(10)))
 @pytest.mark.parametrize(
     "which_tokens_accepted",
-    ["all_tokens_accepted", "no_tokens_accepted", "some_tokens_accepted"],
-)
+    ["all_tokens_accepted", "no_tokens_accepted", "some_tokens_accepted"])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
 def test_correct_output_format(which_tokens_accepted: str, seed: int,
                                device: str, use_flashinfer: bool):
-    """Verify the output has correct format given predetermined accepted matrix."""
+    """Verify the output has correct format given predetermined accepted matrix.
+    """
     set_random_seed(seed)
     torch.set_default_device(device)
 
@@ -86,13 +86,12 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
 
     rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
     rejection_sampler.init_gpu_tensors(device=device)
-    output_token_ids = (
-        rejection_sampler._create_output(  # pylint: disable=protected-access
-            accepted,
-            recovered_token_ids,
-            draft_token_ids,
-            bonus_token_ids,
-        ))
+    output_token_ids = rejection_sampler._create_output(  # pylint: disable=protected-access
+        accepted,
+        recovered_token_ids,
+        draft_token_ids,
+        bonus_token_ids,
+    )
 
     expected_bonus_token_ids = bonus_token_ids.clone()
 
@@ -107,10 +106,8 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
         assert torch.equal(output_token_ids[:, 0], recovered_token_ids[:, 0])
 
         # Expect everything else to be -1.
-        assert torch.equal(
-            output_token_ids[:, 1:],
-            torch.ones_like(output_token_ids[:, 1:]) * -1,
-        )
+        assert torch.equal(output_token_ids[:, 1:],
+                           torch.ones_like(output_token_ids[:, 1:]) * -1)
     elif which_tokens_accepted == "some_tokens_accepted":
         recovered_plus_bonus = torch.cat(
             (recovered_token_ids, expected_bonus_token_ids), dim=-1)
@@ -119,8 +116,7 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
             recovered_plus_bonus[torch.arange(0, batch_size),
                                  last_accepted_indices + 1],
             output_token_ids[torch.arange(0, batch_size),
-                             last_accepted_indices + 1],
-        )
+                             last_accepted_indices + 1])
 
         # Assert every subsequent token is -1.
         subsequent_mask = torch.arange(0, k + 1).expand(
@@ -166,15 +162,9 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
-def test_deterministic_when_seeded(
-    k: int,
-    vocab_size: int,
-    batch_size: int,
-    frac_seeded: float,
-    n_rep: int,
-    device: str,
-    use_flashinfer: bool,
-):
+def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
+                                   frac_seeded: float, n_rep: int, device: str,
+                                   use_flashinfer: bool):
     torch.set_default_device(device)
     rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
     rejection_sampler.init_gpu_tensors(device=device)
@@ -202,13 +192,8 @@ def test_deterministic_when_seeded(
             for i in range(batch_size) if seeded_mask[i]
         }
         results.append(
-            rejection_sampler(
-                target_probs,
-                bonus_token_ids,
-                draft_probs,
-                draft_token_ids,
-                seeded_seqs,
-            ))
+            rejection_sampler(target_probs, bonus_token_ids, draft_probs,
+                              draft_token_ids, seeded_seqs))
 
     for i in range(batch_size):
         if seeded_mask[i]:
@@ -242,13 +227,11 @@ def test_mixed_seeded_batch(k: int, vocab_size: int, batch_size: int,
 
     single_batches = []
     for i in range(batch_size):
-        single_batches.append((
-            draft_probs[i].clone().unsqueeze(0),
-            draft_token_ids[i].clone().unsqueeze(0),
-            target_probs[i].clone().unsqueeze(0),
-            bonus_token_ids[i].clone().unsqueeze(0),
-            draft_token_ids[i].clone().unsqueeze(0),
-        ))
+        single_batches.append((draft_probs[i].clone().unsqueeze(0),
+                               draft_token_ids[i].clone().unsqueeze(0),
+                               target_probs[i].clone().unsqueeze(0),
+                               bonus_token_ids[i].clone().unsqueeze(0),
+                               draft_token_ids[i].clone().unsqueeze(0)))
 
     set_random_seed(0)
     rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
@@ -259,37 +242,24 @@ def test_mixed_seeded_batch(k: int, vocab_size: int, batch_size: int,
         i: torch.Generator(device=device).manual_seed(i)
         for i in range(1, batch_size)  # 0 is seed None
     }
-    batch_result = rejection_sampler(
-        target_probs.clone(),
-        bonus_token_ids.clone(),
-        draft_probs.clone(),
-        draft_token_ids.clone(),
-        seeded_seqs,
-    )
+    batch_result = rejection_sampler(target_probs.clone(),
+                                     bonus_token_ids.clone(),
+                                     draft_probs.clone(),
+                                     draft_token_ids.clone(), seeded_seqs)
 
     set_random_seed(0)
 
     rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
     rejection_sampler.init_gpu_tensors(device=device)
     for i in range(batch_size):
-        request_seeded_seqs = ({
+        request_seeded_seqs = {
             0: torch.Generator(device=device).manual_seed(i)
-        } if seeded_seqs.get(i) is not None else None)
-        (
-            draft_probs,
-            draft_token_ids,
-            target_probs,
-            bonus_token_ids,
-            draft_token_ids,
-        ) = single_batches[i]
+        } if seeded_seqs.get(i) is not None else None
+        (draft_probs, draft_token_ids, target_probs, bonus_token_ids,
+         draft_token_ids) = single_batches[i]
         results.append(
-            rejection_sampler(
-                target_probs,
-                bonus_token_ids,
-                draft_probs,
-                draft_token_ids,
-                request_seeded_seqs,
-            ))
+            rejection_sampler(target_probs, bonus_token_ids, draft_probs,
+                              draft_token_ids, request_seeded_seqs))
     for i in range(batch_size):
         assert torch.equal(batch_result[i], results[i].squeeze(0))
 
@@ -302,7 +272,7 @@ def test_mixed_seeded_batch(k: int, vocab_size: int, batch_size: int,
 def test_compare_nonflashinfer_backend(k: int, vocab_size: int,
                                        batch_size: int, device: str):
     """
-    Test the flashinfer and nonflashinfer backend generate
+    Test the flashinfer and nonflashinfer backend generate 
     the same output metrics.
     """
     torch.set_default_device(device)
@@ -337,13 +307,8 @@ def test_compare_nonflashinfer_backend(k: int, vocab_size: int,
         # We use seeded sequences to ensure the same tokens are accepted
         # for both flashinfer and nonflashinfer backends.
         seeded_seqs = get_seeded_seqs()
-        rejection_sampler(
-            target_probs,
-            bonus_token_ids,
-            draft_probs,
-            draft_token_ids,
-            seeded_seqs,
-        )
+        rejection_sampler(target_probs, bonus_token_ids, draft_probs,
+                          draft_token_ids, seeded_seqs)
         num_accepted_tokens.append(rejection_sampler.num_accepted_tokens)
         num_emitted_tokens.append(rejection_sampler.num_emitted_tokens)
         num_draft_tokens.append(rejection_sampler.num_draft_tokens)
@@ -359,12 +324,9 @@ def test_compare_nonflashinfer_backend(k: int, vocab_size: int,
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("use_flashinfer", [True, False])
 @torch.inference_mode()
-def test_raises_when_vocab_oob(
-    above_or_below_vocab_range: str,
-    which_token_ids: str,
-    device: str,
-    use_flashinfer: bool,
-):
+def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
+                               which_token_ids: str, device: str,
+                               use_flashinfer: bool):
     k = 3
     batch_size = 5
     vocab_size = 30_000
@@ -458,12 +420,12 @@ def test_rejection_sampling_approximates_target_distribution(
 
     for num_samples in sample_sizes:
         (reference_vs_rejsample_dist,
-         target_vs_rejsample_dist) = (helper.run_and_compare_distributions(
+         target_vs_rejsample_dist) = helper.run_and_compare_distributions(
              draft_probs,
              target_probs,
              reference_probs,
              num_samples,
-         ))
+         )
 
         distance_wrt_reference.append(reference_vs_rejsample_dist)
         distance_wrt_target.append(target_vs_rejsample_dist)
@@ -533,21 +495,18 @@ class _CorrectnessTestHelper:
 
         return draft_probs, target_probs, reference_probs
 
-    def run_and_compare_distributions(
-        self,
-        draft_probs: torch.Tensor,
-        target_probs: torch.Tensor,
-        reference_probs: torch.Tensor,
-        num_samples: int,
-    ) -> tuple[float, float]:
+    def run_and_compare_distributions(self, draft_probs: torch.Tensor,
+                                      target_probs: torch.Tensor,
+                                      reference_probs: torch.Tensor,
+                                      num_samples: int) -> tuple[float, float]:
         # Sample using rejection sampling.
         rej_sample_probs = self._estimate_rejection_sampling_pdf(
             draft_probs, target_probs, num_samples)
 
         # Average distance from reference probs.
-        reference_vs_rejsample_dist = (
-            torch.dist(reference_probs, rej_sample_probs).item() /
-            reference_probs.shape[0])
+        reference_vs_rejsample_dist = torch.dist(
+            reference_probs,
+            rej_sample_probs).item() / reference_probs.shape[0]
         target_vs_rejsample_dist = torch.dist(target_probs,
                                               rej_sample_probs).item()
 
@@ -580,22 +539,19 @@ class _CorrectnessTestHelper:
                                       device="cuda").repeat(num_samples, 1)
 
         # Get output tokens via rejection sampling.
-        output_token_ids = self.rejection_sampler(
-            target_probs.to("cuda"),
-            bonus_token_ids.to("cuda"),
-            draft_probs.to("cuda"),
-            draft_token_ids.to("cuda"),
-        )
+        output_token_ids = self.rejection_sampler(target_probs.to("cuda"),
+                                                  bonus_token_ids.to("cuda"),
+                                                  draft_probs.to("cuda"),
+                                                  draft_token_ids.to("cuda"))
 
         # Remove bonus tokens
         output_token_ids = output_token_ids[:, :-1].flatten()
 
         # Estimate probability density function
-        hist = torch.histogram(
-            output_token_ids.to(dtype=torch.float, device="cpu"),
-            bins=self.vocab_size,
-            range=self.vocab_range,
-            density=True,
-        )
+        hist = torch.histogram(output_token_ids.to(dtype=torch.float,
+                                                   device="cpu"),
+                               bins=self.vocab_size,
+                               range=self.vocab_range,
+                               density=True)
 
         return hist.hist

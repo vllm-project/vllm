@@ -104,10 +104,9 @@ def test_compile_correctness(test_setting: TestSetting):
     if cuda_device_count_stateless() != pp_size * tp_size:
         pytest.skip("Not correct CUDA devices for the test.")
     import os
-
     os.environ["VLLM_ATTENTION_BACKEND"] = attn_backend
-    final_args = (["--enforce-eager"] + model_args +
-                  ["-pp", str(pp_size)] + ["-tp", str(tp_size)])
+    final_args = ["--enforce-eager"] + model_args + ["-pp", str(pp_size)] + \
+                ["-tp", str(tp_size)]
 
     all_args: list[list[str]] = []
     all_envs: list[Optional[dict[str, str]]] = []
@@ -125,8 +124,7 @@ def test_compile_correctness(test_setting: TestSetting):
         model,
         all_args,
         all_envs,
-        method=method if method != "generate" else "generate_close",
-    )
+        method=method if method != "generate" else "generate_close")
     all_envs.clear()
     all_args.clear()
 

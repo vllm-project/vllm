@@ -33,8 +33,7 @@ def test_swap() -> None:
     worker.load_model()
     worker.initialize_cache(
         num_gpu_blocks=engine_config.cache_config.num_gpu_blocks,
-        num_cpu_blocks=engine_config.cache_config.num_cpu_blocks,
-    )
+        num_cpu_blocks=engine_config.cache_config.num_cpu_blocks)
 
     # Randomly initialize the cache.
     gpu_cache = worker.cache_engine[0].gpu_cache

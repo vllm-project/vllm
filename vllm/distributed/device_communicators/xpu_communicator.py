@@ -11,13 +11,11 @@ from .base_device_communicator import DeviceCommunicatorBase
 
 class XpuCommunicator(DeviceCommunicatorBase):
 
-    def __init__(
-        self,
-        cpu_group: ProcessGroup,
-        device: Optional[torch.device] = None,
-        device_group: Optional[ProcessGroup] = None,
-        unique_name: str = "",
-    ):
+    def __init__(self,
+                 cpu_group: ProcessGroup,
+                 device: Optional[torch.device] = None,
+                 device_group: Optional[ProcessGroup] = None,
+                 unique_name: str = ""):
         super().__init__(cpu_group, device, device_group, unique_name)
 
     def all_reduce(self, input_) -> torch.Tensor:
@@ -28,9 +26,8 @@ class XpuCommunicator(DeviceCommunicatorBase):
                input_: torch.Tensor,
                dst: int = 0,
                dim: int = -1) -> Optional[torch.Tensor]:
-        assert (
-            -input_.dim() <= dim < input_.dim()
-        ), f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}")
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
@@ -38,11 +35,9 @@ class XpuCommunicator(DeviceCommunicatorBase):
         # cluster so we use all_gather instead for now.
         input_size = input_.size()
         # Allocate output tensor.
-        output_tensor = torch.empty(
-            (self.world_size, ) + input_size,
-            dtype=input_.dtype,
-            device=input_.device,
-        )
+        output_tensor = torch.empty((self.world_size, ) + input_size,
+                                    dtype=input_.dtype,
+                                    device=input_.device)
         # All-gather.
         dist.all_gather_into_tensor(output_tensor,
                                     input_,

@@ -79,13 +79,10 @@ class MultiprocExecutor(Executor):
         # Create workers
         self.workers: list[WorkerProcHandle] = []
         for rank in range(self.world_size):
-            worker = WorkerProc.make_worker_process(
-                self.vllm_config,
-                rank,
-                rank,
-                distributed_init_method,
-                scheduler_output_handle,
-            )
+            worker = WorkerProc.make_worker_process(self.vllm_config, rank,
+                                                    rank,
+                                                    distributed_init_method,
+                                                    scheduler_output_handle)
             self.workers.append(worker)
 
         # Ensure message queues are ready. Will deadlock if re-ordered
@@ -94,13 +91,11 @@ class MultiprocExecutor(Executor):
         for w in self.workers:
             w.worker_response_mq.wait_until_ready()
 
-    def collective_rpc(
-            self,
-            method: Union[str, Callable],
-            timeout: Optional[float] = None,
-            args: tuple = (),
-            kwargs: Optional[dict] = None,
-    ) -> list[Any]:
+    def collective_rpc(self,
+                       method: Union[str, Callable],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict] = None) -> list[Any]:
         start_time = time.monotonic()
         kwargs = kwargs or {}
 
@@ -117,8 +112,8 @@ class MultiprocExecutor(Executor):
 
             responses = [None] * self.world_size
             for w in self.workers:
-                dequeue_timeout = (timeout - (time.monotonic() - start_time)
-                                   if timeout is not None else None)
+                dequeue_timeout = timeout - (time.monotonic() - start_time
+                                             ) if timeout is not None else None
                 status, result = w.worker_response_mq.dequeue(
                     timeout=dequeue_timeout)
 
@@ -175,7 +170,7 @@ class MultiprocExecutor(Executor):
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
-        if not getattr(self, "shutting_down", False):
+        if not getattr(self, 'shutting_down', False):
             self.shutting_down = True
             for w in self.workers:
                 w.worker_response_mq = None
@@ -293,8 +288,8 @@ class WorkerProc:
 
     @staticmethod
     def worker_main(*args, **kwargs):
-        """Worker initialization and execution loops.
-        This runs a background process"""
+        """ Worker initialization and execution loops.
+        This runs a background process """
 
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
@@ -345,6 +340,7 @@ class WorkerProc:
     ) -> Optional[Handle]:
         """Wait until the Worker is ready."""
         with zmq_socket_ctx(ready_path, zmq.constants.PULL) as socket:
+
             # Wait for Worker to send READY.
             while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                 logger.debug("Waiting for WorkerProc to startup.")

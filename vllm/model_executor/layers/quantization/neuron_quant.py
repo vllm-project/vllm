@@ -9,7 +9,7 @@ from torch.nn import Module
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
-SUPPORTED_QUANT_DTYPE_LIST = ["s8", "f8e4m3fn"]
+SUPPORTED_QUANT_DTYPE_LIST = ['s8', 'f8e4m3fn']
 
 
 class NeuronQuantConfig(QuantizationConfig):
@@ -62,9 +62,6 @@ class NeuronQuantConfig(QuantizationConfig):
 
     def get_quantization_config(self):
         from transformers_neuronx.config import QuantizationConfig
-
-        return QuantizationConfig(
-            quant_dtype=self.quant_dtype,
-            dequant_dtype=self.dequant_dtype,
-            quantize_method=self.quantize_method,
-        )
+        return QuantizationConfig(quant_dtype=self.quant_dtype,
+                                  dequant_dtype=self.dequant_dtype,
+                                  quantize_method=self.quantize_method)

@@ -16,7 +16,7 @@ SeqId = int
 
 
 def get_all_num_logprobs(
-    seq_group_metadata_list: List[SequenceGroupMetadata], ) -> List[int]:
+        seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[int]:
     """Given a list of SequenceGroupMetadata, create a list of all num_logprobs.
 
     If the sampling params do not call for any logprobs, return 0 for that
@@ -38,7 +38,8 @@ def get_sampled_token_logprobs(
         logprob_tensor: torch.Tensor,
         sampled_token_ids: torch.Tensor,  # shape [num_steps, batch_size]
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Get the logprobs for the sampled tokens. Returns the ranks and logprobs."""
+    """Get the logprobs for the sampled tokens. Returns the ranks and logprobs.
+    """
     num_steps, batch_size, vocab_size = logprob_tensor.shape
 
     selected_logprobs = logprob_tensor[
@@ -48,8 +49,8 @@ def get_sampled_token_logprobs(
     ]
     expanded_selected_logprobs = selected_logprobs.unsqueeze(-1).expand(
         -1, -1, vocab_size)
-    sampled_token_ids_ranks = ((logprob_tensor
-                                > expanded_selected_logprobs).sum(-1).add_(1))
+    sampled_token_ids_ranks = (logprob_tensor
+                               > expanded_selected_logprobs).sum(-1).add_(1)
 
     return sampled_token_ids_ranks, selected_logprobs
 
@@ -79,14 +80,12 @@ def create_logprobs_output(
         ),
     }
     logprobs.update({
-        topk_token_id:
-        Logprob(
+        topk_token_id: Logprob(
             logprob=topk_logprob if topk_logprob is not None else 0.0,
             rank=topk_index + 1,
         )
-        for topk_index, (
-            topk_token_id,
-            topk_logprob) in enumerate(zip(topk_token_ids, topk_logprobs))
+        for topk_index, (topk_token_id, topk_logprob) \
+            in enumerate(zip(topk_token_ids, topk_logprobs)) \
         if topk_token_id is not None
     })
 
@@ -134,10 +133,8 @@ def create_sequence_group_output(
 def split_batch_by_proposal_len(
     seq_group_metadata_list: List[SequenceGroupMetadata],
     proposal_lens: List[int],
-) -> Tuple[
-        Tuple[List[SequenceGroupMetadata], List[int]],
-        Tuple[List[SequenceGroupMetadata], List[int]],
-]:
+) -> Tuple[Tuple[List[SequenceGroupMetadata], List[int]], Tuple[
+        List[SequenceGroupMetadata], List[int]]]:
     """Utility function that splits a batch based on whether the proposal len is
     zero or not. We should remove this once vLLM supports per-sequence proposal
     lens in a batch.
@@ -158,16 +155,16 @@ def sampler_output_to_torch(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """Utility function which converts a list of SamplerOutput to tensors.
 
-    sampler_transposed here is used as the indicator for whether
-    we need do additional tensor transpose logic here.
+        sampler_transposed here is used as the indicator for whether
+        we need do additional tensor transpose logic here.
 
-    Returns:
-        sampled_token_ids: torch.Tensor
-            shape: [batch_size, len(sampler_output_list)]
+        Returns:
+            sampled_token_ids: torch.Tensor
+                shape: [batch_size, len(sampler_output_list)]
 
-        sampled_token_probs: torch.Tensor
-            shape: [batch_size, len(sampler_output_list), vocab_size]
-    """
+            sampled_token_probs: torch.Tensor
+                shape: [batch_size, len(sampler_output_list), vocab_size]
+        """
 
     # shape: [batch_size, num_sampler_output, vocab_size]
     sampled_token_probs = torch.stack(
@@ -213,12 +210,8 @@ def sampler_output_to_torch(
     else:
         sampled_hidden_states = None
 
-    return (
-        sampled_token_ids,
-        sampled_token_probs,
-        sampled_token_logprobs,
-        sampled_hidden_states,
-    )
+    return (sampled_token_ids, sampled_token_probs, sampled_token_logprobs,
+            sampled_hidden_states)
 
 
 def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,
@@ -228,8 +221,7 @@ def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,
     https://docs.google.com/document/d/1rE4pr3IdspRw97XbImY4fS9IWYuJJ3HGtL7AdIKGrw8/edit#heading=h.qijw1sdidrer
     """
     values = [
-        sampler_output.sampled_token_probs,
-        sampler_output.sampled_token_ids,
+        sampler_output.sampled_token_probs, sampler_output.sampled_token_ids
     ]
     assert all(v is None for v in values) or not any(v is None for v in values)
     if not any(v is None for v in values):
@@ -239,8 +231,7 @@ def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,
     # Softmax to ensure valid probs.
     sampler_output.sampled_token_probs = torch.nn.functional.softmax(
         torch.rand(batch_size, vocab_size, dtype=torch.float32, device=device),
-        dim=-1,
-    )
+        dim=-1)
 
     sampler_output.sampled_token_ids = torch.randint(low=10,
                                                      high=100,
@@ -251,7 +242,7 @@ def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,
 
 @contextmanager
 def nvtx_range(msg, *args, **kwargs):
-    """
+    """ 
     Context manager / decorator that pushes an NVTX range at the beginning
     of its scope, and pops it at the end. If extra arguments are given,
     they are passed as arguments to msg.format().
@@ -272,7 +263,8 @@ def nvtx_range(msg, *args, **kwargs):
 
 
 class Timer:
-    """Basic timer context manager for measuring CPU time."""
+    """Basic timer context manager for measuring CPU time.
+    """
 
     def __enter__(self):
         self.start_time = time.time()

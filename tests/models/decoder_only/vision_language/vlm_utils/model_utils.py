@@ -3,7 +3,6 @@
 for manipulating the input / output of HF & vLLM test runners, which are
 typically specific to a small subset of models.
 """
-
 import re
 import types
 from pathlib import PosixPath
@@ -214,7 +213,7 @@ def get_llava_embeddings(image_assets: _ImageAssets):
 
 ####### postprocessors to run on HF BatchEncoding
 def cast_dtype_post_processor(
-    hf_inp_key: str, ) -> Callable[[BatchEncoding, str], BatchEncoding]:
+        hf_inp_key: str) -> Callable[[BatchEncoding, str], BatchEncoding]:
     """Gets a handle to a post processor which converts a given key into a
     target data type."""
 
@@ -227,7 +226,7 @@ def cast_dtype_post_processor(
 
 
 def ignore_inputs_post_processor(
-    hf_inp_key: str, ) -> Callable[[BatchEncoding, str], BatchEncoding]:
+        hf_inp_key: str) -> Callable[[BatchEncoding, str], BatchEncoding]:
     """Gets a handle to a post processor which ignores a given key."""
 
     def process(hf_inputs: BatchEncoding, dtype: str):
@@ -248,10 +247,8 @@ def molmo_post_processor(hf_inputs: BatchEncoding, dtype: str):
 
 ####### Prompt path encoders for models that need models on disk
 def qwen_prompt_path_encoder(
-    tmp_path: PosixPath,
-    prompt: str,
-    assets: Union[list[ImageAsset], _ImageAssets],
-) -> str:
+        tmp_path: PosixPath, prompt: str, assets: Union[list[ImageAsset],
+                                                        _ImageAssets]) -> str:
     """Given a temporary dir path, export one or more image assets into the
     tempdir & replace its contents with the local path to the string so that
     the HF version of Qwen-VL can resolve the path and load the image in its
@@ -302,8 +299,8 @@ def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         return inputs
 
     hf_model.processor = processor
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language.model.embed_tokens)
+    hf_model.model.get_output_embeddings = lambda: \
+        hf_model.model.language.model.embed_tokens
     return hf_model
 
 
@@ -329,8 +326,8 @@ def glm_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         )
 
     hf_model.processor = processor
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.transformer.output_layer)
+    hf_model.model.get_output_embeddings = lambda: \
+        hf_model.model.transformer.output_layer
     return hf_model
 
 
@@ -376,9 +373,10 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             ]
             pixel_values = torch.cat(pixel_values, dim=0)
             for num_patches in num_patches_list:
-                context_tokens = IMG_CONTEXT * self.num_image_token * num_patches
+                context_tokens = IMG_CONTEXT * self.num_image_token \
+                    * num_patches
                 image_tokens = IMG_START + context_tokens + IMG_END
-                text = text.replace("<image>", image_tokens, 1)
+                text = text.replace('<image>', image_tokens, 1)
             prompt = self.tokenizer(text, return_tensors="pt")
             prompt.update({"pixel_values": pixel_values})
             return prompt
@@ -387,8 +385,8 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         "<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = H2OVLProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings())
+    hf_model.model.get_output_embeddings = lambda: \
+        hf_model.model.language_model.get_output_embeddings()
     hf_model.model.generate = types.MethodType(_internvl_generate,
                                                hf_model.model)
     return hf_model
@@ -417,7 +415,6 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             from vllm.model_executor.models.internvl import (
                 IMG_CONTEXT, IMG_END, IMG_START,
                 image_to_pixel_values_internvl)
-
             images = [images] if isinstance(images, Image) else images
             pixel_values = [
                 image_to_pixel_values_internvl(
@@ -433,9 +430,10 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             ]
             pixel_values = torch.cat(pixel_values, dim=0)
             for num_patches in num_patches_list:
-                context_tokens = IMG_CONTEXT * self.num_image_token * num_patches
+                context_tokens = IMG_CONTEXT * self.num_image_token \
+                    * num_patches
                 image_tokens = IMG_START + context_tokens + IMG_END
-                text = text.replace("<image>", image_tokens, 1)
+                text = text.replace('<image>', image_tokens, 1)
             prompt = self.tokenizer(text, return_tensors="pt")
             prompt.update({"pixel_values": pixel_values})
             return prompt
@@ -444,8 +442,8 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         "<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = InternVLProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings())
+    hf_model.model.get_output_embeddings = lambda: \
+        hf_model.model.language_model.get_output_embeddings()
     hf_model.model.generate = types.MethodType(_internvl_generate,
                                                hf_model.model)
     return hf_model
@@ -467,7 +465,7 @@ def _internvl_generate(
     input_embeds = input_embeds.reshape(B * N, C)
 
     input_ids = input_ids.reshape(B * N)
-    selected = input_ids == self.img_context_token_id
+    selected = (input_ids == self.img_context_token_id)
     assert selected.sum() != 0
     input_embeds[selected] = vit_embeds.reshape(-1, C).to(input_embeds.device)
 

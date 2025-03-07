@@ -32,7 +32,6 @@ class PythonicToolParser(ToolParser):
 
     Used when --enable-auto-tool-choice --tool-call-parser pythonic are all set
     """
-
     # TODO(mdepinet): Possible future improvements:
     #   1. Support text + tools separated by either <|python_tag|> or \n\n
     #   2. Support tools outside of a list (or separated by a semicolon).
@@ -42,8 +41,7 @@ class PythonicToolParser(ToolParser):
 
     TOOL_CALL_REGEX = re.compile(
         r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
-        re.DOTALL,
-    )
+        re.DOTALL)
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
@@ -77,11 +75,10 @@ class PythonicToolParser(ToolParser):
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=[
-                        _handle_single_tool(e)
-                        for e in parsed.elts  # type: ignore
+                        _handle_single_tool(e)  # type: ignore
+                        for e in parsed.elts
                     ],
-                    content=None,
-                )
+                    content=None)
             else:
                 raise _UnexpectedAstError(
                     "Tool output must be a list of function calls")
@@ -102,6 +99,7 @@ class PythonicToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
+
         if not current_text.startswith("["):
             return DeltaMessage(content=delta_text)
 
@@ -117,8 +115,10 @@ class PythonicToolParser(ToolParser):
                     isinstance(e, ast.Call) for e in parsed.elts):
                 raise _UnexpectedAstError(
                     "Tool output must be a list of function calls")
-            tool_calls = [_handle_single_tool(e)
-                          for e in parsed.elts]  # type: ignore
+            tool_calls = [
+                _handle_single_tool(e)  # type: ignore
+                for e in parsed.elts
+            ]
 
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):
@@ -129,24 +129,21 @@ class PythonicToolParser(ToolParser):
                 if len(self.streamed_args_for_tool) == index:
                     self.streamed_args_for_tool.append("")
 
-                new_call_complete = (index < len(tool_calls) - 1
-                                     or ")]" not in added_text)
+                new_call_complete = index < len(
+                    tool_calls) - 1 or ")]" not in added_text
                 if new_call_complete:
                     self.current_tool_index += 1
 
-                withheld_suffix = added_text[:-2] if not new_call_complete else ""
+                withheld_suffix = (added_text[:-2]
+                                   if not new_call_complete else "")
                 if not new_call_complete and added_text[-2] == ")":
                     # Function call is incomplete. Withhold the closing bracket.
                     withheld_suffix = withheld_suffix + "}"
                 # Strings get single quotes in the model-produced string.
                 # JSON requires double quotes.
                 withheld_suffix = withheld_suffix.replace("'", '"')
-                delta = _compute_tool_delta(
-                    self.streamed_args_for_tool[index],
-                    new_call,
-                    index,
-                    withheld_suffix,
-                )
+                delta = _compute_tool_delta(self.streamed_args_for_tool[index],
+                                            new_call, index, withheld_suffix)
 
                 if delta is not None:
                     tool_deltas.append(delta)
@@ -168,14 +165,14 @@ class PythonicToolParser(ToolParser):
             elif not added_text and self.current_tool_id > 0:
                 # Return an empty DeltaMessage once the tool calls are all done
                 # so that finish_reason gets set.
-                return DeltaMessage(content="")
+                return DeltaMessage(content='')
             else:
                 return None
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             logger.debug(
-                "Skipping chunk as a result of tool streaming extraction error"
-            )
+                "Skipping chunk as a result of tool streaming extraction "
+                "error")
             return None
 
 
@@ -203,11 +200,9 @@ def _handle_single_tool(call: ast.Call) -> ToolCall:
     arguments = {}
     for keyword in call.keywords:
         arguments[keyword.arg] = _get_parameter_value(keyword.value)
-    return ToolCall(
-        type="function",
-        function=FunctionCall(name=function_name,
-                              arguments=json.dumps(arguments)),
-    )
+    return ToolCall(type="function",
+                    function=FunctionCall(name=function_name,
+                                          arguments=json.dumps(arguments)))
 
 
 def _make_valid_python(text: str) -> Union[tuple[str, str], None]:
@@ -256,8 +251,8 @@ def _make_valid_python(text: str) -> Union[tuple[str, str], None]:
             return None  # Incomplete parameter name
     if text.endswith(","):
         text = text[:-1]
-    if (bracket_stack and bracket_stack[-1] == "[" and not text.endswith("[")
-            and not text.endswith(")")):
+    if bracket_stack and bracket_stack[-1] == "[" and not text.endswith(
+            "[") and not text.endswith(")"):
         return None  # Incomplete function name
 
     added_text = ""
@@ -276,27 +271,22 @@ def _make_valid_python(text: str) -> Union[tuple[str, str], None]:
     return text + added_text, added_text
 
 
-def _compute_tool_delta(
-    previously_sent_args: str,
-    new_call: ToolCall,
-    index: int,
-    withheld_suffix: str,
-) -> Union[DeltaToolCall, None]:
+def _compute_tool_delta(previously_sent_args: str, new_call: ToolCall,
+                        index: int,
+                        withheld_suffix: str) -> Union[DeltaToolCall, None]:
     new_call_args = new_call.function.arguments
     if withheld_suffix:
         assert new_call_args.endswith(withheld_suffix)
         new_call_args = new_call_args[:-len(withheld_suffix)]
     if not previously_sent_args:
-        return DeltaToolCall(
-            id=new_call.id,
-            index=index,
-            function=DeltaFunctionCall(
-                name=new_call.function.name,
-                arguments=new_call_args,
-            ),
-        )
+        return DeltaToolCall(id=new_call.id,
+                             index=index,
+                             function=DeltaFunctionCall(
+                                 name=new_call.function.name,
+                                 arguments=new_call_args,
+                             ))
 
     arg_diff = new_call_args[len(previously_sent_args):]
-    return (DeltaToolCall(
+    return DeltaToolCall(
         id="", index=index, function=DeltaFunctionCall(
-            arguments=arg_diff)) if arg_diff else None)
+            arguments=arg_diff)) if arg_diff else None

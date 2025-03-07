@@ -41,16 +41,16 @@ def split_tensor_along_last_dim(
     num_partitions: int,
     contiguous_split_chunks: bool = False,
 ) -> Sequence[torch.Tensor]:
-    """Split a tensor along its last dimension.
+    """ Split a tensor along its last dimension.
 
-    Arguments:
-        tensor: input tensor.
-        num_partitions: number of partitions to split the tensor
-        contiguous_split_chunks: If True, make each chunk contiguous
-                                 in memory.
+        Arguments:
+            tensor: input tensor.
+            num_partitions: number of partitions to split the tensor
+            contiguous_split_chunks: If True, make each chunk contiguous
+                                     in memory.
 
-    Returns:
-        A list of Tensors
+        Returns:
+            A list of Tensors
     """
     # Get the size and dimension.
     last_dim = tensor.dim() - 1
@@ -100,10 +100,8 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
         if remaining_layers := num_hidden_layers % pp_size:
             for i in range(2, remaining_layers + 2):
                 partitions[-i] += 1
-            logger.info(
-                "Hidden layers were unevenly partitioned: %s",
-                ",".join(str(p) for p in partitions),
-            )
+            logger.info("Hidden layers were unevenly partitioned: %s",
+                        ",".join(str(p) for p in partitions))
             logger.info("This can be manually overridden using the "
                         "VLLM_PP_LAYER_PARTITION environment variable")
 
@@ -119,7 +117,6 @@ class StatelessProcessGroup:
     group. Only use it to communicate metadata between processes.
     For data-plane communication, create NCCL-related objects.
     """
-
     rank: int
     world_size: int
     store: torch._C._distributed_c10d.Store
@@ -180,13 +177,15 @@ class StatelessProcessGroup:
         """
         if self.rank == src:
             self.expire_data()
-            key = f"broadcast_from/{src}/{self.broadcast_send_counter}"
+            key = (f"broadcast_from/{src}/"
+                   f"{self.broadcast_send_counter}")
             self.store.set(key, pickle.dumps(obj))
             self.broadcast_send_counter += 1
             self.entries.append((key, time.time()))
             return obj
         else:
-            key = f"broadcast_from/{src}/{self.broadcast_recv_src_counter[src]}"
+            key = (f"broadcast_from/{src}/"
+                   f"{self.broadcast_recv_src_counter[src]}")
             recv_obj = pickle.loads(self.store.get(key))
             self.broadcast_recv_src_counter[src] += 1
             return recv_obj
@@ -233,7 +232,7 @@ class StatelessProcessGroup:
         used for exchanging metadata. With this function, process A and process B
         can call `StatelessProcessGroup.create` to form a group, and then process A, B,
         C, and D can call `StatelessProcessGroup.create` to form another group.
-        """  # noqa
+        """ # noqa
         store = TCPStore(
             host_name=host,
             port=port,
@@ -245,8 +244,7 @@ class StatelessProcessGroup:
             rank=rank,
             world_size=world_size,
             store=store,
-            data_expiration_seconds=data_expiration_seconds,
-        )
+            data_expiration_seconds=data_expiration_seconds)
 
 
 def stateless_init_torch_distributed_process_group(
@@ -309,7 +307,6 @@ def stateless_init_torch_distributed_process_group(
 
     if backend == "gloo":
         from torch.distributed.distributed_c10d import ProcessGroupGloo
-
         backend_class = ProcessGroupGloo(prefix_store,
                                          group_rank,
                                          group_size,

@@ -41,7 +41,7 @@ class KVConnectorBase(ABC):
     def close(self) -> None:
         """Close the buffer and release resources.
 
-        This method is responsible for cleaning up resources related to the
+        This method is responsible for cleaning up resources related to the 
         connector when it is no longer needed.
 
         Raises:
@@ -61,19 +61,19 @@ class KVConnectorBase(ABC):
         """
         Send KV caches and hidden states to the connector.
 
-        This method processes the input tokens, KV caches, and
-        hidden/intermediate states for a given model and sends the data to the
+        This method processes the input tokens, KV caches, and 
+        hidden/intermediate states for a given model and sends the data to the 
         decode instance.
 
         Args:
-            model_executable (torch.nn.Module): The model executable containing
+            model_executable (torch.nn.Module): The model executable containing 
                 start and end layer information.
             model_input (ModelInputForGPUWithSamplingMetadata): The input
                 metadata from vLLM.
-            kv_caches (List[torch.Tensor]): List of KV caches (keys and values)
+            kv_caches (List[torch.Tensor]): List of KV caches (keys and values) 
                 for each layer.
-            hidden_or_intermediate_states (Union[torch.Tensor,
-            IntermediateTensors]):
+            hidden_or_intermediate_states (Union[torch.Tensor, 
+            IntermediateTensors]): 
                 The hidden or intermediate states associated with the tokens.
 
         Returns:
@@ -85,41 +85,37 @@ class KVConnectorBase(ABC):
 
     @abstractmethod
     def recv_kv_caches_and_hidden_states(
-        self,
-        model_executable: torch.nn.Module,
+        self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor],
-    ) -> Tuple[
-            Union[torch.Tensor, IntermediateTensors],
-            bool,
-            "ModelInputForGPUWithSamplingMetadata",
-    ]:
+        kv_caches: List[torch.Tensor]
+    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+               "ModelInputForGPUWithSamplingMetadata"]:
         """
         Receive KV caches and hidden states from the connector.
 
         This method attempts to retrieve KV caches and hidden states for input
         tokens. If all required KV caches and hidden states are received, it
-        will bypass model input, else it will fall back to normal vLLM model
+        will bypass model input, else it will fall back to normal vLLM model 
         forwarding.
 
         Args:
-            model_executable (torch.nn.Module):
+            model_executable (torch.nn.Module): 
                 The model executable from vLLM modelrunner.
-            model_input (ModelInputForGPUWithSamplingMetadata):
+            model_input (ModelInputForGPUWithSamplingMetadata): 
                 The model input from vLLM modelrunner.
-            kv_caches (List[torch.Tensor]):
+            kv_caches (List[torch.Tensor]): 
                 List of KV caches for each layer.
 
         Returns:
             - hidden_or_intermediate_states (torch.Tensor or
-            IntermediateTensors):
-                Concatenated hidden states if all required data is retrieved,
+            IntermediateTensors): 
+                Concatenated hidden states if all required data is retrieved, 
                 otherwise `None`.
-            - bypass_model_exec (bool):
-                Indicates whether the model execution can be skipped (True) or
+            - bypass_model_exec (bool): 
+                Indicates whether the model execution can be skipped (True) or 
                 needs to be redone (False).
-            - model_input (ModelInputForGPUWithSamplingMetadata):
-                Optionally adjusted input metadata for re-execution when
+            - model_input (ModelInputForGPUWithSamplingMetadata): 
+                Optionally adjusted input metadata for re-execution when 
                 `bypass_model_exec=False`.
 
         """

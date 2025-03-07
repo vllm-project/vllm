@@ -14,9 +14,9 @@ from vllm.utils import is_pin_memory_available
 class SpecDecodeWorkerMetrics(
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True,
-):  # type: ignore[call-arg]
-    """Dataclass holding metrics emitted from the spec decode worker."""
+        array_like=True):  # type: ignore[call-arg]
+    """Dataclass holding metrics emitted from the spec decode worker.
+    """
 
     # The empirical acceptance rate of the proposal method on a per-token basis.
     # This is useful for evaluating how well the proposal method aligns with the
@@ -55,12 +55,10 @@ class AsyncMetricsCollector:
     from the device to CPU on a non-default Torch stream.
     """
 
-    def __init__(
-        self,
-        spec_decode_sampler: SpecDecodeBaseSampler,
-        timer: Optional[Timer] = None,
-        collect_interval_s: float = 5.0,
-    ):
+    def __init__(self,
+                 spec_decode_sampler: SpecDecodeBaseSampler,
+                 timer: Optional[Timer] = None,
+                 collect_interval_s: float = 5.0):
         self.spec_decode_sampler = spec_decode_sampler
         self._timer = time.time if timer is None else timer
 
@@ -87,18 +85,17 @@ class AsyncMetricsCollector:
 
     def init_tensors(self,
                      rank: int,
-                     device_type: Union[torch.device, str] = "cuda") -> None:
+                     device_type: Union[torch.device, str] = 'cuda') -> None:
         self._rank = rank
         if isinstance(device_type, torch.device):
             device_type = device_type.type
-        if device_type == "cuda":
+        if device_type == 'cuda':
             self._copy_stream = torch.cuda.Stream()
 
     def maybe_collect_rejsample_metrics(
             self, k: int) -> Optional[SpecDecodeWorkerMetrics]:
         # currently using cuda.Event, skip for any non_cuda_alike platform
         from vllm.platforms import current_platform
-
         if not current_platform.is_cuda_alike():
             return None
 
@@ -122,8 +119,7 @@ class AsyncMetricsCollector:
         if self._rank != 0:
             return False
 
-        return (now - self._last_metrics_collect_time
-                >= self._rejsample_metrics_collect_interval_s)  # noqa: E501
+        return now - self._last_metrics_collect_time >= self._rejsample_metrics_collect_interval_s  # noqa: E501
 
     def _copy_rejsample_metrics_async(self) -> torch.cuda.Event:
         """Copy rejection/typical-acceptance sampling metrics
@@ -142,7 +138,8 @@ class AsyncMetricsCollector:
                 self.spec_decode_sampler.num_emitted_tokens, non_blocking=True)
             # Number of draft tokens is calculated on CPU, so no copy is
             # required.
-            self._aggregate_num_draft_tokens = self.spec_decode_sampler.num_draft_tokens
+            self._aggregate_num_draft_tokens = (
+                self.spec_decode_sampler.num_draft_tokens)
 
         aggregate_metrics_ready = torch.cuda.Event()
         aggregate_metrics_ready.record(self._copy_stream)

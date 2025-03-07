@@ -23,7 +23,6 @@ On the client side, run:
         --endpoint /generate_stream
     to the end of the command above.
 """
-
 import argparse
 import asyncio
 import base64
@@ -100,7 +99,7 @@ def sample_sharegpt_requests(
     fixed_output_len: Optional[int] = None,
 ) -> list[tuple[str, int, int, None]]:
     # Load the dataset.
-    with open(dataset_path, encoding="utf-8") as f:
+    with open(dataset_path, encoding='utf-8') as f:
         dataset = json.load(f)
     # Filter out the conversations with less than 2 turns.
     dataset = [data for data in dataset if len(data["conversations"]) >= 2]
@@ -123,8 +122,8 @@ def sample_sharegpt_requests(
         completion = dataset[i][1]
         completion_token_ids = tokenizer(completion).input_ids
         prompt_len = len(prompt_token_ids)
-        output_len = (len(completion_token_ids)
-                      if fixed_output_len is None else fixed_output_len)
+        output_len = len(completion_token_ids
+                         ) if fixed_output_len is None else fixed_output_len
         if prompt_len < 4 or (fixed_output_len is None and output_len < 4):
             # Prune too short sequences.
             continue
@@ -178,7 +177,7 @@ def sample_sonnet_requests(
     ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
 
     # Load the dataset.
-    with open(dataset_path, encoding="utf-8") as f:
+    with open(dataset_path, encoding='utf-8') as f:
         poem_lines = f.readlines()
 
     # Tokenize the poem lines.
@@ -247,7 +246,7 @@ def sample_vision_arena_requests(
         if len(sampled_requests) == num_requests:
             break
 
-        prompt = data["turns"][0][0]["content"]
+        prompt = data["turns"][0][0]['content']
 
         prompt_token_ids = tokenizer(prompt).input_ids
         if fixed_output_len is None:
@@ -265,7 +264,7 @@ def sample_vision_arena_requests(
         image: Image = data["images"][0]
         image = image.convert("RGB")
         image_data = io.BytesIO()
-        image.save(image_data, format="JPEG")
+        image.save(image_data, format='JPEG')
         image_base64 = base64.b64encode(image_data.getvalue()).decode("utf-8")
         mm_content = {
             "type": "image_url",
@@ -288,15 +287,15 @@ def sample_hf_requests(
     random_seed: int,
     fixed_output_len: Optional[int] = None,
 ) -> list[tuple[str, str, int, Optional[dict[str, Collection[str]]]]]:
+
     # Special case for vision_arena dataset
-    if dataset_path == "lmarena-ai/vision-arena-bench-v0.1" and dataset_subset is None:
+    if dataset_path == 'lmarena-ai/vision-arena-bench-v0.1' \
+        and dataset_subset is None:
         assert dataset_split == "train"
-        dataset = load_dataset(
-            dataset_path,
-            name=dataset_subset,
-            split=dataset_split,
-            streaming=True,
-        )
+        dataset = load_dataset(dataset_path,
+                               name=dataset_subset,
+                               split=dataset_split,
+                               streaming=True)
         dataset = dataset.shuffle(seed=random_seed)
         return sample_vision_arena_requests(dataset, num_requests, tokenizer,
                                             fixed_output_len)
@@ -305,9 +304,8 @@ def sample_hf_requests(
                            name=dataset_subset,
                            split=dataset_split,
                            streaming=True)
-    assert (
-        "conversations"
-        in dataset.features), "HF Dataset must have 'conversations' column."
+    assert "conversations" in dataset.features, (
+        "HF Dataset must have 'conversations' column.")
     filter_func = lambda x: len(x["conversations"]) >= 2
     filtered_dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
     sampled_requests: list[tuple[str, int, int, dict[str,
@@ -322,13 +320,13 @@ def sample_hf_requests(
         completion = data["conversations"][1]["value"]
         completion_token_ids = tokenizer(completion).input_ids
         prompt_len = len(prompt_token_ids)
-        output_len = (len(completion_token_ids)
-                      if fixed_output_len is None else fixed_output_len)
+        output_len = len(completion_token_ids
+                         ) if fixed_output_len is None else fixed_output_len
         if fixed_output_len is None and (prompt_len < 4 or output_len < 4):
             # Prune too short sequences.
             continue
-        if fixed_output_len is None and (prompt_len > 1024
-                                         or prompt_len + output_len > 2048):
+        if fixed_output_len is None and \
+            (prompt_len > 1024 or prompt_len + output_len > 2048):
             # Prune too long sequences.
             continue
 
@@ -336,7 +334,7 @@ def sample_hf_requests(
             image: Image = data["image"]
             image = image.convert("RGB")
             image_data = io.BytesIO()
-            image.save(image_data, format="JPEG")
+            image.save(image_data, format='JPEG')
             image_base64 = base64.b64encode(
                 image_data.getvalue()).decode("utf-8")
             mm_content = {
@@ -346,8 +344,8 @@ def sample_hf_requests(
                 },
             }
         elif "image" in data and isinstance(data["image"], str):
-            if data["image"].startswith("http://") or data["image"].startswith(
-                    "file://"):
+            if (data["image"].startswith("http://") or \
+                data["image"].startswith("file://")):
                 image_url = data["image"]
             else:
                 image_url = f"file://{data['image']}"
@@ -427,9 +425,8 @@ async def get_request(
     input_requests = iter(input_requests)
 
     # Calculate scale parameter theta to maintain the desired request_rate.
-    assert (
-        burstiness > 0
-    ), f"A positive burstiness factor is expected, but given {burstiness}."
+    assert burstiness > 0, (
+        f"A positive burstiness factor is expected, but given {burstiness}.")
     theta = 1.0 / (request_rate * burstiness)
 
     for request in input_requests:
@@ -519,8 +516,7 @@ def calculate_metrics(
         warnings.warn(
             "All requests failed. This is likely due to a misconfiguration "
             "on the benchmark arguments.",
-            stacklevel=2,
-        )
+            stacklevel=2)
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
@@ -581,8 +577,8 @@ async def benchmark(
         raise ValueError(f"Unknown backend: {backend}")
 
     print("Starting initial single prompt test run...")
-    test_prompt, test_prompt_len, test_output_len, test_mm_content = input_requests[
-        0]
+    test_prompt, test_prompt_len, test_output_len, test_mm_content = (
+        input_requests[0])
     if backend != "openai-chat" and test_mm_content is not None:
         # multi-modal benchmark is only available on OpenAI Chat backend.
         raise ValueError(
@@ -614,17 +610,15 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            model_name=model_name,
-            prompt=test_prompt,
-            api_url=base_url + "/start_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            multi_modal_content=test_mm_content,
-            ignore_eos=ignore_eos,
-        )
+        profile_input = RequestFuncInput(model=model_id,
+                                         model_name=model_name,
+                                         prompt=test_prompt,
+                                         api_url=base_url + "/start_profile",
+                                         prompt_len=test_prompt_len,
+                                         output_len=test_output_len,
+                                         logprobs=logprobs,
+                                         multi_modal_content=test_mm_content,
+                                         ignore_eos=ignore_eos)
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
             print("Profiler started")
@@ -644,7 +638,8 @@ async def benchmark(
     # and it will simplify the code in limited_request_func.
     #    semaphore = (asyncio.Semaphore(max_concurrency)
     #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = (asyncio.Semaphore(max_concurrency)
+                 if max_concurrency else None)
 
     async def limited_request_func(request_func_input, pbar):
         if semaphore is None:
@@ -663,17 +658,15 @@ async def benchmark(
             req_lora_module = next(lora_modules)
             req_model_id, req_model_name = req_lora_module, req_lora_module
 
-        request_func_input = RequestFuncInput(
-            model=req_model_id,
-            model_name=req_model_name,
-            prompt=prompt,
-            api_url=api_url,
-            prompt_len=prompt_len,
-            output_len=output_len,
-            logprobs=logprobs,
-            multi_modal_content=mm_content,
-            ignore_eos=ignore_eos,
-        )
+        request_func_input = RequestFuncInput(model=req_model_id,
+                                              model_name=req_model_name,
+                                              prompt=prompt,
+                                              api_url=api_url,
+                                              prompt_len=prompt_len,
+                                              output_len=output_len,
+                                              logprobs=logprobs,
+                                              multi_modal_content=mm_content,
+                                              ignore_eos=ignore_eos)
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
@@ -709,7 +702,7 @@ async def benchmark(
         goodput_config_dict=goodput_config_dict,
     )
 
-    print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
+    print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
                                     benchmark_duration))
@@ -756,15 +749,13 @@ async def benchmark(
         # metric.
         if metric_attribute_name not in selected_percentile_metrics:
             return
-        print("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
+        print("{s:{c}^{n}}".format(s=metric_header, n=50, c='-'))
         print("{:<40} {:<10.2f}".format(
             f"Mean {metric_name} (ms):",
-            getattr(metrics, f"mean_{metric_attribute_name}_ms"),
-        ))
+            getattr(metrics, f"mean_{metric_attribute_name}_ms")))
         print("{:<40} {:<10.2f}".format(
             f"Median {metric_name} (ms):",
-            getattr(metrics, f"median_{metric_attribute_name}_ms"),
-        ))
+            getattr(metrics, f"median_{metric_attribute_name}_ms")))
         result[f"mean_{metric_attribute_name}_ms"] = getattr(
             metrics, f"mean_{metric_attribute_name}_ms")
         result[f"median_{metric_attribute_name}_ms"] = getattr(
@@ -818,7 +809,7 @@ def parse_goodput(slo_pairs):
     except ValueError as err:
         raise argparse.ArgumentTypeError(
             "Invalid format found for service level objectives. "
-            'Specify service level objectives for goodput as "KEY:VALUE" '
+            "Specify service level objectives for goodput as \"KEY:VALUE\" "
             "pairs, where the key is a metric name, and the value is a "
             "number in milliseconds.") from err
     return goodput_config_dict
@@ -828,18 +819,9 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
                                      results: dict[str, Any],
                                      file_name: str) -> None:
     metrics = [
-        "median_ttft_ms",
-        "mean_ttft_ms",
-        "std_ttft_ms",
-        "p99_ttft_ms",
-        "mean_tpot_ms",
-        "median_tpot_ms",
-        "std_tpot_ms",
-        "p99_tpot_ms",
-        "median_itl_ms",
-        "mean_itl_ms",
-        "std_itl_ms",
-        "p99_itl_ms",
+        "median_ttft_ms", "mean_ttft_ms", "std_ttft_ms", "p99_ttft_ms",
+        "mean_tpot_ms", "median_tpot_ms", "std_tpot_ms", "p99_tpot_ms",
+        "median_itl_ms", "mean_itl_ms", "std_itl_ms", "p99_itl_ms"
     ]
     # These raw data might be useful, but they are rather big. They can be added
     # later if needed
@@ -851,8 +833,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
         extra_info={
             k: results[k]
             for k in results if k not in metrics and k not in ignored_metrics
-        },
-    )
+        })
     if pt_records:
         # Don't use json suffix here as we don't want CI to pick it up
         pt_file = f"{os.path.splitext(file_name)[0]}.pytorch.json"
@@ -877,11 +858,9 @@ def main(args: argparse.Namespace):
         api_url = f"http://{args.host}:{args.port}{args.endpoint}"
         base_url = f"http://{args.host}:{args.port}"
 
-    tokenizer = get_tokenizer(
-        tokenizer_id,
-        tokenizer_mode=tokenizer_mode,
-        trust_remote_code=args.trust_remote_code,
-    )
+    tokenizer = get_tokenizer(tokenizer_id,
+                              tokenizer_mode=tokenizer_mode,
+                              trust_remote_code=args.trust_remote_code)
 
     if args.dataset_name is None:
         raise ValueError(
@@ -1024,12 +1003,12 @@ def main(args: argparse.Namespace):
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
                                if args.max_concurrency is not None else "")
-        file_name = f"{backend}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
+        file_name = f"{backend}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  #noqa
         if args.result_filename:
             file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name, "w", encoding="utf-8") as outfile:
+        with open(file_name, "w", encoding='utf-8') as outfile:
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
 
@@ -1065,13 +1044,11 @@ if __name__ == "__main__":
         choices=["sharegpt", "burstgpt", "sonnet", "random", "hf"],
         help="Name of the dataset to benchmark on.",
     )
-    parser.add_argument(
-        "--dataset-path",
-        type=str,
-        default=None,
-        help="Path to the sharegpt/sonnet dataset. "
-        "Or the huggingface dataset ID if using HF dataset.",
-    )
+    parser.add_argument("--dataset-path",
+                        type=str,
+                        default=None,
+                        help="Path to the sharegpt/sonnet dataset. "
+                        "Or the huggingface dataset ID if using HF dataset.")
     parser.add_argument(
         "--max-concurrency",
         type=int,
@@ -1083,8 +1060,7 @@ if __name__ == "__main__":
         "initiated, this argument will control how many are actually allowed "
         "to execute at a time. This means that when used in combination, the "
         "actual request rate may be lower than specified with --request-rate, "
-        "if the server is not processing requests fast enough to keep up.",
-    )
+        "if the server is not processing requests fast enough to keep up.")
 
     parser.add_argument(
         "--model",
@@ -1186,38 +1162,35 @@ if __name__ == "__main__":
         "--ignore-eos",
         action="store_true",
         help="Set ignore_eos flag when sending the benchmark request."
-        "Warning: ignore_eos is not supported in deepspeed_mii and tgi.",
-    )
+        "Warning: ignore_eos is not supported in deepspeed_mii and tgi.")
     parser.add_argument(
         "--percentile-metrics",
         type=str,
         default="ttft,tpot,itl",
         help="Comma-seperated list of selected metrics to report percentils. "
         "This argument specifies the metrics to report percentiles. "
-        'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
-        'Default value is "ttft,tpot,itl".',
-    )
+        "Allowed metric names are \"ttft\", \"tpot\", \"itl\", \"e2el\". "
+        "Default value is \"ttft,tpot,itl\".")
     parser.add_argument(
         "--metric-percentiles",
         type=str,
         default="99",
         help="Comma-seperated list of percentiles for selected metrics. "
-        'To report 25-th, 50-th, and 75-th percentiles, use "25,50,75". '
-        'Default value is "99". '
-        'Use "--percentile-metrics" to select metrics.',
+        "To report 25-th, 50-th, and 75-th percentiles, use \"25,50,75\". "
+        "Default value is \"99\". "
+        "Use \"--percentile-metrics\" to select metrics.",
     )
     parser.add_argument(
         "--goodput",
         nargs="+",
         required=False,
-        help='Specify service level objectives for goodput as "KEY:VALUE" '
+        help="Specify service level objectives for goodput as \"KEY:VALUE\" "
         "pairs, where the key is a metric name, and the value is in "
-        'milliseconds. Multiple "KEY:VALUE" pairs can be provided, '
+        "milliseconds. Multiple \"KEY:VALUE\" pairs can be provided, "
         "separated by spaces. Allowed request level metric names are "
-        '"ttft", "tpot", "e2el". For more context on the definition of '
+        "\"ttft\", \"tpot\", \"e2el\". For more context on the definition of "
         "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
-        "and the blog: https://hao-ai-lab.github.io/blogs/distserve",
-    )
+        "and the blog: https://hao-ai-lab.github.io/blogs/distserve")
 
     # group for dataset specific arguments
     sonnet_group = parser.add_argument_group("sonnet dataset options")
@@ -1249,8 +1222,7 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Output length for each request. Overrides the output length "
-        "from the ShareGPT dataset.",
-    )
+        "from the ShareGPT dataset.")
 
     random_group = parser.add_argument_group("random dataset options")
     random_group.add_argument(
@@ -1281,8 +1253,7 @@ if __name__ == "__main__":
         help="Number of fixed prefix tokens before random "
         " context. The length range of context in a random "
         " request is [random-prefix-len, "
-        " random-prefix-len + random-prefix-len * random-range-ratio).",
-    )
+        " random-prefix-len + random-prefix-len * random-range-ratio).")
 
     hf_group = parser.add_argument_group("hf dataset options")
     hf_group.add_argument("--hf-subset",
@@ -1302,34 +1273,29 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
-        "--tokenizer-mode",
+        '--tokenizer-mode',
         type=str,
         default="auto",
-        choices=["auto", "slow", "mistral", "custom"],
+        choices=['auto', 'slow', 'mistral', 'custom'],
         help='The tokenizer mode.\n\n* "auto" will use the '
         'fast tokenizer if available.\n* "slow" will '
-        "always use the slow tokenizer. \n* "
+        'always use the slow tokenizer. \n* '
         '"mistral" will always use the `mistral_common` tokenizer. \n*'
-        '"custom" will use --tokenizer to select the preregistered tokenizer.',
-    )
+        '"custom" will use --tokenizer to select the preregistered tokenizer.')
 
-    parser.add_argument(
-        "--served-model-name",
-        type=str,
-        default=None,
-        help="The model name used in the API. "
-        "If not specified, the model name will be the "
-        "same as the ``--model`` argument. ",
-    )
+    parser.add_argument("--served-model-name",
+                        type=str,
+                        default=None,
+                        help="The model name used in the API. "
+                        "If not specified, the model name will be the "
+                        "same as the ``--model`` argument. ")
 
-    parser.add_argument(
-        "--lora-modules",
-        nargs="+",
-        default=None,
-        help="A subset of LoRA module names passed in when "
-        "launching the server. For each request, the "
-        "script chooses a LoRA module at random.",
-    )
+    parser.add_argument("--lora-modules",
+                        nargs='+',
+                        default=None,
+                        help="A subset of LoRA module names passed in when "
+                        "launching the server. For each request, the "
+                        "script chooses a LoRA module at random.")
 
     args = parser.parse_args()
     main(args)

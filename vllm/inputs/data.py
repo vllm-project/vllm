@@ -224,7 +224,6 @@ class EncoderDecoderInputs(TypedDict):
 
     This specifies the required data for encoder-decoder models.
     """
-
     encoder: Union[TokenInputs, "MultiModalInputs"]
     """The inputs for the encoder portion."""
 
@@ -244,7 +243,6 @@ class SingletonInputsAdapter:
     """
     Unified interface to access the components of :class:`SingletonInputs`.
     """
-
     inputs: SingletonInputs
 
     @cached_property
@@ -364,8 +362,7 @@ def build_explicit_enc_dec_prompt(
     return ExplicitEncoderDecoderPrompt(
         encoder_prompt=encoder_prompt,
         decoder_prompt=decoder_prompt,
-        mm_processor_kwargs=mm_processor_kwargs,
-    )
+        mm_processor_kwargs=mm_processor_kwargs)
 
 
 def zip_enc_dec_prompts(
@@ -377,7 +374,7 @@ def zip_enc_dec_prompts(
     """
     Zip encoder and decoder prompts together into a list of
     :class:`ExplicitEncoderDecoderPrompt` instances.
-
+    
     ``mm_processor_kwargs`` may also be provided; if a dict is passed, the same
     dictionary will be used for every encoder/decoder prompt. If an iterable is
     provided, it will be zipped with the encoder/decoder prompts.
@@ -387,11 +384,10 @@ def zip_enc_dec_prompts(
     if isinstance(mm_processor_kwargs, dict):
         return [
             build_explicit_enc_dec_prompt(
-                encoder_prompt,
-                decoder_prompt,
-                cast(Dict[str, Any], mm_processor_kwargs),
-            ) for (encoder_prompt,
-                   decoder_prompt) in zip(enc_prompts, dec_prompts)
+                encoder_prompt, decoder_prompt,
+                cast(Dict[str, Any], mm_processor_kwargs))
+            for (encoder_prompt,
+                 decoder_prompt) in zip(enc_prompts, dec_prompts)
         ]
     return [
         build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt,

@@ -295,9 +295,7 @@ def _test_2of4_quant_models(qkv_proj,
     assert qkv_proj.scheme.input_quant.strategy == input_strategy
     assert qkv_proj.scheme.quantized
     assert qkv_proj.quant_method.quantization_config.sparsity_scheme_map
-    sparsity_map = (
-        qkv_proj.quant_method.quantization_config.sparsity_scheme_map
-    )  # noqa: E501
+    sparsity_map = qkv_proj.quant_method.quantization_config.sparsity_scheme_map  # noqa: E501
     assert sparsity_map.get("Linear").format == format
     assert sparsity_map.get("Linear").sparsity_structure == "2:4"
 

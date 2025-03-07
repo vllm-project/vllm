@@ -51,8 +51,8 @@ def get_dynamic_override(
     config: QuantizationConfig,
     layer_name: str,
     key: Optional[str] = None,
-    default_value: Union[int, bool, None] = None,
-) -> Union[Dict, int, bool, None]:
+    default_value: Union[int, bool,
+                         None] = None) -> Union[Dict, int, bool, None]:
     for pattern, pattern_dict in config.dynamic.items():
         # Negative match: matched modules are excluded from quantized init
         if pattern.startswith("-:"):
@@ -75,14 +75,13 @@ def get_linear_quant_method(
     linear_method_cls: type,
 ):
     cloned_config = deepcopy(config)
-    parallel_lm_head_quantized = (isinstance(layer, ParallelLMHead)
-                                  and cloned_config.lm_head_quantized)
+    parallel_lm_head_quantized = isinstance(
+        layer, ParallelLMHead) and cloned_config.lm_head_quantized
     if isinstance(layer, LinearBase) or parallel_lm_head_quantized:
         # False = skip module, None = no override, else = Positive match
-        if (get_dynamic_override(  # noqa: E712
+        if get_dynamic_override(  # noqa: E712
                 cloned_config,  # noqa: E712
-                layer_name=prefix,
-        ) == False):  # noqa: E712
+                layer_name=prefix) == False:  # noqa: E712
             if parallel_lm_head_quantized:
                 return UnquantizedEmbeddingMethod()
             return UnquantizedLinearMethod()

@@ -26,35 +26,25 @@ class MarlinLinearKernel(MPLinearKernel):
     def can_implement(cls,
                       c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
         if c.zero_points:
-            return (
-                False,
-                "Zero points currently not supported by "
-                " MarlinLinearKernel. Will be added when AWQMarlin "
-                "is migrated over to using MPLinearKernel backend",
-            )
+            return False, "Zero points currently not supported by "\
+                          " MarlinLinearKernel. Will be added when AWQMarlin "\
+                          "is migrated over to using MPLinearKernel backend"
 
         quant_types = query_marlin_supported_quant_types(c.zero_points)
         if c.weight_type not in quant_types:
-            return (
-                False,
-                f"Quant type ({c.weight_type}) not supported by"
-                f"  Marlin, supported types are: {quant_types}",
-            )
+            return False, f"Quant type ({c.weight_type}) not supported by"\
+                          f"  Marlin, supported types are: {quant_types}"
 
         if c.group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
-            return (
-                False,
-                f"Group size ({c.group_size}) not supported by "
-                "Marlin, supported group sizes are: "
-                f"{MARLIN_SUPPORTED_GROUP_SIZES}",
-            )
+            return False, f"Group size ({c.group_size}) not supported by "\
+                            "Marlin, supported group sizes are: "\
+                            f"{MARLIN_SUPPORTED_GROUP_SIZES}"
 
         return check_marlin_supports_shape(
             c.partition_weight_shape[1],  # out_features
             c.partition_weight_shape[0],  # in_features
             c.full_weight_shape[0],  # in_features
-            c.group_size,
-        )
+            c.group_size)
 
     # note assumes that
     #  `weight_packed` is: {input_dim = 0, output_dim = 1, packed_dim = 0}
@@ -63,7 +53,7 @@ class MarlinLinearKernel(MPLinearKernel):
         device = getattr(layer, self.w_q_name).device
         c = self.config
 
-        row_parallel = c.partition_weight_shape[0] != c.full_weight_shape[0]
+        row_parallel = (c.partition_weight_shape[0] != c.full_weight_shape[0])
         self.is_k_full = marlin_is_k_full(c.has_g_idx, row_parallel)
 
         # Allocate marlin workspace.
@@ -102,35 +92,29 @@ class MarlinLinearKernel(MPLinearKernel):
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
-            x.data = ops.gptq_marlin_repack(
-                x.data.contiguous(),
-                perm=layer.g_idx_sort_indices,
-                size_k=c.partition_weight_shape[0],
-                size_n=c.partition_weight_shape[1],
-                num_bits=c.weight_type.size_bits,
-            )
+            x.data = ops.gptq_marlin_repack(x.data.contiguous(),
+                                            perm=layer.g_idx_sort_indices,
+                                            size_k=c.partition_weight_shape[0],
+                                            size_n=c.partition_weight_shape[1],
+                                            num_bits=c.weight_type.size_bits)
             return x
 
         def transform_w_s(x):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1)
-            x.data = marlin_permute_scales(
-                x.data.contiguous(),
-                size_k=c.partition_weight_shape[0],
-                size_n=c.partition_weight_shape[1],
-                group_size=c.group_size,
-            )
+            x.data = marlin_permute_scales(x.data.contiguous(),
+                                           size_k=c.partition_weight_shape[0],
+                                           size_n=c.partition_weight_shape[1],
+                                           group_size=c.group_size)
             return x
 
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def apply_weights(self,
+                      layer: torch.nn.Module,
+                      x: torch.Tensor,
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         c = self.config
         w_q, w_s, w_zp, w_gidx = self._get_weight_params(layer)
 
@@ -148,5 +132,4 @@ class MarlinLinearKernel(MPLinearKernel):
             input_size_per_partition=c.partition_weight_shape[0],
             output_size_per_partition=c.partition_weight_shape[1],
             is_k_full=self.is_k_full,
-            bias=bias,
-        )
+            bias=bias)

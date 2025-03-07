@@ -99,11 +99,9 @@ class PaliGemmaDummyInputsBuilder(
 
         mm_data = {
             "image":
-            self._get_dummy_images(
-                width=max_image_size,
-                height=max_image_size,
-                num_images=num_images,
-            )
+            self._get_dummy_images(width=max_image_size,
+                                   height=max_image_size,
+                                   num_images=num_images)
         }
 
         return ProcessorInputs(
@@ -195,8 +193,7 @@ class PaliGemmaMultiModalProcessor(
 @MULTIMODAL_REGISTRY.register_processor(
     PaliGemmaMultiModalProcessor,
     info=PaliGemmaProcessingInfo,
-    dummy_inputs=PaliGemmaDummyInputsBuilder,
-)
+    dummy_inputs=PaliGemmaDummyInputsBuilder)
 class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
     packed_modules_mapping = {
@@ -219,15 +216,13 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.vision_tower = SiglipVisionModel(
-            config.vision_config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
+        self.vision_tower = SiglipVisionModel(config.vision_config,
+                                              quant_config,
+                                              prefix=maybe_prefix(
+                                                  prefix, "vision_tower"))
         self.multi_modal_projector = PaliGemmaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
-            projection_dim=config.vision_config.projection_dim,
-        )
+            projection_dim=config.vision_config.projection_dim)
 
         self.quant_config = quant_config
 
@@ -304,6 +299,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_tower: SiglipVisionModel,
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
+
         target_dtype = vision_tower.get_input_embeddings().weight.dtype
         image_features = vision_tower(pixel_values.to(dtype=target_dtype))
 
@@ -313,6 +309,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         image_input: PaliGemmaImageInputs,
     ) -> torch.Tensor:
+
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
@@ -344,21 +341,16 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                self.config.image_token_index,
-            )
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.config.image_token_index)
         return inputs_embeds
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        **kwargs: object,
-    ) -> Union[SamplerOutput, IntermediateTensors]:
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
+                **kwargs: object) -> Union[SamplerOutput, IntermediateTensors]:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -370,12 +362,10 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                       vision_embeddings)
             input_ids = None
 
-        hidden_states = self.language_model.model(
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
+        hidden_states = self.language_model.model(input_ids,
+                                                  positions,
+                                                  intermediate_tensors,
+                                                  inputs_embeds=inputs_embeds)
 
         return hidden_states
 

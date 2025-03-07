@@ -23,12 +23,8 @@ def callable_decorated(graph: torch.fx.Graph):
 
 @pytest.mark.parametrize(
     "works, callable",
-    [
-        (False, simple_callable),
-        (True, callable_decorated),
-        (True, CallableInductorPass(simple_callable, "simple_callable")),
-    ],
-)
+    [(False, simple_callable), (True, callable_decorated),
+     (True, CallableInductorPass(simple_callable, "simple_callable"))])
 def test_pass_manager(works: bool, callable):
     config = CompilationConfig().pass_config
     pass_manager = PostGradPassManager([callable])

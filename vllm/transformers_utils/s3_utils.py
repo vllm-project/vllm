@@ -55,10 +55,10 @@ def glob(s3=None,
 
 
 def list_files(
-    s3,
-    path: str,
-    allow_pattern: Optional[list[str]] = None,
-    ignore_pattern: Optional[list[str]] = None,
+        s3,
+        path: str,
+        allow_pattern: Optional[list[str]] = None,
+        ignore_pattern: Optional[list[str]] = None
 ) -> tuple[str, str, list[str]]:
     """
     List files from S3 path and filter by pattern.
@@ -72,17 +72,17 @@ def list_files(
     Returns:
         tuple[str, str, list[str]]: A tuple where:
             - The first element is the bucket name
-            - The second element is string represent the bucket
+            - The second element is string represent the bucket 
               and the prefix as a dir like string
-            - The third element is a list of files allowed or
+            - The third element is a list of files allowed or 
               disallowed by pattern
     """
-    parts = path.removeprefix("s3://").split("/")
-    prefix = "/".join(parts[1:])
+    parts = path.removeprefix('s3://').split('/')
+    prefix = '/'.join(parts[1:])
     bucket_name = parts[0]
 
     objects = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-    paths = [obj["Key"] for obj in objects.get("Contents", [])]
+    paths = [obj['Key'] for obj in objects.get('Contents', [])]
 
     paths = _filter_ignore(paths, ["*/"])
     if allow_pattern is not None:
@@ -107,7 +107,7 @@ class S3Model:
     """
 
     def __init__(self) -> None:
-        self.s3 = boto3.client("s3")
+        self.s3 = boto3.client('s3')
         for sig in (signal.SIGINT, signal.SIGTERM):
             existing_handler = signal.getsignal(sig)
             signal.signal(sig, self._close_by_signal(existing_handler))
@@ -130,12 +130,10 @@ class S3Model:
 
         return new_handler
 
-    def pull_files(
-        self,
-        s3_model_path: str = "",
-        allow_pattern: Optional[list[str]] = None,
-        ignore_pattern: Optional[list[str]] = None,
-    ) -> None:
+    def pull_files(self,
+                   s3_model_path: str = "",
+                   allow_pattern: Optional[list[str]] = None,
+                   ignore_pattern: Optional[list[str]] = None) -> None:
         """
         Pull files from S3 storage into the temporary directory.
 

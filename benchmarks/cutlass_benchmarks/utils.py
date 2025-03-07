@@ -28,8 +28,8 @@ def to_fp16(tensor: torch.Tensor) -> torch.Tensor:
 
 def make_rand_tensors(dtype: torch.dtype, m: int, n: int,
                       k: int) -> tuple[torch.Tensor, torch.Tensor]:
-    a = torch.randn((m, k), device="cuda") * 5
-    b = torch.randn((n, k), device="cuda").t() * 5
+    a = torch.randn((m, k), device='cuda') * 5
+    b = torch.randn((n, k), device='cuda').t() * 5
 
     if dtype == torch.int8:
         return to_int8(a), to_int8(b)
@@ -64,8 +64,8 @@ def prune_to_2_4(tensor):
 
 def make_rand_sparse_tensors(dtype: torch.dtype, m: int, n: int,
                              k: int) -> tuple[torch.Tensor, torch.Tensor]:
-    a = torch.randn((m, k), device="cuda") * 5
-    b = torch.randn((n, k), device="cuda").t() * 5
+    a = torch.randn((m, k), device='cuda') * 5
+    b = torch.randn((n, k), device='cuda').t() * 5
 
     b = prune_to_2_4(b.t()).t()
 
@@ -86,9 +86,9 @@ def make_rand_sparse_tensors(dtype: torch.dtype, m: int, n: int,
     return b_compressed, e, a, b
 
 
-def make_n_rand_sparse_tensors(
-        num_tensors: int, dtype: torch.dtype, m: int, n: int,
-        k: int) -> tuple[Iterable[torch.Tensor], Iterable[torch.Tensor]]:
+def make_n_rand_sparse_tensors(num_tensors: int, dtype: torch.dtype,
+                        m: int, n: int, k: int) -> \
+                        tuple[Iterable[torch.Tensor], Iterable[torch.Tensor]]:
     ABs = []
     for _ in range(num_tensors):
         b_comp, e, a, b = make_rand_sparse_tensors(dtype, m, n, k)

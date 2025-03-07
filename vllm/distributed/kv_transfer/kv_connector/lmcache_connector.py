@@ -30,6 +30,7 @@ class LMCacheConnector(KVConnectorBase):
         local_rank: int,
         config: VllmConfig,
     ):
+
         self.transfer_config = config.kv_transfer_config
         self.vllm_config = config
 
@@ -38,11 +39,8 @@ class LMCacheConnector(KVConnectorBase):
         from lmcache.integration.vllm.vllm_adapter import (
             RetrieveStatus, StoreStatus, init_lmcache_engine,
             lmcache_retrieve_kv, lmcache_should_store, lmcache_store_kv)
-
-        logger.info(
-            "Initializing LMCacheConfig under kv_transfer_config %s",
-            self.transfer_config,
-        )
+        logger.info("Initializing LMCacheConfig under kv_transfer_config %s",
+                    self.transfer_config)
 
         # TODO (Jiayi): Find model_config, parallel_config, and cache_config
         self.engine = init_lmcache_engine(config.model_config,
@@ -61,27 +59,20 @@ class LMCacheConnector(KVConnectorBase):
         self.retrieve_status = RetrieveStatus
 
     def recv_kv_caches_and_hidden_states(
-        self,
-        model_executable: torch.nn.Module,
+        self, model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor],
-    ) -> Tuple[
-            Union[torch.Tensor, IntermediateTensors],
-            bool,
-            "ModelInputForGPUWithSamplingMetadata",
-    ]:
+        kv_caches: List[torch.Tensor]
+    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+               "ModelInputForGPUWithSamplingMetadata"]:
+
         hidden_or_intermediate_states = None
 
         # TODO (Jiayi): Need to support chunked prefill
         retrieve_status = self.retrieve_status.PREFILL
 
         model_input, bypass_model_exec = self.lmcache_retrieve_kv(
-            model_executable,
-            model_input,
-            self.cache_config,
-            kv_caches,
-            retrieve_status,
-        )
+            model_executable, model_input, self.cache_config, kv_caches,
+            retrieve_status)
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 

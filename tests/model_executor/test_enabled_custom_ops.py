@@ -48,8 +48,7 @@ class Relu3(ReLUSquaredActivation):
         ("-silu_and_mul,+relu3", 3, [0, 0, 0, 1], False),
         # All but RMSNorm
         ("all,-rms_norm", 4, [0, 1, 1, 1], True),
-    ],
-)
+    ])
 def test_enabled_ops(env: str, torch_level: int, ops_enabled: list[int],
                      default_on: bool):
     vllm_config = VllmConfig(compilation_config=CompilationConfig(

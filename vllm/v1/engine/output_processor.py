@@ -18,6 +18,7 @@ from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
 
 @dataclass
 class OutputProcessorOutput:
+
     request_outputs: list[RequestOutput]
     reqs_to_abort: list[str]
 
@@ -99,6 +100,7 @@ class RequestState:
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
     ) -> Optional[RequestOutput]:
+
         finished = finish_reason is not None
         output_kind = self.output_kind
         final_only = output_kind == RequestOutputKind.FINAL_ONLY
@@ -129,6 +131,7 @@ class RequestState:
         request_id: str,
         finished: bool,
     ) -> RequestOutput:
+
         if self.output_kind == RequestOutputKind.DELTA:
             # Side effect: logprobs processor forgets prompt logprobs
             prompt_logprobs = self.logprobs_processor.pop_prompt_logprobs()
@@ -150,6 +153,7 @@ class RequestState:
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
     ) -> CompletionOutput:
+
         finished = finish_reason is not None
         delta = self.output_kind == RequestOutputKind.DELTA
 
@@ -170,8 +174,7 @@ class RequestState:
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
-            stop_reason=stop_reason if finished else None,
-        )
+            stop_reason=stop_reason if finished else None)
 
 
 class OutputProcessor:
@@ -221,8 +224,7 @@ class OutputProcessor:
             parent_req=parent_req,
             request_index=request_index,
             queue=queue,
-            log_stats=self.log_stats,
-        )
+            log_stats=self.log_stats)
         self.request_states[request_id] = req_state
         self.lora_states.add_request(req_state)
 
@@ -237,22 +239,22 @@ class OutputProcessor:
         1) Compute stats for logging
         2) Detokenize
         3) Create and handle RequestOutput objects:
-            * If there is a queue (for usage with AsyncLLM),
+            * If there is a queue (for usage with AsyncLLM), 
               put the RequestOutput objects into the queue for
               handling by the per-request generate() tasks.
 
-            * If there is no queue (for usage with LLMEngine),
+            * If there is no queue (for usage with LLMEngine), 
               return a list of RequestOutput objects.
 
         ****************** NOTE FOR DEVELOPERS ******************
 
         VLLM V1 minimizes the number of python loops over the full
-        batch to ensure system overheads are minimized. This is the
+        batch to ensure system overheads are minimized. This is the 
         only function that should loop over EngineCoreOutputs.
 
         If you need to touch every element of the batch, do it from
         within the loop below.
-
+        
         **********************************************************
         """
 
@@ -266,12 +268,9 @@ class OutputProcessor:
                 continue
 
             # 1) Compute stats for this iteration.
-            self._update_stats_from_output(
-                req_state,
-                engine_core_output,
-                engine_core_timestamp,
-                iteration_stats,
-            )
+            self._update_stats_from_output(req_state, engine_core_output,
+                                           engine_core_timestamp,
+                                           iteration_stats)
 
             new_token_ids = engine_core_output.new_token_ids
             finish_reason = engine_core_output.finish_reason
@@ -333,13 +332,10 @@ class OutputProcessor:
             reqs_to_abort=reqs_to_abort,
         )
 
-    def _update_stats_from_output(
-        self,
-        req_state: RequestState,
-        engine_core_output: EngineCoreOutput,
-        engine_core_timestamp: Optional[float],
-        iteration_stats: Optional[IterationStats],
-    ):
+    def _update_stats_from_output(self, req_state: RequestState,
+                                  engine_core_output: EngineCoreOutput,
+                                  engine_core_timestamp: Optional[float],
+                                  iteration_stats: Optional[IterationStats]):
         if iteration_stats is None:
             return
 
@@ -347,21 +343,15 @@ class OutputProcessor:
 
         assert engine_core_timestamp is not None
         assert req_state.stats is not None
-        iteration_stats.update_from_output(
-            engine_core_output,
-            engine_core_timestamp,
-            req_state.is_prefilling,
-            req_state.prompt_len,
-            req_state.stats,
-            lora_stats,
-        )
+        iteration_stats.update_from_output(engine_core_output,
+                                           engine_core_timestamp,
+                                           req_state.is_prefilling,
+                                           req_state.prompt_len,
+                                           req_state.stats, lora_stats)
 
-    def _update_stats_from_finished(
-        self,
-        req_state: RequestState,
-        finish_reason: Optional[FinishReason],
-        iteration_stats: Optional[IterationStats],
-    ):
+    def _update_stats_from_finished(self, req_state: RequestState,
+                                    finish_reason: Optional[FinishReason],
+                                    iteration_stats: Optional[IterationStats]):
         if iteration_stats is None:
             return
 
@@ -371,12 +361,9 @@ class OutputProcessor:
             finish_reason=finish_reason,
             num_prompt_tokens=len(req_state.prompt_token_ids),
             max_tokens_param=req_state.max_tokens_param,
-            req_stats=req_state.stats,
-        )
+            req_stats=req_state.stats)
         self.lora_states.finish_request(req_state)
 
         ParentRequest.observe_finished_request(
-            req_state.parent_req,
-            iteration_stats,
-            req_state.stats.num_generation_tokens,
-        )
+            req_state.parent_req, iteration_stats,
+            req_state.stats.num_generation_tokens)

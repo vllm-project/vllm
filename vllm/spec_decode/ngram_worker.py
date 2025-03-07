@@ -108,7 +108,7 @@ class NGramWorker(NonLLMProposerWorkerBase):
                 ngram_tensor = input_ids[-ngram_size:]
                 if ngram_size == 1:
                     # Do not match itself and do not use unfold and all
-                    matches = input_ids[:-1] == ngram_tensor
+                    matches = (input_ids[:-1] == ngram_tensor)
                 else:
                     windows = input_ids.unfold(dimension=0,
                                                size=ngram_size,
@@ -151,11 +151,9 @@ class NGramWorker(NonLLMProposerWorkerBase):
                     SamplerOutput(
                         outputs=None,
                         sampled_token_probs=token_prob_list[idx],
-                        logprobs=torch.zeros(
-                            (sample_len, self.vocab_size),
-                            dtype=torch.float32,
-                            device=self.device,
-                        ),
+                        logprobs=torch.zeros((sample_len, self.vocab_size),
+                                             dtype=torch.float32,
+                                             device=self.device),
                         sampled_token_ids=token_id_list[idx],
                     ))
 
@@ -184,7 +182,7 @@ class NGramWorker(NonLLMProposerWorkerBase):
         if any([
                 execute_model_req.blocks_to_swap_in,
                 execute_model_req.blocks_to_swap_out,
-                execute_model_req.blocks_to_copy,
+                execute_model_req.blocks_to_copy
         ]):
             raise NotImplementedError(
                 "NGramWorker does not support cache operations")

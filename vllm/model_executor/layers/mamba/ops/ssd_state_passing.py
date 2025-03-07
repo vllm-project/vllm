@@ -12,14 +12,14 @@ import triton.language as tl
 
 @triton.autotune(
     configs=[
-        triton.Config({"BLOCK_SIZE": 64}),
-        triton.Config({"BLOCK_SIZE": 128}),
-        triton.Config({"BLOCK_SIZE": 256}),
-        triton.Config({"BLOCK_SIZE": 512}),
-        triton.Config({"BLOCK_SIZE": 1024}),
-        triton.Config({"BLOCK_SIZE": 2048}),
+        triton.Config({'BLOCK_SIZE': 64}),
+        triton.Config({'BLOCK_SIZE': 128}),
+        triton.Config({'BLOCK_SIZE': 256}),
+        triton.Config({'BLOCK_SIZE': 512}),
+        triton.Config({'BLOCK_SIZE': 1024}),
+        triton.Config({'BLOCK_SIZE': 2048}),
     ],
-    key=["dim"],
+    key=['dim'],
 )
 @triton.jit
 def _state_passing_fwd_kernel(
@@ -67,8 +67,7 @@ def _state_passing_fwd_kernel(
     states_ptr += pid_b * stride_states_batch + pid_h * stride_states_head
     dA_cs_ptr += pid_b * stride_dA_cs_batch + pid_h * stride_dA_cs_head
     out_ptr += pid_b * stride_out_batch + pid_h * stride_out_head
-    final_states_ptr += (pid_b * stride_final_states_batch +
-                         pid_h * stride_final_states_head)
+    final_states_ptr += pid_b * stride_final_states_batch + pid_h * stride_final_states_head
     if HAS_INITSTATES:
         initstates_ptr += pid_h * stride_initstates_head
         if not IS_CONT_BATCHED:
@@ -114,8 +113,7 @@ def _state_passing_fwd_kernel(
                     # has changed.
                     # - so we do not propagate the state from previous chunk
                     # - but rather we load that sequence's init state
-                    initstates_ptrs = (initstates_ptr +
-                                       seq_idx_new * stride_initstates_batch)
+                    initstates_ptrs = initstates_ptr + seq_idx_new * stride_initstates_batch
 
                     # - update state with seq_idx_new's init state
                     states = tl.load(initstates_ptrs,
@@ -152,11 +150,8 @@ def _state_passing_fwd(
             #   are used for continuous batching. In which case we
             #   require seq_idx to be provided
             assert seq_idx is not None, ""
-            assert initial_states.shape == (
-                seq_idx.max().item() + 1,
-                nheads,
-                dim,
-            )
+            assert initial_states.shape == (seq_idx.max().item() + 1, nheads,
+                                            dim)
         else:
             # - this is the regular batching case, where initial
             #   states are used are for each example of the batch.
@@ -173,7 +168,7 @@ def _state_passing_fwd(
     final_states = torch.empty((batch, nheads, dim),
                                device=states.device,
                                dtype=torch.float32)
-    grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE"]), batch, nheads)
+    grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE']), batch, nheads)
     with torch.cuda.device(states.device.index):
         _state_passing_fwd_kernel[grid](
             states,
@@ -200,11 +195,9 @@ def _state_passing_fwd(
             dA_chunk_cumsum.stride(0),
             dA_chunk_cumsum.stride(2),
             dA_chunk_cumsum.stride(1),
-            *((
-                initial_states.stride(0),
-                initial_states.stride(1),
-                initial_states.stride(2),
-            ) if initial_states is not None else (0, 0, 0)),
+            *((initial_states.stride(0), initial_states.stride(1),
+               initial_states.stride(2)) if initial_states is not None else
+              (0, 0, 0)),
             *((seq_idx.stride(0),
                seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
             HAS_INITSTATES=initial_states is not None,

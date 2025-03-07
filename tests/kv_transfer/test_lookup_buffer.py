@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import PyNcclPipe
 
 
 def test_run(my_rank, buffer, device):
+
     # buffer should be empty in the beginning
     if my_rank == 0:
         assert buffer.buffer_size == 0
@@ -25,7 +26,7 @@ def test_run(my_rank, buffer, device):
 
     # insert
     tokens = torch.tensor([1, 2, 3]).to(device)
-    roi = tokens > 0
+    roi = (tokens > 0)
     if my_rank == 0:
         key = 2.0 * torch.ones([5, 6]).to(device)
         value = 3.0 * torch.ones([5, 6]).to(device)
@@ -53,6 +54,7 @@ def test_run(my_rank, buffer, device):
 
 
 def stress_test(my_rank, buf, device):
+
     torch.distributed.barrier()
     torch.manual_seed(100)
 
@@ -112,11 +114,12 @@ def stress_test(my_rank, buf, device):
 
 
 if __name__ == "__main__":
-    my_rank = int(os.environ["RANK"])
+
+    my_rank = int(os.environ['RANK'])
 
     torch.distributed.init_process_group(
-        backend="gloo",
-        init_method="tcp://localhost:12398",
+        backend='gloo',
+        init_method='tcp://localhost:12398',
         world_size=2,
         rank=my_rank,
     )
@@ -124,8 +127,8 @@ if __name__ == "__main__":
     print(f"initialized! My rank is {my_rank}")
 
     config = KVTransferConfig(
-        kv_connector="PyNcclConnector",
-        kv_buffer_device="cuda",
+        kv_connector='PyNcclConnector',
+        kv_buffer_device='cuda',
         kv_buffer_size=1e9,
         kv_rank=my_rank,
         kv_role="kv_both",  # this arg doesn't matter in this test
@@ -156,4 +159,4 @@ if __name__ == "__main__":
     buffer.close()
     data_pipe.close()
     cpu_pipe.close()
-    print("Done")
+    print('Done')

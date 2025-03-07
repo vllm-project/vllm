@@ -304,7 +304,7 @@ def _attn_fwd_inner(
             num_warps=4,
         ),
     ],
-    key=["IS_CAUSAL", "dropout_p", "BLOCK_DMODEL"],
+    key=['IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL'],
 )
 @triton.jit
 def attn_fwd(
@@ -437,7 +437,8 @@ def attn_fwd(
     padded_head = ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL
 
     # Compute pointers for all the tensors used in this kernel.
-    q_offset = off_z * stride_qz + off_h_q * stride_qh + cu_seqlens_q_start * stride_qm
+    q_offset = (off_z * stride_qz + off_h_q * stride_qh +
+                cu_seqlens_q_start * stride_qm)
     Q_block_ptr = tl.make_block_ptr(
         base=Q + q_offset,
         shape=(seqlen_q, ACTUAL_BLOCK_DMODEL),
@@ -446,7 +447,8 @@ def attn_fwd(
         block_shape=(BLOCK_M, BLOCK_DMODEL),
         order=(1, 0),
     )
-    k_offset = off_z * stride_kz + off_h_k * stride_kh + cu_seqlens_k_start * stride_kn
+    k_offset = (off_z * stride_kz + off_h_k * stride_kh +
+                cu_seqlens_k_start * stride_kn)
     K_block_ptr = tl.make_block_ptr(
         base=K + k_offset,
         shape=(ACTUAL_BLOCK_DMODEL, seqlen_k),
@@ -455,7 +457,8 @@ def attn_fwd(
         block_shape=(BLOCK_DMODEL, BLOCK_N),
         order=(0, 1),
     )
-    v_offset = off_z * stride_vz + off_h_k * stride_vh + cu_seqlens_k_start * stride_vk
+    v_offset = (off_z * stride_vz + off_h_k * stride_vh +
+                cu_seqlens_k_start * stride_vk)
     V_block_ptr = tl.make_block_ptr(
         base=V + v_offset,
         shape=(seqlen_k, ACTUAL_BLOCK_DMODEL),
@@ -476,8 +479,9 @@ def attn_fwd(
     else:
         bias_ptr = None
     if ENABLE_DROPOUT:
-        batch_philox_offset = (philox_offset_base +
-                               (off_z * HQ + off_h_q) * seqlen_q * seqlen_k)
+        batch_philox_offset = philox_offset_base \
+                              + (off_z * HQ + off_h_q) \
+                              * seqlen_q * seqlen_k
     else:
         batch_philox_offset = 0
     # We can ask to return the dropout mask without actually doing any dropout.
@@ -624,8 +628,8 @@ def attn_fwd(
                                         causal_start_idx,
                                         dtype=tl.int32)
             mask_m_offsets = start_m_idx + tl.arange(0, BLOCK_M)
-            out_ptrs_mask = mask_m_offsets[:,
-                                           None] >= out_mask_boundary[None, :]
+            out_ptrs_mask = (mask_m_offsets[:, None]
+                             >= out_mask_boundary[None, :])
             z = 0.0
             acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
     # write back LSE
@@ -643,7 +647,8 @@ def attn_fwd(
     #    tl.store(l_ptrs, m_i + tl.math.log2(l_i))
 
     # write back O
-    o_offset = off_z * stride_oz + cu_seqlens_q_start * stride_om + off_h_q * stride_oh
+    o_offset = (off_z * stride_oz + cu_seqlens_q_start * stride_om +
+                off_h_q * stride_oh)
     O_block_ptr = tl.make_block_ptr(
         base=Out + o_offset,
         shape=(seqlen_q, ACTUAL_BLOCK_DMODEL),

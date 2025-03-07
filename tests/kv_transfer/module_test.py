@@ -8,7 +8,7 @@ import torch
 
 
 def run_python_script(script_name, timeout):
-    script_name = f"kv_transfer/{script_name}"
+    script_name = f'kv_transfer/{script_name}'
     try:
         # Start both processes asynchronously using Popen
         process0 = subprocess.Popen(
@@ -52,14 +52,10 @@ def run_python_script(script_name, timeout):
 @pytest.mark.parametrize(
     "script_name,timeout",
     [
-        (
-            "test_lookup_buffer.py",
-            60,
-        ),  # Second test case with a 60-second timeout
-        ("test_send_recv.py",
-         120),  # First test case with a 120-second timeout
-    ],
-)
+        ("test_lookup_buffer.py",
+         60),  # Second test case with a 60-second timeout
+        ("test_send_recv.py", 120)  # First test case with a 120-second timeout
+    ])
 def test_run_python_script(script_name, timeout):
     # Check the number of GPUs
     if torch.cuda.device_count() < 2:

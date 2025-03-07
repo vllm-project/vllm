@@ -5,7 +5,6 @@ Example online usage of Pooling API.
 Run `vllm serve <model> --task <embed|classify|reward|score>`
 to start up the server in vLLM.
 """
-
 import argparse
 import pprint
 
@@ -46,7 +45,7 @@ if __name__ == "__main__":
                 "type": "text",
                 "text": "vLLM is great!"
             }],
-        }],
+        }]
     }
     pooling_response = post_http_request(prompt=prompt, api_url=api_url)
     print("Pooling Response:")
