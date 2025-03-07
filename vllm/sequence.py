@@ -121,6 +121,7 @@ class RequestMetrics:
     scheduler_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
+    node_acceptance_counts: Optional[float] = None
 
 
 class SequenceDataDelta(
@@ -654,6 +655,7 @@ class SequenceGroup:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        draft_size: int = 1
     ) -> None:
         self.request_id = request_id
         self.seqs = seqs
@@ -667,7 +669,8 @@ class SequenceGroup:
                                       last_token_time=arrival_time,
                                       first_scheduled_time=None,
                                       first_token_time=None,
-                                      time_in_queue=None)
+                                      time_in_queue=None,
+                                      node_acceptance_counts=[0] * draft_size)
         self.last_token_latency = 0.0
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
@@ -1079,6 +1082,7 @@ class CompletionSequenceGroupOutput(
     samples: list[SequenceOutput]
     # Prompt logprob for each prompt query token.
     prompt_logprobs: Optional[PromptLogprobs]
+    step_index: Optional[int] = 0
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "

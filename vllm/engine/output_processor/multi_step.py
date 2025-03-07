@@ -100,6 +100,11 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             seqs = sequence_group.get_seqs(
                 status=SequenceStatus.FINISHED_ABORTED)
 
+        for output in outputs:
+            if output.step_index is not None:
+                sequence_group.metrics.node_acceptance_counts[
+                    output.step_index] += 1
+
         assert seqs, "Expected RUNNING or FINISHED_ABORTED sequences"
         assert len(seqs) == 1, (
             "Beam search not supported in multi-step decoding.")

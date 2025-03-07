@@ -100,6 +100,7 @@ def create_sequence_group_output(
     topk_token_ids: List[Optional[int]],
     topk_logprobs: List[Optional[float]],
     prompt_logprobs: Optional[PromptLogprobs] = None,
+    step_index: Optional[int] = 0
 ) -> CompletionSequenceGroupOutput:
     """Create a SequenceGroupOutput given the sampling results.
 
@@ -127,6 +128,7 @@ def create_sequence_group_output(
                            logprobs=logprobs)
         ],
         prompt_logprobs=prompt_logprobs,
+        step_index=step_index
     )
 
 
