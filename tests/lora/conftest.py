@@ -186,11 +186,6 @@ def mixtral_lora_files():
 
 
 @pytest.fixture(scope="session")
-def mixtral_lora_files_all_target_modules():
-    return snapshot_download(repo_id="dyang415/mixtral-lora-v0")
-
-
-@pytest.fixture(scope="session")
 def gemma_lora_files():
     return snapshot_download(repo_id="wskwon/gemma-7b-test-lora")
 
