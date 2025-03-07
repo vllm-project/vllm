@@ -1675,7 +1675,7 @@ __global__ void Marlin(
           }
 
         } else {
-          if (last) {
+          if (last || use_atomic_add) {
             cp_async_wait<0>();
             __syncthreads();
             if (threadIdx.x / 32 < thread_n_blocks / 4) {
