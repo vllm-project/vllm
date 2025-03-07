@@ -1237,6 +1237,8 @@ class EngineArgs:
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
+
+        assert isinstance(self.speculative_config, dict)
         self.speculative_config.update({
             "target_model_config": target_model_config,
             "target_parallel_config": target_parallel_config,
