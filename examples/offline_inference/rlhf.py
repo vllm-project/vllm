@@ -34,6 +34,8 @@ class MyLLM(LLM):
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         # set the placement group name for vLLM to use
         os.environ['VLLM_RAY_PG_NAME'] = pg_name
+        # set the ray address for vLLM to use
+        os.environ['RAY_ADDRESS'] = ray.get_runtime_context().gcs_address
         super().__init__(*args, **kwargs)
 
 
