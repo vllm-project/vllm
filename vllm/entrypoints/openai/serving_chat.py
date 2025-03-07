@@ -20,16 +20,14 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, PromptTokenUsageInfo,
-    RequestResponseMetadata, ToolCall, UsageInfo)
+    DeltaToolCall, ErrorResponse, PromptTokenUsageInfo,
+    RequestResponseMetadata, UsageInfo)
 from vllm.entrypoints.openai.reasoning_parsers import (ReasoningParser,
                                                        ReasoningParserManager)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
-from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
-    MistralToolCall)
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -337,7 +335,8 @@ class OpenAIServingChat(OpenAIServing):
         # Prepare the tool parser if it's needed
         try:
             use_auto_tool = tool_choice_auto and self.tool_parser
-            use_choice_tool = request.tool_choice and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
+            use_choice_tool = request.tool_choice and type(
+                request.tool_choice) is ChatCompletionNamedToolChoiceParam
             if use_auto_tool or use_choice_tool:
                 tool_parsers: list[Optional[ToolParser]] = [
                     self.tool_parser(tokenizer)
@@ -758,12 +757,12 @@ class OpenAIServingChat(OpenAIServing):
                     logger.exception("Error in tool parser creation.")
                     return self.create_error_response(str(e))
 
-                tool_call_info = tool_parser.extract_tool_calls(output.text, request=request)
+                tool_call_info = tool_parser.extract_tool_calls(
+                    output.text, request=request)
 
                 message = ChatMessage(role=role,
                                       content=tool_call_info.content,
                                       tool_calls=tool_call_info.tool_calls)
-
 
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
