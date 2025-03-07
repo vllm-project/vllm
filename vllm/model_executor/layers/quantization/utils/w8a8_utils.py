@@ -122,6 +122,7 @@ def maybe_create_device_identity():
 
 
 # TODO(luka): follow similar pattern for marlin and block-fp8-linear
+#  https://github.com/vllm-project/vllm/issues/14397
 class Fp8LinearOp:
     """
     This class executes a FP8 linear layer using cutlass if supported and

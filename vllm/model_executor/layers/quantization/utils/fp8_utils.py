@@ -33,7 +33,8 @@ def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
     return x == torch.float8_e4m3fn or x == torch.float8_e4m3fnuz
 
 
-# TODO fix ROCm->Triton custom path
+# TODO fix ROCm->Triton custom path:
+#  https://github.com/vllm-project/vllm/issues/14397
 def apply_w8a8_block_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -51,6 +52,7 @@ def apply_w8a8_block_fp8_linear(
     shape_supported_by_cutlass = (weight.shape[0] % 128 == 0
                                   and weight.shape[1] % 128 == 0)
     if current_platform.is_rocm():
+        # TODO this is never used, as cutlass_block_fp8_supported is False
         scale_a_shape = ((input_2d.shape[-1] // block_size[1], ) +
                          input_2d.shape[:-1])[::-1]
         scale_b_shape = (weight_scale.view(-1, 1)
@@ -107,6 +109,7 @@ direct_register_custom_op(
 # `apply_fp8_linear`
 # NOTE(lucas): this is quite messy, we should think through this more formally
 # TODO(luka): unify this better
+#  https://github.com/vllm-project/vllm/issues/14397
 class Fp8LinearGenericOp:
 
     def __init__(
