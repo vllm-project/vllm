@@ -116,12 +116,16 @@ def test_cumem_with_cudagraph():
 
 @fork_new_process_for_each_test
 @pytest.mark.parametrize(
-    "model",
+    "model, use_v1",
     [
-        "meta-llama/Llama-3.2-1B-Instruct",  # sleep mode with safetensors
-        "facebook/opt-125m"  # sleep mode with pytorch checkpoint
+        # sleep mode with safetensors
+        ("meta-llama/Llama-3.2-1B", True),
+        # sleep mode with pytorch checkpoint
+        ("facebook/opt-125m", False),
     ])
-def test_end_to_end(model):
+def test_end_to_end(model: str, use_v1: bool):
+    import os
+    os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
     free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
     llm = LLM(model, enable_sleep_mode=True)
@@ -145,3 +149,5 @@ def test_end_to_end(model):
 
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+    del os.environ["VLLM_USE_V1"]

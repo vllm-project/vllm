@@ -378,7 +378,7 @@ class SiglipEncoder(nn.Module):
         inputs_embeds: torch.Tensor,
         return_all_hidden_states: bool,
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
-        hidden_states_pool = []
+        hidden_states_pool = [inputs_embeds]
         hidden_states = inputs_embeds
 
         for encoder_layer in self.layers:

@@ -16,8 +16,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
                  device_group: Optional[ProcessGroup] = None,
                  unique_name: str = ""):
         super().__init__(cpu_group, device, device_group, unique_name)
-        if "pp" in unique_name:
-            # pipeline parallel does not need custom allreduce
+        if "tp" not in unique_name:
+            # only tp uses custom allreduce
             use_custom_allreduce = False
         else:
             from vllm.distributed.parallel_state import (

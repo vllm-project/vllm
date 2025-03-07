@@ -7,7 +7,8 @@
 # Copyright (c) 2024 H2O.AI
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-from typing import Mapping, Optional
+from collections.abc import Mapping, Sequence
+from typing import Optional
 
 import torch
 from PIL import Image
@@ -20,7 +21,7 @@ from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (ProcessingCache, PromptReplacement,
-                                        PromptReplacementDetails)
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
@@ -41,6 +42,7 @@ def resolve_h2ovl_min_max_num(
     dynamic_image_size: bool,
     use_thumbnail: bool,
 ) -> tuple[int, int]:
+    min_dynamic_patch = min_dynamic_patch if dynamic_image_size else 1
     max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
 
     if use_thumbnail and max_dynamic_patch != 1:
@@ -190,7 +192,7 @@ def image_to_pixel_values_h2ovl(
         pixel_values1, aspect_ratio1 = _preprocess_image(
             image,
             input_size=input_size,
-            min_num=min_num,
+            min_num=1,
             max_num=max_num,
             use_thumbnail=True,
             prior_aspect_ratio=None,
@@ -199,7 +201,7 @@ def image_to_pixel_values_h2ovl(
         pixel_values2, _ = _preprocess_image(
             image,
             input_size=input_size,
-            min_num=3,  # Hardcoded value
+            min_num=3,
             max_num=max_num,
             use_thumbnail=True,
             prior_aspect_ratio=aspect_ratio1,
@@ -228,6 +230,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
         config: PretrainedConfig,
         tokenizer: AnyTokenizer,
         *,
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
         use_msac: Optional[bool] = None,
@@ -235,6 +238,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
         super().__init__(
             config,
             tokenizer,
+            min_dynamic_patch=min_dynamic_patch,
             max_dynamic_patch=max_dynamic_patch,
             dynamic_image_size=dynamic_image_size,
         )
@@ -267,11 +271,13 @@ class H2OVLProcessor(BaseInternVLProcessor):
     def resolve_min_max_num(
         self,
         *,
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
         use_thumbnail: Optional[bool] = None,
     ) -> tuple[int, int]:
-        min_dynamic_patch = self.min_dynamic_patch
+        min_dynamic_patch = (self.min_dynamic_patch if min_dynamic_patch
+                             is None else min_dynamic_patch)
         max_dynamic_patch = (self.max_dynamic_patch if max_dynamic_patch
                              is None else max_dynamic_patch)
         dynamic_image_size = (self.dynamic_image_size if dynamic_image_size
@@ -289,18 +295,21 @@ class H2OVLProcessor(BaseInternVLProcessor):
     def resolve_target_ratios(
         self,
         *,
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
         use_thumbnail: Optional[bool] = None,
         prior_aspect_ratio: Optional[tuple[int, int]] = None,
+        override_min_num: Optional[int] = None,
     ) -> list[tuple[int, int]]:
         min_num, max_num = self.resolve_min_max_num(
+            min_dynamic_patch=min_dynamic_patch,
             max_dynamic_patch=max_dynamic_patch,
             dynamic_image_size=dynamic_image_size,
             use_thumbnail=use_thumbnail,
         )
-        if prior_aspect_ratio:  # hardcoded value for second pass of use_msac
-            min_num = 3
+        if override_min_num is not None:
+            min_num = override_min_num
 
         return get_h2ovl_target_ratios(
             min_num,
@@ -322,6 +331,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
         if use_msac:
             target_ratios_1 = self.resolve_target_ratios(
                 use_thumbnail=False,  # Applied in calculate_targets
+                override_min_num=1,
             )
             num_patches_1, _, _, aspect_ratio_1 = calculate_h2ovl_targets(
                 orig_width=image_width,
@@ -334,6 +344,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
             target_ratios_2 = self.resolve_target_ratios(
                 use_thumbnail=False,  # Applied in calculate_targets
                 prior_aspect_ratio=aspect_ratio_1,
+                override_min_num=3,
             )
             num_patches_2, _, _, _ = calculate_h2ovl_targets(
                 orig_width=image_width,
@@ -361,12 +372,14 @@ class H2OVLProcessor(BaseInternVLProcessor):
     def _images_to_pixel_values_lst(
         self,
         images: list[Image.Image],
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
     ) -> list[torch.Tensor]:
         use_msac = self.use_msac if len(images) == 1 else False
 
         min_num, max_num = self.resolve_min_max_num(
+            min_dynamic_patch=min_dynamic_patch,
             max_dynamic_patch=max_dynamic_patch,
             dynamic_image_size=dynamic_image_size,
             use_thumbnail=False,  # Applied in image_to_pixel_values
@@ -389,14 +402,23 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
     def get_hf_processor(
         self,
         *,
+        min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
+        **kwargs: object,
     ) -> H2OVLProcessor:
-        return H2OVLProcessor(
-            self.get_hf_config(),
-            self.get_tokenizer(),
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
+        if min_dynamic_patch is not None:
+            kwargs["min_dynamic_patch"] = min_dynamic_patch
+        if max_dynamic_patch is not None:
+            kwargs["max_dynamic_patch"] = max_dynamic_patch
+        if dynamic_image_size is not None:
+            kwargs["dynamic_image_size"] = dynamic_image_size
+
+        return self.ctx.init_processor(
+            H2OVLProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
         )
 
     def get_mm_max_tokens_per_item(
@@ -456,20 +478,22 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
             enable_sanity_checks=enable_sanity_checks,
         )
 
-        if self.cache is not None:
+        mm_limit = self.info.ctx.model_config.multimodal_config.limit_per_prompt
+        if self.cache is not None and mm_limit["image"] >= 2:
             # The processor output depends on the number of images passed,
             # making it incompatible with processing cache which is supposed
             # to be invariant of how many images are passed per prompt
             self.cache = None
             logger.warning_once(
-                f"{type(self).__name__} does not support processing cache.")
+                f"{type(self).__name__} does not support processing cache with "
+                "multi-image support enabled.")
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         if "image_num_patches" in out_mm_kwargs:
@@ -504,7 +528,7 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            return PromptReplacementDetails(
+            return PromptUpdateDetails(
                 full=hf_processor.get_image_repl_full(feature_size,
                                                       num_patches),
                 features=hf_processor.get_image_repl_features(
