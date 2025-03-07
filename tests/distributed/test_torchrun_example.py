@@ -25,7 +25,8 @@ llm = LLM(model="facebook/opt-125m",
           tensor_parallel_size=2,
           distributed_executor_backend="external_launcher",
           gpu_memory_utilization=random.uniform(0.7, 0.9),
-          swap_space=random.randint(1, 4))
+          swap_space=random.randint(1, 4),
+          seed=0)
 
 outputs = llm.generate(prompts, sampling_params)
 
