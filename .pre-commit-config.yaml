@@ -3,44 +3,44 @@ default_stages:
   - manual # Run in CI
 exclude: 'vllm/third_party/.*'
 repos:
-- repo: https://githubfast.com/google/yapf
+- repo: https://github.com/google/yapf
   rev: v0.43.0
   hooks:
   - id: yapf
     args: [--in-place, --verbose]
     additional_dependencies: [toml] # TODO: Remove when yapf is upgraded
-- repo: https://githubfast.com/astral-sh/ruff-pre-commit
+- repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.9.3
   hooks:
   - id: ruff
     args: [--output-format, github, --fix]
-- repo: https://githubfast.com/codespell-project/codespell
+- repo: https://github.com/codespell-project/codespell
   rev: v2.4.0
   hooks:
   - id: codespell
     additional_dependencies: ['tomli']
     args: ['--toml', 'pyproject.toml']
-- repo: https://githubfast.com/PyCQA/isort
+- repo: https://github.com/PyCQA/isort
   rev: 0a0b7a830386ba6a31c2ec8316849ae4d1b8240d # 6.0.0
   hooks:
   - id: isort
-- repo: https://githubfast.com/pre-commit/mirrors-clang-format
+- repo: https://github.com/pre-commit/mirrors-clang-format
   rev: v19.1.7
   hooks:
   - id: clang-format
     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
-- repo: https://githubfast.com/jackdewinter/pymarkdown
+- repo: https://github.com/jackdewinter/pymarkdown
   rev: v0.9.27
   hooks:
   - id: pymarkdown
     args: [fix]
-- repo: https://githubfast.com/rhysd/actionlint
+- repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
   - id: actionlint
-- repo: https://githubfast.com/astral-sh/uv-pre-commit
+- repo: https://github.com/astral-sh/uv-pre-commit
   rev: 0.6.2
   hooks:
     - id: pip-compile
@@ -55,28 +55,28 @@ repos:
     types: [python]
     additional_dependencies: &mypy_deps [mypy==1.11.1, types-setuptools, types-PyYAML, types-requests]
     stages: [pre-commit] # Don't run in CI
-  - id: mypy-3.9 # TODO: Use https://githubfast.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+  - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.9
     entry: tools/mypy.sh 1 "3.9"
     language: python
     types: [python]
     additional_dependencies: *mypy_deps
     stages: [manual] # Only run in CI
-  - id: mypy-3.10 # TODO: Use https://githubfast.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+  - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: tools/mypy.sh 1 "3.10"
     language: python
     types: [python]
     additional_dependencies: *mypy_deps
     stages: [manual] # Only run in CI
-  - id: mypy-3.11 # TODO: Use https://githubfast.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+  - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.11
     entry: tools/mypy.sh 1 "3.11"
     language: python
     types: [python]
     additional_dependencies: *mypy_deps
     stages: [manual] # Only run in CI
-  - id: mypy-3.12 # TODO: Use https://githubfast.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+  - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.12
     entry: tools/mypy.sh 1 "3.12"
     language: python
