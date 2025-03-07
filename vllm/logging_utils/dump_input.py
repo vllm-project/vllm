@@ -29,7 +29,7 @@ def prepare_object_to_dump(obj) -> str:
         return f'[{', '.join([prepare_object_to_dump(v) for v in list(obj)])}]'
         # return [prepare_object_to_dump(v) for v in list(obj)]
     elif isinstance(obj, tuple):
-        return [prepare_object_to_dump(v) for v in obj]
+        return f'[{', '.join([prepare_object_to_dump(v) for v in obj])}]'
     elif isinstance(obj, enum.Enum):
         return repr(obj)
     elif isinstance(obj, torch.Tensor):
