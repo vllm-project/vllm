@@ -295,7 +295,7 @@ def should_use_atomic_add_reduce(m: int, n: int, k: int, device: torch.device,
                                  dtype: torch.dtype) -> bool:
     # disable atomicAdd reduce by default,
     # one can enable it with VLLM_MARLIN_USE_ATOMIC_ADD=1
-    if not envs.VLLM_MARLIN_USE_ATOMIC_ADD or device.dtype != "cuda":
+    if not envs.VLLM_MARLIN_USE_ATOMIC_ADD or device.type != "cuda":
         return False
 
     # sm8x doesn't support atomicAdd + bfloat16 natively
