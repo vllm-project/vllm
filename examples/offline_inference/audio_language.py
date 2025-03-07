@@ -6,10 +6,14 @@ with the correct prompt format on audio language models.
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
+import os
+
+from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
+from vllm.lora.request import LoRARequest
 from vllm.utils import FlexibleArgumentParser
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
@@ -49,6 +53,39 @@ def run_minicpmo(question: str, audio_count: int):
                                            add_generation_prompt=True,
                                            chat_template=audio_chat_template)
     return llm, prompt, stop_token_ids
+
+
+# Phi-4-multimodal-instruct
+def run_phi4mm(questions: str, audio_count: int):
+    """
+    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    show how to process audio inputs.
+    """
+    model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
+    # Since the vision-lora and speech-lora co-exist with the base model,
+    # we have to manually specify the path of the lora weights.
+    speech_lora_path = os.path.join(model_path, "speech-lora")
+    placeholders = "".join([f"<|audio_{i+1}|>" for i in range(audio_count)])
+
+    prompts = f"<|user|>{placeholders}{questions}<|end|><|assistant|>"
+
+    llm = LLM(
+        model=model_path,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=2,
+        enable_lora=True,
+        max_lora_rank=320,
+        lora_extra_vocab_size=0,
+    )
+    lora_request = LoRARequest("speech", 1, speech_lora_path)
+    # To maintain code compatibility in this script, we add LoRA here.
+    llm.llm_engine.add_lora(lora_request=lora_request)
+    # You can also add LoRA using:
+    # llm.generate(prompts, lora_request=lora_request,...)
+
+    stop_token_ids = None
+    return llm, prompts, stop_token_ids
 
 
 # Qwen2-Audio
@@ -113,6 +150,7 @@ def run_whisper(question: str, audio_count: int):
 
 model_example_map = {
     "minicpmo": run_minicpmo,
+    "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,
     "ultravox": run_ultravox,
     "whisper": run_whisper,
