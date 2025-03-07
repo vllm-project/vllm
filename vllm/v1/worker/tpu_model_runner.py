@@ -865,7 +865,7 @@ class ModelWrapperV1(nn.Module):
         kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Executes the forward pass of the model and samples the next token.
+        """Executes the forward pass of the model.
 
         Args:
             input_ids: The input token IDs of shape [num_tokens].
@@ -927,6 +927,8 @@ def _get_padded_token_len(x: int) -> int:
     if x <= 16:
         return 16
     return 1 << (x - 1).bit_length()
+
+
 def _pad_indices_do_sample(indices_do_sample: torch.Tensor,
                            num_do_sample: int) -> torch.Tensor:
     # `num_do_sample` \in [1, max_num_seqs]
