@@ -27,13 +27,13 @@ from vllm.utils import get_ip, get_open_port
 
 class MyLLM(LLM):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, pg_name, **kwargs):
         # a hack to make the script work.
         # stop ray from manipulating CUDA_VISIBLE_DEVICES
         # at the top-level
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-        pg = ray.util.get_current_placement_group()
-        os.environ['VLLM_RAY_PG_NAME'] = pg.name
+        # set the placement group name for vLLM to use
+        os.environ['VLLM_RAY_PG_NAME'] = pg_name
         super().__init__(*args, **kwargs)
 
 
@@ -73,6 +73,7 @@ llm = ray.remote(
     worker_extension_cls="rlhf_utils.WorkerExtension",
     tensor_parallel_size=2,
     distributed_executor_backend="ray",
+    pg_name="inference",
 )
 
 # Generate texts from the prompts.
