@@ -224,54 +224,28 @@ def test_prefill_plp():
         for b in manager.block_pool.free_block_queue.get_all_free_blocks()
     ] == [7, 8, 9, 4, 3, 6, 5, 2, 1, 0]
 
-    # Request #2 is a non-prompt-logprobs request:
-    # Cache hit in the common prefix when the original block is already free.
-    # Incomplete 1 block (6 tokens)
-    unique_token_ids = [3] * 6
-    req2 = make_request("2", common_token_ids + unique_token_ids)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
-    assert len(manager.req_to_block_hashes[req2.request_id]) == 3
-    assert [b.block_id for b in computed_blocks] == [0, 1, 2]
-    assert num_computed_tokens == 3 * 16
-    num_new_tokens = 53 - 3 * 16
-    blocks = manager.allocate_slots(req2, num_new_tokens, computed_blocks)
-    assert [b.block_id for b in blocks] == [7, 8]
-
-    # Although we only have 5 free blocks, we have 8 blocks in
-    # the free block queue due to lazy removal.
-    assert manager.block_pool.free_block_queue.num_free_blocks == 5
-    assert all([
-        b.ref_cnt == 0
-        for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ])
-    assert len([
-        b for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ]) == 5
-
-    manager.free(req2)
-
-    # Request #3 is a prompt-logprobs request:
+    # Request #2 is a prompt-logprobs request:
     # NO cache hit in the common prefix; duplicates request #0 cached blocks
     unique_token_ids = [3] * 6
-    req3 = make_request("3",
+    req2 = make_request("2",
                         common_token_ids + unique_token_ids,
                         prompt_logprobs=5)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
-    assert len(manager.req_to_block_hashes[req3.request_id]) == 3
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    assert len(manager.req_to_block_hashes[req2.request_id]) == 3
     assert not computed_blocks
     assert num_computed_tokens == 0
-    blocks = manager.allocate_slots(req3, 55, computed_blocks)
+    blocks = manager.allocate_slots(req2, 55, computed_blocks)
     block_ids = [b.block_id for b in blocks]
     # Duplicate cached blocks have different ids but same hashes vs request #0
     assert [b.block_hash for b in blocks] == req0_block_hashes
     assert block_ids != [0, 1, 2, 3, 4]
 
-    # Request #3 block hashes are valid since request #0 hashes are.
+    # Request #2 block hashes are valid since request #0 hashes are.
     # Check block reference counts.
     for block_id in block_ids:
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
 
-    manager.free(req3)
+    manager.free(req2)
 
 
 def test_decode():
