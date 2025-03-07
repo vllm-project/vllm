@@ -49,6 +49,11 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
+        if not vllm_config.use_v1:
+            raise ValueError(
+                "Using V1 AsyncLLM, but VllmConfig.use_v1 is False. "
+                "As a workaround, explicitly set VLLM_USE_V1=0 or 1 and "
+                "report this issue on GitHub.")
 
         assert start_engine_loop
 

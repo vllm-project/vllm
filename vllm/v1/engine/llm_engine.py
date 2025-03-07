@@ -46,6 +46,12 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
+        if not vllm_config.use_v1:
+            raise ValueError(
+                "Using V1 LLMEngine, but VllmConfig.use_v1 is False. "
+                "As a workaround, explicitly set VLLM_USE_V1=0 or 1 and "
+                "report this issue on GitHub.")
+
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
