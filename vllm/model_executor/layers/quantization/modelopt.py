@@ -6,9 +6,8 @@ import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
-from vllm._custom_ops import (scaled_fp4_quant,
-                              cutlass_scaled_fp4_mm,
-                              cutlass_scaled_mm_supports_fp4)
+from vllm._custom_ops import (cutlass_scaled_fp4_mm,
+                              cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
@@ -169,6 +168,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
                                      input_scale=layer.input_scale,
                                      bias=bias)
 
+
 class ModelOptNvFp4Config(QuantizationConfig):
     """Config class for ModelOpt FP4."""
 
@@ -232,14 +232,14 @@ class ModelOptNvFp4Config(QuantizationConfig):
             return ModelOptFp8KVCacheMethod(self)
         return None
 
+
 def cutlass_fp4_supported() -> bool:
     if not current_platform.is_cuda():
         return False
-
     capability_tuple = current_platform.get_device_capability()
     capability = -1 if capability_tuple is None else capability_tuple.to_int()
-
     return cutlass_scaled_mm_supports_fp4(capability)
+
 
 class ModelOptNvFp4LinearMethod(LinearMethodBase):
     """Linear method for Model Optimizer NVFP4.
@@ -255,6 +255,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptFp8Config):
         self.quant_config = quant_config
         self.cutlass_nvfp4_supported = cutlass_fp4_supported()
+        if not self.cutlass_nvfp4_supported:
+            raise ValueError("Cannot run the requested FP4"
+                             " on the current platform.")
 
     def create_weights(
         self,
@@ -286,7 +289,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # Weight
         weight = ModelWeightParameter(
             data=torch.empty(
-                # 2 fp4 data are packed in the input dimension
+                # 2 fp4 items are packed in the input dimension
                 layer.output_size_per_partition,
                 layer.input_size_per_partition // 2,
                 dtype=torch.uint8),
@@ -319,58 +322,53 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         layer.register_parameter("weight_scale", weight_scale)
 
-    def swizzle_blockscale(self, scales: torch.tensor):
+    def swizzle_blockscale(self, scale: torch.tensor):
+        assert (scale.dtype == torch.float8_e4m3fn)
         # Pad and blockwise interleave weight_scale
-        scales_ndim = scales.ndim
-        if scales.ndim == 2:
-            scales = scales.unsqueeze(0)
-        assert scales.ndim == 3
-        B, M, K = scales.shape
+        scale_ndim = scale.ndim
+        if scale.ndim == 2:
+            scale = scale.unsqueeze(0)
+        assert scale.ndim == 3
+        B, M, K = scale.shape
         round_up_multiple = lambda x, m: (x + m - 1) // m * m
         M_padded = round_up_multiple(M, 128)
         K_padded = round_up_multiple(K, 4)
-        padded_scales = torch.zeros((B, M_padded, K_padded), dtype=scales.dtype)
-        padded_scales[:B, :M, :K] = scales
-        batches, rows, cols = padded_scales.shape
+        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
+        padded_scale[:B, :M, :K] = scale
+        batches, rows, cols = padded_scale.shape
         assert rows % 128 == 0
         assert cols % 4 == 0
-        padded_scales = padded_scales.reshape(batches, 
-                                              rows // 128,
-                                              4,
-                                              32,
-                                              cols // 4,
-                                              4)
-        swizzled_scales = padded_scales.permute((0, 1, 4, 3, 2, 5))
-        swizzled_scales = swizzled_scales.contiguous().cuda()
-        return (scales.reshape(M, K) if scales_ndim == 2 
-                                    else scales.reshape(B, M, K))
+        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32,
+                                            cols // 4, 4)
+        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
+        swizzled_scale = swizzled_scale.contiguous().cuda()
+        return (swizzled_scale.reshape(M, K)
+                if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
 
     def process_weights_after_loading(self, layer: Module) -> None:
+
         # global scales:
         input_scale_2 = layer.input_scale.max().to(torch.float32)
+        layer.input_scale = Parameter(input_scale_2, requires_grad=False)
+
         weight_scale_2 = layer.weight_scale_2.max().to(torch.float32)
-
-        layer.input_scale = Parameter(1/ input_scale_2, requires_grad=False)
-
         layer.weight_scale_2 = Parameter(weight_scale_2, requires_grad=False)
+
         layer.alpha = Parameter(layer.input_scale * layer.weight_scale_2,
                                 requires_grad=False)
 
-        # swizzle the weight_scale_1
+        # Swizzle the weight blockscale.
         # contracting dimension is input dimension
-        # block_size = 16
+        # block_size = 16;
         # w_indim  = input_size_per_partition // self.quant_config.group_size
-        assert (layer.weight_scale.shape[1] %
-                16 == 0), "Expected weight_scale.dim(1) to be divisible by 16"
+        assert (layer.weight_scale.shape[1] % 16 == 0), (
+            "Expected weight_scale.dim(1) to be divisible by 16")
+        assert (layer.weight_scale.dtype == torch.float8_e4m3fn), (
+            "Weight Block scale must be represented as FP8-E4M3")
+        swizzled_weight_scale = self.swizzle_blockscale(layer.weight_scale)
 
-        # blockscale_interleave_fp4 takes int8 as input
-        # int8_ws = layer.weight_scale.view(torch.int8).contiguous()
-        swizzled_weight_scale = self.swizzle_blockscale(
-                                                layer.weight_scale)
-        # swizzled_weight_scale = swizzled_weight_scale.reshape(
-        #     int8_ws.shape).view(torch.float8_e4m3fn)
-        layer.weight_scale_swizzled = Parameter(
-           swizzled_weight_scale, requires_grad=False)
+        layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
+                                                requires_grad=False)
 
     def apply(
         self,
@@ -386,18 +384,20 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         output_shape = [x_m, w_n]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        qinput, x_sf_1 = scaled_fp4_quant(x, layer.input_scale)
+        s_quant = 1 / layer.input_scale
+        x_fp4, x_blockscale = scaled_fp4_quant(x, s_quant)
 
-        # validate dtypes of quantized input, weight and weight_sf
-        assert (qinput.dtype == torch.uint8)
+        # validate dtypes of quantized input, input block scale,
+        # weight and weight_blockscale
+        assert (x_fp4.dtype == torch.uint8)
         assert (layer.weight.dtype == torch.uint8)
-        # assert (x_sf_1.dtype == torch.int32)
+        assert (x_blockscale.dtype == torch.float8_e4m3fn)
+        assert (layer.weight_scale_swizzled.dtype == torch.float8_e4m3fn)
         assert (layer.alpha.dtype == torch.float32)
 
-        out = cutlass_scaled_fp4_mm(qinput, layer.weight, x_sf_1,
-                               layer.weight_scale_swizzled,
-                               layer.alpha,
-                               output_dtype)
+        out = cutlass_scaled_fp4_mm(x_fp4, layer.weight, x_blockscale,
+                                    layer.weight_scale_swizzled, layer.alpha,
+                                    output_dtype)
         if bias is not None:
             out = out + bias
         return out.view(*output_shape)

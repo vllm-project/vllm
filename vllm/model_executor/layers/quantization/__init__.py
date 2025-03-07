@@ -98,8 +98,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     from .hqq_marlin import HQQMarlinConfig
     from .ipex_quant import IPEXConfig
     from .marlin import MarlinConfig
-    from .modelopt import ModelOptFp8Config
-    from .modelopt import ModelOptNvFp4Config
+    from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
     from .neuron_quant import NeuronQuantConfig
     from .ptpc_fp8 import PTPCFp8Config

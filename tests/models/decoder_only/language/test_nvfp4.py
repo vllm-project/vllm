@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # flake8: noqa
 """Tests Model Optimizer nvfp4 models against ground truth generation
 Note: these tests will only pass on B200
@@ -15,30 +16,31 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
 
-MODELS = ["nvidia/Llama-3.1-8B-Instruct-FP4"]
+MODELS = ["nvidia/Llama-3.3-70B-Instruct-FP4"]
 
 EXPECTED_STRS_MAP = {
-    "nvidia/Llama-3.1-8B-Instruct-FP4": [
-        "It seems like you're referring to VLLM, a high-throughput and memory-efficient inference and",
+    "nvidia/Llama-3.3-70B-Instruct-FP4": [
+        'vLLM (Vectorized Large Language Model) is indeed a high-throughput and memory-efficient inference',
         'Here are the major milestones in the development of artificial intelligence (AI) from 1950 to ',
-        'The processing of information by artificial intelligence (AI) and human intelligence (HI) differs in several ways',
-        "A neural network is a complex system inspired by the structure and function of the human brain. It's",
-        'In a world of wires and circuits, a robot named Zeta whirred to life in the',
+        'Artificial intelligence (AI) and human intelligence (HI) are two distinct forms of intelligence that process',
+        'A neural network is a type of machine learning model inspired by the structure and function of the human brain',
+        'In the heart of a cutting-edge robotics lab, a team of engineers had been working tirelessly to push',
         'The COVID-19 pandemic has had a profound impact on global economic structures and future business models, leading',
         'The Mona Lisa, painted by Leonardo da Vinci in the early 16th century, is one of',
-        'Here are the translations:\n\n**Japanese:** (Hajimete no tori wa mushi o'
+        'Here are the translations:\n\n* Japanese: (Sasuga no tori ga miwa o ts'
     ]
 }
 
 
 # This test compares against golden strings for exact match since
 # there is no baseline implementation to compare against
-# and is unstable w.r.t specifics of the fp8 implementation or
+# and is unstable w.r.t specifics of the fp4 implementation or
 # the hardware being run on.
 # Disabled to prevent it from breaking the build
 @pytest.mark.skip(
     reason=
-    "Prevent unstable test based on golden strings from breaking the build.")
+    "Prevent unstable test based on golden strings from breaking the build "
+    " and test input model being too large and hanging the system.")
 @pytest.mark.quant_model
 @pytest.mark.skipif(not is_quant_method_supported("nvfp4"),
                     reason="nvfp4 is not supported on this GPU type.")
