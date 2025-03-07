@@ -61,14 +61,14 @@ def run_phi4mm(questions: str, audio_count: int):
     Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
     show how to process audio inputs.
     """
+    model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
     # Since the vision-lora and speech-lora co-exist with the base model,
     # we have to manually specify the path of the lora weights.
-    model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
     speech_lora_path = os.path.join(model_path, "speech-lora")
-    prompts = [
-        f"<|user|><|audio_1|>{question}<|end|><|assistant|>"
-        for question in questions
-    ]
+    placeholders = "".join([f"<|audio_{i+1}|>" for i in range(audio_count)])
+
+    prompts = f"<|user|>{placeholders}{questions}<|end|><|assistant|>"
+
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
