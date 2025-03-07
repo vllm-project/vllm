@@ -719,6 +719,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             block_shape is not None and block_shape[1] > 0:
         assert B_scale is not None and B_scale.ndim == 3
         assert B_zp is None or B_zp.ndim == 3
+        assert padding_size == 0, "MoE padding is not supported " \
+              "with GPTQ/AWQ quantization"
 
         fused_moe_kernel_gptq_awq[grid](
             A,
@@ -770,7 +772,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             expert_ids,
             num_tokens_post_padded,
             B.shape[1],
-            A.shape[1] - padding_size,
+            B.shape[2] - padding_size,
             EM,
             topk_ids.numel(),
             A.stride(0),
