@@ -175,7 +175,7 @@ class EngineArgs:
     guided_decoding_backend: str = 'xgrammar'
     logits_processor_pattern: Optional[str] = None
 
-    speculative_config: Optional[Dict[str, Any]] = None
+    speculative_config: Optional[Union[str, Dict[str, Any]]] = None
 
     # TODO(Shangming): Deprecate these out-of-date params after next release
     speculative_model: Optional[str] = None
@@ -760,7 +760,7 @@ class EngineArgs:
             help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens.')
         parser.add_argument('--speculative-config',
-                            type=json.loads,
+                            type=nullable_str,
                             default=None,
                             help='The configurations for speculative decoding.'
                             ' Should be a JSON string.')
@@ -1186,7 +1186,11 @@ class EngineArgs:
             }
 
             self.speculative_config = spec_config_dict
-
+        else:
+            if isinstance(self.speculative_config, str):
+                import ast
+                self.speculative_config = ast.literal_eval(
+                    self.speculative_config)
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
