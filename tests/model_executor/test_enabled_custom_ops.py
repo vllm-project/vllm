@@ -20,6 +20,10 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     cutlass_scaled_mm, dispatch_w8a8_blockscale_func,
     rocm_aiter_gemm_a8w8_blockscale, w8a8_block_fp8_matmul)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_w8a8_scaled_mm, dispatch_w8a8_scaled_mm,
+    rocm_aiter_per_tensor_w8a8_scaled_mm, torch_channelwise_w8a8_scaled_mm,
+    torch_per_tensor_w8a8_scaled_mm, torch_per_token_w8a8_scaled_mm)
 from vllm.platforms import current_platform
 
 
@@ -178,3 +182,43 @@ def test_unquantized_linear_dispatch(use_rocm_aiter: str,
         assert linear_func == rocm_aiter_tgemm_mm
     else:
         assert linear_func == F.linear
+
+
+@pytest.mark.parametrize("cutlass_fp8_supported", [True, False])
+@pytest.mark.parametrize("per_tensor_weights", [True, False])
+@pytest.mark.parametrize("per_tensor_activations", [True, False])
+@pytest.mark.parametrize("use_per_token_if_dynamic", [True, False])
+@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
+@pytest.mark.parametrize("use_rocm_aiter_linear", ["0", "1"])
+def test_scaled_mm_dispatch(cutlass_fp8_supported: bool,
+                            per_tensor_weights: bool,
+                            per_tensor_activations: bool,
+                            use_per_token_if_dynamic: bool,
+                            use_rocm_aiter: str, use_rocm_aiter_linear: str,
+                            monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR", use_rocm_aiter_linear)
+
+    w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(cutlass_fp8_supported,
+                                                  per_tensor_weights,
+                                                  per_tensor_activations,
+                                                  use_per_token_if_dynamic)
+
+    if cutlass_fp8_supported:
+        assert w8a8_scaled_mm_func == cutlass_w8a8_scaled_mm
+
+    elif per_tensor_weights and per_tensor_activations:
+
+        if current_platform.is_rocm() and int(use_rocm_aiter) and int(
+                use_rocm_aiter_linear):
+            assert w8a8_scaled_mm_func == rocm_aiter_per_tensor_w8a8_scaled_mm
+        else:
+            assert w8a8_scaled_mm_func == torch_per_tensor_w8a8_scaled_mm
+
+    elif (current_platform.is_rocm()
+          and current_platform.has_device_capability(94)
+          and use_per_token_if_dynamic and not per_tensor_weights
+          and not per_tensor_activations):
+        assert w8a8_scaled_mm_func == torch_per_token_w8a8_scaled_mm
+    else:
+        assert w8a8_scaled_mm_func == torch_channelwise_w8a8_scaled_mm
