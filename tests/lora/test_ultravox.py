@@ -3,8 +3,8 @@
 import shutil
 from os import path
 from tempfile import TemporaryDirectory
-from typing import List, Tuple
 
+import pytest
 import torch
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
@@ -20,6 +20,14 @@ LLMA_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 VLLM_PLACEHOLDER = "<|reserved_special_token_0|>"
 
 PROMPT = "Tell me about a Fool's mate move in 20 words. Provide the moves!"
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
 
 
 def llama3_1_8b_chess_lora_path():
@@ -86,8 +94,8 @@ def test_ultravox_lora(vllm_runner):
                 dtype="bfloat16",
                 max_model_len=1024,
         ) as vllm_model:
-            ultravox_outputs: List[Tuple[
-                List[int], str]] = vllm_model.generate_greedy(
+            ultravox_outputs: list[tuple[
+                list[int], str]] = vllm_model.generate_greedy(
                     [
                         _get_prompt(0, PROMPT, VLLM_PLACEHOLDER,
                                     ULTRAVOX_MODEL_NAME)
@@ -108,7 +116,7 @@ def test_ultravox_lora(vllm_runner):
             dtype="bfloat16",
             max_model_len=1024,
     ) as vllm_model:
-        llama_outputs: List[Tuple[List[int], str]] = (
+        llama_outputs: list[tuple[list[int], str]] = (
             vllm_model.generate_greedy(
                 [_get_prompt(0, PROMPT, VLLM_PLACEHOLDER, LLMA_MODEL_NAME)],
                 256,
