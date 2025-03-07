@@ -141,7 +141,7 @@ def apply_dora_transformation(
     DoRA differs from LoRA by normalizing the product of lora_a and lora_b
     column-wise and then scaling each column by a learned magnitude parameter.
 
-    Previously, there was a bug in the vLLM implementation where the _apply_magnitude method 
+    Previously, there was a bug in the vLLM implementation where the _apply_magnitude method
     in punica_base.py REPLACED the output with the normalized and scaled values
     instead of ADDING the DoRA contribution to the base output. This bug has been fixed.
     

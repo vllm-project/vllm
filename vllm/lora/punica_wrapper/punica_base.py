@@ -318,8 +318,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
 
                 # Calculate DoRA contribution and add to the original output (not replace)
                 dora_contribution = normalized * masked_magnitudes
-                output[:, offset_left:offset_left +
-                       slice] = (original_slice + dora_contribution)
+                output[:, offset_left:offset_left + slice] = original_slice + dora_contribution
 
             offset_left += slice
 
