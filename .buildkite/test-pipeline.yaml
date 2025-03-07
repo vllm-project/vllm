@@ -78,6 +78,7 @@ steps:
   - tests/basic_correctness/test_preemption
   - tests/basic_correctness/test_cumem.py
   commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/test_cumem.py
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
@@ -112,6 +113,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   - tests/entrypoints/offline_mode
   commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_guided_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
@@ -143,8 +145,10 @@ steps:
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
-  - python3 ../examples/offline_inference/rlhf.py
-  - RAY_DEDUP_LOGS=0 python3 ../examples/offline_inference/rlhf_colocate.py
+  - pushd ../examples/offline_inference
+  - python3 rlhf.py
+  - RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
+  - popd
 
 - label: Metrics, Tracing Test # 10min
   num_gpus: 2
@@ -200,6 +204,7 @@ steps:
     - VLLM_USE_V1=1 pytest -v -s v1/engine
     - VLLM_USE_V1=1 pytest -v -s v1/sample
     - VLLM_USE_V1=1 pytest -v -s v1/worker
+    - VLLM_USE_V1=1 pytest -v -s v1/structured_output
     - VLLM_USE_V1=1 pytest -v -s v1/test_stats.py
     - VLLM_USE_V1=1 pytest -v -s v1/test_utils.py
     # TODO: accuracy does not match, whether setting

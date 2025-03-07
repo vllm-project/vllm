@@ -169,8 +169,8 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompts = len(engine_prompts)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
-        # results. In addition, we do not stream the results when use
-        # beam search.
+        # results. Noting that best_of is only supported in V0. In addition,
+        # we do not stream the results when use beam search.
         stream = (request.stream
                   and (request.best_of is None or request.n == request.best_of)
                   and not request.use_beam_search)
