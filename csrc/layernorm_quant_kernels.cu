@@ -176,39 +176,33 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
   dim3 block(std::min(hidden_size, 1024));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  if (is_fp8_ocp()) {
-    VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
-      vllm::rms_norm_static_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fn>
-          <<<grid, block, 0, stream>>>(
-              out.data_ptr<c10::Float8_e4m3fn>(), input.data_ptr<scalar_t>(),
-              weight.data_ptr<scalar_t>(), scale.data_ptr<float>(), epsilon,
-              num_tokens, hidden_size);
-    });
-  }
-#ifdef USE_ROCM
-  else {
-    VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
-      vllm::rms_norm_static_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fnuz>
-          <<<grid, block, 0, stream>>>(
-              out.data_ptr<c10::Float8_e4m3fnuz>(), input.data_ptr<scalar_t>(),
-              weight.data_ptr<scalar_t>(), scale.data_ptr<float>(), epsilon,
-              num_tokens, hidden_size);
-    });
-  }
-#endif
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "rms_norm_kernel_scalar_type", [&] {
+        VLLM_DISPATCH_FP8_TYPES(
+            out.scalar_type(), "rms_norm_kernel_fp8_type", [&] {
+              vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t>
+                  <<<grid, block, 0, stream>>>(
+                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
+                      weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),
+                      epsilon, num_tokens, hidden_size);
+            });
+      });
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width, fp8_type)                          \
-  VLLM_DISPATCH_FLOATING_TYPES(                                             \
-      input.scalar_type(), "fused_add_rms_norm_kernel", [&] {               \
-        vllm::fused_add_rms_norm_static_fp8_quant_kernel<scalar_t, width,   \
-                                                         fp8_type>          \
-            <<<grid, block, 0, stream>>>(                                   \
-                out.data_ptr<fp8_type>(), input.data_ptr<scalar_t>(),       \
-                residual.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(), \
-                scale.data_ptr<float>(), epsilon, num_tokens, hidden_size); \
+#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                     \
+  VLLM_DISPATCH_FLOATING_TYPES(                                              \
+      input.scalar_type(), "fused_add_rms_norm_kernel_scalar_type", [&] {    \
+        VLLM_DISPATCH_FP8_TYPES(                                             \
+            out.scalar_type(), "fused_add_rms_norm_kernel_fp8_type", [&] {   \
+              vllm::fused_add_rms_norm_static_fp8_quant_kernel<scalar_t,     \
+                                                               width, fp8_t> \
+                  <<<grid, block, 0, stream>>>(                              \
+                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),     \
+                      residual.data_ptr<scalar_t>(),                         \
+                      weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),  \
+                      epsilon, num_tokens, hidden_size);                     \
+            });                                                              \
       });
-
 void fused_add_rms_norm_static_fp8_quant(
     torch::Tensor& out,       // [..., hidden_size],
     torch::Tensor& input,     // [..., hidden_size]
@@ -241,22 +235,8 @@ void fused_add_rms_norm_static_fp8_quant(
   bool ptrs_are_aligned =
       inp_ptr % 16 == 0 && res_ptr % 16 == 0 && wt_ptr % 16 == 0;
   if (ptrs_are_aligned && hidden_size % 8 == 0) {
-    if (is_fp8_ocp()) {
-      LAUNCH_FUSED_ADD_RMS_NORM(8, c10::Float8_e4m3fn);
-    }
-#ifdef USE_ROCM
-    else {
-      LAUNCH_FUSED_ADD_RMS_NORM(8, c10::Float8_e4m3fnuz);
-    }
-#endif
+    LAUNCH_FUSED_ADD_RMS_NORM(8);
   } else {
-    if (is_fp8_ocp()) {
-      LAUNCH_FUSED_ADD_RMS_NORM(0, c10::Float8_e4m3fn);
-    }
-#ifdef USE_ROCM
-    else {
-      LAUNCH_FUSED_ADD_RMS_NORM(0, c10::Float8_e4m3fnuz);
-    }
-#endif
+    LAUNCH_FUSED_ADD_RMS_NORM(0);
   }
 }

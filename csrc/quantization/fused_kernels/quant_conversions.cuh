@@ -63,9 +63,9 @@ struct ScaledQuant<quant_type_t, is_scale_inverted,
   static __device__ __forceinline__ quant_type_t quant_fn(float const x,
                                                           float const scale) {
     if constexpr (is_scale_inverted) {
-      return float_to_fp8(ret, x * scale);
+      return float_to_fp8<quant_type_t>(x * scale);
     } else {
-      return float_to_fp8(ret, x / scale);
+      return float_to_fp8<quant_type_t>(x / scale);
     }
   }
 };

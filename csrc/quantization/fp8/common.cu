@@ -97,26 +97,16 @@ void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   dim3 block(1024);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  if (is_fp8_ocp()) {
-    VLLM_DISPATCH_FLOATING_TYPES(
-        input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
-          vllm::scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fn>
-              <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fn>(),
-                                           input.data_ptr<scalar_t>(),
-                                           scale.data_ptr<float>(), num_elems);
-        });
-  }
-#ifdef USE_ROCM
-  else {
-    VLLM_DISPATCH_FLOATING_TYPES(
-        input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
-          vllm::scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fnuz>
-              <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fnuz>(),
-                                           input.data_ptr<scalar_t>(),
-                                           scale.data_ptr<float>(), num_elems);
-        });
-  }
-#endif
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
+        VLLM_DISPATCH_FP8_TYPES(
+            out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
+              vllm::scaled_fp8_quant_kernel<scalar_t, fp8_t>
+                  <<<grid, block, 0, stream>>>(
+                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
+                      scale.data_ptr<float>(), num_elems);
+            });
+      });
 }
 
 void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
@@ -129,34 +119,20 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   dim3 block(1024);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  if (is_fp8_ocp()) {
-    VLLM_DISPATCH_FLOATING_TYPES(
-        input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
-          vllm::segmented_max_reduction<scalar_t, c10::Float8_e4m3fn>
-              <<<grid, block, 0, stream>>>(scale.data_ptr<float>(),
-                                           input.data_ptr<scalar_t>(),
-                                           num_elems);
-          vllm::scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fn>
-              <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fn>(),
-                                           input.data_ptr<scalar_t>(),
-                                           scale.data_ptr<float>(), num_elems);
-        });
-  }
-#ifdef USE_ROCM
-  else {
-    VLLM_DISPATCH_FLOATING_TYPES(
-        input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
-          vllm::segmented_max_reduction<scalar_t, c10::Float8_e4m3fnuz>
-              <<<grid, block, 0, stream>>>(scale.data_ptr<float>(),
-                                           input.data_ptr<scalar_t>(),
-                                           num_elems);
-          vllm::scaled_fp8_quant_kernel<scalar_t, c10::Float8_e4m3fnuz>
-              <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fnuz>(),
-                                           input.data_ptr<scalar_t>(),
-                                           scale.data_ptr<float>(), num_elems);
-        });
-  }
-#endif
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
+        VLLM_DISPATCH_FP8_TYPES(
+            out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
+              vllm::segmented_max_reduction<scalar_t, fp8_t>
+                  <<<grid, block, 0, stream>>>(scale.data_ptr<float>(),
+                                               input.data_ptr<scalar_t>(),
+                                               num_elems);
+              vllm::scaled_fp8_quant_kernel<scalar_t, fp8_t>
+                  <<<grid, block, 0, stream>>>(
+                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
+                      scale.data_ptr<float>(), num_elems);
+            });
+      });
 }
 
 void dynamic_per_token_scaled_fp8_quant(
@@ -173,30 +149,19 @@ void dynamic_per_token_scaled_fp8_quant(
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  if (is_fp8_ocp()) {
-    VLLM_DISPATCH_FLOATING_TYPES(
-        input.scalar_type(), "dynamic_per_token_scaled_fp8_quant_kernel", [&] {
-          vllm::dynamic_per_token_scaled_fp8_quant_kernel<scalar_t,
-                                                          c10::Float8_e4m3fn>
-              <<<grid, block, 0, stream>>>(
-                  out.data_ptr<c10::Float8_e4m3fn>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  hidden_size);
-        });
-  }
-#ifdef USE_ROCM
-  else {
-    VLLM_DISPATCH_FLOATING_TYPES(
-        input.scalar_type(), "dynamic_per_token_scaled_fp8_quant_kernel", [&] {
-          vllm::dynamic_per_token_scaled_fp8_quant_kernel<scalar_t,
-                                                          c10::Float8_e4m3fnuz>
-              <<<grid, block, 0, stream>>>(
-                  out.data_ptr<c10::Float8_e4m3fnuz>(),
-                  scales.data_ptr<float>(), input.data_ptr<scalar_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  hidden_size);
-        });
-  }
-#endif
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(),
+      "dynamic_per_token_scaled_fp8_quant_kernel_scalar_type", [&] {
+        VLLM_DISPATCH_FP8_TYPES(
+            out.scalar_type(),
+            "dynamic_per_token_scaled_fp8_quant_kernel_fp8_type", [&] {
+              vllm::dynamic_per_token_scaled_fp8_quant_kernel<scalar_t, fp8_t>
+                  <<<grid, block, 0, stream>>>(
+                      out.data_ptr<fp8_t>(), scales.data_ptr<float>(),
+                      input.data_ptr<scalar_t>(),
+                      scale_ub.has_value() ? scale_ub->data_ptr<float>()
+                                           : nullptr,
+                      hidden_size);
+            });
+      });
 }

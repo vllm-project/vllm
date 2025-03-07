@@ -6,6 +6,10 @@
 
 #include <torch/all.h>
 
+// need a special dispatch case macro since we will nest the FP8 dispatch
+#define AT_DISPATCH_FP8_CASE(enum_type, ...) \
+  AT_PRIVATE_CASE_TYPE_USING_HINT(enum_type, fp8_t, __VA_ARGS__)
+
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)         \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
   AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)  \
@@ -18,15 +22,25 @@
 // A host-based check at runtime will create a preferred FP8 type for ROCm
 // such that the correct kernel is dispatched.
 #ifdef USE_ROCM
+  #define VLLM_DISPATCH_CASE_FP8_TYPES(...)                          \
+    AT_DISPATCH_FP8_CASE(at::ScalarType::Float8_e4m3fn, __VA_ARGS__) \
+    AT_DISPATCH_FP8_CASE(at::ScalarType::Float8_e4m3fnuz, __VA_ARGS__)
+
   #define VLLM_DISPATCH_CASE_QUANT_TYPES(...)                      \
     AT_DISPATCH_CASE(at::ScalarType::Float8_e4m3fn, __VA_ARGS__)   \
     AT_DISPATCH_CASE(at::ScalarType::Float8_e4m3fnuz, __VA_ARGS__) \
     AT_DISPATCH_CASE(at::ScalarType::Char, __VA_ARGS__)
 #else
+  #define VLLM_DISPATCH_CASE_FP8_TYPES(...) \
+    AT_DISPATCH_FP8_CASE(at::ScalarType::Float8_e4m3fn, __VA_ARGS__)
+
   #define VLLM_DISPATCH_CASE_QUANT_TYPES(...)                    \
     AT_DISPATCH_CASE(at::ScalarType::Float8_e4m3fn, __VA_ARGS__) \
     AT_DISPATCH_CASE(at::ScalarType::Char, __VA_ARGS__)
 #endif
+
+#define VLLM_DISPATCH_FP8_TYPES(TYPE, NAME, ...) \
+  AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FP8_TYPES(__VA_ARGS__))
 
 #define VLLM_DISPATCH_QUANT_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_QUANT_TYPES(__VA_ARGS__))
