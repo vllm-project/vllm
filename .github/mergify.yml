@@ -36,6 +36,21 @@ pull_request_rules:
       add:
         - frontend
 
+- name: label-multi-modality
+  description: Automatically apply multi-modality label
+  conditions:
+    - or:
+      - files~=^vllm/multimodal/
+      - files~=^tests/multimodal/
+      - files~=^tests/models/multimodal/
+      - files~=^tests/models/*/audio_language/
+      - files~=^tests/models/*/vision_language/
+      - files=tests/models/test_vision.py
+  actions:
+    label:
+      add:
+        - multi-modality
+
 - name: label-structured-output
   description: Automatically apply structured-output label
   conditions:
