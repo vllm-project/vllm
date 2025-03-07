@@ -179,9 +179,6 @@ class Worker(WorkerBase):
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         non_torch_allocations_increase = non_torch_allocations - max(
             0, non_torch_allocations_before)
-        logger.warning(
-            f"{non_torch_allocations=}, {non_torch_allocations_before=}")
-        logger.warning(f"{non_torch_allocations_increase=}")
         if non_torch_allocations_increase > 0:
             peak_memory += non_torch_allocations_increase
         available_kv_cache_memory = (
