@@ -306,8 +306,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
                 magnitudes = magnitudes.view(-1, magnitudes.shape[-1])
                 selected_magnitudes = magnitudes[indices]
                 # Create a mask for valid LoRA positions (indices != -1)
-                valid_mask = (indices
-                              != -1).view(-1, 1).expand_as(selected_magnitudes)
+                valid_mask = (indices != -1).view(-1, 1).expand_as(selected_magnitudes)
 
                 # Apply magnitudes only where valid, otherwise use zeros
                 masked_magnitudes = torch.where(
