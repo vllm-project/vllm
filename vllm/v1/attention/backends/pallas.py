@@ -12,7 +12,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import CommonAttentionState
 
 # These are the 2 tunable parameters of the paged attention Pallas kernel.
-NUM_QUERIES_PER_BLOCK = 16
+NUM_QUERIES_PER_BLOCK = 32
 NUM_KV_PAGES_PER_BLOCK = 128
 
 
@@ -115,6 +115,17 @@ class PallasAttentionBackendImpl(AttentionImpl):
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
 
+        tpu_version = torch_xla.tpu.version()
+        if tpu_version < 4:
+            raise NotImplementedError("TPU version must be 4 or higher.")
+        # NOTE(chengjiyao): the TPU v4's vmem capacity is 16MB
+        # TODO(chengjiyao): autotune NUM_QUERIES_PER_BLOCK,
+        # NUM_KV_PAGES_PER_BLOCK and vmem_limit_bytes
+        if tpu_version == 4:
+            self.vmem_limit_bytes = 16 * 1024 * 1024
+        else:
+            self.vmem_limit_bytes = 64 * 1024 * 1024
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -164,7 +175,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             attn_metadata.num_seqs,
             num_kv_pages_per_block=NUM_KV_PAGES_PER_BLOCK,
             num_queries_per_block=NUM_QUERIES_PER_BLOCK,
-            vmem_limit_bytes=32 * 1024 * 1024,
+            vmem_limit_bytes=self.vmem_limit_bytes,
             use_kernel=True,
             sm_scale=self.scale)
 
