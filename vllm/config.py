@@ -2270,7 +2270,7 @@ class LoRAConfig:
     lora_vocab_padding_size: ClassVar[int] = 256
     long_lora_scaling_factors: Optional[tuple[float]] = None
     bias_enabled: bool = False
-    lora_ignored_layers: Optional[Union[str, list[str]]] = None
+    ignored_layers: Optional[Union[str, list[str]]] = None
 
     def compute_hash(self) -> str:
         """
@@ -2311,9 +2311,9 @@ class LoRAConfig:
             raise ValueError(
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
                 f"max_loras ({self.max_loras})")
-        if isinstance(self.lora_ignored_layers, str):
-            self.lora_ignored_layers = [
-                mod.strip() for mod in self.lora_ignored_layers.split(",")
+        if isinstance(self.ignored_layers, str):
+            self.ignored_layers = [
+                mod.strip() for mod in self.ignored_layers.split(",")
             ]
 
     def verify_with_cache_config(self, cache_config: CacheConfig):
