@@ -1841,7 +1841,8 @@ class SpeculativeConfig:
             stage times in speculative decoding.
     """
     # speculative configs from cli args
-    num_speculative_tokens: int
+    num_speculative_tokens: Optional[int] = field(default=None,
+                                                  init=True)  # type: ignore
     model: Optional[str] = None
     proposer: Optional[str] = None
     quantization: Optional[str] = None
@@ -1911,10 +1912,11 @@ class SpeculativeConfig:
     def __post_init__(self):
         if self.proposer is None and self.model is not None:
             # Note: After next release, the proposer parameter will be used
-            # to specify the speculative method, and the model parameter will
-            # be used when the draft model or head is needed. If users do not
-            # specify a proposer, the speculative method will be considered as
-            # the draft model by default.
+            # to specify the speculative method, which helps to extend the
+            # configuration of non-model-based proposers, and the model
+            # parameter will be used when the draft model or head is needed.
+            # If users do not specify the proposer, the speculative method will
+            # be considered as the model-based method by default.
             self.proposer = self.model
 
         if self.model is None and self.num_speculative_tokens is not None:
@@ -1925,6 +1927,8 @@ class SpeculativeConfig:
                     == "deepseek_v3"):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
+            elif self.proposer in ["ngram", "[ngram]"]:
+                self.model = self.proposer
             else:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
@@ -2159,17 +2163,17 @@ class SpeculativeConfig:
                 "rejection_sampler or typical_acceptance_sampler. Instead it "
                 f"is {self.acceptance_method}")
 
-        if self.acceptance_method == "typical_acceptance_sampler":
-            if (self.typical_acceptance_sampler_posterior_threshold < 0
-                    or self.typical_acceptance_sampler_posterior_alpha < 0):
-                raise ValueError(
-                    "Expected typical_acceptance_sampler_posterior_threshold "
-                    "and typical_acceptance_sampler_posterior_alpha to be > 0."
-                    " Instead found "
-                    f"typical_acceptance_sampler_posterior_threshold = "
-                    f"{self.typical_acceptance_sampler_posterior_threshold} "
-                    f"and typical_acceptance_sampler_posterior_alpha = "
-                    f"{self.typical_acceptance_sampler_posterior_alpha}")
+        if self.acceptance_method == "typical_acceptance_sampler" and (
+                self.typical_acceptance_sampler_posterior_threshold < 0
+                or self.typical_acceptance_sampler_posterior_alpha < 0):
+            raise ValueError(
+                "Expected typical_acceptance_sampler_posterior_threshold "
+                "and typical_acceptance_sampler_posterior_alpha to be > 0. "
+                "Instead found "
+                f"typical_acceptance_sampler_posterior_threshold = "
+                f"{self.typical_acceptance_sampler_posterior_threshold} and "
+                f"typical_acceptance_sampler_posterior_alpha = "
+                f"{self.typical_acceptance_sampler_posterior_alpha}")
 
         if (self.disable_by_batch_size is not None
                 and self.disable_by_batch_size < 2):
