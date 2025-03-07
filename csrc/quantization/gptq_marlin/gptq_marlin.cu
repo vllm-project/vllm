@@ -1655,7 +1655,7 @@ __global__ void Marlin(
           }
           cp_async_fence();
         } else {
-          if (last) {
+          if (last || use_atomic_add) {
             if (s_sh_wr_pred) {
               cp_async4(&sh_s[s_sh_wr], &scales_ptr[s_gl_rd]);
             }
