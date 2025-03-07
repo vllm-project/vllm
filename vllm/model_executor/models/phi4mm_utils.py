@@ -873,10 +873,8 @@ class MeanVarianceNormLayer(nn.Module):
     def __init__(self, input_size):
         super().__init__()
         self.input_size = input_size
-        self.register_buffer("global_mean", torch.zeros(input_size))
-        self.register_buffer("global_invstd", torch.ones(input_size))
-        self.global_mean: Optional[Tensor]
-        self.global_invstd: Optional[Tensor]
+        self.global_mean = nn.Parameter(torch.zeros(input_size))
+        self.global_invstd = nn.Parameter(torch.ones(input_size))
 
     def forward(self, input_: Tensor) -> Tensor:
         """MeanVarianceNormLayer Forward
@@ -1885,23 +1883,6 @@ def embedding_checkpoint_wrapper(
     raise ValueError("Invalid activation_checkpointing config")
 
 
-def attn_checkpointing(activation_checkpointing: Union[str, Dict],
-                       i) -> Union[str, Dict]:
-    """return activation checkpointing config for attention layer"""
-    if isinstance(activation_checkpointing, str):
-        return ""
-
-    if isinstance(activation_checkpointing, dict):
-        target_layer_cls = activation_checkpointing.get(
-            "module", "transformer")
-        checkpointing_interval = activation_checkpointing.get("interval", 1)
-        if target_layer_cls == "attention" and i % checkpointing_interval == 0:
-            return activation_checkpointing
-        return ""
-
-    raise ValueError("Invalid activation_checkpointing config")
-
-
 class MultiSequential(torch.nn.Sequential):
     """Multi-input multi-output torch.nn.Sequential"""
 
@@ -1911,17 +1892,6 @@ class MultiSequential(torch.nn.Sequential):
         for m in self:
             args = m(*args)
         return args
-
-
-def repeat(repeat_num, module_gen_fn):
-    """repeat module N times
-
-    :param int repeat_num: repeat time
-    :param function module_gen_fn: function to generate module
-    :return: repeated modules
-    :rtype: MultiSequential
-    """
-    return MultiSequential(*[module_gen_fn(i) for i in range(repeat_num)])
 
 
 def get_offset(input_layer: str, time_reduction: int):

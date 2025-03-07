@@ -23,8 +23,8 @@ from transformers import PretrainedConfig
 from vllm.model_executor.models.phi4mm_utils import (
     AbsolutePositionalEncoding, ConvModule, FeedForward, MeanVarianceNormLayer,
     MultiHeadedAttention, NemoConvSubsampling, T5RelativeAttentionLogitBias,
-    adaptive_enc_mask, attn_checkpointing, embedding_checkpoint_wrapper,
-    get_offset, repeat, unfold_tensor, validate_checkpointing_config)
+    adaptive_enc_mask, MultiSequential,
+    get_offset, unfold_tensor, validate_checkpointing_config)
 
 _AUDIO_PLACEHOLDER_TOKEN_ID = 200011  # <|endoftext11|>
 
@@ -208,10 +208,7 @@ class ConformerEncoderLayer(nn.Module):
             bias_in_glu=bias_in_glu,
         )
 
-        self.self_attn = encoder_checkpoint_wrapper(
-            activation_checkpointing,
-            MultiHeadedAttention,
-        )(MultiHeadedAttention(
+        self.self_attn = MultiHeadedAttention(
             n_head,
             d_model,
             dropout_rate,
@@ -221,7 +218,7 @@ class ConformerEncoderLayer(nn.Module):
             use_pt_scaled_dot_product_attention=
             use_pt_scaled_dot_product_attention,
             group_size=attn_group_sizes,
-        ))
+        )
         self.conv = ConvModule(
             d_model,
             ext_pw_out_channel,
@@ -883,19 +880,14 @@ class ConformerEncoder(TransformerEncoderBase):
         self.num_blocks = num_blocks
         self.num_lang = num_lang
         self.kernel_size = kernel_size
-        self.embed = embedding_checkpoint_wrapper(activation_checkpointing)(
-            self.embed)
         self.replication_pad_for_subsample_embedding: bool = (
             replication_pad_for_subsample_embedding)
         assert (self.num_heads % attention_group_size == 0
                 ), "attention_group_size must divide n_head"
         self.num_heads_k = self.num_heads // attention_group_size
 
-        self.encoders = repeat(
-            num_blocks,
-            lambda i: encoder_checkpoint_wrapper(activation_checkpointing,
-                                                 ConformerEncoderLayer, i)
-            (ConformerEncoderLayer(
+        self.encoders = MultiSequential(
+            *[ConformerEncoderLayer(
                 d_model=attention_dim,
                 ext_pw_out_channel=ext_pw_out_channel,
                 depthwise_seperable_out_channel=
@@ -916,13 +908,12 @@ class ConformerEncoder(TransformerEncoderBase):
                 bias_in_glu=bias_in_glu,
                 linear_glu_in_convm=linear_glu_in_convm,
                 attention_glu_type=attention_glu_type,
-                activation_checkpointing=attn_checkpointing(
-                    activation_checkpointing, i),
+                activation_checkpointing=activation_checkpointing,
                 export=export,
                 use_pt_scaled_dot_product_attention=
                 use_pt_scaled_dot_product_attention,
                 attn_group_sizes=attention_group_size,
-            )),
+             ) for _ in range(num_blocks)]
         )
         self.extra_layer_output_idx = extra_layer_output_idx
         self.extra_multi_layer_output_idxs = extra_multi_layer_output_idxs
