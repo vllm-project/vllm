@@ -333,6 +333,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                    " in CUDA target architectures, or CUDA not >= 12.0")
   endif()
 
+
+  set(SCALED_MM_3X_ARCHS)
   # The cutlass_scaled_mm kernels for Hopper (c3x, i.e. CUTLASS 3.x) require
   # CUDA 12.0 or later
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
@@ -348,6 +350,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM90=1")
+    # Let scaled_mm_c2x know it doesnt need to build these arches
+    list(APPEND SCALED_MM_3X_ARCHS "${SCALED_MM_ARCHS}")
     message(STATUS "Building scaled_mm_c3x_sm90 for archs: ${SCALED_MM_ARCHS}")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_ARCHS)
@@ -356,13 +360,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "later if you intend on running FP8 quantized models on "
                      "Hopper.")
     else()
-      message(STATUS "Not building scaled_mm_c3x as no compatible archs found "
+      message(STATUS "Not building scaled_mm_c3x_sm90 as no compatible archs found "
                      "in CUDA target architectures")
     endif()
-
-    # clear SCALED_MM_ARCHS so the scaled_mm_c2x kernels know we didn't
-    # build any 3x kernels
-    set(SCALED_MM_ARCHS)
   endif()
 
   # The cutlass_scaled_mm kernels for Blackwell (c3x, i.e. CUTLASS 3.x) require
@@ -378,6 +378,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM100=1")
+    # Let scaled_mm_c2x know it doesnt need to build these arches
+    list(APPEND SCALED_MM_3X_ARCHS "${SCALED_MM_ARCHS}")
     message(STATUS "Building scaled_mm_c3x_sm100 for archs: ${SCALED_MM_ARCHS}")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND SCALED_MM_ARCHS)
@@ -386,7 +388,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "later if you intend on running FP8 quantized models on "
                      "Blackwell.")
     else()
-      message(STATUS "Not building scaled_mm_c3x as no compatible archs found "
+      message(STATUS "Not building scaled_mm_c3x_100 as no compatible archs found "
                      "in CUDA target architectures")
     endif()
 
@@ -401,7 +403,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS
     "7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
   # subtract out the archs that are already built for 3x
-  list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_ARCHS})
+  list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_3X_ARCHS})
   if (SCALED_MM_2X_ARCHS)
     set(SRCS "csrc/quantization/cutlass_w8a8/scaled_mm_c2x.cu")
     set_gencode_flags_for_srcs(
