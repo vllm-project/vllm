@@ -644,7 +644,7 @@ def create_kv_caches_with_random_flash(
     head_size: int,
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: int = 0,
+    seed: Optional[int] = None,
     device: Optional[str] = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
@@ -681,7 +681,7 @@ def create_kv_caches_with_random(
     head_size: int,
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: int = 0,
+    seed: Optional[int] = None,
     device: Optional[str] = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
 

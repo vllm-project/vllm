@@ -104,7 +104,7 @@ class EngineArgs:
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
-    seed: int = 0
+    seed: Optional[int] = None
     max_model_len: Optional[int] = None
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
@@ -277,7 +277,9 @@ class EngineArgs:
         parser.add_argument(
             '--skip-tokenizer-init',
             action='store_true',
-            help='Skip initialization of tokenizer and detokenizer.')
+            help='Skip initialization of tokenizer and detokenizer. '
+            'Expects valid prompt_token_ids and None for prompt from '
+            'the input. The generated output will contain token ids.')
         parser.add_argument(
             '--revision',
             type=nullable_str,
