@@ -478,8 +478,8 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
             enable_sanity_checks=enable_sanity_checks,
         )
 
-        mm_limit = self.info.ctx.model_config.multimodal_config.limit_per_prompt
-        if self.cache is not None and mm_limit["image"] >= 2:
+        if (self.cache is not None and
+                info.ctx.get_mm_config().get_limit_per_prompt("image") >= 2):
             # The processor output depends on the number of images passed,
             # making it incompatible with processing cache which is supposed
             # to be invariant of how many images are passed per prompt
