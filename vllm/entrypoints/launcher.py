@@ -7,16 +7,12 @@ from http import HTTPStatus
 from typing import Any, Optional
 
 import uvicorn
-import zmq
-import zmq.asyncio
-import zmq.devices
 from fastapi import FastAPI, Request, Response
 
 from vllm import envs
 from vllm.engine.async_llm_engine import AsyncEngineDeadError
 from vllm.engine.multiprocessing import MQEngineDeadError
 from vllm.entrypoints.ssl import SSLCertRefresher
-from vllm.entrypoints.openai.connect_worker import worker_routine
 from vllm.logger import init_logger
 from vllm.utils import find_process_using_port
 
@@ -77,43 +73,6 @@ async def serve_http(app: FastAPI,
                 port, process, " ".join(process.cmdline()))
         logger.info("Shutting down FastAPI HTTP server.")
         return server.shutdown()
-
-
-async def serve_zmq(arg, zmq_server_port: int, app: FastAPI) -> None:
-    """Server routine"""
-    logger.info("zmq Server start arg: %s, zmq_server_port: %d", arg,
-                zmq_server_port)
-    # different zmq context can't communicate use inproc
-    workers_addr = "ipc://workers"
-    clients_addr = f"ipc://127.0.0.1:{zmq_server_port}"
-    # Prepare our context and sockets
-    context = zmq.asyncio.Context.instance()
-    try:
-        tasks = [
-            asyncio.create_task(worker_routine(workers_addr, app, context, i))
-            for i in range(100)
-        ]
-        logger.info("zmq tasks: %s", tasks)
-        # thread safety proxy create socket in the background:
-        # https://pyzmq.readthedocs.io/en/latest/api/zmq.devices.html#proxy-devices
-        thread_proxy = zmq.devices.ThreadProxy(zmq.ROUTER, zmq.DEALER)
-        # unlimited HWM
-        hwm_limit = 0
-        thread_proxy.bind_in(clients_addr)
-        thread_proxy.setsockopt_in(zmq.SNDHWM, hwm_limit)
-        thread_proxy.setsockopt_in(zmq.RCVHWM, hwm_limit)
-        thread_proxy.bind_out(workers_addr)
-        thread_proxy.setsockopt_out(zmq.SNDHWM, hwm_limit)
-        thread_proxy.setsockopt_out(zmq.RCVHWM, hwm_limit)
-        thread_proxy.start()
-        await asyncio.gather(*tasks)
-    except KeyboardInterrupt:
-        print("ZMQ Server interrupted")
-    except zmq.ZMQError as e:
-        print("ZMQError:", e)
-    finally:
-        # We never get here but clean up anyhow
-        context.destroy(linger=0)
 
 
 def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server) -> None:
