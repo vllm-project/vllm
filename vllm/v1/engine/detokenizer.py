@@ -130,7 +130,6 @@ class IncrementalDetokenizer:
         # 2) Evaluate stop criteria.
         stop_string = None
         if self.stop:
-            print(f"{self.include_stop_str_in_output=}")
             stop = StopChecker.check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(decoded_text),

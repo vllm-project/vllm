@@ -199,8 +199,12 @@ class Processor:
             raise NotImplementedError
 
         assert isinstance(params, SamplingParams)
-        # TODO: can we avoid cloning here in multiproc case
+        # TODO: can we avoid cloning here in multiproc case?
         sampling_params = params.clone()
+        # If unset max tokens, then generate up to the max_model_len.
+        if sampling_params.max_tokens is None:
+            sampling_params.max_tokens = (self.model_config.max_model_len -
+                                          len(decoder_inputs.prompt_token_ids))
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
 
