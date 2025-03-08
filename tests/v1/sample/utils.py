@@ -1,27 +1,42 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
+from enum import Enum
+from typing import Optional
 
 from vllm import CompletionOutput
 
 
-def get_test_batch(batch_logprobs_composition: str) -> list[tuple]:
+class BatchLogprobsComposition(Enum):
+    """Types of logprobs configs to include in test batch"""
+    NONE = 0
+    SAMPLE = 1
+    PROMPT = 2
+    SAMPLE_PROMPT = 3
+
+
+BatchLogprobsSpecType = list[tuple[Optional[int], Optional[int]]]
+
+
+def get_test_batch(
+    batch_logprobs_composition: BatchLogprobsComposition
+) -> BatchLogprobsSpecType:
     """Generate logprobs configs for a batch of requests
     
     A given request's logprobs configuration is (1) num_sample_logprobs and (2)
     num_prompt_logprobs. The batch logprobs configuration is the list of request
     logprobs configs.
 
-    batch_logprobs_composition == "NONE" yields a batch with no sample or prompt
+    batch_logprobs_composition == NONE yields a batch with no sample or prompt
     logprobs
 
-    batch_logprobs_composition == "SAMPLE" yields a batch with some requests
+    batch_logprobs_composition == SAMPLE yields a batch with some requests
     configured for sample logprobs only, and others configured for no logprobs
 
-    batch_logprobs_composition == "PROMPT" yields a batch with some requests
+    batch_logprobs_composition == PROMPT yields a batch with some requests
     configured for prompt logprobs only, and others configured for no logprobs
 
-    batch_logprobs_composition == "SAMPLE_PROMPT" yields a batch with some
+    batch_logprobs_composition == SAMPLE_PROMPT yields a batch with some
     requests configured for sample logprobs and prompt logprobs, some configured
     for only sample logprobs or only prompt logprobs, and some configured for
     no logprobs
@@ -34,10 +49,10 @@ def get_test_batch(batch_logprobs_composition: str) -> list[tuple]:
       list of (Optional[num_sample_logprobs], Optional[num_prompt_logprobs])
       tuples
     """
-    if batch_logprobs_composition == "NONE":
+    if batch_logprobs_composition == BatchLogprobsComposition.NONE:
         # No requests with sample or prompt logprobs
         return [(None, None)]
-    elif batch_logprobs_composition == "SAMPLE":
+    elif batch_logprobs_composition == BatchLogprobsComposition.SAMPLE:
         # Requests requiring sample logprobs or no logprobs
         return [
             (None, None),
@@ -45,7 +60,7 @@ def get_test_batch(batch_logprobs_composition: str) -> list[tuple]:
             (5, None),
             (3, None),
         ]
-    elif batch_logprobs_composition == "PROMPT":
+    elif batch_logprobs_composition == BatchLogprobsComposition.PROMPT:
         # Requests requiring prompt logprobs or no logprobs
         return [
             (None, None),
@@ -53,7 +68,7 @@ def get_test_batch(batch_logprobs_composition: str) -> list[tuple]:
             (None, 6),
             (None, 5),
         ]
-    elif batch_logprobs_composition == "SAMPLE_PROMPT":
+    elif batch_logprobs_composition == BatchLogprobsComposition.SAMPLE_PROMPT:
         # Requests requiring either no logprobs, just
         # sample logprobs, just prompt logprobs, or
         # both sample and prompt logprobs
