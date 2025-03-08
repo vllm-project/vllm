@@ -93,7 +93,6 @@ class CudaPlatformBase(Platform):
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         if envs.VLLM_USE_V1:
             return False
-
         if enforce_eager:
             logger.warning(
                 "To see benefits of async output processing, enable CUDA "
