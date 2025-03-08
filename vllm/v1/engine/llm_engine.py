@@ -48,9 +48,9 @@ class LLMEngine:
     ) -> None:
         if not envs.VLLM_USE_V1:
             raise ValueError(
-                "Using V1 LLMEngine, but envs.VLLM_USE_V1=True. "
+                "Using V1 LLMEngine, but envs.VLLM_USE_V1=False. "
                 "This should not happen. As a workaround, try using "
-                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
+                "LLMEngine.from_vllm_config(...) or explicitly set "
                 "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
         self.vllm_config = vllm_config

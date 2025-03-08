@@ -595,6 +595,12 @@ class AsyncLLMEngine(EngineClient):
                  log_requests: bool = True,
                  start_engine_loop: bool = True,
                  **kwargs) -> None:
+        raise ValueError(
+            "Using V0 AsyncLLMEngine, but envs.VLLM_USE_V1=True. "
+            "This should not happen. As a workaround, try using "
+            "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
+            "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+
         self.log_requests = log_requests
         self.engine = self._engine_class(*args, **kwargs)
 

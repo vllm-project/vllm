@@ -218,9 +218,10 @@ class LLMEngine:
     ) -> None:
         if envs.VLLM_USE_V1:
             raise ValueError(
-                "Using V0 LLMEngine, but VLLM_USE_V1=1. This should not "
-                "happen. As a workaround, explicitly set VLLM_USE_V1=0 or "
-                "VLLM_USE_V1=1.")
+                "Using V0 LLMEngine, but envs.VLLM_USE_V1=True. "
+                "This should not happen. As a workaround, try using "
+                "LLMEngine.from_vllm_config(...) or explicitly set "
+                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config

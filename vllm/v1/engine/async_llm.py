@@ -54,7 +54,7 @@ class AsyncLLM(EngineClient):
             raise ValueError(
                 "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
                 "This should not happen. As a workaround, try using "
-                "AsyncLLMEngine.from_engine_args(...) or explicitly setting "
+                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
                 "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
         assert start_engine_loop
