@@ -815,7 +815,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP,
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
         quant_config = vllm_config.quant_config
