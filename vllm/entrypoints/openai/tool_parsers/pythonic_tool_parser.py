@@ -4,7 +4,7 @@ import ast
 import json
 import re
 from collections.abc import Sequence
-from typing import Any, Union, Dict
+from typing import Any, Union
 
 from transformers import PreTrainedTokenizerBase
 
@@ -181,7 +181,7 @@ class PythonicToolParser(ToolParser):
             return None
 
 
-def _remap_names(text: str) -> (str, Dict[str, str]):
+def _remap_names(text: str) -> (str, dict[str, str]):
     # remap all function names to func0..n so that the API
     # caller is not limited to valid python function names,
     # and instead only has to match TOOL_NAME_REGEX
@@ -216,7 +216,7 @@ def _get_parameter_value(val: ast.expr) -> Any:
         raise _UnexpectedAstError("Tool call arguments must be literals")
 
 
-def _handle_single_tool(call: ast.Call, name_map: Dict[str, str]) -> ToolCall:
+def _handle_single_tool(call: ast.Call, name_map: dict[str, str]) -> ToolCall:
     if not isinstance(call.func, ast.Name):
         raise _UnexpectedAstError("Invalid tool call name")
     function_name = call.func.id
