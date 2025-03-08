@@ -219,7 +219,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return get_sampler(use_v1=self.envs.VLLM_USE_V1)
+        return get_sampler()
 
     def get_multimodal_embeddings(
         self, **kwargs

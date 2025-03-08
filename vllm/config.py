@@ -3237,7 +3237,6 @@ class VllmConfig:
     additional_config: SupportsHash = field(default=None,
                                             init=True)  # type: ignore
     instance_id: str = ""
-    use_v1: bool = False
 
     def compute_hash(self) -> str:
         """
@@ -3257,7 +3256,7 @@ class VllmConfig:
         vllm_factors: list[Any] = []
         from vllm import __version__
         vllm_factors.append(__version__)
-        vllm_factors.append(self.use_v1)
+        vllm_factors.append(envs.VLLM_USE_V1)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
         else:
@@ -3410,7 +3409,7 @@ class VllmConfig:
 
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
-        if self.use_v1 and self.model_config is not None and \
+        if envs.VLLM_USE_V1 and self.model_config is not None and \
             not self.model_config.enforce_eager:
             # NOTE(woosuk): Currently, we use inductor because the piecewise
             # CUDA graphs do not work properly with the custom CUDA kernels.
@@ -3490,7 +3489,7 @@ class VllmConfig:
         """
 
         # calculate the default `batch_size_capture_list`
-        if not self.use_v1:
+        if not envs.VLLM_USE_V1:
             batch_size_capture_list = []
             max_batchsize_to_capture = 0
             if self.scheduler_config is not None and \

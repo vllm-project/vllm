@@ -281,7 +281,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return get_sampler(use_v1=self.envs.VLLM_USE_V1)
+        return get_sampler()
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
