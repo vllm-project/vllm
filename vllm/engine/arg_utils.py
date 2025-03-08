@@ -1487,6 +1487,13 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
+        V1_UNSUPPORTED_QUANT = ["bitsandbytes", "gguf"]
+        if model_config.quantization in V1_UNSUPPORTED_QUANT:
+            _raise_or_fallback(
+                feature_name=f"--quantization {model_config.quantization}",
+                recommend_to_remove=False)
+            return False
+
         # No Embedding Models so far.
         if model_config.task not in ["generate"]:
             _raise_or_fallback(feature_name=f"--task {model_config.task}",
