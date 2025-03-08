@@ -501,8 +501,9 @@ class LLMEngine:
             stat_loggers=stat_loggers,
         )
 
-    @staticmethod
+    @classmethod
     def from_engine_args(
+        cls,
         engine_args: EngineArgs,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
@@ -511,7 +512,7 @@ class LLMEngine:
         # Create the engine configs.
         vllm_config = engine_args.create_engine_config(usage_context)
 
-        engine_cls = LLMEngine
+        engine_cls = cls
         if envs.VLLM_USE_V1:
             from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
             engine_cls = V1LLMEngine
