@@ -187,6 +187,7 @@ def _remap_names(text: str) -> (str, dict[str, str]):
     # and instead only has to match TOOL_NAME_REGEX
     name_map = {}
     counter = 0
+
     def _replacer(match):
         nonlocal counter
         original_name = match.group(1)
@@ -194,6 +195,7 @@ def _remap_names(text: str) -> (str, dict[str, str]):
         name_map[placeholder] = original_name
         counter += 1
         return f"{placeholder}("
+
     # Apply the replacement function to the entire string.
     remapped_output = PythonicToolParser.TOOL_NAME_REGEX.sub(_replacer, text)
     return remapped_output, name_map
