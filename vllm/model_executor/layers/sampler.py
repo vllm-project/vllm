@@ -34,6 +34,7 @@ else:
 
 
 def get_sampler() -> torch.nn.Module:
+    # Lazy import: the v1 package isn't distributed
     if envs.VLLM_USE_V1:
         from vllm.v1.sample.sampler import Sampler as V1Sampler
         return V1Sampler()
