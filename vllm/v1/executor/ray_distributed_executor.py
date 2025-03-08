@@ -4,7 +4,8 @@ from concurrent.futures import Future
 from typing import Union
 
 from vllm.executor.ray_distributed_executor import (  # noqa
-    RayDistributedExecutor as RayDistributedExecutorV0)
+    RayDistributedExecutor as RayDistributedExecutorV0,
+)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 

@@ -5,8 +5,12 @@ from typing import Any, Optional
 from vllm.config import ModelConfig
 from vllm.envs import VLLM_MM_INPUT_CACHE_SIZE
 from vllm.logger import init_logger
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
-                             MultiModalKwargs, MultiModalRegistry)
+from vllm.multimodal import (
+    MULTIMODAL_REGISTRY,
+    MultiModalDataDict,
+    MultiModalKwargs,
+    MultiModalRegistry,
+)
 from vllm.utils import LRUCache
 
 logger = init_logger(__name__)
@@ -36,7 +40,6 @@ logger = init_logger(__name__)
 # TODO(ywang96): Deprecate this class once all multimodal models migrate to use
 # merged preprocessor with built-in caching functionality.
 class MMInputCacheClient:
-
     def __init__(
         self,
         model_config: ModelConfig,
@@ -45,13 +48,15 @@ class MMInputCacheClient:
         self.model_config = model_config
         self.mm_registry = mm_registry
         self.multi_modal_input_mapper = mm_registry.create_input_mapper(
-            model_config)
+            model_config
+        )
         self.mm_registry.init_mm_limits_per_prompt(model_config)
 
         # Init cache
         self.use_cache = not model_config.disable_mm_preprocessor_cache
-        self.mm_cache = LRUCache[str,
-                                 MultiModalKwargs](VLLM_MM_INPUT_CACHE_SIZE)
+        self.mm_cache = LRUCache[str, MultiModalKwargs](
+            VLLM_MM_INPUT_CACHE_SIZE
+        )
 
         # DEBUG: Set to None to disable
         self.mm_debug_cache_hit_ratio_steps = None
@@ -60,8 +65,10 @@ class MMInputCacheClient:
 
     def cache_hit_ratio(self, steps):
         if self.mm_cache_total > 0 and self.mm_cache_total % steps == 0:
-            logger.debug("MMInputMapper: cache_hit_ratio = %.2f ",
-                         self.mm_cache_hits / self.mm_cache_total)
+            logger.debug(
+                "MMInputMapper: cache_hit_ratio = %.2f ",
+                self.mm_cache_hits / self.mm_cache_total,
+            )
 
     # NOTE: process_inputs only supports image inputs since all multimodal
     # models with other modalities have migrated to use merged preprocessor.
@@ -125,11 +132,11 @@ class MMInputCacheClient:
 
 
 class MMInputCacheServer:
-
     def __init__(self, model_config):
         self.use_cache = not model_config.disable_mm_preprocessor_cache
-        self.mm_cache = LRUCache[str,
-                                 MultiModalKwargs](VLLM_MM_INPUT_CACHE_SIZE)
+        self.mm_cache = LRUCache[str, MultiModalKwargs](
+            VLLM_MM_INPUT_CACHE_SIZE
+        )
 
     def get_and_update(
         self,

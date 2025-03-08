@@ -29,15 +29,17 @@ from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
-                                     StatLoggerBase)
+from vllm.v1.metrics.loggers import (
+    LoggingStatLogger,
+    PrometheusStatLogger,
+    StatLoggerBase,
+)
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
 
 
 class AsyncLLM(EngineClient):
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -49,7 +51,6 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
-
         assert start_engine_loop
 
         self.model_config = vllm_config.model_config
@@ -67,7 +68,8 @@ class AsyncLLM(EngineClient):
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
-            lora_config=vllm_config.lora_config)
+            lora_config=vllm_config.lora_config,
+        )
         self.tokenizer.ping()
 
         # Processor (converts Inputs --> EngineCoreRequests).
@@ -78,8 +80,9 @@ class AsyncLLM(EngineClient):
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
-        self.output_processor = OutputProcessor(self.tokenizer,
-                                                log_stats=self.log_stats)
+        self.output_processor = OutputProcessor(
+            self.tokenizer, log_stats=self.log_stats
+        )
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_client(
@@ -153,11 +156,16 @@ class AsyncLLM(EngineClient):
                 request_id, params = parent_req.get_child_info(idx)
 
             # 3) Convert Input --> Request.
-            request = self.processor.process_inputs(request_id, prompt, params,
-                                                    arrival_time, lora_request,
-                                                    trace_headers,
-                                                    prompt_adapter_request,
-                                                    priority)
+            request = self.processor.process_inputs(
+                request_id,
+                prompt,
+                params,
+                arrival_time,
+                lora_request,
+                trace_headers,
+                prompt_adapter_request,
+                priority,
+            )
 
             # 4) Add the request to OutputProcessor (this process).
             self.output_processor.add_request(request, parent_req, idx, queue)
@@ -206,7 +214,8 @@ class AsyncLLM(EngineClient):
             # to handle startup failure gracefully in the OpenAI server.
             if self.output_handler is None:
                 self.output_handler = asyncio.create_task(
-                    self._run_output_handler())
+                    self._run_output_handler()
+                )
 
             q = await self.add_request(
                 request_id,
@@ -255,23 +264,28 @@ class AsyncLLM(EngineClient):
                 outputs = await self.engine_core.get_output_async()
                 num_outputs = len(outputs.outputs)
 
-                iteration_stats = IterationStats() if (
-                    self.log_stats and num_outputs) else None
+                iteration_stats = (
+                    IterationStats()
+                    if (self.log_stats and num_outputs)
+                    else None
+                )
 
                 # Split outputs into chunks of at most
                 # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                 # event loop for too long.
                 if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
-                    slices = (outputs.outputs, )
+                    slices = (outputs.outputs,)
                 else:
                     slices = np.array_split(
                         outputs.outputs,
-                        cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
+                        cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE),
+                    )
 
                 for i, outputs_slice in enumerate(slices):
                     # 2) Process EngineCoreOutputs.
                     processed_outputs = self.output_processor.process_outputs(
-                        outputs_slice, outputs.timestamp, iteration_stats)
+                        outputs_slice, outputs.timestamp, iteration_stats
+                    )
                     # NOTE: RequestOutputs are pushed to their queues.
                     assert not processed_outputs.request_outputs
 
@@ -281,7 +295,8 @@ class AsyncLLM(EngineClient):
 
                     # 3) Abort any reqs that finished due to stop strings.
                     await self.engine_core.abort_requests_async(
-                        processed_outputs.reqs_to_abort)
+                        processed_outputs.reqs_to_abort
+                    )
 
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
@@ -315,8 +330,9 @@ class AsyncLLM(EngineClient):
 
         assert scheduler_stats is not None
         for stat_logger in self.stat_loggers:
-            stat_logger.record(scheduler_stats=scheduler_stats,
-                               iteration_stats=iteration_stats)
+            stat_logger.record(
+                scheduler_stats=scheduler_stats, iteration_stats=iteration_stats
+            )
 
     def encode(
         self,

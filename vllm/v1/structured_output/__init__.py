@@ -11,8 +11,11 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
-from vllm.v1.structured_output.grammar import (Grammar, StructuredOutputKey,
-                                               StructuredOutputOptions)
+from vllm.v1.structured_output.grammar import (
+    Grammar,
+    StructuredOutputKey,
+    StructuredOutputOptions,
+)
 
 if TYPE_CHECKING:
     import numpy as np
@@ -27,25 +30,27 @@ logger = init_logger(__name__)
 
 
 class StructuredOutputManager:
-
     def __init__(self, vllm_config: VllmConfig, max_cache_size: int = 500):
         tokenizer_group = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
-            lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
+            lora_config=vllm_config.lora_config,
+        )  # type: ignore[arg-type]
         tokenizer_group.ping()
         self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.vllm_config = vllm_config
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         tokenizer_info = xgr.TokenizerInfo.from_huggingface(
-            tokenizer, vocab_size=self.vocab_size)
+            tokenizer, vocab_size=self.vocab_size
+        )
         self.compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
 
         self.max_cache_size = max_cache_size
-        self.request_key_to_grammar: OrderedDict[StructuredOutputKey,
-                                                 Grammar] = OrderedDict()
+        self.request_key_to_grammar: OrderedDict[
+            StructuredOutputKey, Grammar
+        ] = OrderedDict()
 
         # The default max_workers if not specified is the number of CPUs * 5,
         # which is way too high since these tasks are CPU-bound, not I/O bound.
@@ -54,7 +59,8 @@ class StructuredOutputManager:
         max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self._grammar_bitmask = xgr.allocate_token_bitmask(
-            self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
+            self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size
+        )
 
     def __getitem__(self, key: StructuredOutputKey) -> Optional[Grammar]:
         # We need to pop and re-insert the grammar here for LRU cache
@@ -72,7 +78,8 @@ class StructuredOutputManager:
             return
 
         grammar = self.request_key_to_grammar.get(
-            request.structured_output_request.structured_output_key)
+            request.structured_output_request.structured_output_key
+        )
         if grammar:
             request.structured_output_request.grammar = copy.copy(grammar)
             return
@@ -106,17 +113,20 @@ class StructuredOutputManager:
         if request_type == StructuredOutputOptions.JSON:
             # TODO -- allow any_whitespace to be configurable
             # pending merge of https://github.com/vllm-project/vllm/pull/12744
-            ctx = self.compiler.compile_json_schema(grammar_spec,
-                                                    any_whitespace=False)
+            ctx = self.compiler.compile_json_schema(
+                grammar_spec, any_whitespace=False
+            )
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             ctx = self.compiler.compile_builtin_json_grammar()
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
         else:
-            logger.error("Validation should have already occurred. "
-                         "Please file an issue.")
+            logger.error(
+                "Validation should have already occurred. Please file an issue."
+            )
             raise ValueError(
-                f"grammar is not of valid supported types. ({request_type!s})")
+                f"grammar is not of valid supported types. ({request_type!s})"
+            )
 
         return Grammar(
             matcher=xgr.GrammarMatcher(ctx),

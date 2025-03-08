@@ -5,13 +5,22 @@ from collections.abc import Mapping
 from typing import Optional, Union
 
 from vllm.config import VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
-                         PromptType, SingletonInputsAdapter)
+from vllm.inputs import (
+    INPUT_REGISTRY,
+    InputRegistry,
+    ProcessorInputs,
+    PromptType,
+    SingletonInputsAdapter,
+)
 from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalHasher,
-                             MultiModalKwargs, MultiModalRegistry)
+from vllm.multimodal import (
+    MULTIMODAL_REGISTRY,
+    MultiModalHasher,
+    MultiModalKwargs,
+    MultiModalRegistry,
+)
 from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -23,7 +32,6 @@ from vllm.v1.structured_output.utils import validate_structured_output_request
 
 
 class Processor:
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -31,7 +39,6 @@ class Processor:
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
-
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -40,20 +47,22 @@ class Processor:
         self.tokenizer = tokenizer
 
         self.generation_config_fields = (
-            self.model_config.try_get_generation_config())
-        self.input_preprocessor = InputPreprocessor(self.model_config,
-                                                    self.tokenizer,
-                                                    mm_registry)
+            self.model_config.try_get_generation_config()
+        )
+        self.input_preprocessor = InputPreprocessor(
+            self.model_config, self.tokenizer, mm_registry
+        )
         self.input_processor = input_registry.create_input_processor(
-            self.model_config)
+            self.model_config
+        )
 
         # Multi-modal (huggingface) input mapper
         self.mm_input_cache_client = MMInputCacheClient(self.model_config)
 
         # Multi-modal hasher (for images)
         self.use_hash = (
-            not self.model_config.disable_mm_preprocessor_cache) or \
-            self.cache_config.enable_prefix_caching
+            not self.model_config.disable_mm_preprocessor_cache
+        ) or self.cache_config.enable_prefix_caching
 
     def _validate_logprobs(
         self,
@@ -64,13 +73,15 @@ class Processor:
         if params.logprobs and params.logprobs > max_logprobs:
             raise ValueError(
                 f"Requested sample logprobs of {params.logprobs}, "
-                f"which is greater than max allowed: {max_logprobs}")
+                f"which is greater than max allowed: {max_logprobs}"
+            )
 
         # Validate prompt logprobs.
         if params.prompt_logprobs and params.prompt_logprobs > max_logprobs:
             raise ValueError(
                 f"Requested prompt logprobs of {params.prompt_logprobs}, "
-                f"which is greater than max allowed: {max_logprobs}")
+                f"which is greater than max allowed: {max_logprobs}"
+            )
 
     def _validate_sampling_params(
         self,
@@ -85,7 +96,8 @@ class Processor:
         vocab_size = self.model_config.get_vocab_size()
         if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
             raise ValueError(
-                "allowed_token_ids contains out-of-vocab token id!")
+                "allowed_token_ids contains out-of-vocab token id!"
+            )
 
     def _validate_supported_sampling_params(
         self,
@@ -99,8 +111,10 @@ class Processor:
             raise ValueError("VLLM V1 does not yet support bad_words.")
         # Logits processors not supported.
         if params.logits_processors:
-            raise ValueError("VLLM V1 does not support per request "
-                             "user provided logits processors.")
+            raise ValueError(
+                "VLLM V1 does not support per request "
+                "user provided logits processors."
+            )
 
     def _validate_params(
         self,
@@ -120,22 +134,28 @@ class Processor:
 
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
         if lora_request is not None and not self.lora_config:
-            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
-                             "not enabled!")
+            raise ValueError(
+                f"Got lora_request {lora_request} but LoRA is not enabled!"
+            )
 
     def _validate_structured_output(self, params: SamplingParams) -> None:
         if not params.guided_decoding or not self.decoding_config:
             return
         if self.decoding_config.guided_decoding_backend != "xgrammar":
             raise ValueError(
-                "Only xgrammar structured output is supported in V1.")
-        if (params.guided_decoding.backend
-                and params.guided_decoding.backend != 'xgrammar'):
+                "Only xgrammar structured output is supported in V1."
+            )
+        if (
+            params.guided_decoding.backend
+            and params.guided_decoding.backend != "xgrammar"
+        ):
             raise ValueError(
-                "Only xgrammar structured output is supported in V1.")
+                "Only xgrammar structured output is supported in V1."
+            )
         if self.vllm_config.speculative_config:
-            raise ValueError("Structured output is not supported with "
-                             "speculative decoding.")
+            raise ValueError(
+                "Structured output is not supported with speculative decoding."
+            )
         validate_structured_output_request(params)
 
     def process_inputs(
@@ -149,7 +169,6 @@ class Processor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> EngineCoreRequest:
-
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
@@ -186,10 +205,8 @@ class Processor:
         self._validate_model_inputs(processed_inputs)
 
         if is_encoder_decoder_inputs(processed_inputs):
-            decoder_inputs = SingletonInputsAdapter(
-                processed_inputs["decoder"])
-            encoder_inputs = SingletonInputsAdapter(
-                processed_inputs["encoder"])
+            decoder_inputs = SingletonInputsAdapter(processed_inputs["decoder"])
+            encoder_inputs = SingletonInputsAdapter(processed_inputs["encoder"])
         else:
             decoder_inputs = SingletonInputsAdapter(processed_inputs)
             encoder_inputs = None
@@ -202,7 +219,8 @@ class Processor:
         # TODO: can we avoid cloning here in multiproc case
         sampling_params = params.clone()
         sampling_params.update_from_generation_config(
-            self.generation_config_fields, eos_token_id)
+            self.generation_config_fields, eos_token_id
+        )
 
         # Multimodal related.
         # Compute MM hashes (if enabled)
@@ -234,7 +252,6 @@ class Processor:
 
         # Last-mile processing of multimodal metadata and inputs.
         if mm_positions:
-
             # Merge and flatten multimodal placeholders, hashes and inputs
             # from dictionaries to lists, and sort them by each item's position
             # in the input sequence.
@@ -251,7 +268,6 @@ class Processor:
             # NOTE: Sort multimodal inputs/kwargs ONLY IF there are multiple
             # modalities involved AND the model supports merged input processor.
             if len(sorted_modalities) > 1 and precomputed_mm_inputs:
-
                 modality_order_dict = {
                     modality: order
                     for order, modality in enumerate(sorted_modalities)
@@ -265,8 +281,10 @@ class Processor:
                 # Sort MultiModalKwags to match sorted_mm_positions
                 precomputed_mm_inputs = sorted(
                     precomputed_mm_inputs,
-                    key=lambda mm_input: modality_order_dict[list(
-                        mm_input.modalities)[0]])
+                    key=lambda mm_input: modality_order_dict[
+                        list(mm_input.modalities)[0]
+                    ],
+                )
 
             # Apply mm input cache update and legacy input mapper if one exists.
             sorted_mm_inputs = self.mm_input_cache_client.process_inputs(
@@ -297,8 +315,11 @@ class Processor:
         if is_encoder_decoder_inputs(inputs):
             # For encoder-decoder multimodal models, the max_prompt_len
             # restricts the decoder prompt length
-            prompt_inputs = inputs["decoder" if self.model_config.
-                                   is_multimodal_model else "encoder"]
+            prompt_inputs = inputs[
+                "decoder"
+                if self.model_config.is_multimodal_model
+                else "encoder"
+            ]
         else:
             prompt_inputs = inputs
 
@@ -310,7 +331,8 @@ class Processor:
         if len(prompt_ids) >= self.model_config.max_model_len:
             raise ValueError(
                 f"Prompt length of {len(prompt_ids)} is longer than the "
-                f"maximum model length of {self.model_config.max_model_len}.")
+                f"maximum model length of {self.model_config.max_model_len}."
+            )
 
         if self.model_config.is_multimodal_model:
             max_prompt_len = self.model_config.max_model_len
@@ -322,7 +344,8 @@ class Processor:
                     "Make sure that `max_model_len` is no smaller than the "
                     "number of text tokens plus multimodal tokens. For image "
                     "inputs, the number of image tokens depends on the number "
-                    "of images, and possibly their aspect ratios as well.")
+                    "of images, and possibly their aspect ratios as well."
+                )
 
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
