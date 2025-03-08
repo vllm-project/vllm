@@ -184,7 +184,7 @@ class MultiModalRegistry:
         Note:
             This should be called after :meth:`init_mm_limits_per_prompt`.
         """
-        merged_dict: dict[str, NestedTensors] = {}
+        merged_dict = dict[str, NestedTensors]()
 
         for data_key, data_value in data.items():
             plugin = self._get_plugin(data_key)
