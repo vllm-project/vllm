@@ -19,8 +19,6 @@ def server():
         "100",
         "--dtype",
         DTYPE,
-        "--seed",
-        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

@@ -19,8 +19,6 @@ def run_and_test_dummy_opt_api_server(model, tp=1):
         "dummy",
         "-tp",
         f"{tp}",
-        "--seed",
-        "0",
     ]
     with RemoteOpenAIServer(model, server_args) as server:
         client = server.get_client()

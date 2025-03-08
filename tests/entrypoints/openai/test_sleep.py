@@ -17,8 +17,6 @@ def test_sleep_mode():
         "--max-num-seqs",
         "128",
         "--enable-sleep-mode",
-        "--seed",
-        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME,

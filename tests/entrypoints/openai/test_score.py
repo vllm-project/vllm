@@ -51,8 +51,6 @@ def server(model: dict[str, Any]):
         "100",
         "--dtype",
         DTYPE,
-        "--seed",
-        "0",
     ]
 
     with RemoteOpenAIServer(model["name"], args) as remote_server:

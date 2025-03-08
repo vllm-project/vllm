@@ -85,8 +85,6 @@ def server_with_lora_modules_json(zephyr_lora_files):
         "2",
         "--max-num-seqs",
         "64",
-        "--seed",
-        "0",
     ]
 
     # Enable the /v1/load_lora_adapter endpoint

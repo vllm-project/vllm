@@ -15,8 +15,6 @@ def server():
         "--dtype",
         "bfloat16",
         "--enforce-eager",
-        "--seed",
-        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

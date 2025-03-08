@@ -35,8 +35,6 @@ def server():
         "--trust-remote-code",
         "--limit-mm-per-prompt",
         f"image={MAXIMUM_IMAGES}",
-        "--seed",
-        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

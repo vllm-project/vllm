@@ -19,8 +19,6 @@ async def test_shutdown_on_engine_failure():
         "--enforce-eager",
         "--max-num-seqs",
         "128",
-        "--seed",
-        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

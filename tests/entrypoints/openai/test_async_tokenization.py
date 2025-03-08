@@ -29,8 +29,6 @@ def server():  # noqa: F811
         "128",
         "--load-format",
         "dummy",
-        "--seed",
-        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

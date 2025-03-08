@@ -34,8 +34,6 @@ def server():
         "--trust-remote-code",
         "--limit-mm-per-prompt",
         f"video={MAXIMUM_VIDEOS}",
-        "--seed",
-        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
