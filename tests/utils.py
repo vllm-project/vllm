@@ -76,6 +76,7 @@ class RemoteOpenAIServer:
                  vllm_serve_args: list[str],
                  *,
                  env_dict: Optional[dict[str, str]] = None,
+                 seed: Optional[int] = 0,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None) -> None:
         if auto_port:
@@ -87,6 +88,12 @@ class RemoteOpenAIServer:
             vllm_serve_args = vllm_serve_args + [
                 "--port", str(get_open_port())
             ]
+        if seed is not None:
+            if "--seed" in vllm_serve_args:
+                raise ValueError("You have manually specified the seed "
+                                 f"when `seed={seed}`.")
+
+            vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
 
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")

@@ -30,8 +30,6 @@ def server():
         "/" + ROOT_PATH,
         "--chat-template",
         DUMMY_CHAT_TEMPLATE,
-        "--seed",
-        "0",
     ]
     envs = os.environ.copy()
 

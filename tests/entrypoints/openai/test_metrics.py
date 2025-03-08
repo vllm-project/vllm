@@ -47,8 +47,6 @@ def default_server_args():
         "--enforce-eager",
         "--max-num-seqs",
         "128",
-        "--seed",
-        "0",
     ]
 
 
