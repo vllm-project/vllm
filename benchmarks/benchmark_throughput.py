@@ -6,6 +6,7 @@ import json
 import os
 import random
 import time
+import warnings
 from functools import cache
 from typing import Any, Optional, Union
 
@@ -78,7 +79,7 @@ def get_random_lora_request(
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
                     args: argparse.Namespace) -> list[SampleRequest]:
 
-    dataset_path: str = args.dataset
+    dataset_path: str = args.dataset_path
     num_requests: int = args.num_prompts
     fixed_output_len: Optional[int] = args.output_len
     model: str = args.model
@@ -376,13 +377,13 @@ def get_requests(args, tokenizer):
         "num_requests": args.num_prompts,
         "input_len": args.input_len,
         "output_len": args.output_len,
-        "dataset_path": args.dataset,
+        "dataset_path": args.dataset_path,
         "model": args.model,
         "random_seed": args.seed,
     }
     sample_kwargs = {}
 
-    if args.dataset is None or args.dataset_name == "random":
+    if args.dataset_path is None or args.dataset_name == "random":
         common_kwargs["range_ratio"] = args.random_range_ratio
         common_kwargs["prefix_len"] = args.prefix_len
         dataset_cls = RandomDataset
@@ -397,7 +398,8 @@ def get_requests(args, tokenizer):
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
     elif args.dataset_name == "hf":
-        if args.dataset == VISION_ARENA_DATASET_PATH and args.hf_subset is None:
+        if args.dataset_path == \
+            VISION_ARENA_DATASET_PATH and args.hf_subset is None:
             dataset_cls = VisionArenaDataset
         else:
             dataset_cls = HuggingFaceDataset
@@ -481,12 +483,17 @@ if __name__ == "__main__":
         type=str,
         choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
         default="sharegpt")
-    parser.add_argument("--dataset",
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help="(Deprecated)Path to the dataset. The dataset is expected to "
+        "be a json in form of list[dict[..., conversations: "
+        "list[dict[..., value: <prompt_or_response>]]]]")
+    parser.add_argument("--dataset-path",
                         type=str,
                         default=None,
-                        help="Path to the dataset. The dataset is expected to "
-                        "be a json in form of list[dict[..., conversations: "
-                        "list[dict[..., value: <prompt_or_response>]]]]")
+                        help="Path to the dataset")
     parser.add_argument("--input-len",
                         type=int,
                         default=None,
@@ -559,7 +566,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
-    if args.dataset is None:
+    if args.dataset is not None:
+        warnings.warn("--dataset is deprecated",
+                      DeprecationWarning,
+                      stacklevel=2)
+        args.dataset_path = args.dataset
+    if args.dataset is None and args.dataset_path is None:
         # for random dataset, the default sampling
         # setting is in benchmark_dataset.RandomDataset
         print("When dataset is not set, it will default to random dataset")

@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-benchmark_dataset.py
-
 This module defines a framework for sampling benchmark requests from various
 datasets. Each dataset subclass of BenchmarkDataset must implement sample
 generation. Supported dataset types include:
@@ -11,6 +9,10 @@ generation. Supported dataset types include:
   - BurstGPT
   - HuggingFace
   - VisionArena
+
+TODO: Implement CustomDataset to parse a JSON file and convert its 
+contents into  SampleRequest instances, similar to the approach used
+in ShareGPT.
 """
 
 import base64
@@ -32,7 +34,6 @@ from transformers import PreTrainedTokenizerBase
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
-from vllm.multimodal.inputs import ImageItem
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 
 # -----------------------------------------------------------------------------
@@ -76,14 +77,13 @@ class BenchmarkDataset(ABC):
         output_len: Optional[int] = None,
         dataset_path: Optional[str] = None,
         model: Optional[str] = None,
-        data: Optional[list] = None,
         random_seed: int = DEFAULT_SEED,
     ) -> None:
         self.tokenizer = tokenizer
-        self.data = data  # For datasets that require pre-loading
         self.dataset_path = dataset_path
         self.random_seed = (random_seed
                             if random_seed is not None else self.DEFAULT_SEED)
+        self.data = None
 
         # LoRA related
         self.enable_lora_tokenizer = enable_lora_tokenizer
@@ -102,8 +102,9 @@ class BenchmarkDataset(ABC):
 
     def load_data(self) -> None:
         """
-        Load data from the specified dataset path.  RandomDataset does not need
-        to implement this method.
+        Load data from the dataset path into self.data.
+        Subclasses must override this method; otherwise,
+        NotImplementedError is raised.
         """
         raise NotImplementedError(
             "load_data must be implemented in subclasses.")
@@ -193,20 +194,11 @@ lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
 
 
 def process_image(
-    image: Any,
-    return_multi_modal_data_dict: bool = True
-) -> Union[MultiModalDataDict, Mapping[str, Any]]:
+    image: Any, ) -> Union[MultiModalDataDict, Mapping[str, Any]]:
     """
     Process an single image input and return a multimedia content dictionary.
 
-    Modes:
-      1. MultiModal Data Dictionary (return_multi_modal_data_dict=True): - If
-         the input is an ImageItem, it is assigned directly under the "image"
-         key.  - If the input is a string (file path), the image is opened with
-         PIL and converted to RGB.  - Raises a ValueError if the input type is
-         invalid - Return empty data if the file is not found.
-
-      2. Base64-Encoded Image URL (return_multi_modal_data_dict=False): - If the
+    Base64-Encoded Image URL (return_multi_modal_data_dict=False): - If the
          input is a PIL.Image.Image, it is converted to RGB, saved as a JPEG
          in-memory,
            encoded in base64, and returned as a data URL.
@@ -214,22 +206,6 @@ def process_image(
            lacks a valid prefix, "file://" is prepended.
          - Raises a ValueError if the input type is invalid.
     """
-    if return_multi_modal_data_dict:
-        mm_data: MultiModalDataDict = {}  # ensure type hinting
-        if isinstance(image, ImageItem):
-            mm_data["image"] = image
-        elif isinstance(image, str):
-            try:
-                mm_data["image"] = Image.open(image).convert("RGB")
-            except FileNotFoundError:
-                print(f"Image not found: {image}")
-                return mm_data
-        else:
-            # TODO(vllm-project/vllm/issues/9778): Support multiple images.
-            raise ValueError(
-                f"Invalid image input {image}. Must be an ImageItem or str.")
-        return mm_data
-
     if isinstance(image, Image.Image):
         image = image.convert("RGB")
         with io.BytesIO() as image_data:
@@ -328,8 +304,7 @@ class ShareGPTDataset(BenchmarkDataset):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        if self.data is None:
-            self.load_data()
+        self.load_data()
 
     def load_data(self) -> None:
         if self.dataset_path is None:
@@ -344,15 +319,6 @@ class ShareGPTDataset(BenchmarkDataset):
         ]
         random.shuffle(self.data)
 
-    def _get_prompt_for_image_model(self, text_prompt: str) -> str:
-        """
-        Prepend and append special tokens around the text prompt.
-        """
-        model = self.model.lower() if self.model else ""
-        if "pixtral" in model:
-            return f"<s>[INST]{text_prompt}\n[IMG][/INST]"
-        raise ValueError(f"Unsupported model {model}")
-
     def sample(self, for_online_benchmark: bool = False) -> list:
         samples: list = []
         for entry in self.data:
@@ -360,16 +326,6 @@ class ShareGPTDataset(BenchmarkDataset):
                 break
             prompt = entry["conversations"][0]["value"]
             completion = entry["conversations"][1]["value"]
-            mm_content: Optional[MultiModalDataDict] = None
-
-            # Process image input if available.
-            if "image" in entry:
-                mm_content = process_image(
-                    entry["image"],
-                    return_multi_modal_data_dict=not for_online_benchmark)
-                if not mm_content:
-                    continue
-                prompt = self._get_prompt_for_image_model(prompt)
 
             lora_request, tokenizer = self.get_random_lora_request(
                 for_online_benchmark=for_online_benchmark)
@@ -390,7 +346,6 @@ class ShareGPTDataset(BenchmarkDataset):
                     prompt,
                     prompt_len,
                     output_len,
-                    mm_content,
                     lora_request,
                 ))
         return samples
@@ -446,7 +401,8 @@ class SonnetDataset(BenchmarkDataset):
             self.tokenizer(line).input_ids for line in self.data
         ]
         avg_len = sum(len(tokens)
-                      for tokens in tokenized_lines) / len(tokenized_lines)
+                      for tokens in \
+                        tokenized_lines) / len(tokenized_lines)
 
         # Build the base prompt.
         base_prompt = "Pick as many lines as you can from these poem lines:\n"
@@ -454,7 +410,6 @@ class SonnetDataset(BenchmarkDataset):
         base_fmt = self.tokenizer.apply_chat_template(
             base_msg, add_generation_prompt=True, tokenize=False)
         base_offset = len(self.tokenizer(base_fmt).input_ids)
-        print(base_offset, self.input_len)
         if self.input_len <= base_offset:
             raise ValueError(
                 f"'input_len' must be higher than the base prompt length "
@@ -497,8 +452,7 @@ class BurstGPTDataset(BenchmarkDataset):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        if self.data is None:
-            self.load_data()
+        self.load_data()
 
     def load_data(self):
         if self.dataset_path is None:
@@ -565,8 +519,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
 
-        if self.data is None:
-            self.load_data()
+        self.load_data()
 
     def load_data(self) -> None:
         if not self.dataset_path:
@@ -611,9 +564,7 @@ class HuggingFaceDataset(BenchmarkDataset):
                 continue
 
             mm_content = process_image(
-                item["image"],
-                return_multi_modal_data_dict=not for_online_benchmark,
-            ) if "image" in item else None
+                item["image"]) if "image" in item else None
             sampled_requests.append(
                 SampleRequest(
                     prompt,
@@ -656,8 +607,7 @@ class VisionArenaDataset(BenchmarkDataset):
         if self.dataset_subset is None and self.dataset_split != "train":
             raise ValueError("Dataset split must be 'train'.")
 
-        if self.data is None:
-            self.load_data()
+        self.load_data()
 
         if self.enable_lora_tokenizer:
             raise NotImplementedError(
@@ -683,10 +633,7 @@ class VisionArenaDataset(BenchmarkDataset):
                 break
             prompt = item["turns"][0][0]["content"]
             prompt_len = len(self.tokenizer(prompt).input_ids)
-            mm_content = process_image(
-                item["images"][0],
-                return_multi_modal_data_dict=not for_online_benchmark,
-            )
+            mm_content = process_image(item["images"][0])
             sampled_requests.append(
                 SampleRequest(
                     prompt,
