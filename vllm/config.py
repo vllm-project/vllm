@@ -1277,6 +1277,8 @@ class LoadConfig:
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's
             checkpoints.
+        use_tqdm_on_load: Whether to enable tqdm for showing progress bar during
+            loading. Default to True
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
@@ -1284,6 +1286,7 @@ class LoadConfig:
     model_loader_extra_config: Optional[Union[str, dict]] = field(
         default_factory=dict)
     ignore_patterns: Optional[Union[list[str], str]] = None
+    use_tqdm_on_load: bool = True
 
     def compute_hash(self) -> str:
         """
