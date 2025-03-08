@@ -1460,13 +1460,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
+        use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: KVCacheSpec = {}
         for layer_name, attn_module in forward_ctx.items():
             if isinstance(attn_module, FusedMoE):
                 continue
 
             # TODO: Support other attention modules, e.g., sliding window,
-            # cross-attention, MLA.
+            # cross-attention
             assert isinstance(attn_module, Attention)
             if attn_module.attn_type == AttentionType.DECODER:
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -1474,7 +1475,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=attn_module.dtype,
-                )
+                    use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
