@@ -15,6 +15,7 @@ from transformers import BatchFeature, ProcessorMixin
 from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
@@ -493,7 +494,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         if multimodal_embeddings is not None:
 
             # TODO(ywang96): remove this block after v0 is deprecated.
-            if not self.envs.VLLM_USE_V1:
+            if not envs.VLLM_USE_V1:
                 attn_metadata = get_forward_context().attn_metadata
                 merge_multimodal_embeddings_from_map(
                     inputs_embeds, multimodal_embeddings,
