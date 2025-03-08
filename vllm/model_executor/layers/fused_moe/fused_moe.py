@@ -1565,7 +1565,7 @@ def fused_experts_impl(
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'] if not use_dg else 1,
+            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
         # TODO: fix, this won't work chunked
