@@ -157,7 +157,9 @@ design/multiprocessing
 :caption: V1 Design Documents
 :maxdepth: 2
 
+design/v1/torch_compile
 design/v1/prefix_caching
+design/v1/metrics
 :::
 
 % How to contribute to the vLLM project

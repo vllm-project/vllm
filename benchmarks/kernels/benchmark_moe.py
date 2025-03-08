@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import json
 import time
+from contextlib import nullcontext
 from datetime import datetime
 from itertools import product
 from typing import Any, TypedDict
@@ -412,7 +414,8 @@ class BenchmarkWorker:
                                                    hidden_size, search_space,
                                                    is_fp16, topk)
 
-        with torch.cuda.device(self.device_id):
+        with torch.cuda.device(self.device_id) if current_platform.is_rocm(
+        ) else nullcontext():
             for config in tqdm(search_space):
                 try:
                     kernel_time = benchmark_config(
@@ -507,6 +510,11 @@ def main(args: argparse.Namespace):
         intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
         block_quant_shape = config.quantization_config['weight_block_size']
+    elif config.architectures[0] == "Qwen2MoeForCausalLM":
+        E = config.num_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.moe_intermediate_size
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
     else:
         # Default: Mixtral.
         E = config.num_local_experts

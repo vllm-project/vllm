@@ -257,7 +257,9 @@ class MultiModalRegistry:
         """
         if self.has_processor(model_config):
             tokenizer = cached_tokenizer_from_config(model_config)
-            processor = self.create_processor(model_config, tokenizer)
+            processor = self.create_processor(model_config,
+                                              tokenizer,
+                                              disable_cache=True)
             seq_len = model_config.max_model_len
             mm_limits = self.get_mm_limits_per_prompt(model_config)
             return processor.info.get_mm_max_tokens_per_item(
@@ -353,7 +355,7 @@ class MultiModalRegistry:
             # TODO: Automatically determine the limits based on budget
             # once more models support multi-image inputs
             limits_per_plugin = {
-                key: config_limits_per_plugin.get(key, 1)
+                key: multimodal_config.get_limit_per_prompt(key)
                 for key in self._plugins
             }
 
@@ -372,7 +374,9 @@ class MultiModalRegistry:
         """
         if self.has_processor(model_config):
             tokenizer = cached_tokenizer_from_config(model_config)
-            processor = self.create_processor(model_config, tokenizer)
+            processor = self.create_processor(model_config,
+                                              tokenizer,
+                                              disable_cache=True)
             profiler = MultiModalProfiler(processor)
             return profiler.get_mm_limits()
 
@@ -433,6 +437,8 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         tokenizer: AnyTokenizer,
+        *,
+        disable_cache: Optional[bool] = None,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
         Create a multi-modal processor for a specific model and tokenizer.
@@ -440,11 +446,13 @@ class MultiModalRegistry:
         See also:
             :ref:`mm-processing`
         """
+        if disable_cache is None:
+            disable_cache = model_config.disable_mm_preprocessor_cache
+
         model_cls = self._get_model_cls(model_config)
         factories = self._processor_factories[model_cls]
 
         ctx = InputProcessingContext(model_config, tokenizer)
-        cache = (None if model_config.disable_mm_preprocessor_cache else
-                 self._processing_cache)
+        cache = None if disable_cache else self._processing_cache
 
         return factories.build_processor(ctx, cache=cache)

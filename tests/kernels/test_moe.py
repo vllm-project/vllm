@@ -221,6 +221,7 @@ def test_mixtral_moe(dtype: torch.dtype, use_rocm_aiter: bool, monkeypatch):
         intermediate_size=config.intermediate_size,
         params_dtype=dtype,
         tp_size=1,
+        dp_size=1,
     ).cuda()
 
     # Load the weights
