@@ -94,7 +94,6 @@ void per_token_group_quant_fp8(torch::Tensor const& input,
   const int num_rows = input.size(0);
   const int groups_per_row = input.size(-1) / group_size;
   const int y_s_stride = column_major_scales ? output_s.stride(-1) : 1;
-  std::cout << "y_s_stride:" << y_s_stride << std::endl;
 
   // Launch parameters
   const int block_size = std::min(1024, static_cast<int>(group_size));
