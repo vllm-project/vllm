@@ -1159,6 +1159,19 @@ class EngineArgs:
         self,
         usage_context: Optional[UsageContext] = None,
     ) -> VllmConfig:
+        """
+        Create the VllmConfig.
+
+        NOTE: for autoselection of V0 vs V1 engine, we need to
+        create the ModelConfig first, since ModelConfig's attrs
+        (e.g. the model arch) are needed to make the decision.
+        
+        This function set VLLM_USE_V1=X if VLLM_USE_V1 is
+        unspecified by the user.
+
+        If VLLM_USE_V1 is specified by the user but the VllmConfig
+        is incompatible, we raise an error.
+        """
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update()
 
@@ -1172,21 +1185,17 @@ class EngineArgs:
         # * If VLLM_USE_V1=0, we disable V1.
         use_v1 = False
         if self._is_v1_supported_oracle(model_config):
-            # NOTE(rob): remove (not envs.is_set("VLLM_USE_V1")) to
-            # disable V1 by default.
             try_by_default = (not envs.is_set("VLLM_USE_V1")
                               and envs.VLLM_USE_V1_BY_DEFAULT)
             if (envs.VLLM_USE_V1 or try_by_default):
                 use_v1 = True
-            else:
-                logger.info(
-                    "===============================================================================================\n\n"  # noqa: E501
-                    "Detected EngineConfig is compatible with VLLM V1. Set VLLM_USE_V1=1 before launch to enable V1.\n\n"  # noqa: E501
-                    "==============================================================================================="
-                )  # noqa: E501
 
+        # If V1 is explicitly set, then we should
         if envs.is_set("VLLM_USE_V1"):
             assert use_v1 == envs.VLLM_USE_V1
+        # Otherwise set the env variable globally.
+        else:
+            envs.set_vllm_use_v1(use_v1)
 
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
@@ -1205,7 +1214,6 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
-            use_v1=use_v1,
         )
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
@@ -1362,7 +1370,6 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             additional_config=self.additional_config,
-            use_v1=use_v1,
         )
 
         return config
@@ -1494,7 +1501,6 @@ class EngineArgs:
                               recommend_to_remove=False)
             return False
 
-        # TODO: remove FLASH_ATTN_VLLM_V1 and PALLAS_VLLM_V1 and unify env var.
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1", "PALLAS_VLLM_V1", "TRITON_MLA", "FLASHMLA"
         ]
