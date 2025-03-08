@@ -1,8 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 from vllm import SamplingParams
 
-MODELS = ["facebook/opt-125m"]
+MODELS = ["distilbert/distilgpt2"]
 
 
 @pytest.mark.parametrize("model", MODELS)

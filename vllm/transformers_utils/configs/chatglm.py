@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
 from transformers import PretrainedConfig

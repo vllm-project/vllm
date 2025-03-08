@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
 from collections import defaultdict
 from dataclasses import dataclass
@@ -7,25 +8,26 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 import torch
 
 from vllm import _custom_ops as ops
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
-                                              AttentionType)
+                                              AttentionType,
+                                              is_quantized_kv_cache)
+# yapf: enable
 from vllm.attention.backends.utils import (
     PAD_SLOT_ID, CommonAttentionState, compute_slot_mapping,
-    compute_slot_mapping_start_idx, get_num_prefill_decode_query_kv_tokens,
-    get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
-    is_all_encoder_attn_metadata_set, is_block_tables_empty)
-from vllm.envs import VLLM_FLASH_ATTN_VERSION
+    compute_slot_mapping_start_idx, get_flash_attn_version,
+    get_num_prefill_decode_query_kv_tokens, get_seq_len_block_table_args,
+    is_all_cross_attn_metadata_set, is_all_encoder_attn_metadata_set,
+    is_block_tables_empty)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
-from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
-from vllm.vllm_flash_attn import (fa_version_unsupported_reason,
-                                  flash_attn_varlen_func,
-                                  flash_attn_with_kvcache,
-                                  is_fa_version_supported)
+from vllm.vllm_flash_attn import (flash_attn_varlen_func,
+                                  flash_attn_with_kvcache)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -628,6 +630,9 @@ class FlashAttentionImpl(AttentionImpl):
         self.sliding_window = ((sliding_window - 1,
                                 0) if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError(
+                "FlashAttention with FP8 KV cache not yet supported")
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -642,25 +647,7 @@ class FlashAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by FlashAttention. "
                 f"Supported head sizes are: {support_head_sizes}.")
         self.attn_type = attn_type
-
-        # if hopper default to FA3, otherwise stick to FA2 for now
-        # TODO(lucas): profile FA3 on ampere to see if it makes sense to
-        #  use FA3 as default for both
-        if current_platform.get_device_capability()[0] >= 9:
-            self.fa_version = 3 if is_fa_version_supported(3) else 2
-        else:
-            self.fa_version = 2
-
-        if VLLM_FLASH_ATTN_VERSION is not None:
-            assert VLLM_FLASH_ATTN_VERSION in [2, 3]
-            self.fa_version = VLLM_FLASH_ATTN_VERSION
-
-        if not is_fa_version_supported(self.fa_version):
-            logger.error("Cannot use FA version %d is not supported due to %s",
-                         self.fa_version,
-                         fa_version_unsupported_reason(self.fa_version))
-
-        assert is_fa_version_supported(self.fa_version)
+        self.vllm_flash_attn_version = get_flash_attn_version()
 
     def forward(
         self,
@@ -780,7 +767,7 @@ class FlashAttentionImpl(AttentionImpl):
                     alibi_slopes=alibi_slopes,
                     softcap=logits_soft_cap,
                     out=prefill_output,
-                    fa_version=self.fa_version,
+                    fa_version=self.vllm_flash_attn_version,
                 )
             else:
                 # prefix-enabled attention
@@ -803,7 +790,7 @@ class FlashAttentionImpl(AttentionImpl):
                     block_table=prefill_meta.block_tables,
                     softcap=logits_soft_cap,
                     out=prefill_output,
-                    fa_version=self.fa_version,
+                    fa_version=self.vllm_flash_attn_version,
                 )
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -832,7 +819,7 @@ class FlashAttentionImpl(AttentionImpl):
                     softcap=logits_soft_cap,
                     block_table=decode_meta.block_tables,
                     out=decode_output,
-                    fa_version=self.fa_version,
+                    fa_version=self.vllm_flash_attn_version,
                 )
             else:
                 # Use flash_attn_with_kvcache for normal decoding.
@@ -853,7 +840,7 @@ class FlashAttentionImpl(AttentionImpl):
                     alibi_slopes=alibi_slopes,
                     softcap=logits_soft_cap,
                     out=decode_output.unsqueeze(1),
-                    fa_version=self.fa_version,
+                    fa_version=self.vllm_flash_attn_version,
                 )
         return output
 

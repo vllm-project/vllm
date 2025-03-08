@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Verify that seeded random sampling is deterministic.
 
 Run `pytest tests/samplers/test_seeded_generate.py`.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the outputs of HF and vLLM for Mistral models using greedy sampling.
 
 Run `pytest tests/models/test_mistral.py`.
@@ -5,7 +6,7 @@ Run `pytest tests/models/test_mistral.py`.
 import json
 import uuid
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional
 
 import pytest
 from mistral_common.multimodal import download_image
@@ -37,7 +38,7 @@ IMG_URLS = [
 PROMPT = "Describe each image in one short sentence."
 
 
-def _create_msg_format(urls: List[str]) -> List[Dict[str, Any]]:
+def _create_msg_format(urls: list[str]) -> list[dict[str, Any]]:
     return [{
         "role":
         "user",
@@ -53,7 +54,7 @@ def _create_msg_format(urls: List[str]) -> List[Dict[str, Any]]:
     }]
 
 
-def _create_msg_format_hf(urls: List[str]) -> List[Dict[str, Any]]:
+def _create_msg_format_hf(urls: list[str]) -> list[dict[str, Any]]:
     return [{
         "role":
         "user",
@@ -67,7 +68,7 @@ def _create_msg_format_hf(urls: List[str]) -> List[Dict[str, Any]]:
     }]
 
 
-def _create_engine_inputs(urls: List[str]) -> TokensPrompt:
+def _create_engine_inputs(urls: list[str]) -> TokensPrompt:
     msg = _create_msg_format(urls)
 
     tokenizer = MistralTokenizer.from_model("pixtral")
@@ -88,7 +89,7 @@ def _create_engine_inputs(urls: List[str]) -> TokensPrompt:
     return engine_inputs
 
 
-def _create_engine_inputs_hf(urls: List[str]) -> TextPrompt:
+def _create_engine_inputs_hf(urls: list[str]) -> TextPrompt:
     msg = _create_msg_format_hf(urls)
 
     tokenizer = AutoProcessor.from_pretrained("mistral-community/pixtral-12b")
@@ -127,7 +128,7 @@ assert FIXTURES_PATH.exists()
 FIXTURE_LOGPROBS_CHAT = FIXTURES_PATH / "pixtral_chat.json"
 FIXTURE_LOGPROBS_ENGINE = FIXTURES_PATH / "pixtral_chat_engine.json"
 
-OutputsLogprobs = List[Tuple[List[int], str, Optional[SampleLogprobs]]]
+OutputsLogprobs = list[tuple[list[int], str, Optional[SampleLogprobs]]]
 
 
 # For the test author to store golden output in JSON
@@ -135,10 +136,10 @@ def _dump_outputs_w_logprobs(
     outputs: OutputsLogprobs,
     filename: "StrPath",
 ) -> None:
-    json_data = [(tokens, text,
-                  [{k: asdict(v)
-                    for k, v in token_logprobs.items()}
-                   for token_logprobs in (logprobs or [])])
+    json_data = [(tokens, text, [{
+        k: asdict(v)
+        for k, v in token_logprobs.items()
+    } for token_logprobs in (logprobs or [])])
                  for tokens, text, logprobs in outputs]
 
     with open(filename, "w") as f:
@@ -149,11 +150,10 @@ def load_outputs_w_logprobs(filename: "StrPath") -> OutputsLogprobs:
     with open(filename, "rb") as f:
         json_data = json.load(f)
 
-    return [(tokens, text,
-             [{int(k): Logprob(**v)
-               for k, v in token_logprobs.items()}
-              for token_logprobs in logprobs])
-            for tokens, text, logprobs in json_data]
+    return [(tokens, text, [{
+        int(k): Logprob(**v)
+        for k, v in token_logprobs.items()
+    } for token_logprobs in logprobs]) for tokens, text, logprobs in json_data]
 
 
 @large_gpu_test(min_gb=80)

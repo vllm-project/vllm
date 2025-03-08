@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from typing import TYPE_CHECKING, Optional
 
@@ -31,8 +33,9 @@ class CpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool) -> str:
-        if selected_backend != _Backend.TORCH_SDPA:
+                             block_size: int, use_v1: bool,
+                             use_mla: bool) -> str:
+        if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         logger.info("Using Torch SDPA backend.")
         return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
@@ -112,6 +115,9 @@ class CpuPlatform(Platform):
         # Environment variables for CPU executor
         #
 
+        # Set default threads num for OpenMP parallel
+        os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
@@ -140,3 +146,10 @@ class CpuPlatform(Platform):
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_cpu.PunicaWrapperCPU"
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        """
+        Get device specific communicator class for distributed communication.
+        """
+        return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa

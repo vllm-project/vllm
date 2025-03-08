@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import NamedTuple
 
 import openai  # use the official client for correctness check

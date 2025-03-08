@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The tests in this file verify end-to-end speculative decoding correctness.
 
 This docstring details important information on the testing methodology.
@@ -147,20 +148,20 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [
-    {
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
-        "enable_chunked_prefill": False,
-    },
-    {
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
-        "enable_chunked_prefill": True,
-        "max_num_batched_tokens": 4,
-        "max_num_seqs": 4,
-    },
-])
+@pytest.mark.parametrize("test_llm_kwargs",
+                         [{
+                             "speculative_model": "JackFram/llama-68m",
+                             "num_speculative_tokens": 5,
+                             "enable_chunked_prefill": False,
+                             "disable_logprobs_during_spec_decoding": False
+                         }, {
+                             "speculative_model": "JackFram/llama-68m",
+                             "num_speculative_tokens": 3,
+                             "enable_chunked_prefill": True,
+                             "max_num_batched_tokens": 4,
+                             "max_num_seqs": 4,
+                             "disable_logprobs_during_spec_decoding": False
+                         }])
 @pytest.mark.parametrize(
     "output_len",
     [
@@ -192,6 +193,9 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
                                   batch_size,
                                   max_output_len=output_len,
                                   seed=seed,
+                                  prompt_logprobs=2,
+                                  logprobs=2,
+                                  disable_logprobs=False,
                                   temperature=0.0,
                                   ensure_all_accepted=ensure_all_accepted)
 

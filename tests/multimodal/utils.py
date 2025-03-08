@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import numpy as np
 from PIL import Image
 
@@ -15,10 +17,7 @@ def random_video(
     min_wh: int,
     max_wh: int,
 ):
-    # Temporary workaround for https://github.com/huggingface/transformers/issues/35412
     num_frames = rng.randint(min_frames, max_frames)
-    num_frames = (num_frames // 2) * 2
-
     w, h = rng.randint(min_wh, max_wh, size=(2, ))
     return rng.randint(0, 255, size=(num_frames, w, h, 3), dtype=np.uint8)
 

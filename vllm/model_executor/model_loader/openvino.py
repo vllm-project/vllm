@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # ruff: noqa: SIM117
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import openvino as ov
 import torch
@@ -10,8 +12,8 @@ from optimum.intel import OVModelForCausalLM
 from torch import nn
 
 import vllm.envs as envs
-from vllm.attention.backends.openvino import OpenVINOAttentionMetadata
-from vllm.config import DeviceConfig, ModelConfig
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import (LogitsProcessor,
                                                          _prune_hidden_states)
@@ -22,7 +24,7 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
-def _flattenize_inputs(inputs):
+def _flatten_inputs(inputs):
     """
     Helper function for making nested inputs flattens
     """
@@ -31,10 +33,9 @@ def _flattenize_inputs(inputs):
         if input_data is None:
             continue
         if isinstance(input_data, (list, tuple)):
-            flatten_inputs.extend(_flattenize_inputs(input_data))
+            flatten_inputs.extend(_flatten_inputs(input_data))
         elif isinstance(input_data, dict):
-            flatten_inputs.extend(_flattenize_inputs(list(
-                input_data.values())))
+            flatten_inputs.extend(_flatten_inputs(list(input_data.values())))
         else:
             flatten_inputs.append(input_data)
     return flatten_inputs
@@ -101,7 +102,6 @@ class OpenVINOCausalLM(nn.Module):
         self,
         ov_core: ov.Core,
         model_config: ModelConfig,
-        device_config: DeviceConfig,
         kv_cache_dtype: ov.Type,
     ) -> None:
         super().__init__()
@@ -124,7 +124,8 @@ class OpenVINOCausalLM(nn.Module):
                 "as-is, all possible options that may affect model conversion "
                 "are ignored.")
 
-        load_in_8bit = envs.VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS
+        load_in_8bit = (envs.VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS
+                        if export else False)
         pt_model = OVModelForCausalLM.from_pretrained(
             model_config.model,
             export=export,
@@ -145,15 +146,15 @@ class OpenVINOCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[Tuple[ov.Tensor, ov.Tensor]],
-        attn_metadata: OpenVINOAttentionMetadata,
+        kv_caches: list[tuple[ov.Tensor, ov.Tensor]],
     ) -> torch.Tensor:
-        flatten_kv_cache = _flattenize_inputs(kv_caches)
+        flat_kv_caches = _flatten_inputs(kv_caches)
+        attn_metadata = get_forward_context().attn_metadata
 
         inputs = [
             input_ids,
             positions,
-            *flatten_kv_cache,
+            *flat_kv_caches,
             attn_metadata.past_lens,
             attn_metadata.subsequence_begins,
             attn_metadata.block_indices,
@@ -185,8 +186,7 @@ class OpenVINOCausalLM(nn.Module):
 
 
 def get_model(
-    model_config: ModelConfig,
-    device_config: DeviceConfig,
+    vllm_config: VllmConfig,
     kv_cache_dtype: ov.Type,
     **kwargs,
 ) -> torch.nn.Module:
@@ -199,5 +199,6 @@ def get_model(
             "be added in the future. If this is important to you, "
             "please open an issue on github.")
 
-    return OpenVINOCausalLM(ov_core, model_config, device_config,
-                            kv_cache_dtype)
+    with set_current_vllm_config(vllm_config):
+        return OpenVINOCausalLM(ov_core, vllm_config.model_config,
+                                kv_cache_dtype)

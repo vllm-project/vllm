@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
@@ -73,12 +75,12 @@ class MPLinearKernel(ABC):
                 torch.nn.Parameter(new_param.data, requires_grad=False))
 
     def _get_weight_params(
-            self, layer: torch.nn.Module
-    ) -> Tuple[torch.Tensor,  # w_q
-               torch.Tensor,  # w_s
-               Optional[torch.Tensor],  # w_zp, 
-               Optional[torch.Tensor]  # w_gidx
-               ]:
+            self, layer: torch.nn.Module) -> Tuple[
+                torch.Tensor,  # w_q
+                torch.Tensor,  # w_s
+                Optional[torch.Tensor],  # w_zp, 
+                Optional[torch.Tensor]  # w_gidx
+            ]:
         return (
             getattr(layer, self.w_q_name),
             getattr(layer, self.w_s_name),

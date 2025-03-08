@@ -14,10 +14,10 @@ The FP8 types typically supported in hardware have two distinct representations,
 - **E4M3**: Consists of 1 sign bit, 4 exponent bits, and 3 bits of mantissa. It can store values up to +/-448 and `nan`.
 - **E5M2**: Consists of 1 sign bit, 5 exponent bits, and 2 bits of mantissa. It can store values up to +/-57344, +/- `inf`, and `nan`. The tradeoff for the increased dynamic range is lower precision of the stored values.
 
-```{note}
+:::{note}
 FP8 computation is supported on NVIDIA GPUs with compute capability > 8.9 (Ada Lovelace, Hopper).
 FP8 models will run on compute capability > 8.0 (Ampere) as weight-only W8A16, utilizing FP8 Marlin.
-```
+:::
 
 ## Quick Start with Online Dynamic Quantization
 
@@ -32,9 +32,9 @@ model = LLM("facebook/opt-125m", quantization="fp8")
 result = model.generate("Hello, my name is")
 ```
 
-```{warning}
+:::{warning}
 Currently, we load the model at original precision before quantizing down to 8-bits, so you need enough memory to load the whole model.
-```
+:::
 
 ## Installation
 
@@ -110,9 +110,9 @@ model.generate("Hello my name is")
 
 Evaluate accuracy with `lm_eval` (for example on 250 samples of `gsm8k`):
 
-```{note}
+:::{note}
 Quantized models can be sensitive to the presence of the `bos` token. `lm_eval` does not add a `bos` token by default, so make sure to include the `add_bos_token=True` argument when running your evaluations.
-```
+:::
 
 ```console
 $ MODEL=$PWD/Meta-Llama-3-8B-Instruct-FP8-Dynamic
@@ -137,10 +137,10 @@ If you encounter any issues or have feature requests, please open an issue on th
 
 ## Deprecated Flow
 
-```{note}
+:::{note}
 The following information is preserved for reference and search purposes.
 The quantization method described below is deprecated in favor of the `llmcompressor` method described above.
-```
+:::
 
 For static per-tensor offline quantization to FP8, please install the [AutoFP8 library](https://github.com/neuralmagic/autofp8).
 

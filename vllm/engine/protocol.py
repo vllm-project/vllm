@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, List, Mapping, Optional
@@ -274,6 +276,16 @@ class EngineClient(ABC):
     @abstractmethod
     async def reset_prefix_cache(self) -> None:
         """Reset the prefix cache"""
+        ...
+
+    @abstractmethod
+    async def sleep(self, level: int = 1) -> None:
+        """Sleep the engine"""
+        ...
+
+    @abstractmethod
+    async def wake_up(self) -> None:
+        """Wake up the engine"""
         ...
 
     @abstractmethod

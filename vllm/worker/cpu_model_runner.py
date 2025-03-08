@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
 import weakref
 from collections import defaultdict
@@ -384,20 +386,17 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                 "mrope embedding type requires multi-modal input mapper "
                 "returns 'image_grid_thw' or 'video_grid_thw'.")
 
+            second_per_grid_ts = mm_kwargs.get("second_per_grid_ts", None)
             hf_config = self.runner.model_config.hf_config
             token_ids = seq_data.get_token_ids()
 
             mrope_positions, mrope_position_delta = \
                 MRotaryEmbedding.get_input_positions(
                     token_ids,
+                    hf_config=hf_config,
                     image_grid_thw=image_grid_thw,
                     video_grid_thw=video_grid_thw,
-                    image_token_id=hf_config.image_token_id,
-                    video_token_id=hf_config.video_token_id,
-                    vision_start_token_id=hf_config.vision_start_token_id,
-                    vision_end_token_id=hf_config.vision_end_token_id,
-                    spatial_merge_size=hf_config.vision_config.
-                    spatial_merge_size,
+                    second_per_grid_ts=second_per_grid_ts,
                     context_len=computed_len,
                 )
             seq_data.mrope_position_delta = mrope_position_delta
@@ -655,8 +654,6 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
             hidden_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,
-                kv_caches=kv_caches,
-                attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
                 **execute_model_kwargs,
                 **multimodal_kwargs,

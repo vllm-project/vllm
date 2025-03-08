@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import TYPE_CHECKING, Optional
 
 from vllm.logger import init_logger
@@ -38,8 +40,8 @@ class NeuronPlatform(Platform):
         if parallel_config.world_size > 1:
             parallel_config.distributed_executor_backend = "uni"
 
-        assert (vllm_config.lora_config is
-                None), "LoRA is not supported for Neuron backend."
+        assert (vllm_config.lora_config
+                is None), "LoRA is not supported for Neuron backend."
         assert (not vllm_config.speculative_config
                 ), "Speculative decoding not yet supported for Neuron backend."
 
@@ -53,3 +55,7 @@ class NeuronPlatform(Platform):
     def is_pin_memory_available(cls) -> bool:
         logger.warning("Pin memory is not supported on Neuron.")
         return False
+
+    @classmethod
+    def use_all_gather(cls) -> bool:
+        return True

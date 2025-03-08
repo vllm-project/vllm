@@ -29,9 +29,6 @@ if [ -f /tmp/neuron-docker-build-timestamp ]; then
         docker image prune -f
         # Remove unused volumes / force the system prune for old images as well.
         docker volume prune -f && docker system prune -f
-        # Remove huggingface model artifacts and compiler cache
-        rm -rf "${HF_MOUNT:?}/*"
-        rm -rf "${NEURON_COMPILE_CACHE_MOUNT:?}/*"
         echo "$current_time" > /tmp/neuron-docker-build-timestamp
     fi
 else
@@ -54,4 +51,4 @@ docker run --rm -it --device=/dev/neuron0 --device=/dev/neuron1 --network host \
        -e "NEURON_COMPILE_CACHE_URL=${NEURON_COMPILE_CACHE_MOUNT}" \
        --name "${container_name}" \
        ${image_name} \
-       /bin/bash -c "python3 /workspace/vllm/examples/offline_inference/neuron.py"
+       /bin/bash -c "python3 /workspace/vllm/examples/offline_inference/neuron.py && python3 -m pytest /workspace/vllm/tests/neuron/ -v --capture=tee-sys"

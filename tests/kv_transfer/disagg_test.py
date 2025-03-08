@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import subprocess
 import sys
@@ -26,7 +28,7 @@ def setup_servers():
         "-m",
         "vllm.entrypoints.openai.api_server",
         "--model",
-        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "meta-llama/Llama-3.2-1B-Instruct",
         "--port",
         "8100",
         "--gpu-memory-utilization",
@@ -47,7 +49,7 @@ def setup_servers():
         "-m",
         "vllm.entrypoints.openai.api_server",
         "--model",
-        "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "meta-llama/Llama-3.2-1B-Instruct",
         "--port",
         "8200",
         "--gpu-memory-utilization",
@@ -98,8 +100,7 @@ def test_disaggregated_prefilling(prompt):
     response = requests.post("http://localhost:8100/v1/completions",
                              headers={"Content-Type": "application/json"},
                              json={
-                                 "model":
-                                 "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                                 "model": "meta-llama/Llama-3.2-1B-Instruct",
                                  "prompt": prompt,
                                  "max_tokens": 1,
                                  "temperature": 0
@@ -110,8 +111,7 @@ def test_disaggregated_prefilling(prompt):
     response = requests.post("http://localhost:8200/v1/completions",
                              headers={"Content-Type": "application/json"},
                              json={
-                                 "model":
-                                 "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                                 "model": "meta-llama/Llama-3.2-1B-Instruct",
                                  "prompt": prompt,
                                  "max_tokens": 10,
                                  "temperature": 0

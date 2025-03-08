@@ -2,15 +2,15 @@
 
 # Speculative Decoding
 
-```{warning}
+:::{warning}
 Please note that speculative decoding in vLLM is not yet optimized and does
 not usually yield inter-token latency reductions for all prompt datasets or sampling parameters.
 The work to optimize it is ongoing and can be followed here: <gh-issue:4630>
-```
+:::
 
-```{warning}
+:::{warning}
 Currently, speculative decoding in vLLM is not compatible with pipeline parallelism.
-```
+:::
 
 This document shows how to use [Speculative Decoding](https://x.com/karpathy/status/1697318534555336961) with vLLM.
 Speculative decoding is a technique which improves inter-token latency in memory-bound LLM inference.
@@ -45,7 +45,7 @@ To perform the same with an online mode launch the server:
 
 ```bash
 python -m vllm.entrypoints.openai.api_server --host 0.0.0.0 --port 8000 --model facebook/opt-6.7b \
-    --seed 42 -tp 1 --speculative_model facebook/opt-125m --use-v2-block-manager \
+    --seed 42 -tp 1 --speculative_model facebook/opt-125m \
     --num_speculative_tokens 5 --gpu_memory_utilization 0.8
 ```
 
@@ -131,7 +131,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 llm = LLM(
     model="meta-llama/Meta-Llama-3.1-70B-Instruct",
     tensor_parallel_size=4,
-    speculative_model="ibm-fms/llama3-70b-accelerator",
+    speculative_model="ibm-ai-platform/llama3-70b-accelerator",
     speculative_draft_tensor_parallel_size=1,
 )
 outputs = llm.generate(prompts, sampling_params)
@@ -149,11 +149,11 @@ limitation will be fixed in a future release.
 
 A variety of speculative models of this type are available on HF hub:
 
-- [llama-13b-accelerator](https://huggingface.co/ibm-fms/llama-13b-accelerator)
-- [llama3-8b-accelerator](https://huggingface.co/ibm-fms/llama3-8b-accelerator)
-- [codellama-34b-accelerator](https://huggingface.co/ibm-fms/codellama-34b-accelerator)
-- [llama2-70b-accelerator](https://huggingface.co/ibm-fms/llama2-70b-accelerator)
-- [llama3-70b-accelerator](https://huggingface.co/ibm-fms/llama3-70b-accelerator)
+- [llama-13b-accelerator](https://huggingface.co/ibm-ai-platform/llama-13b-accelerator)
+- [llama3-8b-accelerator](https://huggingface.co/ibm-ai-platform/llama3-8b-accelerator)
+- [codellama-34b-accelerator](https://huggingface.co/ibm-ai-platform/codellama-34b-accelerator)
+- [llama2-70b-accelerator](https://huggingface.co/ibm-ai-platform/llama2-70b-accelerator)
+- [llama3-70b-accelerator](https://huggingface.co/ibm-ai-platform/llama3-70b-accelerator)
 - [granite-3b-code-instruct-accelerator](https://huggingface.co/ibm-granite/granite-3b-code-instruct-accelerator)
 - [granite-8b-code-instruct-accelerator](https://huggingface.co/ibm-granite/granite-8b-code-instruct-accelerator)
 - [granite-7b-instruct-accelerator](https://huggingface.co/ibm-granite/granite-7b-instruct-accelerator)
@@ -175,7 +175,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 llm = LLM(
     model="meta-llama/Meta-Llama-3-8B-Instruct",
     tensor_parallel_size=4,
-    speculative_model="path/to/modified/eagle/model",
+    speculative_model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
     speculative_draft_tensor_parallel_size=1,
 )
 
@@ -190,14 +190,12 @@ for output in outputs:
 
 A few important things to consider when using the EAGLE based draft models:
 
-1. The EAGLE draft models available in the [HF repository for EAGLE models](https://huggingface.co/yuhuili) cannot be
-   used directly with vLLM due to differences in the expected layer names and model definition.
-   To use these models with vLLM, use the [following script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d)
-   to convert them. Note that this script does not modify the model's weights.
-
-   In the above example, use the script to first convert
-   the [yuhuili/EAGLE-LLaMA3-Instruct-8B](https://huggingface.co/yuhuili/EAGLE-LLaMA3-Instruct-8B) model
-   and then use the converted checkpoint as the draft model in vLLM.
+1. The EAGLE draft models available in the [HF repository for EAGLE models](https://huggingface.co/yuhuili) should
+   be able to be loaded and used directly by vLLM after [PR 12304](https://github.com/vllm-project/vllm/pull/12304).
+   If you are using vllm version before [PR 12304](https://github.com/vllm-project/vllm/pull/12304), please use the
+   [script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d) to convert the speculative model,
+   and specify `speculative_model="path/to/modified/eagle/model"`. If weight-loading problems still occur when using
+   the latest version of vLLM, please leave a comment or raise an issue.
 
 2. The EAGLE based draft models need to be run without tensor parallelism
    (i.e. speculative_draft_tensor_parallel_size is set to 1), although

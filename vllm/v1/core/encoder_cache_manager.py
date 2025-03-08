@@ -1,4 +1,6 @@
-from typing import TYPE_CHECKING, Dict, List, Set, Tuple
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -16,9 +18,9 @@ class EncoderCacheManager:
         self.cache_size = cache_size
         self.num_free_slots = cache_size
         # req_id -> cached input ids
-        self.cached: Dict[str, Set[int]] = {}
-        # List of [req_id, input_id]
-        self.freed: List[Tuple[str, int]] = []
+        self.cached: dict[str, set[int]] = {}
+        # list of [req_id, input_id]
+        self.freed: list[tuple[str, int]] = []
 
     def has_cache(self, request: Request, input_id: int) -> bool:
         req_id = request.request_id
@@ -35,10 +37,11 @@ class EncoderCacheManager:
         self.cached[req_id].add(input_id)
         self.num_free_slots -= request.get_num_encoder_tokens(input_id)
 
-    def get_cached_input_ids(self, request: Request) -> Set[int]:
+    def get_cached_input_ids(self, request: Request) -> set[int]:
         return self.cached.get(request.request_id, set())
 
-    def free(self, request: Request, input_id: int) -> None:
+    def free_encoder_input(self, request: Request, input_id: int) -> None:
+        """Free a single encoder input id for the request."""
         req_id = request.request_id
         if req_id not in self.cached:
             return
@@ -49,7 +52,13 @@ class EncoderCacheManager:
         self.num_free_slots += request.get_num_encoder_tokens(input_id)
         self.freed.append((req_id, input_id))
 
-    def get_freed_ids(self) -> List[Tuple[str, int]]:
+    def free(self, request: Request) -> None:
+        """Free all cached input ids for the request."""
+        input_ids = self.get_cached_input_ids(request).copy()
+        for input_id in input_ids:
+            self.free_encoder_input(request, input_id)
+
+    def get_freed_ids(self) -> list[tuple[str, int]]:
         freed = self.freed
         self.freed = []
         return freed
@@ -58,7 +67,7 @@ class EncoderCacheManager:
 def compute_encoder_budget(
     model_config: "ModelConfig",
     scheduler_config: "SchedulerConfig",
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     """Compute the encoder cache budget based on the model and scheduler 
     configurations.
 
@@ -88,7 +97,7 @@ def compute_encoder_budget(
 def _compute_encoder_budget_multimodal(
     model_config: "ModelConfig",
     scheduler_config: "SchedulerConfig",
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     """Compute the encoder cache budget based on the model and scheduler 
     configurations for a multimodal model.
 

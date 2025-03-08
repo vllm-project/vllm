@@ -1,4 +1,6 @@
-from typing import List, Optional, Union
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Optional, Union
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -20,7 +22,7 @@ class RequestLogger:
         self,
         request_id: str,
         prompt: Optional[str],
-        prompt_token_ids: Optional[List[int]],
+        prompt_token_ids: Optional[list[int]],
         params: Optional[Union[SamplingParams, PoolingParams,
                                BeamSearchParams]],
         lora_request: Optional[LoRARequest],

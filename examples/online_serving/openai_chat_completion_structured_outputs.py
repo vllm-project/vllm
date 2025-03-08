@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from enum import Enum
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 from pydantic import BaseModel
 
 client = OpenAI(
@@ -92,3 +94,26 @@ completion = client.chat.completions.create(
     extra_body={"guided_grammar": simplified_sql_grammar},
 )
 print(completion.choices[0].message.content)
+
+# Extra backend options
+prompt = ("Generate an email address for Alan Turing, who works in Enigma."
+          "End in .com and new line. Example result:"
+          "alan.turing@enigma.com\n")
+
+try:
+    # The no-fallback option forces vLLM to use xgrammar, so when it fails
+    # you get a 400 with the reason why
+    completion = client.chat.completions.create(
+        model="Qwen/Qwen2.5-3B-Instruct",
+        messages=[{
+            "role": "user",
+            "content": prompt,
+        }],
+        extra_body={
+            "guided_regex": "\w+@\w+\.com\n",
+            "stop": ["\n"],
+            "guided_decoding_backend": "xgrammar:no-fallback"
+        },
+    )
+except BadRequestError as e:
+    print("This error is expected:", e)

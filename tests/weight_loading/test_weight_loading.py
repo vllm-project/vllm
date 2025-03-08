@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 
 import pytest
@@ -10,7 +12,7 @@ MODEL_NAME = os.environ.get("MODEL_NAME",
                             "robertgshaw2/zephyr-7b-beta-channelwise-gptq")
 REVISION = os.environ.get("REVISION", "main")
 QUANTIZATION = os.environ.get("QUANTIZATION", "gptq_marlin")
-MIN_CAPABILITY = os.environ.get("MIN_CAPABILITY", "89")
+MIN_CAPABILITY = os.environ.get("MIN_CAPABILITY", "80")
 
 
 @pytest.mark.skipif(

@@ -1,6 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 from http import HTTPStatus
-from typing import List
 
 import openai
 import pytest
@@ -15,7 +16,7 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
 @pytest.fixture(scope='module')
-def server_args(request: pytest.FixtureRequest) -> List[str]:
+def server_args(request: pytest.FixtureRequest) -> list[str]:
     """ Provide extra arguments to the server via indirect parametrization
 
     Usage:
@@ -154,3 +155,19 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
                                                     max_tokens=10)
 
     assert len(response.choices) == 1
+
+
+@pytest.mark.asyncio
+async def test_request_wrong_content_type(server: RemoteOpenAIServer):
+
+    chat_input = [{"role": "user", "content": "Write a long story"}]
+    client = server.get_async_client()
+
+    with pytest.raises(openai.APIStatusError):
+        await client.chat.completions.create(
+            messages=chat_input,
+            model=MODEL_NAME,
+            max_tokens=10000,
+            extra_headers={
+                "Content-Type": "application/x-www-form-urlencoded"
+            })

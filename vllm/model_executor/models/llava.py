@@ -1,7 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from abc import abstractmethod
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Final, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Set, Tuple, TypedDict, TypeVar, Union)
+from typing import (Final, List, Literal, Optional, Protocol, Set, Tuple,
+                    TypedDict, TypeVar, Union, cast)
 
 import torch
 import torch.nn as nn
@@ -13,7 +16,6 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.models.llava import LlavaProcessor
 from transformers.models.pixtral import PixtralProcessor
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.inputs import InputProcessingContext
 from vllm.model_executor.layers.activation import get_act_fn
@@ -30,9 +32,10 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, ProcessingCache,
-                                        PromptReplacement)
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
+from vllm.utils import JSONTree, flatten_2d_lists, json_map_leaves
 
 from .clip import CLIPVisionModel
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -54,6 +57,25 @@ class LlavaImagePixelInputs(TypedDict):
     in which case the data is passed as a list instead of a batched tensor.
     """
 
+    feat_is_patch: Union[torch.Tensor, List[torch.Tensor]]
+    """
+    A boolean mask indicating which image features correspond
+    to patch tokens.
+
+    Shape: `(batch_size, num_crops, num_patch)`
+    """
+
+    embed_is_patch: Union[torch.Tensor, List[torch.Tensor]]
+    """
+    A boolean mask indicating which image embeddings correspond
+    to patch tokens.
+    
+    Shape: `(batch_size, num_embeds)`
+    """
+
+    num_crops: torch.Tensor
+    """Shape: `(batch_size, num_images)`"""
+
 
 class LlavaImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
@@ -62,6 +84,25 @@ class LlavaImageEmbeddingInputs(TypedDict):
 
     `hidden_size` must match the hidden size of language model backbone.
     """
+
+    feat_is_patch: Union[torch.Tensor, List[torch.Tensor]]
+    """
+    A boolean mask indicating which image features correspond
+    to patch tokens.
+
+    Shape: `(batch_size, num_crops, num_patch)`
+    """
+
+    embed_is_patch: Union[torch.Tensor, List[torch.Tensor]]
+    """
+    A boolean mask indicating which image embeddings correspond
+    to patch tokens.
+    
+    Shape: `(batch_size, num_embeds)`
+    """
+
+    num_crops: torch.Tensor
+    """Shape: `(batch_size, num_images)`"""
 
 
 LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageEmbeddingInputs]
@@ -73,19 +114,20 @@ class LlavaMultiModalProjector(nn.Module):
                  vision_hidden_size: int,
                  text_hidden_size: int,
                  projector_hidden_act: str,
+                 multimodal_projector_bias: bool,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
         super().__init__()
 
         self.linear_1 = ColumnParallelLinear(vision_hidden_size,
                                              text_hidden_size,
-                                             bias=True,
+                                             bias=multimodal_projector_bias,
                                              quant_config=quant_config,
                                              prefix=f"{prefix}.linear_1")
         self.act = get_act_fn(projector_hidden_act)
         self.linear_2 = RowParallelLinear(text_hidden_size,
                                           text_hidden_size,
-                                          bias=True,
+                                          bias=multimodal_projector_bias,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.linear_2")
 
@@ -116,13 +158,17 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
         return get_vision_encoder_info(self.get_hf_config())
 
     @abstractmethod
-    def get_hf_processor(self) -> LlavaLikeProcessor:
+    def get_hf_processor(self, **kwargs: object) -> LlavaLikeProcessor:
         raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         return {"image": self.get_max_image_tokens()}
 
     def _apply_feature_select_strategy(
@@ -201,8 +247,8 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
 class LlavaProcessingInfo(BaseLlavaProcessingInfo):
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(LlavaProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(LlavaProcessor, **kwargs)
 
 
 class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
@@ -216,12 +262,12 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         raise NotImplementedError
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
@@ -265,8 +311,8 @@ class LlavaMultiModalProcessor(
 
 class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
 
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor(PixtralProcessor)
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
 
 class PixtralHFMultiModalProcessor(
@@ -286,16 +332,49 @@ class PixtralHFMultiModalProcessor(
 
         pixel_values = processed_outputs.get("pixel_values")
         if pixel_values is not None:
-            images = mm_data["images"]
-            assert isinstance(images, list)
+            # Before/after https://github.com/huggingface/transformers/pull/35122
+            if Version(TRANSFORMERS_VERSION) <= Version("4.48.3"):
+                images = mm_data["images"]
+                assert isinstance(images, list)
 
-            # Original output: (1, num_images, C, H, W)
-            # New output: (num_images, C, H, W)
-            assert (isinstance(pixel_values, list) and len(pixel_values) == 1)
-            assert (isinstance(pixel_values[0], list)
-                    and len(pixel_values[0]) == len(images))
+                # Original output: (1, num_images, C, H, W)
+                # New output: (num_images, C, H, W)
+                assert (isinstance(pixel_values, list)
+                        and len(pixel_values) == 1)
+                assert (isinstance(pixel_values[0], list)
+                        and len(pixel_values[0]) == len(images))
 
-            processed_outputs["pixel_values"] = pixel_values[0]
+                processed_outputs["pixel_values"] = pixel_values[0]
+            else:
+                # Avoid padding since we need the output for each image to be
+                # independent of other images for the cache to work correctly
+                image_sizes = processed_outputs["image_sizes"]
+                assert len(pixel_values) == len(image_sizes)
+
+                processed_outputs["pixel_values"] = [
+                    p[:, :h, :w]
+                    for p, (h, w) in zip(pixel_values, image_sizes)
+                ]
+
+            hf_config = self.info.get_hf_config()
+
+            tile_sizes = [
+                get_pixtral_hf_image_feature_grid_size(
+                    hf_config.vision_config,
+                    image_width=pixel_value.shape[-1],
+                    image_height=pixel_value.shape[-2])
+                for pixel_value in processed_outputs["pixel_values"]
+            ]
+            num_crops = torch.tensor([(ncols + 1) * nrows
+                                      for ncols, nrows in tile_sizes])
+            # Each image may result to masks of different sizes, so we need to
+            # flatten the list and later use `num_crops` to get per-image masks.
+            embed_is_patch = torch.tensor(
+                flatten_2d_lists([([True] * ncols + [False]) * nrows
+                                  for ncols, nrows in tile_sizes]))
+            processed_outputs["num_crops"] = num_crops
+            processed_outputs["embed_is_patch"] = embed_is_patch
+            processed_outputs["feat_is_patch"] = embed_is_patch
 
         return processed_outputs
 
@@ -304,17 +383,23 @@ class PixtralHFMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        num_crops = hf_inputs.get("num_crops", torch.empty(0)).view(-1)
         return dict(
+            feat_is_patch=MultiModalFieldConfig.flat_from_sizes(
+                "image", num_crops),
+            embed_is_patch=MultiModalFieldConfig.flat_from_sizes(
+                "image", num_crops),
+            num_crops=MultiModalFieldConfig.batched("image"),
             pixel_values=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         hf_config = self.info.get_hf_config()
         tokenizer = self.info.get_tokenizer()
@@ -408,7 +493,7 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
 
 
 def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
-    """Given an signed vision feature layer, get the number of hidden layers
+    """Given a signed vision feature layer, get the number of hidden layers
     needed to leverage it.
 
     Args:
@@ -418,7 +503,7 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
     """
     if feature_layer_index < 0:
         return num_hidden_layers + feature_layer_index + 1
-    return feature_layer_index + 1
+    return feature_layer_index
 
 
 def init_vision_tower_for_llava(
@@ -501,6 +586,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act,
+            multimodal_projector_bias=config.multimodal_projector_bias,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "multi_modal_projector"))
 
@@ -541,6 +627,23 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         if pixel_values is None and image_embeds is None:
             return None
 
+        feat_is_patch = kwargs.pop("feat_is_patch", None)
+        if feat_is_patch is not None and not isinstance(
+                feat_is_patch, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of feat_is_patch. "
+                             f"Got type: {type(feat_is_patch)}")
+
+        embed_is_patch = kwargs.pop("embed_is_patch", None)
+        if embed_is_patch is not None and not isinstance(
+                embed_is_patch, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of embed_is_patch. "
+                             f"Got type: {type(embed_is_patch)}")
+
+        num_crops = kwargs.pop("num_crops", None)
+        if num_crops is not None and not isinstance(num_crops, torch.Tensor):
+            raise ValueError("Incorrect type of num_crops. "
+                             f"Got type: {type(num_crops)}")
+
         if pixel_values is not None:
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
@@ -550,12 +653,18 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                 return LlavaImagePixelInputs(
                     type="pixel_values",
                     data=flatten_bn(pixel_values),
+                    feat_is_patch=feat_is_patch,
+                    embed_is_patch=embed_is_patch,
+                    num_crops=num_crops,
                 )
 
             return LlavaImagePixelInputs(
                 type="pixel_values",
                 data=self._validate_pixel_values(
                     flatten_bn(pixel_values, concat=True)),
+                feat_is_patch=feat_is_patch,
+                embed_is_patch=embed_is_patch,
+                num_crops=num_crops,
             )
 
         if image_embeds is not None:
@@ -566,6 +675,9 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             return LlavaImageEmbeddingInputs(
                 type="image_embeds",
                 data=flatten_bn(image_embeds, concat=True),
+                feat_is_patch=feat_is_patch,
+                embed_is_patch=embed_is_patch,
+                num_crops=num_crops,
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -612,14 +724,74 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         assert self.vision_tower is not None
         image_features = self._process_image_pixels(image_input)
-        return self.multi_modal_projector(image_features)
+
+        if isinstance(image_features, torch.Tensor):
+            return self.multi_modal_projector(image_features)
+
+        feature_sizes = [
+            image_feature.shape[0] for image_feature in image_features
+        ]
+
+        image_embeds = self.multi_modal_projector(torch.cat(image_features))
+        image_embeds = torch.split(image_embeds, feature_sizes)
+        return image_embeds
+
+    def _get_mm_embeds(
+            self,
+            features: torch.Tensor,  # Shape: (num_crop, num_patch, d)
+            feat_is_patch: torch.Tensor,  # Shape: (num_crop, num_patch)
+            num_crops: torch.Tensor,  # Shape: (num_images,)
+            embed_is_patch: torch.Tensor,  # Shape: (num_embeds,)
+    ) -> list[torch.Tensor]:
+        """Scatter the patch features into a contiguous tensor that corresponds
+        to the embedding tokens defined by the multimodal processor.
+
+        Mostly copied from `Molmo._get_mm_embeds`. See following fixme comment.
+        """
+
+        # Insert columns of nan values according to `feat_is_patch`. This work
+        # ideally should be done in `_process_image_input`, but
+        # `_process_image_input` is used in both V0 and V1 path. It's safer to
+        # put the logic here.
+        # FIXME: Move this logic to `_process_image_input` when v0 is
+        # deprecated. Merge this function with `Molmo._get_mm_embeds`.
+        feat_is_patch = feat_is_patch.view(-1)
+        embed_is_patch = embed_is_patch.view(-1)
+        expanded_embedding = torch.full(
+            (sum(num_crops), *features.shape[1:]),
+            torch.nan,
+            dtype=features.dtype).to(features.device)
+        expanded_embedding[feat_is_patch] = features
+
+        num_crops_per_image = num_crops.tolist()
+        feats_per_image = expanded_embedding.split(num_crops_per_image)
+        f_is_patch_per_image = feat_is_patch.split(num_crops_per_image)
+
+        embed_dim = expanded_embedding.shape[-1]
+        num_embeds = embed_is_patch.shape[0]
+
+        embeds_in_batch = list[torch.Tensor]()
+        for feats, f_is_patch in zip(feats_per_image, f_is_patch_per_image):
+            embeds = feats.new_full((num_embeds, embed_dim), torch.nan)
+            embeds[embed_is_patch] = feats[f_is_patch]
+            embeds_in_batch.append(embeds)
+
+        return embeds_in_batch
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
         vision_embeddings = self._process_image_input(image_input)
-        return vision_embeddings
+        if kwargs.get("v0_path", False):
+            return vision_embeddings
+        else:
+            nested_emb = [
+                self._get_mm_embeds(*args) for args in zip(
+                    vision_embeddings, image_input["feat_is_patch"],
+                    image_input["num_crops"], image_input["embed_is_patch"])
+            ]
+            return flatten_2d_lists(nested_emb)
 
     def get_input_embeddings(
         self,
@@ -628,8 +800,15 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
+            # Extract the patch tokens
+            patch_embeddings = json_map_leaves(
+                lambda x: x[~x.isnan()].view(-1, *x.shape[1:]),
+                cast(JSONTree[torch.Tensor], multimodal_embeddings),
+            )
+
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
+                input_ids, inputs_embeds, cast(NestedTensors,
+                                               patch_embeddings),
                 self.config.image_token_index)
         return inputs_embeds
 
@@ -637,8 +816,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -684,6 +861,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
+            kwargs.update({"v0_path": True})
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
@@ -691,8 +869,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 
@@ -721,23 +897,24 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
 class MantisProcessingInfo(LlavaProcessingInfo):
 
-    def get_hf_processor(self):
+    def get_hf_processor(self, **kwargs: object):
         hf_config = self.get_hf_config()
         vision_info = self.get_vision_encoder_info()
+
+        kwargs.setdefault("patch_size", vision_info.get_patch_size())
 
         if Version(TRANSFORMERS_VERSION) < Version("4.48"):
             # BUG: num_additional_image_tokens = 0 but treated as 1,
             # so we set vision_feature_select_strategy to None to offset this
-            vision_feature_select_strategy = None
+            kwargs.setdefault("vision_feature_select_strategy", None)
         else:
             # FIXED: https://github.com/huggingface/transformers/pull/33424/files#diff-6a37acc21efcadaae622b079b2712a131131448ff64262bd219aa346aeec38faL150
-            vision_feature_select_strategy = hf_config.vision_feature_select_strategy  # noqa: E501
+            kwargs.setdefault(
+                "vision_feature_select_strategy",
+                hf_config.vision_feature_select_strategy,
+            )
 
-        return self.ctx.get_hf_processor(
-            LlavaProcessor,
-            patch_size=vision_info.get_patch_size(),
-            vision_feature_select_strategy=vision_feature_select_strategy,
-        )
+        return self.ctx.get_hf_processor(LlavaProcessor, **kwargs)
 
 
 class MantisMultiModalProcessor(LlavaMultiModalProcessor):
@@ -747,6 +924,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
@@ -757,7 +935,8 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             image_height=-1,
         )
 
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
+        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
+                               return_mm_hashes)
 
         mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()
@@ -772,7 +951,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
                 "</Image>)",  # 3 tokens
             ])
 
-        mantis_mm_repls = self._bind_and_group_repls([
+        mantis_mm_repls = self._bind_and_group_updates([
             PromptReplacement(
                 modality="image",
                 target=[image_token_id] * num_image_tokens,
@@ -780,25 +959,24 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             )
         ])
 
-        prompt_ids, prompt, _ = self._apply_prompt_replacements(
+        prompt_ids, prompt, _ = self._apply_prompt_updates(
             result["prompt_token_ids"],
             mantis_mm_repls,
             mm_item_counts,
         )
 
-        unbound_orig_repls = self._get_prompt_replacements(
+        unbound_orig_repls = self._get_prompt_updates(
             mm_items,
             hf_processor_mm_kwargs,
             mm_kwargs,
         )
-        orig_repls = self._bind_and_group_repls(unbound_orig_repls)
+        orig_repls = self._bind_and_group_updates(unbound_orig_repls)
 
         mm_placeholders = self._find_mm_placeholders(
             orig_repls,
             prompt_ids,
             mm_item_counts,
         )
-
         self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         mm_placeholder_ranges = {

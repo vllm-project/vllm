@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import itertools
 from abc import abstractmethod
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -45,8 +47,8 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
 
 
 def adjust_bitsandbytes_4bit_shard(param: Parameter,
-                                   shard_offsets: Dict[str, Tuple[int, int]],
-                                   loaded_shard_id: str) -> Tuple[int, int]:
+                                   shard_offsets: dict[str, tuple[int, int]],
+                                   loaded_shard_id: str) -> tuple[int, int]:
     """Adjust the quantization offsets and sizes for BitsAndBytes sharding."""
 
     total, _ = shard_offsets["total"]
@@ -88,7 +90,7 @@ class LinearMethodBase(QuantizeMethodBase):
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         """Create weights for a linear layer. 
@@ -121,7 +123,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
+                       output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         weight = Parameter(torch.empty(sum(output_partition_sizes),
@@ -150,6 +152,7 @@ class LinearBase(torch.nn.Module):
         skip_bias_add: If true, skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
+        return_bias: If true, return bias together with outputs in forward pass.
     """
 
     def __init__(
@@ -160,6 +163,8 @@ class LinearBase(torch.nn.Module):
         params_dtype: Optional[torch.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        *,
+        return_bias: bool = True,
     ):
         super().__init__()
 
@@ -176,8 +181,11 @@ class LinearBase(torch.nn.Module):
         else:
             self.quant_method = quant_config.get_quant_method(self,
                                                               prefix=prefix)
+        self.return_bias = return_bias
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         raise NotImplementedError
 
 
@@ -195,20 +203,25 @@ class ReplicatedLinear(LinearBase):
                         (e.g. model.layers.0.qkv_proj)
     """
 
-    def __init__(self,
-                 input_size: int,
-                 output_size: int,
-                 bias: bool = True,
-                 skip_bias_add: bool = False,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+    ):
         super().__init__(input_size,
                          output_size,
                          skip_bias_add,
                          params_dtype,
                          quant_config,
-                         prefix=prefix)
+                         prefix=prefix,
+                         return_bias=return_bias)
 
         # All the linear layer supports quant method.
         assert self.quant_method is not None
@@ -232,19 +245,34 @@ class ReplicatedLinear(LinearBase):
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         # If the weight on disk does not have a shape, give it one
         # (such scales for AutoFp8).
+        # Special case for GGUF
+
+        is_gguf_weight = getattr(param, "is_gguf_weight", False)
+        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
+        if is_gguf_weight_type:
+            param.weight_type = loaded_weight.item()
+
+        # Materialize GGUF UninitializedParameter
+        if is_gguf_weight and isinstance(param, UninitializedParameter):
+            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
+
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
-        assert param.size() == loaded_weight.size()
+        assert param.size() == loaded_weight.size(), (
+            f"Tried to load weights of size {loaded_weight.size()}"
+            f"to a parameter of size {param.size()}")
         param.data.copy_(loaded_weight)
 
     def forward(
         self, x: torch.Tensor
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
         output = self.quant_method.apply(self, x, bias)
         output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
         return output, output_bias
 
     def extra_repr(self) -> str:
@@ -278,39 +306,49 @@ class ColumnParallelLinear(LinearBase):
                         (e.g. model.layers.0.qkv_proj) 
     """
 
-    def __init__(self,
-                 input_size: int,
-                 output_size: int,
-                 bias: bool = True,
-                 gather_output: bool = False,
-                 skip_bias_add: bool = False,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 output_sizes: Optional[List[int]] = None,
-                 prefix: str = ""):
-        super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config, prefix)
-
-        self.gather_output = gather_output
-
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        gather_output: bool = False,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        output_sizes: Optional[list[int]] = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+    ):
         # Divide the weight matrix along the last dimension.
-        tp_size = get_tensor_model_parallel_world_size()
-        assert self.quant_method is not None
-        self.output_size_per_partition = divide(self.output_size, tp_size)
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.input_size_per_partition = input_size
+        self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
         # If QKV or MergedColumn, use output size of each partition.
         if hasattr(self, "output_sizes"):
             self.output_partition_sizes = [
-                divide(output_size, tp_size)
+                divide(output_size, self.tp_size)
                 for output_size in self.output_sizes
             ]
+
+        super().__init__(input_size,
+                         output_size,
+                         skip_bias_add,
+                         params_dtype,
+                         quant_config,
+                         prefix,
+                         return_bias=return_bias)
+
+        self.gather_output = gather_output
 
         if output_sizes is None:
             output_sizes = [output_size]
 
+        assert self.quant_method is not None
         self.quant_method.create_weights(
             layer=self,
-            input_size_per_partition=self.input_size,
+            input_size_per_partition=self.input_size_per_partition,
             output_partition_sizes=self.output_partition_sizes,
             input_size=self.input_size,
             output_size=self.output_size,
@@ -333,6 +371,12 @@ class ColumnParallelLinear(LinearBase):
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
 
+        is_sharded_weight = getattr(param, "is_sharded_weight", False)
+        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
+        # bitsandbytes loads the weights of the specific portion
+        # no need to narrow
+        is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
+
         # Special case for GGUF
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
@@ -341,13 +385,12 @@ class ColumnParallelLinear(LinearBase):
 
         # Materialize GGUF UninitializedParameter
         if is_gguf_weight and isinstance(param, UninitializedParameter):
-            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
-
-        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-        is_sharded_weight = getattr(param, "is_sharded_weight", False)
-        # bitsandbytes loads the weights of the specific portion
-        # no need to narrow
-        is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
+            final_shape = list(loaded_weight.shape)
+            if output_dim is not None:
+                tp_size = get_tensor_model_parallel_world_size()
+                assert final_shape[output_dim] % tp_size == 0
+                final_shape[output_dim] = final_shape[output_dim] // tp_size
+            param.materialize(final_shape, dtype=loaded_weight.dtype)
 
         param_data = param.data
         if output_dim is not None and not is_sharded_weight:
@@ -372,7 +415,9 @@ class ColumnParallelLinear(LinearBase):
             loaded_weight = loaded_weight.reshape(1)
         param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
-    def forward(self, input_):
+    def forward(
+        self, input_
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
@@ -384,6 +429,8 @@ class ColumnParallelLinear(LinearBase):
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
         return output, output_bias
 
     def extra_repr(self) -> str:
@@ -418,15 +465,19 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                         (e.g. model.layers.0.qkv_proj)
     """
 
-    def __init__(self,
-                 input_size: int,
-                 output_sizes: List[int],
-                 bias: bool = True,
-                 gather_output: bool = False,
-                 skip_bias_add: bool = False,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: list[int],
+        bias: bool = True,
+        gather_output: bool = False,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+    ):
         self.output_sizes = output_sizes
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
@@ -437,7 +488,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                          skip_bias_add=skip_bias_add,
                          params_dtype=params_dtype,
                          quant_config=quant_config,
-                         prefix=prefix)
+                         prefix=prefix,
+                         return_bias=return_bias)
 
     def weight_loader(self,
                       param: Parameter,
@@ -498,7 +550,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             current_shard_offset = 0
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
                                             False)
-            shard_offsets: List[Tuple[int, int, int]] = []
+            shard_offsets: list[tuple[int, int, int]] = []
             for i, output_size in enumerate(self.output_sizes):
                 shard_offsets.append((i, current_shard_offset, output_size))
                 current_shard_offset += output_size
@@ -600,7 +652,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         """
 
         current_shard_offset = 0
-        shard_offsets: List[Tuple[int, int, int]] = []
+        shard_offsets: list[tuple[int, int, int]] = []
         for i, output_size in enumerate(self.output_sizes):
             shard_offsets.append((i, current_shard_offset, output_size))
             current_shard_offset += output_size
@@ -690,16 +742,20 @@ class QKVParallelLinear(ColumnParallelLinear):
                         (e.g. model.layers.0.qkv_proj)
     """
 
-    def __init__(self,
-                 hidden_size: int,
-                 head_size: int,
-                 total_num_heads: int,
-                 total_num_kv_heads: Optional[int] = None,
-                 bias: bool = True,
-                 skip_bias_add: bool = False,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        hidden_size: int,
+        head_size: int,
+        total_num_heads: int,
+        total_num_kv_heads: Optional[int] = None,
+        bias: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+    ):
         self.hidden_size = hidden_size
         self.head_size = head_size
         self.total_num_heads = total_num_heads
@@ -732,7 +788,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                          skip_bias_add=skip_bias_add,
                          params_dtype=params_dtype,
                          quant_config=quant_config,
-                         prefix=prefix)
+                         prefix=prefix,
+                         return_bias=return_bias)
 
     def _get_shard_offset_mapping(self, loaded_shard_id: str):
         shard_offset_mapping = {
@@ -1027,32 +1084,43 @@ class RowParallelLinear(LinearBase):
         quant_config: Quantization configure.
     """
 
-    def __init__(self,
-                 input_size: int,
-                 output_size: int,
-                 bias: bool = True,
-                 input_is_parallel: bool = True,
-                 skip_bias_add: bool = False,
-                 params_dtype: Optional[torch.dtype] = None,
-                 reduce_results: bool = True,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
-        super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config, prefix)
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        input_is_parallel: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        reduce_results: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+    ):
+        # Divide the weight matrix along the first dimension.
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.input_size_per_partition = divide(input_size, self.tp_size)
+        self.output_size_per_partition = output_size
+        self.output_partition_sizes = [output_size]
+
+        super().__init__(input_size,
+                         output_size,
+                         skip_bias_add,
+                         params_dtype,
+                         quant_config,
+                         prefix,
+                         return_bias=return_bias)
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
 
-        # Divide the weight matrix along the last dimension.
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.input_size_per_partition = divide(input_size, self.tp_size)
         assert self.quant_method is not None
-
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,
-            output_partition_sizes=[self.output_size],
+            output_partition_sizes=self.output_partition_sizes,
             input_size=self.input_size,
             output_size=self.output_size,
             params_dtype=self.params_dtype,
@@ -1122,7 +1190,9 @@ class RowParallelLinear(LinearBase):
 
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
-    def forward(self, input_):
+    def forward(
+        self, input_
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -1146,6 +1216,8 @@ class RowParallelLinear(LinearBase):
 
         output_bias = self.bias if self.skip_bias_add else None
 
+        if not self.return_bias:
+            return output
         return output, output_bias
 
     def extra_repr(self) -> str:
@@ -1155,3 +1227,98 @@ class RowParallelLinear(LinearBase):
         s += f", tp_size={self.tp_size}"
         s += f", reduce_results={self.reduce_results}"
         return s
+
+
+class QKVCrossParallelLinear(torch.nn.Module):
+
+    def __init__(self,
+                 hidden_size: int,
+                 head_size: int,
+                 total_num_heads: int,
+                 total_num_kv_heads: Optional[int] = None,
+                 bias: bool = True,
+                 skip_bias_add: bool = False,
+                 params_dtype: Optional[torch.dtype] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
+        super().__init__()
+        # Empty placeholders for loading as a single module.
+        self.weight = torch.nn.Parameter()
+        set_weight_attrs(self.weight, {
+            "weight_loader": self.weight_loader_weight,
+        })
+        # Use a dictionary to avoid submodules parameters auto-registration:
+        # drop-in replacement for a `QKVParallelLinear` module.
+        self.proj = dict()
+        self.proj["q_proj_decoder"] = ColumnParallelLinear(
+            input_size=hidden_size,
+            output_size=total_num_heads * head_size,
+            bias=bias,
+            quant_config=quant_config,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            prefix=f"{prefix}.q_proj_decoder")
+
+        self.proj["kv_proj_encoder"] = QKVParallelLinear(
+            hidden_size=hidden_size,
+            head_size=head_size,
+            total_num_heads=0,
+            total_num_kv_heads=total_num_kv_heads,
+            bias=bias,
+            quant_config=quant_config,
+            skip_bias_add=skip_bias_add,
+            params_dtype=params_dtype,
+            prefix=f"{prefix}.kv_proj_encoder")
+
+        # `kv_proj_encoder.num_kv_heads` accounts for sharding with tp>1.
+        self.kv_size = self.kv_proj_encoder.num_kv_heads * head_size
+
+        if bias:
+            self.bias = torch.nn.Parameter()
+            set_weight_attrs(self.bias, {
+                "weight_loader": self.weight_loader_bias,
+            })
+
+    @property
+    def q_proj_decoder(self):
+        return self.proj["q_proj_decoder"]
+
+    @property
+    def kv_proj_encoder(self):
+        return self.proj["kv_proj_encoder"]
+
+    def forward(self, decoder_hidden_states, encoder_hidden_states):
+        q, _ = self.q_proj_decoder(decoder_hidden_states)
+        if encoder_hidden_states is None:
+            # Encoder KV already cached.
+            k = None
+            v = None
+        else:
+            # Prefill phase, encoder KV cached here.
+            kv_enc, _ = self.kv_proj_encoder(encoder_hidden_states)
+            # Split kv in half
+            k, v = kv_enc.split(self.kv_size, dim=-1)
+        return q, k, v
+
+    def weight_loader_weight(self,
+                             param: torch.nn.Parameter,
+                             loaded_weight: torch.Tensor,
+                             loaded_shard_id: Optional[str] = None):
+        # NOTE Use QKV/ColumnParallel weight_loader, ignore placeholder param.
+        param = self.q_proj_decoder.weight if loaded_shard_id == "q" \
+            else self.kv_proj_encoder.weight
+        param.weight_loader(
+            param,
+            loaded_weight) if loaded_shard_id == "q" else param.weight_loader(
+                param, loaded_weight, loaded_shard_id)
+
+    def weight_loader_bias(self,
+                           param: torch.nn.Parameter,
+                           loaded_weight: torch.Tensor,
+                           loaded_shard_id: Optional[str] = None):
+        param = self.q_proj_decoder.bias if loaded_shard_id == "q" \
+            else self.kv_proj_encoder.bias
+        param.weight_loader(
+            param,
+            loaded_weight) if loaded_shard_id == "q" else param.weight_loader(
+                param, loaded_weight, loaded_shard_id)

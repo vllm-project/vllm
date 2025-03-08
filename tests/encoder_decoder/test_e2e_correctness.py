@@ -1,8 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
 """E2E tests to verify the correctness of the encoder-decoder framework
 
 Run `pytest tests/encoder_decoder/test_e2e_correctness.py`.
 """
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import pytest
 from transformers import AutoModelForSeq2SeqLM
@@ -21,7 +22,7 @@ LIST_ENC_DEC_SUPPORTED_BACKENDS = [
 
 
 def vllm_to_hf_output(
-    vllm_output: Tuple[List[int], str, Optional[SampleLogprobs]],
+    vllm_output: tuple[list[int], str, Optional[SampleLogprobs]],
     decoder_prompt_type: DecoderPromptType,
 ):
     """Sanitize vllm output to be comparable with hf output."""

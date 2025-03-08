@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Tests gguf models against unquantized models generations
 Note: To pass the test, quantization higher than Q4 should be used
 """
 
 import os
-from typing import List, NamedTuple, Type
+from typing import NamedTuple
 
 import pytest
 from huggingface_hub import hf_hub_download
@@ -89,8 +90,8 @@ MODELS = [
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_models(
     num_gpus_available: int,
-    vllm_runner: Type[VllmRunner],
-    example_prompts: List[str],
+    vllm_runner: type[VllmRunner],
+    example_prompts: list[str],
     model: GGUFTestConfig,
     dtype: str,
     max_tokens: int,

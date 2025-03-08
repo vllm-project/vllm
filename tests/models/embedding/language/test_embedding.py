@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compare the embedding outputs of HF and vLLM models.
 
 Run `pytest tests/models/embedding/language/test_embedding.py`.
@@ -16,7 +17,7 @@ from ..utils import check_embeddings_close
         pytest.param("BAAI/bge-base-en-v1.5",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
-        pytest.param("intfloat/multilingual-e5-large"),
+        pytest.param("intfloat/multilingual-e5-small"),
         # [Decoder-only]
         pytest.param("BAAI/bge-multilingual-gemma2",
                      marks=[pytest.mark.core_model]),

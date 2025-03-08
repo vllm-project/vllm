@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 Set up this example by starting a vLLM OpenAI-compatible server with tool call
 options enabled. For example:

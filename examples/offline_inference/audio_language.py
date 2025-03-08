@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This example shows how to use vLLM for running offline inference 
 with the correct prompt format on audio language models.
@@ -5,10 +6,14 @@ with the correct prompt format on audio language models.
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
+import os
+
+from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
+from vllm.lora.request import LoRARequest
 from vllm.utils import FlexibleArgumentParser
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
@@ -23,26 +28,65 @@ question_per_audio_count = {
 # Unless specified, these settings have been tested to work on a single L4.
 
 
-# Ultravox 0.3
-def run_ultravox(question: str, audio_count: int):
-    model_name = "fixie-ai/ultravox-v0_3"
+# MiniCPM-O
+def run_minicpmo(question: str, audio_count: int):
+    model_name = "openbmb/MiniCPM-o-2_6"
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    llm = LLM(model=model_name,
+              trust_remote_code=True,
+              max_model_len=4096,
+              max_num_seqs=5,
+              limit_mm_per_prompt={"audio": audio_count})
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    stop_tokens = ['<|im_end|>', '<|endoftext|>']
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+
+    audio_placeholder = "(<audio>./</audio>)" * audio_count
+    audio_chat_template = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n<|spk_bos|><|spk|><|spk_eos|><|tts_bos|>' }}{% endif %}"  # noqa: E501
     messages = [{
         'role': 'user',
-        'content': "<|audio|>\n" * audio_count + question
+        'content': f'{audio_placeholder}\n{question}'
     }]
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
-                                           add_generation_prompt=True)
-
-    llm = LLM(model=model_name,
-              max_model_len=4096,
-              max_num_seqs=5,
-              trust_remote_code=True,
-              limit_mm_per_prompt={"audio": audio_count})
-    stop_token_ids = None
+                                           add_generation_prompt=True,
+                                           chat_template=audio_chat_template)
     return llm, prompt, stop_token_ids
+
+
+# Phi-4-multimodal-instruct
+def run_phi4mm(questions: str, audio_count: int):
+    """
+    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    show how to process audio inputs.
+    """
+    model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
+    # Since the vision-lora and speech-lora co-exist with the base model,
+    # we have to manually specify the path of the lora weights.
+    speech_lora_path = os.path.join(model_path, "speech-lora")
+    placeholders = "".join([f"<|audio_{i+1}|>" for i in range(audio_count)])
+
+    prompts = f"<|user|>{placeholders}{questions}<|end|><|assistant|>"
+
+    llm = LLM(
+        model=model_path,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=2,
+        enable_lora=True,
+        max_lora_rank=320,
+        lora_extra_vocab_size=0,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+    lora_request = LoRARequest("speech", 1, speech_lora_path)
+    # To maintain code compatibility in this script, we add LoRA here.
+    llm.llm_engine.add_lora(lora_request=lora_request)
+    # You can also add LoRA using:
+    # llm.generate(prompts, lora_request=lora_request,...)
+
+    stop_token_ids = None
+    return llm, prompts, stop_token_ids
 
 
 # Qwen2-Audio
@@ -67,7 +111,51 @@ def run_qwen2_audio(question: str, audio_count: int):
     return llm, prompt, stop_token_ids
 
 
-model_example_map = {"ultravox": run_ultravox, "qwen2_audio": run_qwen2_audio}
+# Ultravox 0.5-1B
+def run_ultravox(question: str, audio_count: int):
+    model_name = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    messages = [{
+        'role': 'user',
+        'content': "<|audio|>\n" * audio_count + question
+    }]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    llm = LLM(model=model_name,
+              max_model_len=4096,
+              max_num_seqs=5,
+              trust_remote_code=True,
+              limit_mm_per_prompt={"audio": audio_count})
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# Whisper
+def run_whisper(question: str, audio_count: int):
+    assert audio_count == 1, (
+        "Whisper only support single audio input per prompt")
+    model_name = "openai/whisper-large-v3-turbo"
+
+    prompt = "<|startoftranscript|>"
+
+    llm = LLM(model=model_name,
+              max_model_len=448,
+              max_num_seqs=5,
+              limit_mm_per_prompt={"audio": audio_count})
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+model_example_map = {
+    "minicpmo": run_minicpmo,
+    "phi4_mm": run_phi4mm,
+    "qwen2_audio": run_qwen2_audio,
+    "ultravox": run_ultravox,
+    "whisper": run_whisper,
+}
 
 
 def main(args):

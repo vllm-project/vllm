@@ -1,4 +1,4 @@
-from typing import List
+# SPDX-License-Identifier: Apache-2.0
 
 import pytest
 
@@ -25,7 +25,7 @@ EXPECTED_OUTPUT = [
 ]
 
 
-def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
+def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     sampling_params = vllm.SamplingParams(
         temperature=0,
         max_tokens=5,
@@ -46,7 +46,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
         if lora_id else None,
     )
     # Print the outputs.
-    generated_texts: List[str] = []
+    generated_texts: list[str] = []
     for output in outputs:
         generated_text = output.outputs[0].text.strip()
         generated_texts.append(generated_text)

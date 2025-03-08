@@ -41,6 +41,8 @@ We currently support the following OpenAI APIs:
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API](#embeddings-api) (`/v1/embeddings`)
   - Only applicable to [embedding models](../models/pooling_models.md) (`--task embed`).
+- [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
+  - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
 
 In addition, we have the following custom APIs:
 
@@ -49,6 +51,11 @@ In addition, we have the following custom APIs:
 - [Pooling API](#pooling-api) (`/pooling`)
   - Applicable to all [pooling models](../models/pooling_models.md).
 - [Score API](#score-api) (`/score`)
+  - Applicable to embedding models and [cross-encoder models](../models/pooling_models.md) (`--task score`).
+- [Re-rank API](#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+  - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
+  - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
+  - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
   - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
 
 (chat-template)=
@@ -156,11 +163,11 @@ print(completion._request_id)
 
 The `vllm serve` command is used to launch the OpenAI-compatible server.
 
-```{argparse}
+:::{argparse}
 :module: vllm.entrypoints.openai.cli_args
 :func: create_parser_for_docs
 :prog: vllm serve
-```
+:::
 
 #### Configuration file
 
@@ -183,10 +190,10 @@ To use the above config file:
 vllm serve SOME_MODEL --config config.yaml
 ```
 
-```{note}
+:::{note}
 In case an argument is supplied simultaneously using command line and the config file, the value from the command line will take precedence.
 The order of priorities is `command line > config file values > defaults`.
-```
+:::
 
 ## API Reference
 
@@ -203,19 +210,19 @@ Code example: <gh-file:examples/online_serving/openai_completion_client.py>
 
 The following [sampling parameters](#sampling-params) are supported.
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-completion-sampling-params
 :end-before: end-completion-sampling-params
-```
+:::
 
 The following extra parameters are supported:
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-completion-extra-params
 :end-before: end-completion-extra-params
-```
+:::
 
 (chat-api)=
 
@@ -235,19 +242,19 @@ Code example: <gh-file:examples/online_serving/openai_chat_completion_client.py>
 
 The following [sampling parameters](#sampling-params) are supported.
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-chat-completion-sampling-params
 :end-before: end-chat-completion-sampling-params
-```
+:::
 
 The following extra parameters are supported:
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-chat-completion-extra-params
 :end-before: end-chat-completion-extra-params
-```
+:::
 
 (embeddings-api)=
 
@@ -259,37 +266,126 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 If the model has a [chat template](#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](#chat-api))
 which will be treated as a single prompt to the model.
 
-```{tip}
-This enables multi-modal inputs to be passed to embedding models, see [this page](#multimodal-inputs) for details.
+Code example: <gh-file:examples/online_serving/openai_embedding_client.py>
+
+#### Multi-modal inputs
+
+You can pass multi-modal inputs to embedding models by defining a custom chat template for the server
+and passing a list of `messages` in the request. Refer to the examples below for illustration.
+
+:::::{tab-set}
+::::{tab-item} VLM2Vec
+
+To serve the model:
+
+```bash
+vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
+  --trust-remote-code --max-model-len 4096 --chat-template examples/template_vlm2vec.jinja
 ```
 
-Code example: <gh-file:examples/online_serving/openai_embedding_client.py>
+:::{important}
+Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--task embed`
+to run this model in embedding mode instead of text generation mode.
+
+The custom chat template is completely different from the original one for this model,
+and can be found here: <gh-file:examples/template_vlm2vec.jinja>
+:::
+
+Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
+
+```python
+import requests
+
+image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+
+response = requests.post(
+    "http://localhost:8000/v1/embeddings",
+    json={
+        "model": "TIGER-Lab/VLM2Vec-Full",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "Represent the given image."},
+            ],
+        }],
+        "encoding_format": "float",
+    },
+)
+response.raise_for_status()
+response_json = response.json()
+print("Embedding output:", response_json["data"][0]["embedding"])
+```
+
+::::
+
+::::{tab-item} DSE-Qwen2-MRL
+
+To serve the model:
+
+```bash
+vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
+  --trust-remote-code --max-model-len 8192 --chat-template examples/template_dse_qwen2_vl.jinja
+```
+
+:::{important}
+Like with VLM2Vec, we have to explicitly pass `--task embed`.
+
+Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
+by a custom chat template: <gh-file:examples/template_dse_qwen2_vl.jinja>
+:::
+
+:::{important}
+`MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
+example below for details.
+:::
+
+::::
+
+:::::
+
+Full example: <gh-file:examples/online_serving/openai_chat_embedding_client_for_multimodal.py>
 
 #### Extra parameters
 
 The following [pooling parameters](#pooling-params) are supported.
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-embedding-pooling-params
 :end-before: end-embedding-pooling-params
-```
+:::
 
 The following extra parameters are supported by default:
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-embedding-extra-params
 :end-before: end-embedding-extra-params
-```
+:::
 
 For chat-like input (i.e. if `messages` is passed), these extra parameters are supported instead:
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-chat-embedding-extra-params
 :end-before: end-chat-embedding-extra-params
-```
+:::
+
+(transcriptions-api)=
+
+### Transcriptions API
+
+Our Transcriptions API is compatible with [OpenAI's Transcriptions API](https://platform.openai.com/docs/api-reference/audio/createTranscription);
+you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
+
+:::{note}
+To use the Transcriptions API, please install with extra audio dependencies using `pip install vllm[audio]`.
+:::
+
+<!-- TODO: api enforced limits + uploading audios -->
+
+Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
 
 (tokenizer-api)=
 
@@ -315,10 +411,10 @@ Code example: <gh-file:examples/online_serving/openai_pooling_client.py>
 
 ### Score API
 
-Our Score API applies a cross-encoder model to predict scores for sentence pairs.
+Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
 Usually, the score for a sentence pair refers to the similarity between two sentences, on a scale of 0 to 1.
 
-You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
+You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 
 Code example: <gh-file:examples/online_serving/openai_cross_encoder_score.py>
 
@@ -460,16 +556,103 @@ Response:
 
 The following [pooling parameters](#pooling-params) are supported.
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-score-pooling-params
 :end-before: end-score-pooling-params
-```
+:::
 
 The following extra parameters are supported:
 
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
 :start-after: begin-score-extra-params
 :end-before: end-score-extra-params
+:::
+
+(rerank-api)=
+
+### Re-rank API
+
+Our Re-rank API can apply an embedding model or a cross-encoder model to predict relevant scores between a single query, and
+each of a list of documents. Usually, the score for a sentence pair refers to the similarity between two sentences, on
+a scale of 0 to 1.
+
+You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
+
+The rerank endpoints support popular re-rank models such as `BAAI/bge-reranker-base` and other models supporting the
+`score` task. Additionally, `/rerank`, `/v1/rerank`, and `/v2/rerank`
+endpoints are compatible with both [Jina AI's re-rank API interface](https://jina.ai/reranker/) and
+[Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
+popular open-source tools.
+
+Code example: <gh-file:examples/online_serving/jinaai_rerank_client.py>
+
+#### Example Request
+
+Note that the `top_n` request parameter is optional and will default to the length of the `documents` field.
+Result documents will be sorted by relevance, and the `index` property can be used to determine original order.
+
+Request:
+
+```bash
+curl -X 'POST' \
+  'http://127.0.0.1:8000/v1/rerank' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "BAAI/bge-reranker-base",
+  "query": "What is the capital of France?",
+  "documents": [
+    "The capital of Brazil is Brasilia.",
+    "The capital of France is Paris.",
+    "Horses and cows are both animals"
+  ]
+}'
 ```
+
+Response:
+
+```bash
+{
+  "id": "rerank-fae51b2b664d4ed38f5969b612edff77",
+  "model": "BAAI/bge-reranker-base",
+  "usage": {
+    "total_tokens": 56
+  },
+  "results": [
+    {
+      "index": 1,
+      "document": {
+        "text": "The capital of France is Paris."
+      },
+      "relevance_score": 0.99853515625
+    },
+    {
+      "index": 0,
+      "document": {
+        "text": "The capital of Brazil is Brasilia."
+      },
+      "relevance_score": 0.0005860328674316406
+    }
+  ]
+}
+```
+
+#### Extra parameters
+
+The following [pooling parameters](#pooling-params) are supported.
+
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-rerank-pooling-params
+:end-before: end-rerank-pooling-params
+:::
+
+The following extra parameters are supported:
+
+:::{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-rerank-extra-params
+:end-before: end-rerank-extra-params
+:::

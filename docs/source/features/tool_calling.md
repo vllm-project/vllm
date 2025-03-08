@@ -1,6 +1,6 @@
 # Tool Calling
 
-vLLM currently supports named function calling, as well as the `auto` and `none` options for the `tool_choice` field in the chat completion API. The `tool_choice` option `required` is **not yet supported** but on the roadmap.
+vLLM currently supports named function calling, as well as the `auto` and `none` options for the `tool_choice` field in the chat completion API. The `tool_choice` option `required` is **not yet supported** but [on the roadmap](gh-issue:13002).
 
 ## Quickstart
 
@@ -208,6 +208,15 @@ AI21's Jamba-1.5 models are supported.
 * `ai21labs/AI21-Jamba-1.5-Large`
 
 Flags: `--tool-call-parser jamba`
+
+### Qwen Models
+
+For Qwen2.5, the chat template in tokenizer_config.json has already included support for the Hermes-style tool use. Therefore, you can use the `hermes` parser to enable tool calls for Qwen models. For more detailed information, please refer to the official [Qwen documentation](https://qwen.readthedocs.io/en/latest/framework/function_call.html#vllm)
+
+* `Qwen/Qwen2.5-*`
+* `Qwen/QwQ-32B`
+
+Flags: `--tool-call-parser hermes`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

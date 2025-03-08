@@ -1,4 +1,4 @@
-from typing import Dict
+# SPDX-License-Identifier: Apache-2.0
 
 import pytest
 import requests
@@ -47,7 +47,7 @@ def server():
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image() -> Dict[str, str]:
+def base64_encoded_image() -> dict[str, str]:
     return {
         image_url: encode_image_base64(fetch_image(image_url))
         for image_url in TEST_IMAGE_URLS
@@ -91,5 +91,5 @@ async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
     assert len(embeddings.data) == 1
     assert len(embeddings.data[0].embedding) == 3072
     assert embeddings.usage.completion_tokens == 0
-    assert embeddings.usage.prompt_tokens == 764
-    assert embeddings.usage.total_tokens == 764
+    assert embeddings.usage.prompt_tokens == 763
+    assert embeddings.usage.total_tokens == 763

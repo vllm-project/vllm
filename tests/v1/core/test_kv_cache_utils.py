@@ -1,12 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock,
+                                         KVCacheBlock, PrefixCachingMetrics,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens)
+from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
 
@@ -161,7 +164,7 @@ def test_generate_block_hash_extra_keys():
 
     # Test with no overlap
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 6, 10, 0)
-    assert extra_keys == ()
+    assert extra_keys is None
     assert next_mm_idx == 1
 
     # Test with multiple extra keys
@@ -192,7 +195,7 @@ def test_hash_block_tokens():
                                    extra_keys)
     assert isinstance(block_hash, BlockHashType)
     assert block_hash.hash_value == hash(
-        (parent_block_hash, *curr_block_token_ids))
+        (parent_block_hash, curr_block_token_ids, extra_keys))
     assert block_hash.token_ids == curr_block_token_ids
     assert block_hash.extra_keys == extra_keys
 
@@ -227,6 +230,38 @@ def test_hash_request_tokens():
     assert block_hashes[1].extra_keys == ("hash2", )
 
 
+def test_hash_tokens_different_mm_input():
+    request1 = make_request(
+        request_id=0,
+        prompt_token_ids=[_ for _ in range(6)],
+        mm_positions=[{
+            "offset": 0,
+            "length": 3
+        }, {
+            "offset": 3,
+            "length": 3
+        }],
+        mm_hashes=["hash1", "hash2"],
+    )
+    request2 = make_request(
+        request_id=1,
+        prompt_token_ids=[_ for _ in range(6)],
+        mm_positions=[{
+            "offset": 0,
+            "length": 3
+        }, {
+            "offset": 3,
+            "length": 3
+        }],
+        mm_hashes=["hash3", "hash2"],
+    )
+    block_size = 3
+    block_hashes1 = hash_request_tokens(block_size, request1)
+    block_hashes2 = hash_request_tokens(block_size, request2)
+    assert block_hashes1[0] != block_hashes2[0]
+    assert block_hashes1[1] != block_hashes2[1]
+
+
 def test_hash_request_tokens_no_mm_inputs():
     request = make_request(
         request_id=0,
@@ -243,3 +278,39 @@ def test_hash_request_tokens_no_mm_inputs():
     assert block_hashes[0].extra_keys is None
     assert block_hashes[1].token_ids == (3, 4, 5)
     assert block_hashes[1].extra_keys is None
+
+
+def test_metrics():
+    """
+    Test the prefix caching metrics.
+    """
+
+    def stats(requests, queries, hits):
+        return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
+
+    metrics = PrefixCachingMetrics(interval=5)
+    assert metrics.hit_rate == 0.0
+
+    metrics.observe(stats(1, 20, 9))
+    # 9 / 20 = 0.45
+    assert metrics.hit_rate == 0.45
+
+    metrics.observe(stats(4, 80, 16))
+
+    # 25 / 100 = 0.25
+    assert metrics.hit_rate == 0.25
+
+    metrics.observe(stats(1, 10, 2))
+
+    # Remove (20, 9) and add (10, 2): 18 / 90 = 0.2
+    assert metrics.aggregated_requests == 5
+    assert metrics.aggregated_query_total == 90
+    assert metrics.aggregated_query_hit == 18
+    assert metrics.hit_rate == 0.2
+
+    metrics.reset()
+    assert metrics.hit_rate == 0.0
+    assert metrics.aggregated_requests == 0
+    assert metrics.aggregated_query_total == 0
+    assert metrics.aggregated_query_hit == 0
+    assert not metrics.query_queue

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """
 This file contains the command line arguments for the vLLM's
 OpenAI-compatible server. It is kept in a separate file for documentation
@@ -7,7 +8,8 @@ purposes.
 import argparse
 import json
 import ssl
-from typing import List, Optional, Sequence, Union, get_args
+from collections.abc import Sequence
+from typing import Optional, Union, get_args
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
@@ -32,7 +34,7 @@ class LoRAParserAction(argparse.Action):
         if isinstance(values, str):
             raise TypeError("Expected values to be a list")
 
-        lora_list: List[LoRAModulePath] = []
+        lora_list: list[LoRAModulePath] = []
         for item in values:
             if item in [None, '']:  # Skip if item is None or empty string
                 continue
@@ -68,7 +70,7 @@ class PromptAdapterParserAction(argparse.Action):
         if isinstance(values, str):
             raise TypeError("Expected values to be a list")
 
-        adapter_list: List[PromptAdapterPath] = []
+        adapter_list: list[PromptAdapterPath] = []
         for item in values:
             name, path = item.split('=')
             adapter_list.append(PromptAdapterPath(name, path))
@@ -162,6 +164,11 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         type=nullable_str,
                         default=None,
                         help="The CA certificates file.")
+    parser.add_argument(
+        "--enable-ssl-refresh",
+        action="store_true",
+        default=False,
+        help="Refresh SSL Context when SSL certificate files change")
     parser.add_argument(
         "--ssl-cert-reqs",
         type=int,
@@ -266,6 +273,18 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires "
                         "--tool-call-parser")
+
+    # Enable reasoning needs a reasoning parser to be valid
+    if args.enable_reasoning and not args.reasoning_parser:
+        raise TypeError("Error: --enable-reasoning requires "
+                        "--reasoning-parser")
+
+    # Ref https://api-docs.deepseek.com/guides/reasoning_model
+    # tool call and reasoning cannot be enabled at the same time.
+    if args.enable_auto_tool_choice and args.enable_reasoning:
+        raise TypeError(
+            "Error: --enable-auto-tool-choice and "
+            "--enable-reasoning cannot be enabled at the same time")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

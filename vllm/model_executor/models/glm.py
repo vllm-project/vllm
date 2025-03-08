@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Inference-only HF format GLM-4 model compatible with THUDM weights."""
 from vllm.config import VllmConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
