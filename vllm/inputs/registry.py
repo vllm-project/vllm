@@ -331,7 +331,9 @@ class InputRegistry:
 
         if mm_registry.has_processor(model_config):
             tokenizer = cached_tokenizer_from_config(model_config)
-            processor = mm_registry.create_processor(model_config, tokenizer)
+            processor = mm_registry.create_processor(model_config,
+                                                     tokenizer,
+                                                     disable_cache=True)
             profiler = MultiModalProfiler(processor)
             dummy_data = profiler.get_dummy_data(
                 seq_len, is_encoder_data=is_encoder_data)

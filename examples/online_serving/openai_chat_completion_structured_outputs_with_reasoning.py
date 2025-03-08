@@ -33,6 +33,42 @@ client = OpenAI(
 models = client.models.list()
 model = models.data[0].id
 
+# Guided decoding by Regex
+prompt = ("What is the capital of France?")
+
+completion = client.chat.completions.create(
+    model=model,
+    messages=[{
+        "role": "user",
+        "content": prompt,
+    }],
+    extra_body={
+        "guided_regex": "(Paris|London)",
+    },
+)
+print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+print("content: ", completion.choices[0].message.content)
+
+
+class People(BaseModel):
+    name: str
+    age: int
+
+
+json_schema = People.model_json_schema()
+
+prompt = ("Generate a JSON with the name and age of one random person.")
+completion = client.chat.completions.create(
+    model=model,
+    messages=[{
+        "role": "user",
+        "content": prompt,
+    }],
+    extra_body={"guided_json": json_schema},
+)
+print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+print("content: ", completion.choices[0].message.content)
+
 
 # Guided decoding by JSON using Pydantic schema
 class CarType(str, Enum):
@@ -51,7 +87,7 @@ class CarDescription(BaseModel):
 json_schema = CarDescription.model_json_schema()
 
 prompt = ("Generate a JSON with the brand, model and car_type of"
-          "the most iconic car from the 90's, think in 100 tokens")
+          "the most iconic car from the 90's")
 completion = client.chat.completions.create(
     model=model,
     messages=[{
@@ -60,5 +96,34 @@ completion = client.chat.completions.create(
     }],
     extra_body={"guided_json": json_schema},
 )
-print("content", completion.choices[0].message.content)
 print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+print("content: ", completion.choices[0].message.content)
+
+# Guided decoding by Grammar
+simplified_sql_grammar = """
+    ?start: select_statement
+
+    ?select_statement: "SELECT " column_list " FROM " table_name
+
+    ?column_list: column_name ("," column_name)*
+
+    ?table_name: identifier
+
+    ?column_name: identifier
+
+    ?identifier: /[a-zA-Z_][a-zA-Z0-9_]*/
+"""
+
+# This may be very slow https://github.com/vllm-project/vllm/issues/12122
+prompt = ("Generate an SQL query to show the 'username' and 'email'"
+          "from the 'users' table.")
+completion = client.chat.completions.create(
+    model=model,
+    messages=[{
+        "role": "user",
+        "content": prompt,
+    }],
+    extra_body={"guided_grammar": simplified_sql_grammar},
+)
+print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+print("content: ", completion.choices[0].message.content)

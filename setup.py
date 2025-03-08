@@ -2,6 +2,7 @@
 
 import ctypes
 import importlib.util
+import json
 import logging
 import os
 import re
@@ -66,6 +67,18 @@ def is_ccache_available() -> bool:
 
 def is_ninja_available() -> bool:
     return which("ninja") is not None
+
+
+def is_url_available(url: str) -> bool:
+    from urllib.request import urlopen
+
+    status = None
+    try:
+        with urlopen(url) as f:
+            status = f.status
+    except Exception:
+        return False
+    return status == 200
 
 
 class CMakeExtension(Extension):
@@ -269,9 +282,32 @@ class repackage_wheel(build_ext):
     """Extracts libraries and other files from an existing wheel."""
 
     def get_base_commit_in_main_branch(self) -> str:
-        import subprocess
+        # Force to use the nightly wheel. This is mainly used for CI testing.
+        if envs.VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL:
+            return "nightly"
 
         try:
+            # Get the latest commit hash of the upstream main branch.
+            resp_json = subprocess.check_output([
+                "curl", "-s",
+                "https://api.github.com/repos/vllm-project/vllm/commits/main"
+            ]).decode("utf-8")
+            upstream_main_commit = json.loads(resp_json)["sha"]
+
+            # Check if the local main branch is up-to-date. This is to ensure
+            # the base commit we found is the most recent commit on the main
+            # branch.
+            local_main_commit = subprocess.check_output(
+                ["git", "rev-parse", "main"]).decode("utf-8").strip()
+            if local_main_commit != upstream_main_commit:
+                raise ValueError(
+                    f"Local main branch ({local_main_commit}) is not "
+                    "up-to-date with upstream main branch "
+                    f"({upstream_main_commit}). Please pull the latest "
+                    "changes from upstream main branch first.")
+
+            # Then get the commit hash of the current branch that is the same as
+            # the upstream main commit.
             current_branch = subprocess.check_output(
                 ["git", "branch", "--show-current"]).decode("utf-8").strip()
 
@@ -279,6 +315,8 @@ class repackage_wheel(build_ext):
                 ["git", "merge-base", "main",
                  current_branch]).decode("utf-8").strip()
             return base_commit
+        except ValueError as err:
+            raise ValueError(err) from None
         except Exception as err:
             logger.warning(
                 "Failed to get the base commit in the main branch. "
@@ -294,6 +332,10 @@ class repackage_wheel(build_ext):
         if wheel_location is None:
             base_commit = self.get_base_commit_in_main_branch()
             wheel_location = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+            # Fallback to nightly wheel if latest commit wheel is unavailable,
+            # in this rare case, the nightly release CI hasn't finished on main.
+            if not is_url_available(wheel_location):
+                wheel_location = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
 
         import zipfile
 

@@ -47,6 +47,8 @@ def default_server_args():
         "--enforce-eager",
         "--max-num-seqs",
         "128",
+        "--seed",
+        "0",
     ]
 
 
@@ -239,6 +241,12 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_generation_tokens_sum",
     "vllm:request_generation_tokens_bucket",
     "vllm:request_generation_tokens_count",
+    "vllm:request_params_n_sum",
+    "vllm:request_params_n_bucket",
+    "vllm:request_params_n_count",
+    "vllm:request_params_max_tokens_sum",
+    "vllm:request_params_max_tokens_bucket",
+    "vllm:request_params_max_tokens_count",
     "vllm:time_to_first_token_seconds_sum",
     "vllm:time_to_first_token_seconds_bucket",
     "vllm:time_to_first_token_seconds_count",

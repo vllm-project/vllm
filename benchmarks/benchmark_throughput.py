@@ -7,7 +7,7 @@ import os
 import random
 import time
 from functools import cache
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import torch
 import uvloop
@@ -24,7 +24,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args)
-from vllm.inputs import TextPrompt
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
@@ -153,6 +153,7 @@ def run_vllm(
     requests: list[SampleRequest],
     n: int,
     engine_args: EngineArgs,
+    disable_detokenize: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
@@ -163,10 +164,13 @@ def run_vllm(
             "Please ensure that max_model_len is greater than the sum of"
             " prompt_len and expected_output_len for all requests.")
     # Add the requests to the engine.
-    prompts: list[TextPrompt] = []
+    prompts: list[Union[TextPrompt, TokensPrompt]] = []
     sampling_params: list[SamplingParams] = []
     for request in requests:
         prompts.append(
+            TokensPrompt(prompt_token_ids=request.prompt["prompt_token_ids"],
+                       multi_modal_data=request.multi_modal_data)
+            if "prompt_token_ids" in request.prompt else \
             TextPrompt(prompt=request.prompt,
                        multi_modal_data=request.multi_modal_data))
         sampling_params.append(
@@ -176,6 +180,7 @@ def run_vllm(
                 top_p=1.0,
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
+                detokenize=not disable_detokenize,
             ))
     lora_requests: Optional[list[LoRARequest]] = None
     if engine_args.enable_lora:
@@ -214,6 +219,7 @@ async def run_vllm_async(
     n: int,
     engine_args: AsyncEngineArgs,
     disable_frontend_multiprocessing: bool = False,
+    disable_detokenize: bool = False,
 ) -> float:
     from vllm import SamplingParams
 
@@ -227,11 +233,14 @@ async def run_vllm_async(
                 " prompt_len and expected_output_len for all requests.")
 
         # Add the requests to the engine.
-        prompts: list[TextPrompt] = []
+        prompts: list[Union[TextPrompt, TokensPrompt]] = []
         sampling_params: list[SamplingParams] = []
         lora_requests: list[Optional[LoRARequest]] = []
         for request in requests:
             prompts.append(
+                TokensPrompt(prompt_token_ids=request.prompt["prompt_token_ids"],
+                        multi_modal_data=request.multi_modal_data)
+                if "prompt_token_ids" in request.prompt else \
                 TextPrompt(prompt=request.prompt,
                            multi_modal_data=request.multi_modal_data))
             sampling_params.append(
@@ -241,6 +250,7 @@ async def run_vllm_async(
                     top_p=1.0,
                     ignore_eos=True,
                     max_tokens=request.expected_output_len,
+                    detokenize=not disable_detokenize,
                 ))
             lora_requests.append(request.lora_request)
 
@@ -267,6 +277,7 @@ def run_hf(
     n: int,
     max_batch_size: int,
     trust_remote_code: bool,
+    disable_detokenize: bool = False,
 ) -> float:
     llm = AutoModelForCausalLM.from_pretrained(
         model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
@@ -306,8 +317,9 @@ def run_hf(
             use_cache=True,
             max_new_tokens=max_output_len,
         )
-        # Include the decoding time.
-        tokenizer.batch_decode(llm_outputs, skip_special_tokens=True)
+        if not disable_detokenize:
+            # Include the decoding time.
+            tokenizer.batch_decode(llm_outputs, skip_special_tokens=True)
         pbar.update(len(batch))
 
         # Clear the batch.
@@ -405,7 +417,6 @@ def main(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)
     requests = get_requests(args, tokenizer)
-
     is_multi_modal = any(request.multi_modal_data is not None
                          for request in requests)
     if args.backend == "vllm":
@@ -416,14 +427,17 @@ def main(args: argparse.Namespace):
                     args.n,
                     AsyncEngineArgs.from_cli_args(args),
                     args.disable_frontend_multiprocessing,
+                    args.disable_detokenize,
                 ))
         else:
             elapsed_time = run_vllm(requests, args.n,
-                                    EngineArgs.from_cli_args(args))
+                                    EngineArgs.from_cli_args(args),
+                                    args.disable_detokenize)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
-                              args.hf_max_batch_size, args.trust_remote_code)
+                              args.hf_max_batch_size, args.trust_remote_code,
+                              args.disable_detokenize)
     elif args.backend == "mii":
         elapsed_time = run_mii(requests, args.model, args.tensor_parallel_size,
                                args.output_len)
@@ -507,6 +521,11 @@ if __name__ == "__main__":
                         action='store_true',
                         default=False,
                         help="Disable decoupled async engine frontend.")
+    parser.add_argument(
+        "--disable-detokenize",
+        action="store_true",
+        help=("Do not detokenize the response (i.e. do not include "
+              "detokenization time in the measurement)"))
     # LoRA
     parser.add_argument(
         "--lora-path",

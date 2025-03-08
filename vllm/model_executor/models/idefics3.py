@@ -404,7 +404,6 @@ class Idefics3Model(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        self.padding_idx = self.config.text_config.pad_token_id
         self.vocab_size = self.config.text_config.vocab_size
         self.vision_model = Idefics3VisionTransformer(
             config.vision_config,
@@ -617,7 +616,9 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
         self.sampler = get_sampler()
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input = self.model._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
