@@ -2112,6 +2112,6 @@ class LLMEngine:
         return sampling_params
 
 
-# TODO(v1): Remove this class proxy when V1 goes default.
-if envs.VLLM_USE_V1:
-    from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
+if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
+    from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+    LLMEngine = V1LLMEngine

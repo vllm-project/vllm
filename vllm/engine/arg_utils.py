@@ -1184,16 +1184,14 @@ class EngineArgs:
         #   features and raise error for unsupported features.
         # * If VLLM_USE_V1=0, we disable V1.
         use_v1 = False
-        if self._is_v1_supported_oracle(model_config):
-            try_by_default = (not envs.is_set("VLLM_USE_V1")
-                              and envs.VLLM_USE_V1_BY_DEFAULT)
-            if (envs.VLLM_USE_V1 or try_by_default):
-                use_v1 = True
+        try_v1 = envs.VLLM_USE_V1 or not envs.is_set("VLLM_USE_V1")
+        if try_v1 and self._is_v1_supported_oracle(model_config):
+            use_v1 = True
 
-        # If V1 is explicitly set, then we should
+        # If user explicitly set VLLM_USE_V1, sanity check we respect it.
         if envs.is_set("VLLM_USE_V1"):
             assert use_v1 == envs.VLLM_USE_V1
-        # Otherwise set the env variable globally.
+        # Otherwise, set the VLLM_USE_V1 variable globally.
         else:
             envs.set_vllm_use_v1(use_v1)
 
@@ -1673,7 +1671,7 @@ def _raise_or_fallback(feature_name: str, recommend_to_remove: bool):
 
 
 def _warn_or_fallback(feature_name: str) -> bool:
-    if envs.VLLM_USE_V1:
+    if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
         logger.warning(
             "Detected VLLM_USE_V1=1 with %s. Usage should "
             "be considered experimental. Please report any "

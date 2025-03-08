@@ -26,6 +26,12 @@ def test_reject_unsupported_models(monkeypatch, model):
 
         with pytest.raises(NotImplementedError):
             _ = args.create_engine_config()
+        m.delenv("VLLM_USE_V1")
+
+
+def test_reject_bad_config(monkeypatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "0")
 
 
 def test_unsupported_configs(monkeypatch):
@@ -86,7 +92,6 @@ def test_enable_by_default_fallback(monkeypatch):
     with monkeypatch.context() as m:
         if os.getenv("VLLM_USE_V1", None):
             m.delenv("VLLM_USE_V1")
-        m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
 
         # Should default to V1 for supported config.
         _ = AsyncEngineArgs(
@@ -94,6 +99,7 @@ def test_enable_by_default_fallback(monkeypatch):
             enforce_eager=True,
         ).create_engine_config()
         assert envs.VLLM_USE_V1
+        m.delenv("VLLM_USE_V1")
 
         # Should fall back to V0 for experimental config.
         _ = AsyncEngineArgs(
@@ -101,57 +107,45 @@ def test_enable_by_default_fallback(monkeypatch):
             enable_lora=True,
         ).create_engine_config()
         assert not envs.VLLM_USE_V1
+        m.delenv("VLLM_USE_V1")
 
-        # Should fall back to V0 for experimental config.
+        # Should fall back to V0 for supported model.
         _ = AsyncEngineArgs(
-            model=UNSUPPORTED_MODELS_V1[0], ).create_engine_config()
+            model=UNSUPPORTED_MODELS_V1[0]).create_engine_config()
         assert not envs.VLLM_USE_V1
+        m.delenv("VLLM_USE_V1")
 
 
 def test_v1_llm_by_default(monkeypatch):
     with monkeypatch.context() as m:
         if os.getenv("VLLM_USE_V1", None):
             m.delenv("VLLM_USE_V1")
-        m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
 
         # Should default to V1 for supported config.
         model = LLM(MODEL, enforce_eager=True)
         print(model.generate("Hello my name is"))
-
-        assert model.llm_engine.envs.VLLM_USE_V1
         assert hasattr(model.llm_engine, "engine_core")
-
-
-def test_v1_ray_llm_by_default(monkeypatch):
-    with monkeypatch.context() as m:
-        if os.getenv("VLLM_USE_V1", None):
-            m.delenv("VLLM_USE_V1")
-        m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
-
-        model = LLM(MODEL,
-                    enforce_eager=True,
-                    distributed_executor_backend="ray")
-        print(model.generate("Hello my name is"))
-        assert model.llm_engine.envs.VLLM_USE_V1
-        assert hasattr(model.llm_engine, "engine_core")
+        m.delenv("VLLM_USE_V1")
 
 
 def test_v1_attn_backend(monkeypatch):
     with monkeypatch.context() as m:
         if os.getenv("VLLM_USE_V1", None):
             m.delenv("VLLM_USE_V1")
-        m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
         m.setenv("VLLM_ATTENTION_BACKEND", "XFORMERS")
 
         # Fall back to V0.
-        engine_config = AsyncEngineArgs(model=MODEL).create_engine_config()
-        assert not engine_config.use_v1
+        _ = AsyncEngineArgs(model=MODEL).create_engine_config()
+        assert not envs.VLLM_USE_V1
+        m.delenv("VLLM_USE_V1")
 
         # Reject if V1.
         m.setenv("VLLM_USE_V1", "1")
         with pytest.raises(NotImplementedError):
             AsyncEngineArgs(model=MODEL).create_engine_config()
+        m.delenv("VLLM_USE_V1")
 
         m.setenv("VLLM_ATTENTION_BACKEND", "FLASHMLA")
-        engine_config = AsyncEngineArgs(model=MODEL).create_engine_config()
-        assert engine_config.use_v1
+        _ = AsyncEngineArgs(model=MODEL).create_engine_config()
+        assert envs.VLLM_USE_V1
+        m.delenv("VLLM_USE_V1")
