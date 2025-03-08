@@ -55,7 +55,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return True
+        return not envs.VLLM_USE_V1
 
     @classmethod
     def inference_mode(cls):
@@ -104,8 +104,7 @@ class TpuPlatform(Platform):
 
         # Adjust scheduler config for V1
         # TODO: Add support for these
-        if (envs.VLLM_USE_V1
-                and vllm_config.cache_config.enable_prefix_caching):
+        if envs.VLLM_USE_V1 and vllm_config.cache_config.enable_prefix_caching:
             logger.warning("[V1][TPU] Disable prefix caching")
             vllm_config.cache_config.enable_prefix_caching = False
 

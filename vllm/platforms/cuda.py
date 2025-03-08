@@ -249,6 +249,7 @@ class CudaPlatformBase(Platform):
                 "Cannot use FlashAttention-2 backend for block size not "
                 "divisible by 16.")
             target_backend = _Backend.XFORMERS
+
         # FlashAttn is valid for the model, checking if the package is
         # installed.
         if target_backend == _Backend.FLASH_ATTN:
