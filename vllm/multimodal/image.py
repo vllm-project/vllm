@@ -3,7 +3,7 @@
 import base64
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from PIL import Image
@@ -31,7 +31,7 @@ class ImagePlugin(MultiModalPlugin):
     def _get_hf_image_processor(
         self,
         model_config: "ModelConfig",
-        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ):
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
