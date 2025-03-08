@@ -44,11 +44,11 @@ SEEDS = [0]
 
 
 def p(s, t):
-    print(f"{s}: {t.shape}\n{t}")
+    #print(f"{s}: {t.shape}\n{t}")
     pass
 
 def pp(x):
-    print(x)
+    #print(x)
     pass
 
 
@@ -435,7 +435,7 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     p("sorted_token_ids[:num_pad]", sorted_token_ids[:num_pad])
     #sorted_token_ids = sorted_token_ids[:num_pad]
     p("orig m_indices", m_indices)
-    m_indices = torch.repeat_interleave(m_indices, M, dim=0)
+    m_indices = torch.repeat_interleave(m_indices, block_m, dim=0)
 
     print("GOT HERE2")
 
@@ -525,7 +525,6 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
     print(f"GOT HERE9 {out.shape}, {M}, {num_tokens}")
 
-    TT = topk_weight.shape[0]
     tmp_out = out.view(-1, topk, w2.shape[1])[:M, ...]
     #tmp_out = out[:M, ...].view(M, -1, w2.shape[1])
 
@@ -562,8 +561,8 @@ def iota(shape: Tuple[int, ...], dim: int = 0, **kwargs) -> torch.Tensor:
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
     #itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
-    #itertools.product(M_moe_dg, N_moe, K_moe, E, [1, 2, 4], BLOCK_SIZE, DTYPES, SEEDS))
-    itertools.product([512], [128], [256], [2], [2], BLOCK_SIZE, DTYPES, SEEDS))
+    itertools.product(M_moe_dg, N_moe, K_moe, E, [1, 2, 4], BLOCK_SIZE, DTYPES, SEEDS))
+    #itertools.product([512], [128], [256], [2], [2], BLOCK_SIZE, DTYPES, SEEDS))
     #itertools.product([128], [128], [256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS))
     #itertools.product([128], [128], [256], [2], [2], BLOCK_SIZE, DTYPES, SEEDS))
 @torch.inference_mode()
