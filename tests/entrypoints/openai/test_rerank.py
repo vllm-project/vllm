@@ -13,13 +13,7 @@ DTYPE = "bfloat16"
 
 @pytest.fixture(scope="module")
 def server():
-    args = [
-        "--enforce-eager",
-        "--max-model-len",
-        "100",
-        "--dtype",
-        DTYPE,
-    ]
+    args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

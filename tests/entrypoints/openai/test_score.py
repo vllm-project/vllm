@@ -45,13 +45,7 @@ def model(request):
 
 @pytest.fixture(scope="class")
 def server(model: dict[str, Any]):
-    args = [
-        "--enforce-eager",
-        "--max-model-len",
-        "100",
-        "--dtype",
-        DTYPE,
-    ]
+    args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
 
     with RemoteOpenAIServer(model["name"], args) as remote_server:
         yield remote_server
