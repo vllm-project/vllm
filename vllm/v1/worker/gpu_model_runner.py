@@ -1238,6 +1238,42 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         return hidden_states
 
+    @torch.inference_mode()
+    def _dummy_sampler_run(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+
+        logits = self.model.compute_logits(hidden_states, None)
+        num_reqs = logits.size(0)
+
+        dummy_tensors = lambda v: torch.full(
+            (num_reqs, ), v, device=self.device)
+
+        dummy_metadata = SamplingMetadata(
+            temperature=dummy_tensors(0.5),
+            all_greedy=False,
+            all_random=False,
+            top_p=dummy_tensors(0.9),
+            top_k=dummy_tensors(logits.size(1) - 1),
+            min_p=None,
+            generators={},
+            max_num_logprobs=None,
+            no_penalties=True,
+            prompt_token_ids=None,
+            frequency_penalties=dummy_tensors(0.1),
+            presence_penalties=dummy_tensors(0.1),
+            repetition_penalties=dummy_tensors(0.1),
+            output_token_ids=[[] for _ in range(num_reqs)],
+            min_tokens={},
+            logit_bias=[None for _ in range(num_reqs)],
+            allowed_token_ids_mask=None,
+        )
+        sampler_output = self.model.sample(logits=logits,
+                                           sampling_metadata=dummy_metadata)
+
+        return sampler_output
+
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
         # TODO: handle encoder-decoder models once we support them.
@@ -1353,37 +1389,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states = self._dummy_run(self.max_num_tokens)
             if get_pp_group().is_last_rank:
                 hidden_states = hidden_states[logit_indices]
-                logits = self.model.compute_logits(hidden_states, None)
-                dummy_tensors = lambda v: torch.full(
-                    (num_reqs, ), v, device=self.device)
-                dummy_metadata = SamplingMetadata(
-                    temperature=dummy_tensors(0.5),
-                    all_greedy=False,
-                    all_random=False,
-                    top_p=dummy_tensors(0.9),
-                    top_k=dummy_tensors(logits.size(1) - 1),
-                    min_p=None,
-                    generators={},
-                    max_num_logprobs=None,
-                    no_penalties=True,
-                    prompt_token_ids=torch.ones_like(logits,
-                                                     dtype=torch.int64),
-                    frequency_penalties=dummy_tensors(0.1),
-                    presence_penalties=dummy_tensors(0.1),
-                    repetition_penalties=dummy_tensors(0.1),
-                    output_token_ids=[[] for _ in range(num_reqs)],
-                    min_tokens={},
-                    logit_bias=[None for _ in range(num_reqs)],
-                    allowed_token_ids_mask=None,
-                )
-                sampler_output = self.model.sample(
-                    logits=logits, sampling_metadata=dummy_metadata)
+                sampler_output = self._dummy_sampler_run(hidden_states)
             else:
-                logits = None
                 sampler_output = None
-                dummy_metadata = None
             torch.cuda.synchronize()
-            del hidden_states, logits, sampler_output, dummy_metadata
+            del hidden_states, sampler_output
             self.encoder_cache.clear()
         gc.collect()
 
