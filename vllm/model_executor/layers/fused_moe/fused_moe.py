@@ -1379,7 +1379,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             block_shape=block_shape)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'] if not use_dg else 1,
+            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
         invoke_fused_moe_kernel(qcurr_hidden_states,
