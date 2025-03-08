@@ -44,7 +44,6 @@ if __name__ == "__main__":
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngineWithStats.from_engine_args(engine_args)
-
     vllm.entrypoints.api_server.engine = engine
     uvicorn.run(
         app,
