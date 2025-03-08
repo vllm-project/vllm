@@ -755,10 +755,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             #print("GOT HERE2")
             X = A.shape
             Y = A_scale.shape
-            if False and not mul_routed_weight:
-                #print("GOT HERE2A")
-                A_scale = dg.get_col_major_tma_aligned_tensor(A_scale)
-                #print("GOT HERE2B")
             if not mul_routed_weight:
                 A = A.view(A.shape[0], -1, A.shape[1]).repeat(1, top_k, 1).reshape(-1, A.shape[1])
                 A_scale = A_scale.view(A_scale.shape[0], -1,
@@ -1551,6 +1547,7 @@ def fused_experts_impl(
             break
 
         if tokens_in_chunk < CHUNK_SIZE and chunk > 0:
+            assert False # for now
             # Adjust the intermediate cache size and config for the last
             # chunk. Note that in most cases we only have one chunk
             # so the cache size and config are already set correctly and
@@ -1564,17 +1561,28 @@ def fused_experts_impl(
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
+        block_m = config['BLOCK_SIZE_M']
+        assert not use_dg or block_m == 128
+
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
+            moe_align_block_size(curr_topk_ids, block_m,
                                  global_num_experts, expert_map))
 
-        # TODO: fix, this won't work chunked
         if use_dg:
-            p("SOR", sorted_token_ids)
-            #expert_ids = torch.arange(0, top_k_num, dtype=torch.int)
-            #expert_ids = expert_ids.unsqueeze(-1).expand(top_k_num, tokens_in_chunk).contiguous().view(-1)
-            assert sorted_token_ids[sorted_token_ids >= top_k_num*M].sum() == 0
+            num_tokens = top_k_num * M
+            pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) * block_m) - sorted_token_ids.numel()
+            if pad_size > 0:
+                sorted_token_ids = torch.nn.functional.pad(sorted_token_ids, (0, pad_size), "constant", num_tokens)
 
+                sorted_token_ids = sorted_token_ids.clamp(max=num_tokens-1)
+                expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
+
+            scale = sorted_token_ids.numel()//(M*top_k_num)
+
+            intermediate_cache1 = intermediate_cache1.repeat_interleave(scale, dim=0)
+            intermediate_cache2 = intermediate_cache2.repeat_interleave(scale, dim=0)
+            intermediate_cache3 = intermediate_cache3.repeat_interleave(scale, dim=0)
+            #print(f"fused2 {intermediate_cache1.shape}")
 
         p("fused topk", topk_ids)
         p("fused sorted", sorted_token_ids)
