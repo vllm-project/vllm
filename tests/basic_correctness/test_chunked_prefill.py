@@ -96,8 +96,9 @@ def test_models_distributed(
     model: str,
     distributed_executor_backend: str,
     attention_backend: str,
+    monkeypatch,
 ) -> None:
-    override_backend_env_variable(attention_backend)
+    override_backend_env_variable(monkeypatch, attention_backend)
 
     if (model == "meta-llama/Llama-3.2-1B-Instruct"
             and distributed_executor_backend == "ray"):
@@ -223,7 +224,6 @@ def test_with_prefix_caching(
     chunk_size: int,
     tensor_parallel_size: int,
     dtype: str,
-    monkeypatch,
 ) -> None:
     """
     Checks exact match decode with and without prefix caching
