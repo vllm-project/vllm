@@ -321,8 +321,10 @@ class ModelConfig:
 
         from vllm.platforms import current_platform
 
-        if self.enable_sleep_mode and not current_platform.is_cuda():
-            raise ValueError("Sleep mode is only supported on CUDA devices.")
+        if self.enable_sleep_mode and not (current_platform.is_cuda()
+                                           or current_platform.is_rocm()):
+            raise ValueError(
+                "Sleep mode is only supported on CUDA/ROCM devices.")
 
         hf_config = get_config(self.hf_config_path or self.model,
                                trust_remote_code, revision, code_revision,
