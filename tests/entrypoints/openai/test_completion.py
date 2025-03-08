@@ -89,6 +89,8 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
         "2",
         "--max-prompt-adapter-token",
         "128",
+        "--seed",
+        "0",
     ]
 
 

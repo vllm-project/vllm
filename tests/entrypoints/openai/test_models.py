@@ -40,6 +40,8 @@ def server(zephyr_lora_files):
         "2",
         "--max-num-seqs",
         "128",
+        "--seed",
+        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

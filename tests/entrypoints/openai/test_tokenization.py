@@ -31,6 +31,8 @@ def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
         f"zephyr-lora2={zephyr_lora_added_tokens_files}",
         "--max-lora-rank",
         "64",
+        "--seed",
+        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

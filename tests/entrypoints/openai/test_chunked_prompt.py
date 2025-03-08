@@ -27,6 +27,8 @@ def server():
         "1000",
         # large prompts create a lot of output
         "--disable-log-requests",
+        "--seed",
+        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

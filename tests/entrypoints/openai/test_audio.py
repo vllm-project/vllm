@@ -26,6 +26,8 @@ def server():
         "5",
         "--enforce-eager",
         "--trust-remote-code",
+        "--seed",
+        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

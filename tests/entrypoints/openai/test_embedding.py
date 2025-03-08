@@ -30,6 +30,8 @@ def server():
         "512",
         "--chat-template",
         DUMMY_CHAT_TEMPLATE,
+        "--seed",
+        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

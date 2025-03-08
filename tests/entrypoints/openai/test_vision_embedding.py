@@ -40,6 +40,8 @@ def server():
         f"image={MAXIMUM_IMAGES}",
         "--chat-template",
         str(vlm2vec_jinja_path),
+        "--seed",
+        "0",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
