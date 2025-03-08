@@ -21,12 +21,13 @@ MODELS = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    We should enable this for V1, but VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT,
+    so use VLLM_USE_V1=0 for all tests in the file.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 @pytest.fixture(scope="module", autouse=True)
