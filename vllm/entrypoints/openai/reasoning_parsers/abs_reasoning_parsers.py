@@ -24,6 +24,7 @@ class ReasoningParser:
 
     def __init__(self, tokenizer: AnyTokenizer):
         self.model_tokenizer = tokenizer
+        self._is_reasoning_complete = False
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -75,6 +76,20 @@ class ReasoningParser:
         raise NotImplementedError(
             "AbstractReasoningParser.extract_reasoning_content_streaming "
             "has not been implemented!")
+
+    @property
+    def is_reasoning_complete(self) -> bool:
+        """
+        Indicates whether the reasoning is completed.
+        
+        Returns:
+            True: Reasoning is completed 
+            False: Reasoning is still in progress
+        """
+        return self._is_reasoning_complete
+
+    def _set_reasoning_complete(self, value: bool):
+        self._is_reasoning_complete = value
 
 
 class ReasoningParserManager:
