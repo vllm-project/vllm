@@ -2114,4 +2114,4 @@ class LLMEngine:
 
 if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
     from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
-    LLMEngine = V1LLMEngine
+    LLMEngine = V1LLMEngine  # type: ignore
