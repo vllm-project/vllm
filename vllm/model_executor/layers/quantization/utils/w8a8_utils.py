@@ -251,8 +251,8 @@ def torch_channelwise_w8a8_scaled_mm(*, qinput: torch.Tensor,
 
 def dispatch_w8a8_scaled_mm(
         cutlass_fp8_supported: bool, per_tensor_weights: bool,
-        per_tensor_activations: bool,
-        use_per_token_if_dynamic: bool) -> Callable[..., torch.Tensor]:
+        per_tensor_activations: bool, use_per_token_if_dynamic: Optional[bool]
+) -> Callable[..., torch.Tensor]:
 
     if cutlass_fp8_supported:
         return cutlass_w8a8_scaled_mm
@@ -306,7 +306,7 @@ class Fp8LinearOp:
     ) -> torch.Tensor:
         input_2d = input.view(-1, input.shape[-1])
         output_shape = [*input.shape[:-1], weight.shape[1]]
-        if cutlass_fp8_supported:
+        if self.cutlass_fp8_supported:
             qinput, x_scale = ops.scaled_fp8_quant(
                 input_2d,
                 input_scale,
@@ -326,8 +326,8 @@ class Fp8LinearOp:
         per_tensor_activations = (x_scale.numel() == 1)
 
         w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(
-            cutlass_fp8_supported, per_tensor_weights, per_tensor_activations,
-            use_per_token_if_dynamic)
+            self.cutlass_fp8_supported, per_tensor_weights,
+            per_tensor_activations, use_per_token_if_dynamic)
 
         return w8a8_scaled_mm_func(qinput=qinput,
                                    weight=weight,
