@@ -352,12 +352,6 @@ class Phi4MMImageEncoder(nn.Module):
         # n_embed or hidden_size
         hidden_size = config.n_embd if hasattr(
             config, 'n_embd') else config.hidden_size
-        if hasattr(config, 'embd_pdrop') or hasattr(config, 'embed_pdrop'):
-            embd_drop = config.embd_pdrop if hasattr(
-                config, 'embd_pdrop') else config.embed_pdrop
-            self.drop = nn.Dropout(embd_drop)
-        else:
-            self.drop = None
 
         # layer_idx to output the img features
         if isinstance(config.img_processor, dict):

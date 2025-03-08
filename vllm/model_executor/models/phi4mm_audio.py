@@ -16,7 +16,6 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointWrapper)
 from torch.distributed.fsdp.fully_sharded_data_parallel import (
     FullyShardedDataParallel)
-from torch.utils.checkpoint import checkpoint
 from transformers import PretrainedConfig
 
 from vllm.model_executor.models.phi4mm_utils import (
@@ -971,9 +970,6 @@ class ConformerEncoder(TransformerEncoderBase):
 
         return input_tensor, masks  # , layer_emb
 
-    def gradient_checkpointing_enable(self):
-        pass
-
 
 class WindowQformer(nn.Module):
     """Window-level Qformer"""
@@ -1007,13 +1003,6 @@ class WindowQformer(nn.Module):
         self.after_norm = (nn.LayerNorm(attention_dim, eps=1e-12)
                            if normalize_before else None)
         self.window_size = window_size
-        self.gradient_checkpointing_enable = False
-
-    def enable_gradient_checkpointing(self):
-        self.gradient_checkpointing_enable = True
-
-    def disable_gradient_checkpointing(self):
-        self.gradient_checkpointing_enable = False
 
     def forward(self, audio_embed, mask, embed_len=None):
         """forward decoder"""
@@ -1041,20 +1030,10 @@ class WindowQformer(nn.Module):
         # NT' x 1 x D
         q = self.queries.expand(bsz * slen, -1, -1)
         for layer in self.decoders:
-            if self.gradient_checkpointing_enable and self.training:
-                q = checkpoint(
-                    layer.__call__,
-                    q,
-                    embed_chunk,
-                    None,
-                    mask,
-                    use_reentrant=True,
-                )
-            else:
-                q = layer(tgt=q,
-                          memory=embed_chunk,
-                          tgt_mask=None,
-                          memory_mask=mask)
+            q = layer(tgt=q,
+                      memory=embed_chunk,
+                      tgt_mask=None,
+                      memory_mask=mask)
 
         if self.after_norm is not None:
             q = self.after_norm(q)
@@ -1077,13 +1056,6 @@ class AudioEmbedding(nn.Module):
         hidden_size = (config.n_embd
                        if hasattr(config, "n_embd") else config.hidden_size)
 
-        if hasattr(config, "embd_pdrop") or hasattr(config, "embed_pdrop"):
-            embd_drop = (config.embd_pdrop if hasattr(config, "embd_pdrop")
-                         else config.embed_pdrop)
-            self.drop = nn.Dropout(embd_drop)
-        else:
-            self.drop = None
-
         # self.wte = nn.Embedding(config.vocab_size, hidden_size)
 
         audio_dim_out = (
@@ -1096,12 +1068,6 @@ class AudioEmbedding(nn.Module):
             encoder_config = config.audio_processor.get("config", None)
             assert encoder_config is not None
             self.encoder = ConformerEncoder(**encoder_config)
-
-            # fake initialization, create encoder_embedding layer only so that
-            # in decoding, all parameters can be loaded in
-            # from_pretrained_function in training, we do post init after
-            # from_pretrained function to make sure the correct initialization
-            self.encoder.post_init({})
 
             audio_dim_out = encoder_config["attention_dim"]
             n_mels = encoder_config["input_size"]
