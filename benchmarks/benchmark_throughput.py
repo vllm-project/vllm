@@ -370,22 +370,20 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
 def get_requests(args, tokenizer):
     # Common parameters for all dataset types.
     common_kwargs = {
+        "dataset_path": args.dataset_path,
+        "random_seed": args.seed,
+    }
+    sample_kwargs = {
         "tokenizer": tokenizer,
-        "enable_lora_tokenizer": args.enable_lora,
         "lora_path": args.lora_path,
         "max_loras": args.max_loras,
         "num_requests": args.num_prompts,
         "input_len": args.input_len,
         "output_len": args.output_len,
-        "dataset_path": args.dataset_path,
-        "model": args.model,
-        "random_seed": args.seed,
     }
-    sample_kwargs = {}
-
     if args.dataset_path is None or args.dataset_name == "random":
-        common_kwargs["range_ratio"] = args.random_range_ratio
-        common_kwargs["prefix_len"] = args.prefix_len
+        sample_kwargs["range_ratio"] = args.random_range_ratio
+        sample_kwargs["prefix_len"] = args.prefix_len
         dataset_cls = RandomDataset
     elif args.dataset_name == "sharegpt":
         dataset_cls = ShareGPTDataset
@@ -393,7 +391,7 @@ def get_requests(args, tokenizer):
         assert tokenizer.chat_template or tokenizer.default_chat_template, (
             "Tokenizer/model must have chat template for sonnet dataset.")
         dataset_cls = SonnetDataset
-        common_kwargs["prefix_len"] = args.prefix_len
+        sample_kwargs["prefix_len"] = args.prefix_len
         sample_kwargs["return_prompt_formatted"] = True
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset

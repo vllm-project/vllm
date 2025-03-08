@@ -68,37 +68,13 @@ class BenchmarkDataset(ABC):
 
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizerBase,
-        enable_lora_tokenizer: bool = False,
-        lora_path: Optional[str] = None,
-        max_loras: Optional[int] = None,
-        num_requests: int = DEFAULT_NUM_REQUESTS,
-        input_len: Optional[int] = None,
-        output_len: Optional[int] = None,
         dataset_path: Optional[str] = None,
-        model: Optional[str] = None,
         random_seed: int = DEFAULT_SEED,
     ) -> None:
-        self.tokenizer = tokenizer
         self.dataset_path = dataset_path
         self.random_seed = (random_seed
                             if random_seed is not None else self.DEFAULT_SEED)
         self.data = None
-
-        # LoRA related
-        self.enable_lora_tokenizer = enable_lora_tokenizer
-        self.lora_path = lora_path
-        self.max_loras = max_loras
-
-        self.num_requests = (num_requests if num_requests is not None else
-                             self.DEFAULT_NUM_REQUESTS)
-        self.input_len = input_len
-        self.output_len = output_len
-
-        self.model = model
-
-        if self.enable_lora_tokenizer and not self.lora_path:
-            raise ValueError("LoRA is enabled but no lora_path provided.")
 
     def load_data(self) -> None:
         """
@@ -111,39 +87,32 @@ class BenchmarkDataset(ABC):
 
     def get_random_lora_request(
         self,
-        for_online_benchmark=False
+        tokenizer,
+        max_loras: Optional[int] = None,
+        lora_path: Optional[str] = None,
     ) -> tuple[Optional[LoRARequest], AnyTokenizer]:
         """
         Return a tuple (lora_request, tokenizer) for tokenizing requests.  If
         LoRA is enabled, returns the LoRA-specific tokenizer; otherwise, the
         base tokenizer.
         """
-        if not self.enable_lora_tokenizer or for_online_benchmark:
-            return None, self.tokenizer
-
-        if self.max_loras is None:
-            raise ValueError(
-                "max_lora must be set when enabling LoRA tokenizer.")
+        if max_loras is None or lora_path is None:
+            return None, tokenizer
 
         # Generate a random LoRA ID in the range [1, max_loras].
-        lora_id = random.randint(1, self.max_loras)
+        lora_id = random.randint(1, max_loras)
         lora_request = LoRARequest(
             lora_name=str(lora_id),
             lora_int_id=lora_id,
-            lora_path=lora_path_on_disk(self.lora_path),
+            lora_path=lora_path_on_disk(lora_path),
         )
         if lora_id not in lora_tokenizer_cache:
             lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
         return lora_request, lora_tokenizer_cache[lora_id]
 
     @abstractmethod
-    def sample(
-        self,
-        for_online_benchmark: bool = False
-    ) -> list[Union[
-            SampleRequest,
-            tuple[str, int, int, Optional[MultiModalDataDict]],
-    ]]:
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase) -> list[SampleRequest]:
         """
         Generate sample requests from the dataset.
         """
@@ -193,18 +162,23 @@ def lora_path_on_disk(lora_path: str) -> str:
 lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
 
 
-def process_image(
-    image: Any, ) -> Union[MultiModalDataDict, Mapping[str, Any]]:
+def process_image(image: Any, ) -> Mapping[str, Any]:
     """
-    Process an single image input and return a multimedia content dictionary.
+    Process a single image input and return a multimedia content dictionary.
 
-    Base64-Encoded Image URL (return_multi_modal_data_dict=False): - If the
-         input is a PIL.Image.Image, it is converted to RGB, saved as a JPEG
-         in-memory,
-           encoded in base64, and returned as a data URL.
-         - If the input is a string, it is treated as a URL or file path. If it
-           lacks a valid prefix, "file://" is prepended.
-         - Raises a ValueError if the input type is invalid.
+    For a PIL.Image.Image input:
+      - Converts the image to RGB.
+      - Saves the image as a JPEG in-memory.
+      - Encodes the JPEG data as a base64 string.
+      - Returns a dictionary with the image as a base64 data URL.
+
+    For a string input:
+      - Treats the string as a URL or file path.
+      - Prepends "file://" if the string doesn't start with "http://" or "file://".
+      - Returns a dictionary with the image URL.
+
+    Raises:
+      ValueError: If the input is neither a PIL.Image.Image nor a string.
     """
     if isinstance(image, Image.Image):
         image = image.convert("RGB")
@@ -239,49 +213,56 @@ class RandomDataset(BenchmarkDataset):
     DEFAULT_RANGE_RATIO = 1.0
     DEFAULT_INPUT_LEN = 1024
     DEFAULT_OUTPUT_LEN = 128
+    DEFAULT_NUM_REQUESTS = 1000
 
     def __init__(
         self,
-        prefix_len: int = DEFAULT_PREFIX_LEN,
-        range_ratio: float = DEFAULT_RANGE_RATIO,
-        input_len: int = DEFAULT_INPUT_LEN,
-        output_len: int = DEFAULT_OUTPUT_LEN,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.prefix_len = (prefix_len if prefix_len is not None else
-                           self.DEFAULT_PREFIX_LEN)
-        self.range_ratio = (range_ratio if range_ratio is not None else
-                            self.DEFAULT_RANGE_RATIO)
-        self.input_len = (input_len
-                          if input_len is not None else self.DEFAULT_INPUT_LEN)
-        self.output_len = (output_len if output_len is not None else
-                           self.DEFAULT_OUTPUT_LEN)
 
-    def sample(self, for_online_benchmark: bool = False) -> list:
-        vocab_size = self.tokenizer.vocab_size
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               prefix_len: int = DEFAULT_PREFIX_LEN,
+               range_ratio: float = DEFAULT_RANGE_RATIO,
+               input_len: int = DEFAULT_INPUT_LEN,
+               output_len: int = DEFAULT_OUTPUT_LEN,
+               num_requests: int = DEFAULT_NUM_REQUESTS,
+               **kwargs) -> list[SampleRequest]:
+        prefix_len = (prefix_len
+                      if prefix_len is not None else self.DEFAULT_PREFIX_LEN)
+        range_ratio = (range_ratio if range_ratio is not None else
+                       self.DEFAULT_RANGE_RATIO)
+        input_len = (input_len
+                     if input_len is not None else self.DEFAULT_INPUT_LEN)
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        num_requests = (num_requests if num_requests is not None else
+                        self.DEFAULT_NUM_REQUESTS)
+
+        vocab_size = tokenizer.vocab_size
+
         prefix_token_ids = (np.random.randint(
-            0, vocab_size, size=self.prefix_len).tolist()
-                            if self.prefix_len > 0 else [])
+            0, vocab_size, size=prefix_len).tolist() if prefix_len > 0 else [])
 
-        input_low = int(self.input_len * self.range_ratio)
-        output_low = int(self.output_len * self.range_ratio)
+        input_low = int(input_len * range_ratio)
+        output_low = int(output_len * range_ratio)
 
         input_lens = np.random.randint(input_low,
-                                       self.input_len + 1,
-                                       size=self.num_requests)
+                                       input_len + 1,
+                                       size=num_requests)
         output_lens = np.random.randint(output_low,
-                                        self.output_len + 1,
-                                        size=self.num_requests)
-        offsets = np.random.randint(0, vocab_size, size=self.num_requests)
+                                        output_len + 1,
+                                        size=num_requests)
+        offsets = np.random.randint(0, vocab_size, size=num_requests)
 
         requests = []
-        for i in range(self.num_requests):
+        for i in range(num_requests):
             inner_seq = ((offsets[i] + i + np.arange(input_lens[i])) %
                          vocab_size).tolist()
             token_sequence = prefix_token_ids + inner_seq
-            prompt = self.tokenizer.decode(token_sequence)
-            total_input_len = self.prefix_len + int(input_lens[i])
+            prompt = tokenizer.decode(token_sequence)
+            total_input_len = prefix_len + int(input_lens[i])
             requests.append(
                 SampleRequest(
                     prompt,
@@ -301,6 +282,7 @@ class ShareGPTDataset(BenchmarkDataset):
     Implements the ShareGPT dataset.  Loads data from a JSON file and generates
     sample requests based on conversation turns.
     """
+    DEFAULT_NUM_REQUESTS = 1000
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -319,26 +301,32 @@ class ShareGPTDataset(BenchmarkDataset):
         ]
         random.shuffle(self.data)
 
-    def sample(self, for_online_benchmark: bool = False) -> list:
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               lora_path: Optional[str] = None,
+               max_loras: Optional[int] = None,
+               num_requests: int = DEFAULT_NUM_REQUESTS,
+               output_len: Optional[int] = None,
+               **kwargs) -> list:
         samples: list = []
         for entry in self.data:
-            if len(samples) >= self.num_requests:
+            if len(samples) >= num_requests:
                 break
             prompt = entry["conversations"][0]["value"]
             completion = entry["conversations"][1]["value"]
 
             lora_request, tokenizer = self.get_random_lora_request(
-                for_online_benchmark=for_online_benchmark)
+                tokenizer=tokenizer, max_loras=max_loras, lora_path=lora_path)
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
             prompt_len = len(prompt_ids)
             output_len = (len(completion_ids)
-                          if self.output_len is None else self.output_len)
+                          if output_len is None else output_len)
             if not is_valid_sequence(
                     prompt_len,
                     output_len,
-                    skip_min_output_len_check=self.output_len is not None
-                    and self.output_len > 0,
+                    skip_min_output_len_check=output_len is not None
+                    and output_len > 0,
             ):
                 continue
             samples.append(
@@ -366,25 +354,14 @@ class SonnetDataset(BenchmarkDataset):
     DEFAULT_PREFIX_LEN = 200
     DEFAULT_INPUT_LEN = 550
     DEFAULT_OUTPUT_LEN = 150
+    DEFAULT_NUM_REQUESTS = 1000
 
     def __init__(
         self,
-        prefix_len: int = DEFAULT_PREFIX_LEN,
-        input_len: int = DEFAULT_INPUT_LEN,
-        output_len: int = DEFAULT_OUTPUT_LEN,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.prefix_len = (self.DEFAULT_PREFIX_LEN
-                           if prefix_len is None else prefix_len)
-        self.input_len = (self.DEFAULT_INPUT_LEN
-                          if input_len is None else input_len)
-        self.output_len = (self.DEFAULT_OUTPUT_LEN
-                           if output_len is None else output_len)
-        if self.enable_lora_tokenizer:
-            raise NotImplementedError("LoRA is not supported in SonnetDataset")
-        if self.data is None:
-            self.load_data()
+        self.load_data()
 
     def load_data(self) -> None:
         if not self.dataset_path:
@@ -392,14 +369,23 @@ class SonnetDataset(BenchmarkDataset):
         with open(self.dataset_path, encoding="utf-8") as f:
             self.data = f.readlines()
 
-    def sample(
-        self,
-        return_prompt_formatted: bool = False,
-    ) -> list:
+    def sample(self,
+               tokenizer,
+               prefix_len: int = DEFAULT_PREFIX_LEN,
+               input_len: int = DEFAULT_INPUT_LEN,
+               output_len: int = DEFAULT_OUTPUT_LEN,
+               num_requests: int = DEFAULT_NUM_REQUESTS,
+               return_prompt_formatted: bool = False,
+               **kwargs) -> list:
         # Calculate average token length for a poem line.
-        tokenized_lines = [
-            self.tokenizer(line).input_ids for line in self.data
-        ]
+        prefix_len = (self.DEFAULT_PREFIX_LEN
+                      if prefix_len is None else prefix_len)
+        input_len = (self.DEFAULT_INPUT_LEN
+                     if input_len is None else input_len)
+        output_len = (self.DEFAULT_OUTPUT_LEN
+                      if output_len is None else output_len)
+
+        tokenized_lines = [tokenizer(line).input_ids for line in self.data]
         avg_len = sum(len(tokens)
                       for tokens in \
                         tokenized_lines) / len(tokenized_lines)
@@ -407,33 +393,34 @@ class SonnetDataset(BenchmarkDataset):
         # Build the base prompt.
         base_prompt = "Pick as many lines as you can from these poem lines:\n"
         base_msg = [{"role": "user", "content": base_prompt}]
-        base_fmt = self.tokenizer.apply_chat_template(
-            base_msg, add_generation_prompt=True, tokenize=False)
-        base_offset = len(self.tokenizer(base_fmt).input_ids)
-        if self.input_len <= base_offset:
+        base_fmt = tokenizer.apply_chat_template(base_msg,
+                                                 add_generation_prompt=True,
+                                                 tokenize=False)
+        base_offset = len(tokenizer(base_fmt).input_ids)
+        if input_len <= base_offset:
             raise ValueError(
                 f"'input_len' must be higher than the base prompt length "
                 f"({base_offset}).")
 
         # Determine how many poem lines to use.
-        num_input_lines = round((self.input_len - base_offset) / avg_len)
-        num_prefix_lines = round((self.prefix_len - base_offset) / avg_len)
+        num_input_lines = round((input_len - base_offset) / avg_len)
+        num_prefix_lines = round((prefix_len - base_offset) / avg_len)
         prefix_lines = self.data[:num_prefix_lines]
 
         samples = []
-        for _ in range(self.num_requests):
+        for _ in range(num_requests):
             extra_lines = random.choices(self.data,
                                          k=num_input_lines - num_prefix_lines)
             prompt = f"{base_prompt}{''.join(prefix_lines + extra_lines)}"
             msg = [{"role": "user", "content": prompt}]
-            prompt_formatted = self.tokenizer.apply_chat_template(
+            prompt_formatted = tokenizer.apply_chat_template(
                 msg, add_generation_prompt=True, tokenize=False)
-            prompt_len = len(self.tokenizer(prompt_formatted).input_ids)
+            prompt_len = len(tokenizer(prompt_formatted).input_ids)
             samples.append(
                 SampleRequest(
                     prompt_formatted if return_prompt_formatted else prompt,
                     prompt_len,
-                    self.output_len,
+                    output_len,
                 ))
         return samples
 
@@ -449,12 +436,13 @@ class BurstGPTDataset(BenchmarkDataset):
     sample requests based on synthetic prompt generation. Only rows with Model
     "GPT-4" and positive response tokens are used.
     """
+    DEFAULT_NUM_REQUESTS = 1000
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.load_data()
 
-    def load_data(self):
+    def load_data(self, ):
         if self.dataset_path is None:
             raise ValueError("dataset_path must be provided for loading data.")
 
@@ -464,25 +452,34 @@ class BurstGPTDataset(BenchmarkDataset):
         # Remove failed requests (where Response tokens is 0 or less).
         gpt4_df = gpt4_df[gpt4_df["Response tokens"] > 0]
         # Sample the desired number of rows.
-        if self.num_requests <= len(gpt4_df):
-            gpt4_df = gpt4_df.sample(n=self.num_requests,
-                                     random_state=self.random_seed)
+        self.data = gpt4_df
+
+    def _sample_loaded_data(self, num_requests: int = DEFAULT_NUM_REQUESTS):
+        if num_requests <= len(self.data):
+            data = self.data.sample(n=num_requests,
+                                    random_state=self.random_seed)
         else:
-            gpt4_df = gpt4_df.sample(
-                n=self.num_requests,
+            data = self.data.sample(
+                n=num_requests,
                 random_state=self.random_seed,
                 replace=True,
             )
         # Convert the dataframe to a list of lists.
-        self.data = gpt4_df.values.tolist()
+        return data.values.tolist()
 
-    def sample(self, for_online_benchmark: bool = False) -> list:
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               num_requests: int = DEFAULT_NUM_REQUESTS,
+               max_loras: Optional[int] = None,
+               lora_path: Optional[str] = None,
+               **kwargs) -> list[SampleRequest]:
         samples = []
-        for i in range(self.num_requests):
-            input_len = int(self.data[i][2])
-            output_len = int(self.data[i][3])
+        data = self._sample_loaded_data(num_requests=num_requests)
+        for i in range(num_requests):
+            input_len = int(data[i][2])
+            output_len = int(data[i][3])
             lora_req, tokenizer = self.get_random_lora_request(
-                for_online_benchmark=for_online_benchmark)
+                tokenizer=tokenizer, max_loras=max_loras, lora_path=lora_path)
             vocab_size = tokenizer.vocab_size
             # Generate a synthetic prompt: a list of token IDs computed as (i +
             # j) modulo vocab_size.
@@ -508,6 +505,7 @@ class HuggingFaceDataset(BenchmarkDataset):
     Dataset class for processing a HuggingFace dataset with conversation data
     and optional images.
     """
+    DEFAULT_NUM_REQUESTS = 1000
 
     def __init__(
         self,
@@ -539,25 +537,31 @@ class HuggingFaceDataset(BenchmarkDataset):
         self.data = self.data.shuffle(seed=self.random_seed).filter(
             lambda x: len(x["conversations"]) >= 2)
 
-    def sample(self, for_online_benchmark: bool = False) -> list:
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               num_requests: int = DEFAULT_NUM_REQUESTS,
+               lora_path: Optional[str] = None,
+               max_loras: Optional[int] = None,
+               output_len: Optional[int] = None,
+               **kwargs) -> list:
         sampled_requests = []
-        dynamic_output = self.output_len is None
+        dynamic_output = output_len is None
 
         for item in self.data:
-            if len(sampled_requests) >= self.num_requests:
+            if len(sampled_requests) >= num_requests:
                 break
 
             conv = item["conversations"]
             prompt, completion = conv[0]["value"], conv[1]["value"]
 
             lora_request, tokenizer = self.get_random_lora_request(
-                for_online_benchmark=for_online_benchmark)
+                tokenizer, lora_path=lora_path, max_loras=max_loras)
 
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
             prompt_len = len(prompt_ids)
             completion_len = len(completion_ids)
-            output_len = completion_len if dynamic_output else self.output_len
+            output_len = completion_len if dynamic_output else output_len
             assert isinstance(output_len, int) and output_len > 0
             if dynamic_output and not is_valid_sequence(
                     prompt_len, completion_len):
@@ -587,19 +591,17 @@ class VisionArenaDataset(BenchmarkDataset):
     """
 
     DEFAULT_OUTPUT_LEN = 128
+    DEFAULT_NUM_REQUESTS = 1000
 
     def __init__(
         self,
         dataset_split: str,
         dataset_subset: Optional[str] = None,
-        output_len: int = DEFAULT_OUTPUT_LEN,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
-        self.output_len = (output_len if output_len is not None else
-                           self.DEFAULT_OUTPUT_LEN)
 
         if self.dataset_path != VISION_ARENA_DATASET_PATH:
             raise ValueError(f"Only support Vision Arena dataset.\
@@ -608,10 +610,6 @@ class VisionArenaDataset(BenchmarkDataset):
             raise ValueError("Dataset split must be 'train'.")
 
         self.load_data()
-
-        if self.enable_lora_tokenizer:
-            raise NotImplementedError(
-                "LoRA is not supported in VisionArenaDataset")
 
     def load_data(self) -> None:
         dataset = load_dataset(
@@ -622,23 +620,26 @@ class VisionArenaDataset(BenchmarkDataset):
         )
         self.data = dataset.shuffle(seed=self.random_seed)
 
-    def sample(self, for_online_benchmark: bool = False) -> list:
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               output_len: int = DEFAULT_OUTPUT_LEN,
+               num_requests: int = DEFAULT_NUM_REQUESTS,
+               **kwargs) -> list:
         # TODO (jenniferzhao): Add support for offline benchmark sampling
-        assert for_online_benchmark, (
-            "VisionArenaDataset only support online benchmark sampling "
-            "for now")
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests = []
         for item in self.data:
-            if len(sampled_requests) >= self.num_requests:
+            if len(sampled_requests) >= num_requests:
                 break
             prompt = item["turns"][0][0]["content"]
-            prompt_len = len(self.tokenizer(prompt).input_ids)
+            prompt_len = len(tokenizer(prompt).input_ids)
             mm_content = process_image(item["images"][0])
             sampled_requests.append(
                 SampleRequest(
                     prompt,
                     prompt_len,
-                    self.output_len,
+                    output_len,
                     mm_content,
                 ))
         return sampled_requests

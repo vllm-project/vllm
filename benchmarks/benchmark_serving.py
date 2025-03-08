@@ -567,21 +567,24 @@ def main(args: argparse.Namespace):
             "'--dataset-path' if required.")
 
     if args.dataset_name == "sonnet":
-        dataset = SonnetDataset(
-            dataset_path=args.dataset_path,
-            num_requests=args.num_prompts,
-            input_len=args.sonnet_input_len,
-            output_len=args.sonnet_output_len,
-            prefix_len=args.sonnet_prefix_len,
-            tokenizer=tokenizer,
-        )
+        dataset = SonnetDataset(dataset_path=args.dataset_path)
         # For the "sonnet" dataset, formatting depends on the backend.
         if args.backend == "openai-chat":
-            input_requests = dataset.sample(return_prompt_formatted=False)
+            input_requests = dataset.sample(num_requests=args.num_prompts,
+                                            input_len=args.sonnet_input_len,
+                                            output_len=args.sonnet_output_len,
+                                            prefix_len=args.sonnet_prefix_len,
+                                            tokenizer=tokenizer,
+                                            return_prompt_formatted=False)
         else:
             assert tokenizer.chat_template or tokenizer.default_chat_template, (
                 "Tokenizer/model must have chat template for sonnet dataset.")
-            input_requests = dataset.sample(return_prompt_formatted=True)
+            input_requests = dataset.sample(num_requests=args.num_prompts,
+                                            input_len=args.sonnet_input_len,
+                                            output_len=args.sonnet_output_len,
+                                            prefix_len=args.sonnet_prefix_len,
+                                            tokenizer=tokenizer,
+                                            return_prompt_formatted=True)
 
     elif args.dataset_name == "hf":
         # Choose between VisionArenaDataset
@@ -593,44 +596,40 @@ def main(args: argparse.Namespace):
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
             dataset_split=args.hf_split,
+        ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             random_seed=args.seed,
             output_len=args.hf_output_len,
-        ).sample(for_online_benchmark=True)
+        )
 
     else:
         # For datasets that follow a similar structure, use a mapping.
         dataset_mapping = {
             "sharegpt":
-            lambda: ShareGPTDataset(
+            lambda: ShareGPTDataset(dataset_path=args.dataset_path, ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 output_len=args.sharegpt_output_len,
-                dataset_path=args.dataset_path,
             ),
             "burstgpt":
             lambda: BurstGPTDataset(
-                tokenizer=tokenizer,
-                num_requests=args.num_prompts,
                 random_seed=args.seed,
                 dataset_path=args.dataset_path,
-            ),
+            ).sample(tokenizer=tokenizer, num_requests=args.num_prompts),
             "random":
-            lambda: RandomDataset(
+            lambda: RandomDataset(dataset_path=args.dataset_path, ).sample(
                 tokenizer=tokenizer,
                 prefix_len=args.random_prefix_len,
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 num_requests=args.num_prompts,
                 range_ratio=args.random_range_ratio,
-                dataset_path=args.dataset_path,
             )
         }
 
         if args.dataset_name in dataset_mapping:
-            input_requests = dataset_mapping[args.dataset_name]().sample(
-                for_online_benchmark=True)
+            input_requests = dataset_mapping[args.dataset_name]()
         else:
             raise ValueError(f"Unknown dataset: {args.dataset_name}")
 
