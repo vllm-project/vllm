@@ -55,10 +55,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv pip install --index-url https://download.pytorch.org/whl/nightly/cu126 "torch==2.7.0.dev20250121+cu126" "torchvision==0.22.0.dev20250121";  \
     fi
 
-COPY requirements-common.txt requirements-common.txt
-COPY requirements-cuda.txt requirements-cuda.txt
+COPY requirements/common.txt requirements/common.txt
+COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements-cuda.txt
+    uv pip install -r requirements/cuda.txt
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -76,14 +76,14 @@ FROM base AS build
 ARG TARGETPLATFORM
 
 # install build dependencies
-COPY requirements-build.txt requirements-build.txt
+COPY requirements/build.txt requirements/build.txt
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements-build.txt
+    uv pip install -r requirements/build.txt
 
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -151,11 +151,11 @@ FROM base as dev
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 
-COPY requirements-lint.txt requirements-lint.txt
-COPY requirements-test.txt requirements-test.txt
-COPY requirements-dev.txt requirements-dev.txt
+COPY requirements/lint.txt requirements/lint.txt
+COPY requirements/test.txt requirements/test.txt
+COPY requirements/dev.txt requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements-dev.txt
+    uv pip install -r requirements/dev.txt
 #################### DEV IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
@@ -230,9 +230,9 @@ COPY examples examples
 # some issues w.r.t. JIT compilation. Therefore we need to
 # install build dependencies for JIT compilation.
 # TODO: Remove this once FlashInfer AOT wheel is fixed
-COPY requirements-build.txt requirements-build.txt
+COPY requirements/build.txt requirements/build.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements-build.txt
+    uv pip install -r requirements/build.txt
 
 #################### vLLM installation IMAGE ####################
 
@@ -249,7 +249,7 @@ ENV UV_HTTP_TIMEOUT=500
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements-dev.txt
+    uv pip install -r requirements/dev.txt
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
