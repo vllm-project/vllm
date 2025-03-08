@@ -48,9 +48,10 @@ class LLMEngine:
     ) -> None:
         if not envs.VLLM_USE_V1:
             raise ValueError(
-                "Using V1 LLMEngine, but VllmConfig.use_v1 is False. "
-                "As a workaround, explicitly set VLLM_USE_V1=0 or 1 and "
-                "report this issue on GitHub.")
+                "Using V1 LLMEngine, but envs.VLLM_USE_V1=False. This "
+                "should not happen. As a workaround, try using "
+                "LLMEngine.from_engine_args(...) or explicitly setting "
+                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -104,10 +105,6 @@ class LLMEngine:
         stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
         disable_log_stats: bool = False,
     ) -> "LLMEngine":
-        if not envs.VLLM_USE_V1:
-            raise ValueError(
-                "Using V1 LLMEngine but VllmConfig.use_v1 is False.")
-
         if stat_loggers is not None:
             raise NotImplementedError(
                 "Passing StatLoggers to V1 is not yet supported. "
