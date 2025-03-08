@@ -2,9 +2,10 @@
 
 import functools
 from collections import UserDict
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Mapping, NamedTuple,
-                    Optional, Protocol, Union)
+from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional,
+                    Protocol, Union)
 
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
