@@ -5,7 +5,7 @@ import functools
 import json
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
-
+import pdb
 import torch
 import triton
 import triton.language as tl
@@ -62,7 +62,8 @@ def apply_w8a8_block_fp8_linear(
         if (ac > 1 or bc > 1 or ar not in (1, input_2d.shape[0])
                 or br not in (1, weight.shape[0])):
             shape_supported_by_cutlass = False
-    if cutlass_block_fp8_supported and shape_supported_by_cutlass:
+    if True:#cutlass_block_fp8_supported and shape_supported_by_cutlass:
+        pdb.set_trace()
         q_input, x_scale = per_token_group_quant_fp8(input_2d,
                                                      block_size[1],
                                                      column_major_scales=True)

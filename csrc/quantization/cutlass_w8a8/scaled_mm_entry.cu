@@ -128,14 +128,17 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
 
   #if defined CUDA_VERSION && CUDA_VERSION < 12080
   if (version_num >= 90 && version_num < 100) {
+    std::cout << "sm90\n";
     cutlass_scaled_mm_sm90(c, a, b, a_scales, b_scales, bias);
     return;
   }
   #else
   if (version_num >= 90 && version_num < 100) {
+    std::cout << "sm90\n";
     cutlass_scaled_mm_sm90(c, a, b, a_scales, b_scales, bias);
     return;
   } else if (version_num >= 100) {
+    std::cout << "sm100\n";
     cutlass_scaled_mm_sm100(c, a, b, a_scales, b_scales, bias);
     return;
   }
