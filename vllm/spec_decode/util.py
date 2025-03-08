@@ -93,15 +93,14 @@ def create_logprobs_output(
 
 
 def create_sequence_group_output(
-    token_id: int,
-    token_id_logprob_rank: int,
-    token_id_logprob: float,
-    seq_id: SeqId,
-    topk_token_ids: List[Optional[int]],
-    topk_logprobs: List[Optional[float]],
-    prompt_logprobs: Optional[PromptLogprobs] = None,
-    step_index: Optional[int] = 0
-) -> CompletionSequenceGroupOutput:
+        token_id: int,
+        token_id_logprob_rank: int,
+        token_id_logprob: float,
+        seq_id: SeqId,
+        topk_token_ids: List[Optional[int]],
+        topk_logprobs: List[Optional[float]],
+        prompt_logprobs: Optional[PromptLogprobs] = None,
+        step_index: Optional[int] = 0) -> CompletionSequenceGroupOutput:
     """Create a SequenceGroupOutput given the sampling results.
 
     Args:
@@ -121,15 +120,13 @@ def create_sequence_group_output(
         topk_logprobs,
     )
 
-    return CompletionSequenceGroupOutput(
-        samples=[
-            SequenceOutput(parent_seq_id=seq_id,
-                           output_token=token_id,
-                           logprobs=logprobs)
-        ],
-        prompt_logprobs=prompt_logprobs,
-        step_index=step_index
-    )
+    return CompletionSequenceGroupOutput(samples=[
+        SequenceOutput(parent_seq_id=seq_id,
+                       output_token=token_id,
+                       logprobs=logprobs)
+    ],
+                                         prompt_logprobs=prompt_logprobs,
+                                         step_index=step_index)
 
 
 def split_batch_by_proposal_len(

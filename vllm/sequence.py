@@ -642,21 +642,19 @@ class SequenceGroup:
         priority: User-defined priority of the request.
     """
 
-    def __init__(
-        self,
-        request_id: str,
-        seqs: list[Sequence],
-        arrival_time: float,
-        sampling_params: Optional[SamplingParams] = None,
-        lora_request: Optional[LoRARequest] = None,
-        pooling_params: Optional[PoolingParams] = None,
-        pooled_data: Optional[torch.Tensor] = None,
-        encoder_seq: Optional[Sequence] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        priority: int = 0,
-        draft_size: int = 1
-    ) -> None:
+    def __init__(self,
+                 request_id: str,
+                 seqs: list[Sequence],
+                 arrival_time: float,
+                 sampling_params: Optional[SamplingParams] = None,
+                 lora_request: Optional[LoRARequest] = None,
+                 pooling_params: Optional[PoolingParams] = None,
+                 pooled_data: Optional[torch.Tensor] = None,
+                 encoder_seq: Optional[Sequence] = None,
+                 trace_headers: Optional[Mapping[str, str]] = None,
+                 prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+                 priority: int = 0,
+                 draft_size: int = 1) -> None:
         self.request_id = request_id
         self.seqs = seqs
         self.first_seq = seqs[0]
