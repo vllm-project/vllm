@@ -219,9 +219,18 @@ class Worker(WorkerBase):
         # fragmentation issue.
         # NOTE: This is called after `capture_model` on purpose to prevent
         # memory buffers from being cleared by `torch.cuda.empty_cache`.
-        self.model_runner._dummy_sampler_run(
-            hidden_states=self.model_runner._dummy_run(
-                num_tokens=self.scheduler_config.max_num_seqs))
+        try:
+            self.model_runner._dummy_sampler_run(
+                hidden_states=self.model_runner._dummy_run(
+                    num_tokens=self.scheduler_config.max_num_seqs))
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                raise RuntimeError(
+                    "CUDA out of memory occurred when warming up sampler. "
+                    "Please try lowering `gpu_memory_utilization` when "
+                    "initializing the engine.") from None
+            else:
+                raise e
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
