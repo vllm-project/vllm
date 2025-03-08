@@ -9,6 +9,7 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
+import vllm.envs as envs
 from vllm.inputs import DummyData
 from vllm.logger import init_logger
 
@@ -145,8 +146,7 @@ class MultiModalProfiler(Generic[_I]):
 
     def get_dummy_data(self,
                        seq_len: int,
-                       is_encoder_data: bool = False,
-                       use_v1: bool = False) -> DummyData:
+                       is_encoder_data: bool = False) -> DummyData:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
@@ -189,7 +189,7 @@ class MultiModalProfiler(Generic[_I]):
         total_len = len(prompt_token_ids)
 
         # V0 does not support chunked prefill.
-        if (total_len > seq_len and not use_v1) or is_encoder_data:
+        if (total_len > seq_len and not envs.VLLM_USE_V1) or is_encoder_data:
             if total_len > seq_len and not is_encoder_data:
                 logger.warning(
                     "The context length (%d) of the model is too short "
