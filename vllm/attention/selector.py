@@ -86,7 +86,6 @@ def get_attn_backend(
     is_attention_free: bool,
     is_blocksparse: bool = False,
     use_mla: bool = False,
-    use_v1: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
     return _cached_get_attn_backend(
@@ -96,7 +95,7 @@ def get_attn_backend(
         block_size=block_size,
         is_attention_free=is_attention_free,
         is_blocksparse=is_blocksparse,
-        use_v1=use_v1,
+        use_v1=envs.VLLM_USE_V1,
         use_mla=use_mla,
     )
 

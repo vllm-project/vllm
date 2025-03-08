@@ -1062,7 +1062,6 @@ class CacheConfig:
             prefix caching enabled.
         enable_prefix_caching: Whether to enable prefix caching.
         cpu_offload_gb: Size of the CPU offload buffer in GiB.
-        use_v1: Whether to use VLLM_USE_V1.
     """
 
     def compute_hash(self) -> str:
