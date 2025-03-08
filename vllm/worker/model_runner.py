@@ -1306,8 +1306,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                 dummy_data = self.input_registry \
                     .dummy_data_for_profiling(self.model_config,
-                                              seq_len,
-                                              self.mm_registry)
+                                            seq_len,
+                                            self.mm_registry)
 
                 seq = SequenceGroupMetadata(
                     request_id=str(group_id),
