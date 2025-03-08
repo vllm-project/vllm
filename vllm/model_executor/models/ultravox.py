@@ -35,7 +35,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
+                         SupportsV0Only)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings,
@@ -345,7 +346,8 @@ class ModifiedWhisperEncoder(WhisperEncoder):
     UltravoxMultiModalProcessor,
     info=UltravoxProcessingInfo,
     dummy_inputs=UltravoxDummyInputsBuilder)
-class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
+                    SupportsV0Only):
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
