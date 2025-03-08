@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
@@ -61,7 +62,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        if vllm_config.use_v1:
+        if envs.VLLM_USE_V1:
             raise NotImplementedError(
                 "V1 is not supported on XPU. Set VLLM_USE_V1=0")
 

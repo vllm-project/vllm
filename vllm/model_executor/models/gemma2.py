@@ -393,7 +393,7 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                  prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
             config.vocab_size, soft_cap=config.final_logit_softcapping)
-        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

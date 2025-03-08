@@ -46,7 +46,7 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
-        if not vllm_config.use_v1:
+        if not envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V1 LLMEngine, but VllmConfig.use_v1 is False. "
                 "As a workaround, explicitly set VLLM_USE_V1=0 or 1 and "
@@ -104,7 +104,7 @@ class LLMEngine:
         stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
         disable_log_stats: bool = False,
     ) -> "LLMEngine":
-        if not vllm_config.use_v1:
+        if not envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V1 LLMEngine but VllmConfig.use_v1 is False.")
 

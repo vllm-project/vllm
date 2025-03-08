@@ -216,11 +216,11 @@ class LLMEngine:
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
     ) -> None:
-        if vllm_config.use_v1:
+        if envs.VLLM_USE_V1:
             raise ValueError(
-                "Using V0 LLMEngine, but VllmConfig.use_v1 is True. "
-                "As a workaround, explicitly set VLLM_USE_V1=0 or 1 and "
-                "report this issue on GitHub.")
+                "Using V0 LLMEngine, but VLLM_USE_V1=1. This should not "
+                "happen. As a workaround, explicitly set VLLM_USE_V1=0 or "
+                "VLLM_USE_V1=1.")
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -511,7 +511,7 @@ class LLMEngine:
         vllm_config = engine_args.create_engine_config(usage_context)
 
         engine_cls = LLMEngine
-        if vllm_config.use_v1:
+        if envs.VLLM_USE_V1:
             from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
             engine_cls = V1LLMEngine
 

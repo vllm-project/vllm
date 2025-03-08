@@ -8,6 +8,7 @@ from typing import Optional, Union
 
 import numpy as np
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
@@ -49,7 +50,7 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
-        if not vllm_config.use_v1:
+        if not envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V1 AsyncLLM, but VllmConfig.use_v1 is False. "
                 "As a workaround, explicitly set VLLM_USE_V1=0 or 1 and "
@@ -108,7 +109,7 @@ class AsyncLLM(EngineClient):
         disable_log_requests: bool = False,
         disable_log_stats: bool = False,
     ) -> "AsyncLLM":
-        if not vllm_config.use_v1:
+        if not envs.VLLM_USE_V1:
             raise ValueError("Using V1 Engine but VllmConfig.use_v1 is False.")
 
         # Create the LLMEngine.

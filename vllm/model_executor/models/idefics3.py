@@ -614,7 +614,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         if self.config.text_config.tie_word_embeddings:
             self.lm_head.weight = self.model.text_model.wte.weight
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
-        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
+        self.sampler = get_sampler()
 
     def get_multimodal_embeddings(
         self, **kwargs

@@ -662,7 +662,7 @@ class AsyncLLMEngine(EngineClient):
         vllm_config = engine_args.create_engine_config(usage_context)
 
         async_engine_cls = AsyncLLMEngine
-        if vllm_config.use_v1:
+        if envs.VLLM_USE_V1:
             from vllm.v1.engine.async_llm import AsyncLLM as V1AsyncLLMEngine
             async_engine_cls = V1AsyncLLMEngine
 

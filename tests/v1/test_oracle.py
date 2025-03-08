@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+import vllm.envs as envs
 from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 
@@ -88,23 +89,23 @@ def test_enable_by_default_fallback(monkeypatch):
         m.setenv("VLLM_USE_V1_BY_DEFAULT", "1")
 
         # Should default to V1 for supported config.
-        vllm_config = AsyncEngineArgs(
+        _ = AsyncEngineArgs(
             model=MODEL,
             enforce_eager=True,
         ).create_engine_config()
-        assert vllm_config.use_v1
+        assert envs.VLLM_USE_V1
 
         # Should fall back to V0 for experimental config.
-        vllm_config = AsyncEngineArgs(
+        _ = AsyncEngineArgs(
             model=MODEL,
             enable_lora=True,
         ).create_engine_config()
-        assert not vllm_config.use_v1
+        assert not envs.VLLM_USE_V1
 
         # Should fall back to V0 for experimental config.
-        vllm_config = AsyncEngineArgs(
+        _ = AsyncEngineArgs(
             model=UNSUPPORTED_MODELS_V1[0], ).create_engine_config()
-        assert not vllm_config.use_v1
+        assert not envs.VLLM_USE_V1
 
 
 def test_v1_llm_by_default(monkeypatch):
@@ -117,7 +118,7 @@ def test_v1_llm_by_default(monkeypatch):
         model = LLM(MODEL, enforce_eager=True)
         print(model.generate("Hello my name is"))
 
-        assert model.llm_engine.vllm_config.use_v1
+        assert model.llm_engine.envs.VLLM_USE_V1
         assert hasattr(model.llm_engine, "engine_core")
 
 
@@ -131,7 +132,7 @@ def test_v1_ray_llm_by_default(monkeypatch):
                     enforce_eager=True,
                     distributed_executor_backend="ray")
         print(model.generate("Hello my name is"))
-        assert model.llm_engine.vllm_config.use_v1
+        assert model.llm_engine.envs.VLLM_USE_V1
         assert hasattr(model.llm_engine, "engine_core")
 
 

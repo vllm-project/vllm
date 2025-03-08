@@ -672,7 +672,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
 
         self.logits_processor = LogitsProcessor(self.vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
+        self.sampler = get_sampler()
 
     def forward(
         self,
@@ -928,7 +928,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
     def sampler(self):
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
-        return get_sampler(use_v1=self.vllm_config.use_v1)
+        return get_sampler()
 
     def _validate_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]

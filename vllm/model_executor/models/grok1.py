@@ -420,7 +420,7 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                                 config.vocab_size,
                                                 self.output_multiplier_scale)
 
-        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

@@ -414,7 +414,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return get_sampler(use_v1=self.vllm_config.use_v1)
+        return get_sampler()
 
     def _validate_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]

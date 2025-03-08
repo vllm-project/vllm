@@ -356,7 +356,7 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                                 scale=1 /
                                                 self.config.logits_scaling)
 
-        self.sampler = get_sampler(use_v1=vllm_config.use_v1)
+        self.sampler = get_sampler()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)

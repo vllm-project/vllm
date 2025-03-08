@@ -851,7 +851,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP,
         if hasattr(self.llm, "sampler"):
             return self.llm.sampler
 
-        return get_sampler(use_v1=self.vllm_config.use_v1)
+        return get_sampler()
 
     def get_embedding_with_vision(
         self,

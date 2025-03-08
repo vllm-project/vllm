@@ -109,7 +109,7 @@ class CudaPlatformBase(Platform):
 
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
-                if vllm_config.use_v1:
+                if envs.VLLM_USE_V1:
                     raise NotImplementedError(
                         "Multi-step scheduling is not supported (and not "
                         "needed) on VLLM V1. Please launch without "
@@ -118,7 +118,7 @@ class CudaPlatformBase(Platform):
                     parallel_config.worker_cls = \
                         "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
-                if vllm_config.use_v1:
+                if envs.VLLM_USE_V1:
                     parallel_config.worker_cls = \
                             "vllm.v1.worker.gpu_worker.Worker"
                 else:
@@ -127,7 +127,7 @@ class CudaPlatformBase(Platform):
                     parallel_config.sd_worker_cls = \
                         "vllm.worker.worker.Worker"
             else:
-                if vllm_config.use_v1:
+                if envs.VLLM_USE_V1:
                     parallel_config.worker_cls = \
                             "vllm.v1.worker.gpu_worker.Worker"
                 else:

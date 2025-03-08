@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .interface import Platform, PlatformEnum, _Backend
@@ -90,7 +91,7 @@ class TpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
-            if vllm_config.use_v1:
+            if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = \
                     "vllm.v1.worker.tpu_worker.TPUWorker"
             else:
@@ -103,7 +104,7 @@ class TpuPlatform(Platform):
 
         # Adjust scheduler config for V1
         # TODO: Add support for these
-        if (vllm_config.use_v1
+        if (envs.VLLM_USE_V1
                 and vllm_config.cache_config.enable_prefix_caching):
             logger.warning("[V1][TPU] Disable prefix caching")
             vllm_config.cache_config.enable_prefix_caching = False

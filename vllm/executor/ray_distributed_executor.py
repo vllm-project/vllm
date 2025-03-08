@@ -72,7 +72,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _init_executor(self) -> None:
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
-        if self.vllm_config.use_v1:
+        if envs.VLLM_USE_V1:
             # v1 always uses the compiled DAG and SPMD worker.
             os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
             os.environ["VLLM_USE_RAY_COMPILED_DAG"] = "1"
@@ -442,12 +442,12 @@ class RayDistributedExecutor(DistributedExecutorBase):
         if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
-        if self.vllm_config.use_v1:
+        if envs.VLLM_USE_V1:
             serialized_data = execute_model_req
         else:
             serialized_data = self.input_encoder.encode(execute_model_req)
         outputs = ray.get(self.forward_dag.execute(serialized_data))
-        if self.vllm_config.use_v1:
+        if envs.VLLM_USE_V1:
             output = outputs[0]
         else:
             output = self.output_decoder.decode(outputs[0])
@@ -574,7 +574,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
             for pp_rank, tp_group in enumerate(self.pp_tp_workers):
                 # Each PP worker takes in the output of the previous PP worker,
                 # and the TP group executes in SPMD fashion.
-                if self.vllm_config.use_v1:
+                if envs.VLLM_USE_V1:
                     outputs = [
                         worker.execute_model_ray.
                         bind(  # type: ignore[attr-defined]
