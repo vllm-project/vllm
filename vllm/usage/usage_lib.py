@@ -27,7 +27,7 @@ _USAGE_STATS_DO_NOT_TRACK_PATH = os.path.join(_config_home, "do_not_track")
 _USAGE_STATS_ENABLED = None
 _USAGE_STATS_SERVER = envs.VLLM_USAGE_STATS_SERVER
 
-_GLOBAL_RUNTIME_DATA: dict[str, Union[str, int, bool]] = {}
+_GLOBAL_RUNTIME_DATA = dict[str, Union[str, int, bool]]()
 
 _USAGE_ENV_VARS_TO_COLLECT = [
     "VLLM_USE_MODELSCOPE",
