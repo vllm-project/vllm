@@ -5,8 +5,16 @@ import os
 import weakref
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
-                    Union, overload)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    Optional,
+    TypeVar,
+    Union,
+    overload,
+)
 
 import torch
 
@@ -23,7 +31,6 @@ T = TypeVar("T")
 
 
 class ConstantList(Generic[T], Sequence):
-
     def __init__(self, x: list[T]) -> None:
         self._x = x
 
@@ -45,31 +52,25 @@ class ConstantList(Generic[T], Sequence):
     def clear(self):
         raise Exception("Cannot clear a constant list")
 
-    def index(self,
-              item: T,
-              start: int = 0,
-              stop: Optional[int] = None) -> int:
-        return self._x.index(item, start,
-                             stop if stop is not None else len(self._x))
+    def index(self, item: T, start: int = 0, stop: Optional[int] = None) -> int:
+        return self._x.index(
+            item, start, stop if stop is not None else len(self._x)
+        )
 
     @overload
-    def __getitem__(self, item: int) -> T:
-        ...
+    def __getitem__(self, item: int) -> T: ...
 
     @overload
-    def __getitem__(self, s: slice, /) -> list[T]:
-        ...
+    def __getitem__(self, s: slice, /) -> list[T]: ...
 
     def __getitem__(self, item: Union[int, slice]) -> Union[T, list[T]]:
         return self._x[item]
 
     @overload
-    def __setitem__(self, item: int, value: T):
-        ...
+    def __setitem__(self, item: int, value: T): ...
 
     @overload
-    def __setitem__(self, s: slice, value: T, /):
-        ...
+    def __setitem__(self, s: slice, value: T, /): ...
 
     def __setitem__(self, item: Union[int, slice], value: Union[T, list[T]]):
         raise Exception("Cannot set item in a constant list")
@@ -104,23 +105,27 @@ class BackgroundProcHandle:
         context = get_mp_context()
         reader, writer = context.Pipe(duplex=False)
 
-        assert ("ready_pipe" not in process_kwargs
-                and "input_path" not in process_kwargs
-                and "output_path" not in process_kwargs)
+        assert (
+            "ready_pipe" not in process_kwargs
+            and "input_path" not in process_kwargs
+            and "output_path" not in process_kwargs
+        )
         process_kwargs["ready_pipe"] = writer
         process_kwargs["input_path"] = input_path
         process_kwargs["output_path"] = output_path
 
         # Run busy loop in background process.
         self.proc = context.Process(target=target_fn, kwargs=process_kwargs)
-        self._finalizer = weakref.finalize(self, shutdown, self.proc,
-                                           input_path, output_path)
+        self._finalizer = weakref.finalize(
+            self, shutdown, self.proc, input_path, output_path
+        )
         self.proc.start()
 
         # Wait for startup.
         if reader.recv()["status"] != "READY":
-            raise RuntimeError(f"{process_name} initialization failed. "
-                               "See root cause above.")
+            raise RuntimeError(
+                f"{process_name} initialization failed. See root cause above."
+            )
 
     def shutdown(self):
         self._finalizer()
@@ -157,12 +162,12 @@ def bind_kv_cache(
     This function:
       1) Fills the ModelRunner's kv cache list (`runner_kv_caches`) with
          kv_caches.
-      2) Associates each attention layer in the `forward_context` with its 
+      2) Associates each attention layer in the `forward_context` with its
          corresponding KV cache in kv_caches.
 
     Args:
         kv_caches: The allocated kv_caches with layer names as keys.
-        forward_context: The global forward context containing all Attention 
+        forward_context: The global forward context containing all Attention
         layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
     """
@@ -190,8 +195,9 @@ def bind_kv_cache(
         forward_context[layer_name].kv_cache = [kv_cache]
 
 
-def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
-               length: int) -> torch.Tensor:
+def copy_slice(
+    from_tensor: torch.Tensor, to_tensor: torch.Tensor, length: int
+) -> torch.Tensor:
     """
     Copy the first length elements of a tensor into another tensor in a
     non-blocking manner.

@@ -4,20 +4,22 @@ import enum
 from typing import TYPE_CHECKING, Optional, Union
 
 from vllm.sampling_params import SamplingParams
-from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
-                            EngineCoreRequest, FinishReason)
+from vllm.v1.engine import (
+    EngineCoreEvent,
+    EngineCoreEventType,
+    EngineCoreRequest,
+    FinishReason,
+)
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
-
     from vllm.lora.request import LoRARequest
     from vllm.multimodal import MultiModalKwargs
     from vllm.multimodal.inputs import PlaceholderRange
 
 
 class Request:
-
     def __init__(
         self,
         request_id: str,
@@ -39,9 +41,11 @@ class Request:
         self.lora_request = lora_request
         self.structured_output_request = structured_output_request
 
-        self.status = (RequestStatus.WAITING_FOR_FSM
-                       if sampling_params.guided_decoding is not None else
-                       RequestStatus.WAITING)
+        self.status = (
+            RequestStatus.WAITING_FOR_FSM
+            if sampling_params.guided_decoding is not None
+            else RequestStatus.WAITING
+        )
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
         assert sampling_params.max_tokens is not None
@@ -85,17 +89,19 @@ class Request:
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             structured_output_request=StructuredOutputRequest(
-                sampling_params=request.sampling_params),
+                sampling_params=request.sampling_params
+            ),
         )
 
     def queued(self, timestamp: Optional[float] = None) -> None:
         self.events.append(
-            EngineCoreEvent.new_event(EngineCoreEventType.QUEUED, timestamp))
+            EngineCoreEvent.new_event(EngineCoreEventType.QUEUED, timestamp)
+        )
 
     def scheduled(self, timestamp: Optional[float] = None) -> None:
         self.events.append(
-            EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED,
-                                      timestamp))
+            EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED, timestamp)
+        )
 
     def take_events(self) -> Optional[list[EngineCoreEvent]]:
         if not self.events:
@@ -149,6 +155,7 @@ class Request:
 
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
+
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
     RUNNING = enum.auto()
@@ -166,7 +173,8 @@ class RequestStatus(enum.IntEnum):
 
     @staticmethod
     def get_finished_reason(
-            status: "RequestStatus") -> Union[FinishReason, None]:
+        status: "RequestStatus",
+    ) -> Union[FinishReason, None]:
         return _FINISHED_REASON_MAP.get(status)
 
 

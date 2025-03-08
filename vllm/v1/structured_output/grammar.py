@@ -42,10 +42,9 @@ class Grammar:
     vocab_size: int
     matcher: xgr.GrammarMatcher = field(hash=False)
     ctx: xgr.CompiledGrammar = field(hash=False)
-    num_processed_tokens: int = field(default_factory=lambda: 0,
-                                      repr=False,
-                                      hash=False,
-                                      init=False)
+    num_processed_tokens: int = field(
+        default_factory=lambda: 0, repr=False, hash=False, init=False
+    )
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
@@ -57,7 +56,10 @@ class Grammar:
             if not self.matcher.accept_token(token):
                 logger.error(
                     "Failed to advance FSM for request %s "
-                    "for tokens %s. Please file an issue.", request_id, token)
+                    "for tokens %s. Please file an issue.",
+                    request_id,
+                    token,
+                )
                 return False
             self.num_processed_tokens += 1
         return True

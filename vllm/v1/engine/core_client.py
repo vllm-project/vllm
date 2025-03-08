@@ -19,10 +19,18 @@ import zmq.asyncio
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.utils import (get_open_zmq_inproc_path, get_open_zmq_ipc_path,
-                        kill_process_tree, make_zmq_socket)
-from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType, UtilityOutput)
+from vllm.utils import (
+    get_open_zmq_inproc_path,
+    get_open_zmq_ipc_path,
+    kill_process_tree,
+    make_zmq_socket,
+)
+from vllm.v1.engine import (
+    EngineCoreOutputs,
+    EngineCoreRequest,
+    EngineCoreRequestType,
+    UtilityOutput,
+)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -35,7 +43,7 @@ AnyFuture = Union[asyncio.Future[Any], Future[Any]]
 
 class EngineCoreClient(ABC):
     """
-    EngineCoreClient: subclasses handle different methods for pushing 
+    EngineCoreClient: subclasses handle different methods for pushing
         and pulling from the EngineCore for asyncio / multiprocessing.
 
     Subclasses:
@@ -52,12 +60,12 @@ class EngineCoreClient(ABC):
         executor_class: type[Executor],
         log_stats: bool,
     ) -> "EngineCoreClient":
-
         # TODO: support this for debugging purposes.
         if asyncio_mode and not multiprocess_mode:
             raise NotImplementedError(
                 "Running EngineCore in asyncio without multiprocessing "
-                "is not currently supported.")
+                "is not currently supported."
+            )
 
         if multiprocess_mode and asyncio_mode:
             return AsyncMPClient(vllm_config, executor_class, log_stats)
@@ -68,8 +76,7 @@ class EngineCoreClient(ABC):
         return InprocClient(vllm_config, executor_class, log_stats)
 
     @abstractmethod
-    def shutdown(self):
-        ...
+    def shutdown(self): ...
 
     def get_output(self) -> EngineCoreOutputs:
         raise NotImplementedError
@@ -146,7 +153,7 @@ class EngineCoreClient(ABC):
 
 class InprocClient(EngineCoreClient):
     """
-    InprocClient: client for in-process EngineCore. Intended 
+    InprocClient: client for in-process EngineCore. Intended
     for use in LLMEngine for V0-style add_request() and step()
         EngineCore setup in this process (no busy loop).
 
@@ -226,7 +233,7 @@ class BackgroundResources:
             with self.ctx.socket(zmq.PAIR) as shutdown_sender:
                 shutdown_sender.connect(self.shutdown_path)
                 # Send shutdown signal.
-                shutdown_sender.send(b'')
+                shutdown_sender.send(b"")
 
 
 class MPClient(EngineCoreClient):
@@ -237,7 +244,7 @@ class MPClient(EngineCoreClient):
 
         * pushes EngineCoreRequests via input_socket
         * pulls EngineCoreOutputs via output_socket
-    
+
         * AsyncMPClient subclass for AsyncLLM usage
         * SyncMPClient subclass for LLM usage
     """
@@ -257,18 +264,22 @@ class MPClient(EngineCoreClient):
         # handle at the API server level so we can return a better
         # error code to the clients calling VLLM.
         def sigusr1_handler(signum, frame):
-            logger.fatal("Got fatal signal from worker processes, shutting "
-                         "down. See stack trace above for root cause issue.")
+            logger.fatal(
+                "Got fatal signal from worker processes, shutting "
+                "down. See stack trace above for root cause issue."
+            )
             kill_process_tree(os.getpid())
 
         if threading.current_thread() == threading.main_thread():
             signal.signal(signal.SIGUSR1, sigusr1_handler)
         else:
-            logger.warning("SIGUSR1 handler not installed because we are not "
-                           "running in the main thread. In this case the "
-                           "forked engine process may not be killed when "
-                           "an exception is raised, and you need to handle "
-                           "the engine process shutdown manually.")
+            logger.warning(
+                "SIGUSR1 handler not installed because we are not "
+                "running in the main thread. In this case the "
+                "forked engine process may not be killed when "
+                "an exception is raised, and you need to handle "
+                "the engine process shutdown manually."
+            )
 
         # Serialization setup.
         self.encoder = MsgpackEncoder()
@@ -298,11 +309,13 @@ class MPClient(EngineCoreClient):
                 "vllm_config": vllm_config,
                 "executor_class": executor_class,
                 "log_stats": log_stats,
-            })
+            },
+        )
 
         # Create input socket.
-        self.resources.input_socket = make_zmq_socket(self.ctx, input_path,
-                                                      zmq.constants.PUSH)
+        self.resources.input_socket = make_zmq_socket(
+            self.ctx, input_path, zmq.constants.PUSH
+        )
         self.input_socket = self.resources.input_socket
         self.utility_results: dict[int, AnyFuture] = {}
 
@@ -310,8 +323,9 @@ class MPClient(EngineCoreClient):
         self._finalizer()
 
 
-def _process_utility_output(output: UtilityOutput,
-                            utility_results: dict[int, AnyFuture]):
+def _process_utility_output(
+    output: UtilityOutput, utility_results: dict[int, AnyFuture]
+):
     """Set the result from a utility method in the waiting future"""
     future = utility_results.pop(output.call_id)
     if output.failure_message is not None:
@@ -323,8 +337,12 @@ def _process_utility_output(output: UtilityOutput,
 class SyncMPClient(MPClient):
     """Synchronous client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
-                 log_stats: bool):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool,
+    ):
         super().__init__(
             asyncio_mode=False,
             vllm_config=vllm_config,
@@ -361,11 +379,12 @@ class SyncMPClient(MPClient):
                         # shutdown signal, exit thread.
                         break
 
-                    (frame, ) = out_socket.recv_multipart(copy=False)
+                    (frame,) = out_socket.recv_multipart(copy=False)
                     outputs = decoder.decode(frame.buffer)
                     if outputs.utility_output:
-                        _process_utility_output(outputs.utility_output,
-                                                utility_results)
+                        _process_utility_output(
+                            outputs.utility_output, utility_results
+                        )
                     else:
                         outputs_queue.put_nowait(outputs)
             finally:
@@ -374,17 +393,19 @@ class SyncMPClient(MPClient):
                 out_socket.close(linger=0)
 
         # Process outputs from engine in separate thread.
-        self.output_queue_thread = Thread(target=process_outputs_socket,
-                                          name="EngineCoreOutputQueueThread",
-                                          daemon=True)
+        self.output_queue_thread = Thread(
+            target=process_outputs_socket,
+            name="EngineCoreOutputQueueThread",
+            daemon=True,
+        )
         self.output_queue_thread.start()
 
     def get_output(self) -> EngineCoreOutputs:
         return self.outputs_queue.get()
 
-    def _send_input(self, request_type: EngineCoreRequestType,
-                    request: Any) -> None:
-
+    def _send_input(
+        self, request_type: EngineCoreRequestType, request: Any
+    ) -> None:
         # (RequestType, SerializedRequest)
         msg = (request_type.value, self.encoder.encode(request))
         self.input_socket.send_multipart(msg, copy=False)
@@ -394,8 +415,7 @@ class SyncMPClient(MPClient):
         future: Future[Any] = Future()
         self.utility_results[call_id] = future
 
-        self._send_input(EngineCoreRequestType.UTILITY,
-                         (call_id, method, args))
+        self._send_input(EngineCoreRequestType.UTILITY, (call_id, method, args))
 
         return future.result()
 
@@ -440,8 +460,12 @@ class SyncMPClient(MPClient):
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
 
-    def __init__(self, vllm_config: VllmConfig, executor_class: type[Executor],
-                 log_stats: bool):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool,
+    ):
         super().__init__(
             asyncio_mode=True,
             vllm_config=vllm_config,
@@ -460,22 +484,25 @@ class AsyncMPClient(MPClient):
         utility_results = self.utility_results
         outputs_queue = self.outputs_queue
         output_path = self.output_path
-        output_socket = make_zmq_socket(self.ctx, output_path,
-                                        zmq.constants.PULL)
+        output_socket = make_zmq_socket(
+            self.ctx, output_path, zmq.constants.PULL
+        )
         self.resources.output_socket = output_socket
 
         async def process_outputs_socket():
             while True:
-                (frame, ) = await output_socket.recv_multipart(copy=False)
+                (frame,) = await output_socket.recv_multipart(copy=False)
                 outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
                 if outputs.utility_output:
-                    _process_utility_output(outputs.utility_output,
-                                            utility_results)
+                    _process_utility_output(
+                        outputs.utility_output, utility_results
+                    )
                 else:
                     outputs_queue.put_nowait(outputs)
 
-        self.queue_task = asyncio.create_task(process_outputs_socket(),
-                                              name="EngineCoreOutputQueueTask")
+        self.queue_task = asyncio.create_task(
+            process_outputs_socket(), name="EngineCoreOutputQueueTask"
+        )
 
     async def get_output_async(self) -> EngineCoreOutputs:
         if self.outputs_queue is None:
@@ -483,9 +510,9 @@ class AsyncMPClient(MPClient):
             assert self.outputs_queue is not None
         return await self.outputs_queue.get()
 
-    async def _send_input(self, request_type: EngineCoreRequestType,
-                          request: Any) -> None:
-
+    async def _send_input(
+        self, request_type: EngineCoreRequestType, request: Any
+    ) -> None:
         msg = (request_type.value, self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)
 
@@ -496,8 +523,9 @@ class AsyncMPClient(MPClient):
         call_id = uuid.uuid1().int >> 64
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
-        await self._send_input(EngineCoreRequestType.UTILITY,
-                               (call_id, method, args))
+        await self._send_input(
+            EngineCoreRequestType.UTILITY, (call_id, method, args)
+        )
 
         return await future
 

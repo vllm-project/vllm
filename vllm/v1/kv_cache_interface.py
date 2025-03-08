@@ -69,8 +69,13 @@ class FullAttentionSpec(KVCacheSpecBase):
     def page_size_bytes(self) -> int:
         # For MLA we only store a single latent vector
         coef = 1 if self.use_mla else 2
-        return coef * self.block_size * self.num_kv_heads * self.head_size \
-                * get_dtype_size(self.dtype)
+        return (
+            coef
+            * self.block_size
+            * self.num_kv_heads
+            * self.head_size
+            * get_dtype_size(self.dtype)
+        )
 
     def bytes_for_tokens(self, num_tokens: int) -> int:
         return cdiv(num_tokens, self.block_size) * self.page_size_bytes
@@ -86,6 +91,7 @@ class KVCacheTensor:
     for a layer. Only contains the size of KV cache for that layer for now. Will
     be extended to support multiple layers sharing the same memory pool.
     """
+
     size: int  # The size of KV cache Tensor in bytes
 
 
@@ -94,6 +100,7 @@ class KVCacheConfig:
     """
     The KV cache configuration of a model.
     """
+
     """The number of KV cache blocks"""
     num_blocks: int
     """layer_name -> how to initialize KV cache for that layer"""

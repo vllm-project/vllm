@@ -4,19 +4,22 @@ from typing import Any, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionType,
-                                              is_quantized_kv_cache)
+from vllm.attention.backends.abstract import (
+    AttentionType,
+    is_quantized_kv_cache,
+)
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
-                                                   MLACommonImpl,
-                                                   MLACommonMetadata)
+from vllm.v1.attention.backends.mla.common import (
+    MLACommonBackend,
+    MLACommonImpl,
+    MLACommonMetadata,
+)
 
 logger = init_logger(__name__)
 
 
 class TritonMLABackend(MLACommonBackend):
-
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA_VLLM_V1"
@@ -27,44 +30,60 @@ class TritonMLABackend(MLACommonBackend):
 
 
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
-
     def __init__(
-            self,
-            num_heads: int,
-            head_size: int,
-            scale: float,
-            num_kv_heads: int,
-            alibi_slopes: Optional[list[float]],
-            sliding_window: Optional[int],
-            kv_cache_dtype: str,
-            blocksparse_params: Optional[dict[str, Any]],
-            logits_soft_cap: Optional[float],
-            attn_type: str,
-            # MLA Specific Arguments
-            **mla_args) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads,
-                         alibi_slopes, sliding_window, kv_cache_dtype,
-                         blocksparse_params, logits_soft_cap, attn_type,
-                         **mla_args)
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: Optional[list[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        blocksparse_params: Optional[dict[str, Any]],
+        logits_soft_cap: Optional[float],
+        attn_type: str,
+        # MLA Specific Arguments
+        **mla_args,
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            blocksparse_params,
+            logits_soft_cap,
+            attn_type,
+            **mla_args,
+        )
 
         unsupported_features = [
-            alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
+            alibi_slopes,
+            sliding_window,
+            blocksparse_params,
+            logits_soft_cap,
         ]
         if any(unsupported_features):
             raise NotImplementedError(
                 "TritonMLAImpl does not support one of the following: "
                 "alibi_slopes, sliding_window, blocksparse_params, "
-                "logits_soft_cap")
+                "logits_soft_cap"
+            )
 
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "TritonMLAImpl")
+            raise NotImplementedError(
+                "Encoder self-attention and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "TritonMLAImpl"
+            )
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
-                "TritonMLA V1 with FP8 KV cache not yet supported")
+                "TritonMLA V1 with FP8 KV cache not yet supported"
+            )
 
     def _forward_decode(
         self,
@@ -82,11 +101,9 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         B = q_nope.shape[0]
 
         q = torch.cat([q_nope, q_pe], dim=-1)
-        o = torch.zeros(B,
-                        self.num_heads,
-                        self.kv_lora_rank,
-                        dtype=q.dtype,
-                        device=q.device)
+        o = torch.zeros(
+            B, self.num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
+        )
 
         num_kv_splits = 4  # TODO: heuristic
 
@@ -106,13 +123,21 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         # Add a head dim of 1
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
-        kv_c_cache = kv_c_and_k_pe_cache[..., :self.kv_lora_rank]
+        kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
 
         # Run MQA
-        decode_attention_fwd(q, kv_c_and_k_pe_cache, kv_c_cache, o,
-                             attn_metadata.decode.block_table,
-                             attn_metadata.decode.seq_lens, attn_logits,
-                             num_kv_splits, self.scale, PAGE_SIZE)
+        decode_attention_fwd(
+            q,
+            kv_c_and_k_pe_cache,
+            kv_c_cache,
+            o,
+            attn_metadata.decode.block_table,
+            attn_metadata.decode.seq_lens,
+            attn_logits,
+            num_kv_splits,
+            self.scale,
+            PAGE_SIZE,
+        )
 
         return self._v_up_proj_and_o_proj(o)

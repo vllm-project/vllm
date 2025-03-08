@@ -4,10 +4,13 @@ from collections.abc import Iterable
 from typing import Optional
 
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
-                                         KVCacheBlock,
-                                         generate_block_hash_extra_keys,
-                                         hash_block_tokens)
+from vllm.v1.core.kv_cache_utils import (
+    BlockHashType,
+    FreeKVCacheBlockQueue,
+    KVCacheBlock,
+    generate_block_hash_extra_keys,
+    hash_block_tokens,
+)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -15,10 +18,10 @@ logger = init_logger(__name__)
 
 class BlockPool:
     """BlockPool that manages KVCacheBlocks.
-    It provides methods to allocate, free and cache the kv cache blocks. The 
-    free_block_queue stores the free blocks in eviction order to enable 
-    allocation, free, and cache eviction. The cached_block_hash_to_block 
-    maps between block hash and cached block to support finding cached blocks 
+    It provides methods to allocate, free and cache the kv cache blocks. The
+    free_block_queue stores the free blocks in eviction order to enable
+    allocation, free, and cache eviction. The cached_block_hash_to_block
+    maps between block hash and cached block to support finding cached blocks
     by their block hash.
 
     Args:
@@ -47,11 +50,13 @@ class BlockPool:
         # if there is already an identical block in the cache. This is because
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
-        self.cached_block_hash_to_block: dict[BlockHashType, dict[
-            int, KVCacheBlock]] = defaultdict(dict)
+        self.cached_block_hash_to_block: dict[
+            BlockHashType, dict[int, KVCacheBlock]
+        ] = defaultdict(dict)
 
-    def get_cached_block(self,
-                         block_hash: BlockHashType) -> Optional[KVCacheBlock]:
+    def get_cached_block(
+        self, block_hash: BlockHashType
+    ) -> Optional[KVCacheBlock]:
         """Get a cached block by the block hash, or None if cache miss.
         If there are duplicated blocks, we return the first block in the cache.
 
@@ -63,7 +68,8 @@ class BlockPool:
         """
         if block_hash in self.cached_block_hash_to_block:
             first_block_id = list(
-                self.cached_block_hash_to_block[block_hash].keys())[0]
+                self.cached_block_hash_to_block[block_hash].keys()
+            )[0]
             return self.cached_block_hash_to_block[block_hash][first_block_id]
         return None
 
@@ -79,7 +85,7 @@ class BlockPool:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
         metadata to be updated and cached. Given a request, it computes the
-        block hashes for the blocks starting from `num_cached_blocks` to 
+        block hashes for the blocks starting from `num_cached_blocks` to
         `num_full_blocks`, updating the metadata for each block
         and caching them in the `cached_block_hash_to_block`.
 
@@ -87,10 +93,10 @@ class BlockPool:
             request: The request to cache the blocks.
             blocks: All blocks in the request.
             block_hashes: Block hashes of the blocks in the request. Note that
-            this list may be shorter than the blocks list. In this case the 
+            this list may be shorter than the blocks list. In this case the
             missed block hash will be computed in this function.
             num_cached_blocks: The number of blocks that are already cached.
-            num_full_blocks: The number of blocks that are full and should 
+            num_full_blocks: The number of blocks that are full and should
                 be cached after this function.
             block_size: Number of tokens in each block.
         """
@@ -125,21 +131,25 @@ class BlockPool:
                 start_token_idx = blk_idx * block_size
                 end_token_idx = (blk_idx + 1) * block_size
                 block_tokens = request.all_token_ids[
-                    start_token_idx:end_token_idx]
+                    start_token_idx:end_token_idx
+                ]
                 assert len(block_tokens) == block_size, (
                     f"Expected {block_size} tokens, got "
                     f"{len(block_tokens)} at {blk_idx}th block for request "
-                    f"{request.request_id}({request})")
+                    f"{request.request_id}({request})"
+                )
 
                 # Generate extra keys for multi-modal inputs. Note that since
                 # we reach to this branch only when the block is completed with
                 # generated tokens, we only need to consider the last mm input.
                 extra_keys, _ = generate_block_hash_extra_keys(
-                    request, start_token_idx, end_token_idx, -1)
+                    request, start_token_idx, end_token_idx, -1
+                )
 
                 # Compute the hash of the current block.
-                block_hash = hash_block_tokens(prev_block_hash_value,
-                                               block_tokens, extra_keys)
+                block_hash = hash_block_tokens(
+                    prev_block_hash_value, block_tokens, extra_keys
+                )
                 block_hashes.append(block_hash)
 
             # Update and added the full block to the cache.
@@ -160,7 +170,8 @@ class BlockPool:
         """
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(
-                f"Cannot get {num_blocks} free blocks from the pool")
+                f"Cannot get {num_blocks} free blocks from the pool"
+            )
 
         ret: list[KVCacheBlock] = []
         idx = 0
@@ -238,11 +249,13 @@ class BlockPool:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        num_used_blocks = (self.num_gpu_blocks - self.get_num_free_blocks())
+        num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
         if num_used_blocks > 0:
             logger.warning(
                 "Failed to reset prefix cache because some "
-                "blocks (%d) are not freed yet", num_used_blocks)
+                "blocks (%d) are not freed yet",
+                num_used_blocks,
+            )
             return False
 
         # Remove all hashes so that no new blocks will hit.

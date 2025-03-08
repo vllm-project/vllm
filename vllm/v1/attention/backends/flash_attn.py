@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import torch
 
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType,
-                                              is_quantized_kv_cache)
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionMetadata,
+    AttentionType,
+    is_quantized_kv_cache,
+)
 from vllm.attention.backends.utils import get_flash_attn_version
 from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
@@ -27,7 +32,6 @@ logger = init_logger(__name__)
 
 
 class FlashAttentionBackend(AttentionBackend):
-
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -96,39 +100,56 @@ class FlashAttentionMetadata:
 
 
 class FlashAttentionMetadataBuilder:
-
     def __init__(self, runner: "GPUModelRunner"):
         self.runner = runner
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
+    def reorder_batch(
+        self, input_batch: "InputBatch", scheduler_output: "SchedulerOutput"
+    ) -> bool:
         return False
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int):
+    def build(
+        self,
+        num_reqs: int,
+        num_actual_tokens: int,
+        max_query_len: int,
+        common_prefix_len: int,
+    ):
         max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
-        query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
-            self.runner.device, non_blocking=True)
-        seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(self.runner.device,
-                                                          non_blocking=True)
-        block_table = (
-            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            self.runner.device, non_blocking=True).long()
+        query_start_loc = self.runner.query_start_loc_cpu[: num_reqs + 1].to(
+            self.runner.device, non_blocking=True
+        )
+        seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(
+            self.runner.device, non_blocking=True
+        )
+        block_table = self.runner.input_batch.block_table.get_device_tensor()[
+            :num_reqs
+        ]
+        slot_mapping = (
+            self.runner.slot_mapping_cpu[:num_actual_tokens]
+            .to(self.runner.device, non_blocking=True)
+            .long()
+        )
 
         use_cascade = common_prefix_len > 0
         if use_cascade:
             # TODO: Optimize.
-            cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
-                                                dtype=torch.int32,
-                                                device=self.runner.device)
-            prefix_kv_lens = torch.tensor([common_prefix_len],
-                                          dtype=torch.int32,
-                                          device=self.runner.device)
-            suffix_kv_lens = (self.runner.seq_lens_np[:num_reqs] -
-                              common_prefix_len)
+            cu_prefix_query_lens = torch.tensor(
+                [0, num_actual_tokens],
+                dtype=torch.int32,
+                device=self.runner.device,
+            )
+            prefix_kv_lens = torch.tensor(
+                [common_prefix_len],
+                dtype=torch.int32,
+                device=self.runner.device,
+            )
+            suffix_kv_lens = (
+                self.runner.seq_lens_np[:num_reqs] - common_prefix_len
+            )
             suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
-                self.runner.device)
+                self.runner.device
+            )
         else:
             cu_prefix_query_lens = None
             prefix_kv_lens = None
@@ -152,7 +173,6 @@ class FlashAttentionMetadataBuilder:
 
 
 class FlashAttentionImpl(AttentionImpl):
-
     def __init__(
         self,
         num_heads: int,
@@ -168,7 +188,8 @@ class FlashAttentionImpl(AttentionImpl):
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
-                "FlashAttention does not support block-sparse attention.")
+                "FlashAttention does not support block-sparse attention."
+            )
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -183,7 +204,8 @@ class FlashAttentionImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
-                "FlashAttention V1 with FP8 KV cache not yet supported")
+                "FlashAttention V1 with FP8 KV cache not yet supported"
+            )
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -196,13 +218,16 @@ class FlashAttentionImpl(AttentionImpl):
         if head_size not in support_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
-                f"Supported head sizes are: {support_head_sizes}.")
+                f"Supported head sizes are: {support_head_sizes}."
+            )
 
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "FlashAttentionImpl")
+            raise NotImplementedError(
+                "Encoder self-attention and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "FlashAttentionImpl"
+            )
         self.vllm_flash_attn_version = get_flash_attn_version()
 
     def forward(
@@ -340,8 +365,12 @@ def use_cascade_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     # The criteria for using FlashDecoding can be found in the following link:
     # https://github.com/vllm-project/flash-attention/blob/96266b1111111f3d11aabefaf3bacbab6a89d03c/csrc/flash_attn/flash_api.cpp#L535
-    use_flash_decoding = (num_queries_per_kv > 1 and not use_sliding_window
-                          and not use_alibi and np.all(query_lens == 1))
+    use_flash_decoding = (
+        num_queries_per_kv > 1
+        and not use_sliding_window
+        and not use_alibi
+        and np.all(query_lens == 1)
+    )
     if not use_flash_decoding:
         # Use cascade attention.
         return True
@@ -363,8 +392,9 @@ def use_cascade_attention(
     cascade_waves = cdiv(cascade_ctas, num_sms)
     cascade_time = cascade_waves * num_prefix_tiles
 
-    flash_decoding_ctas = (num_reqs * num_kv_heads *
-                           cdiv(num_queries_per_kv, q_tile_size))
+    flash_decoding_ctas = (
+        num_reqs * num_kv_heads * cdiv(num_queries_per_kv, q_tile_size)
+    )
     flash_decoding_ctas *= num_prefix_tiles
     flash_decoding_time = cdiv(flash_decoding_ctas, num_sms)
 
@@ -391,10 +421,11 @@ def cascade_attention(
     common_prefix_len: int,
     fa_version: int,
 ) -> torch.Tensor:
-    assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
+    assert alibi_slopes is None, "Cascade attention does not support ALiBi."
     # TODO: Support sliding window.
     assert sliding_window == (-1, -1), (
-        "Cascade attention does not support sliding window.")
+        "Cascade attention does not support sliding window."
+    )
 
     num_tokens = query.shape[0]
     block_size = key_cache.shape[-3]
@@ -439,5 +470,6 @@ def cascade_attention(
     )
 
     # Merge prefix and suffix outputs, and store the result in output.
-    merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
-                      suffix_lse)
+    merge_attn_states(
+        output, prefix_output, prefix_lse, suffix_output, suffix_lse
+    )
