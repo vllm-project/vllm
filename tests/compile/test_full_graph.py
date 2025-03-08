@@ -13,11 +13,10 @@ from .utils import TEST_MODELS, check_full_graph_support
     "optimization_level",
     [CompilationLevel.DYNAMO_ONCE, CompilationLevel.PIECEWISE])
 @fork_new_process_for_each_test
-def test_full_graph(model_info, optimization_level, monkeypatch):
+def test_full_graph(model_info, optimization_level):
     model = model_info[0]
     model_kwargs = model_info[1]
     check_full_graph_support(model,
                              model_kwargs,
                              optimization_level,
-                             monkeypatch,
                              tp_size=1)

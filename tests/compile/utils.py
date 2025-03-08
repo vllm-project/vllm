@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
@@ -62,10 +64,9 @@ if not current_platform.is_rocm() and is_quant_method_supported("awq"):
 def check_full_graph_support(model,
                              model_kwargs,
                              optimization_level,
-                             monkeypatch,
                              tp_size=1):
     # make sure these models can be captured in full graph mode
-    monkeypatch.setenv("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1")
+    os.environ["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "1"
 
     print(f"MODEL={model}")
 
