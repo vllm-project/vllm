@@ -3,7 +3,7 @@
 import argparse
 import dataclasses
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
                     Tuple, Type, Union, cast, get_args)
 
@@ -88,8 +88,8 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
 
 
 @dataclass
-class EngineArgs:
-    """Arguments for vLLM engine."""
+class ModelArgs:
+    """Arguments related to model configuration."""
     model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[str, List[str]]] = None
     tokenizer: Optional[str] = None
@@ -103,80 +103,100 @@ class EngineArgs:
     load_format: str = 'auto'
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
-    kv_cache_dtype: str = 'auto'
-    seed: Optional[int] = None
     max_model_len: Optional[int] = None
-    # Note: Specifying a custom executor backend by passing a class
-    # is intended for expert use only. The API may change without
-    # notice.
-    distributed_executor_backend: Optional[Union[str,
-                                                 Type[ExecutorBase]]] = None
-    # number of P/D disaggregation (or other disaggregation) workers
-    pipeline_parallel_size: int = 1
-    tensor_parallel_size: int = 1
-    enable_expert_parallel: bool = False
-    max_parallel_loading_workers: Optional[int] = None
-    block_size: Optional[int] = None
-    enable_prefix_caching: Optional[bool] = None
-    disable_sliding_window: bool = False
-    use_v2_block_manager: bool = True
-    swap_space: float = 4  # GiB
-    cpu_offload_gb: float = 0  # GiB
-    gpu_memory_utilization: float = 0.90
-    max_num_batched_tokens: Optional[int] = None
-    max_num_partial_prefills: Optional[int] = 1
-    max_long_partial_prefills: Optional[int] = 1
-    long_prefill_token_threshold: Optional[int] = 0
-    max_num_seqs: Optional[int] = None
-    max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
-    disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
     hf_overrides: Optional[HfOverrides] = None
     tokenizer_revision: Optional[str] = None
-    quantization: Optional[str] = None
+    disable_sliding_window: bool = False
+    generation_config: Optional[str] = "auto"
+    override_generation_config: Optional[Dict[str, Any]] = None
+    model_impl: str = "auto"
     enforce_eager: Optional[bool] = None
     max_seq_len_to_capture: int = 8192
+
+
+@dataclass
+class ParallelArgs:
+    """Arguments related to parallelism configuration."""
+    distributed_executor_backend: Optional[Union[str,
+                                                 Type[ExecutorBase]]] = None
+    pipeline_parallel_size: int = 1
+    tensor_parallel_size: int = 1
+    enable_expert_parallel: bool = False
+    max_parallel_loading_workers: Optional[int] = None
     disable_custom_all_reduce: bool = False
     tokenizer_pool_size: int = 0
-    # Note: Specifying a tokenizer pool by passing a class
-    # is intended for expert use only. The API may change without
-    # notice.
     tokenizer_pool_type: Union[str, Type["BaseTokenizerGroup"]] = "ray"
     tokenizer_pool_extra_config: Optional[Dict[str, Any]] = None
-    limit_mm_per_prompt: Optional[Mapping[str, int]] = None
-    mm_processor_kwargs: Optional[Dict[str, Any]] = None
-    disable_mm_preprocessor_cache: bool = False
+    worker_cls: str = "auto"
+    worker_extension_cls: str = ""
+
+
+@dataclass
+class CacheArgs:
+    """Arguments related to KV cache configuration."""
+    block_size: Optional[int] = None
+    swap_space: float = 4  # GiB
+    cpu_offload_gb: float = 0  # GiB
+    gpu_memory_utilization: float = 0.90
+    kv_cache_dtype: str = 'auto'
+    enable_prefix_caching: Optional[bool] = None
+    use_v2_block_manager: bool = True
+    num_gpu_blocks_override: Optional[int] = None
+    num_lookahead_slots: int = 0
+    calculate_kv_scales: Optional[bool] = None
+    preemption_mode: Optional[str] = None
+
+
+@dataclass
+class SchedulerArgs:
+    """Arguments related to request scheduling."""
+    max_num_batched_tokens: Optional[int] = None
+    max_num_seqs: Optional[int] = None
+    max_num_partial_prefills: Optional[int] = 1
+    max_long_partial_prefills: Optional[int] = 1
+    long_prefill_token_threshold: Optional[int] = 0
+    scheduler_delay_factor: float = 0.0
+    enable_chunked_prefill: Optional[bool] = None
+    num_scheduler_steps: int = 1
+    multi_step_stream_outputs: bool = True
+    scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
+    scheduler_cls: Union[str, Type[object]] = "vllm.core.scheduler.Scheduler"
+    disable_async_output_proc: bool = False
+
+
+@dataclass
+class QuantizationArgs:
+    """Arguments related to model quantization."""
+    quantization: Optional[str] = None
+    qlora_adapter_name_or_path: Optional[str] = None
+
+
+@dataclass
+class LoRAArgs:
+    """Arguments related to LoRA adapters."""
     enable_lora: bool = False
     enable_lora_bias: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
-    enable_prompt_adapter: bool = False
-    max_prompt_adapters: int = 1
-    max_prompt_adapter_token: int = 0
-    fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
     lora_dtype: Optional[Union[str, torch.dtype]] = 'auto'
     max_cpu_loras: Optional[int] = None
-    device: str = 'auto'
-    num_scheduler_steps: int = 1
-    multi_step_stream_outputs: bool = True
-    ray_workers_use_nsight: bool = False
-    num_gpu_blocks_override: Optional[int] = None
-    num_lookahead_slots: int = 0
-    model_loader_extra_config: Optional[dict] = None
-    ignore_patterns: Optional[Union[str, List[str]]] = None
-    preemption_mode: Optional[str] = None
+    fully_sharded_loras: bool = False
 
-    scheduler_delay_factor: float = 0.0
-    enable_chunked_prefill: Optional[bool] = None
+    # Prompt adapter related
+    enable_prompt_adapter: bool = False
+    max_prompt_adapters: int = 1
+    max_prompt_adapter_token: int = 0
 
-    guided_decoding_backend: str = 'xgrammar'
-    logits_processor_pattern: Optional[str] = None
-    # Speculative decoding configuration.
+
+@dataclass
+class SpeculativeArgs:
+    """Arguments related to speculative decoding."""
     speculative_model: Optional[str] = None
     speculative_model_quantization: Optional[str] = None
     speculative_draft_tensor_parallel_size: Optional[int] = None
@@ -189,35 +209,63 @@ class EngineArgs:
     spec_decoding_acceptance_method: str = 'rejection_sampler'
     typical_acceptance_sampler_posterior_threshold: Optional[float] = None
     typical_acceptance_sampler_posterior_alpha: Optional[float] = None
-    qlora_adapter_name_or_path: Optional[str] = None
     disable_logprobs_during_spec_decoding: Optional[bool] = None
 
+
+@dataclass
+class ObservabilityArgs:
+    """Arguments related to observability and monitoring."""
+    max_logprobs: int = 20
+    disable_log_stats: bool = False
     show_hidden_metrics_for_version: Optional[str] = None
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
-    disable_async_output_proc: bool = False
-    scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
-    scheduler_cls: Union[str, Type[object]] = "vllm.core.scheduler.Scheduler"
-
-    override_neuron_config: Optional[Dict[str, Any]] = None
-    override_pooler_config: Optional[PoolerConfig] = None
-    compilation_config: Optional[CompilationConfig] = None
-    worker_cls: str = "auto"
-    worker_extension_cls: str = ""
-
-    kv_transfer_config: Optional[KVTransferConfig] = None
-
-    generation_config: Optional[str] = "auto"
-    override_generation_config: Optional[Dict[str, Any]] = None
-    enable_sleep_mode: bool = False
-    model_impl: str = "auto"
-
-    calculate_kv_scales: Optional[bool] = None
-
-    additional_config: Optional[Dict[str, Any]] = None
+    guided_decoding_backend: str = 'xgrammar'
+    logits_processor_pattern: Optional[str] = None
     enable_reasoning: Optional[bool] = None
     reasoning_parser: Optional[str] = None
+
+
+@dataclass
+class SystemArgs:
+    """Arguments related to system and device configuration."""
+    device: str = 'auto'
+    seed: Optional[int] = None
+    compilation_config: Optional[CompilationConfig] = None
+    kv_transfer_config: Optional[KVTransferConfig] = None
+    override_neuron_config: Optional[Dict[str, Any]] = None
+    override_pooler_config: Optional[PoolerConfig] = None
+    additional_config: Optional[Dict[str, Any]] = None
+    enable_sleep_mode: bool = False
     use_tqdm_on_load: bool = True
+    ignore_patterns: Optional[Union[str, List[str]]] = None
+    ray_workers_use_nsight: bool = False
+
+
+@dataclass
+class MultiModalArgs:
+    """Arguments related to multimodal models."""
+    limit_mm_per_prompt: Optional[Mapping[str, int]] = None
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None
+    disable_mm_preprocessor_cache: bool = False
+
+
+@dataclass
+class EngineArgs:
+    """Arguments for vLLM engine."""
+    # Use the nested argument groups
+    model_args: ModelArgs = field(default_factory=ModelArgs)
+    parallel_args: ParallelArgs = field(default_factory=ParallelArgs)
+    cache_args: CacheArgs = field(default_factory=CacheArgs)
+    scheduler_args: SchedulerArgs = field(default_factory=SchedulerArgs)
+    quantization_args: QuantizationArgs = field(
+        default_factory=QuantizationArgs)
+    lora_args: LoRAArgs = field(default_factory=LoRAArgs)
+    speculative_args: SpeculativeArgs = field(default_factory=SpeculativeArgs)
+    observability_args: ObservabilityArgs = field(
+        default_factory=ObservabilityArgs)
+    system_args: SystemArgs = field(default_factory=SystemArgs)
+    multimodal_args: MultiModalArgs = field(default_factory=MultiModalArgs)
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -243,68 +291,459 @@ class EngineArgs:
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
+    # Properties for backward compatibility - Model args
+    @property
+    def model(self) -> str:
+        return self.model_args.model
+
+    @model.setter
+    def model(self, value: str):
+        self.model_args.model = value
+
+    @property
+    def served_model_name(self) -> Optional[Union[str, List[str]]]:
+        return self.model_args.served_model_name
+
+    @served_model_name.setter
+    def served_model_name(self, value: Optional[Union[str, List[str]]]):
+        self.model_args.served_model_name = value
+
+    @property
+    def tokenizer(self) -> Optional[str]:
+        return self.model_args.tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, value: Optional[str]):
+        self.model_args.tokenizer = value
+
+    @property
+    def hf_config_path(self) -> Optional[str]:
+        return self.model_args.hf_config_path
+
+    @hf_config_path.setter
+    def hf_config_path(self, value: Optional[str]):
+        self.model_args.hf_config_path = value
+
+    @property
+    def task(self) -> TaskOption:
+        return self.model_args.task
+
+    @task.setter
+    def task(self, value: TaskOption):
+        self.model_args.task = value
+
+    @property
+    def skip_tokenizer_init(self) -> bool:
+        return self.model_args.skip_tokenizer_init
+
+    @skip_tokenizer_init.setter
+    def skip_tokenizer_init(self, value: bool):
+        self.model_args.skip_tokenizer_init = value
+
+    @property
+    def tokenizer_mode(self) -> str:
+        return self.model_args.tokenizer_mode
+
+    @tokenizer_mode.setter
+    def tokenizer_mode(self, value: str):
+        self.model_args.tokenizer_mode = value
+
+    @property
+    def trust_remote_code(self) -> bool:
+        return self.model_args.trust_remote_code
+
+    @trust_remote_code.setter
+    def trust_remote_code(self, value: bool):
+        self.model_args.trust_remote_code = value
+
+    @property
+    def allowed_local_media_path(self) -> str:
+        return self.model_args.allowed_local_media_path
+
+    @allowed_local_media_path.setter
+    def allowed_local_media_path(self, value: str):
+        self.model_args.allowed_local_media_path = value
+
+    @property
+    def download_dir(self) -> Optional[str]:
+        return self.model_args.download_dir
+
+    @download_dir.setter
+    def download_dir(self, value: Optional[str]):
+        self.model_args.download_dir = value
+
+    @property
+    def load_format(self) -> str:
+        return self.model_args.load_format
+
+    @load_format.setter
+    def load_format(self, value: str):
+        self.model_args.load_format = value
+
+    @property
+    def config_format(self) -> ConfigFormat:
+        return self.model_args.config_format
+
+    @config_format.setter
+    def config_format(self, value: ConfigFormat):
+        self.model_args.config_format = value
+
+    @property
+    def dtype(self) -> str:
+        return self.model_args.dtype
+
+    @dtype.setter
+    def dtype(self, value: str):
+        self.model_args.dtype = value
+
+    @property
+    def max_model_len(self) -> Optional[int]:
+        return self.model_args.max_model_len
+
+    @max_model_len.setter
+    def max_model_len(self, value: Optional[int]):
+        self.model_args.max_model_len = value
+
+    @property
+    def revision(self) -> Optional[str]:
+        return self.model_args.revision
+
+    @revision.setter
+    def revision(self, value: Optional[str]):
+        self.model_args.revision = value
+
+    @property
+    def code_revision(self) -> Optional[str]:
+        return self.model_args.code_revision
+
+    @code_revision.setter
+    def code_revision(self, value: Optional[str]):
+        self.model_args.code_revision = value
+
+    @property
+    def rope_scaling(self) -> Optional[Dict[str, Any]]:
+        return self.model_args.rope_scaling
+
+    @rope_scaling.setter
+    def rope_scaling(self, value: Optional[Dict[str, Any]]):
+        self.model_args.rope_scaling = value
+
+    @property
+    def rope_theta(self) -> Optional[float]:
+        return self.model_args.rope_theta
+
+    @rope_theta.setter
+    def rope_theta(self, value: Optional[float]):
+        self.model_args.rope_theta = value
+
+    @property
+    def hf_overrides(self) -> Optional[HfOverrides]:
+        return self.model_args.hf_overrides
+
+    @hf_overrides.setter
+    def hf_overrides(self, value: Optional[HfOverrides]):
+        self.model_args.hf_overrides = value
+
+    @property
+    def tokenizer_revision(self) -> Optional[str]:
+        return self.model_args.tokenizer_revision
+
+    @tokenizer_revision.setter
+    def tokenizer_revision(self, value: Optional[str]):
+        self.model_args.tokenizer_revision = value
+
+    @property
+    def disable_sliding_window(self) -> bool:
+        return self.model_args.disable_sliding_window
+
+    @disable_sliding_window.setter
+    def disable_sliding_window(self, value: bool):
+        self.model_args.disable_sliding_window = value
+
+    @property
+    def generation_config(self) -> Optional[str]:
+        return self.model_args.generation_config
+
+    @generation_config.setter
+    def generation_config(self, value: Optional[str]):
+        self.model_args.generation_config = value
+
+    @property
+    def override_generation_config(self) -> Optional[Dict[str, Any]]:
+        return self.model_args.override_generation_config
+
+    @override_generation_config.setter
+    def override_generation_config(self, value: Optional[Dict[str, Any]]):
+        self.model_args.override_generation_config = value
+
+    @property
+    def model_impl(self) -> str:
+        return self.model_args.model_impl
+
+    @model_impl.setter
+    def model_impl(self, value: str):
+        self.model_args.model_impl = value
+
+    @property
+    def enforce_eager(self) -> Optional[bool]:
+        return self.model_args.enforce_eager
+
+    @enforce_eager.setter
+    def enforce_eager(self, value: Optional[bool]):
+        self.model_args.enforce_eager = value
+
+    @property
+    def max_seq_len_to_capture(self) -> int:
+        return self.model_args.max_seq_len_to_capture
+
+    @max_seq_len_to_capture.setter
+    def max_seq_len_to_capture(self, value: int):
+        self.model_args.max_seq_len_to_capture = value
+
+    # Properties for backward compatibility - Parallel args
+    @property
+    def distributed_executor_backend(
+            self) -> Optional[Union[str, Type[ExecutorBase]]]:
+        return self.parallel_args.distributed_executor_backend
+
+    @distributed_executor_backend.setter
+    def distributed_executor_backend(
+            self, value: Optional[Union[str, Type[ExecutorBase]]]):
+        self.parallel_args.distributed_executor_backend = value
+
+    @property
+    def pipeline_parallel_size(self) -> int:
+        return self.parallel_args.pipeline_parallel_size
+
+    @pipeline_parallel_size.setter
+    def pipeline_parallel_size(self, value: int):
+        self.parallel_args.pipeline_parallel_size = value
+
+    @property
+    def tensor_parallel_size(self) -> int:
+        return self.parallel_args.tensor_parallel_size
+
+    @tensor_parallel_size.setter
+    def tensor_parallel_size(self, value: int):
+        self.parallel_args.tensor_parallel_size = value
+
+    @property
+    def enable_expert_parallel(self) -> bool:
+        return self.parallel_args.enable_expert_parallel
+
+    @enable_expert_parallel.setter
+    def enable_expert_parallel(self, value: bool):
+        self.parallel_args.enable_expert_parallel = value
+
+    @property
+    def max_parallel_loading_workers(self) -> Optional[int]:
+        return self.parallel_args.max_parallel_loading_workers
+
+    @max_parallel_loading_workers.setter
+    def max_parallel_loading_workers(self, value: Optional[int]):
+        self.parallel_args.max_parallel_loading_workers = value
+
+    @property
+    def disable_custom_all_reduce(self) -> bool:
+        return self.parallel_args.disable_custom_all_reduce
+
+    @disable_custom_all_reduce.setter
+    def disable_custom_all_reduce(self, value: bool):
+        self.parallel_args.disable_custom_all_reduce = value
+
+    @property
+    def tokenizer_pool_size(self) -> int:
+        return self.parallel_args.tokenizer_pool_size
+
+    @tokenizer_pool_size.setter
+    def tokenizer_pool_size(self, value: int):
+        self.parallel_args.tokenizer_pool_size = value
+
+    @property
+    def tokenizer_pool_type(self) -> Union[str, Type["BaseTokenizerGroup"]]:
+        return self.parallel_args.tokenizer_pool_type
+
+    @tokenizer_pool_type.setter
+    def tokenizer_pool_type(self, value: Union[str,
+                                               Type["BaseTokenizerGroup"]]):
+        self.parallel_args.tokenizer_pool_type = value
+
+    @property
+    def tokenizer_pool_extra_config(self) -> Optional[Dict[str, Any]]:
+        return self.parallel_args.tokenizer_pool_extra_config
+
+    @tokenizer_pool_extra_config.setter
+    def tokenizer_pool_extra_config(self, value: Optional[Dict[str, Any]]):
+        self.parallel_args.tokenizer_pool_extra_config = value
+
+    @property
+    def worker_cls(self) -> str:
+        return self.parallel_args.worker_cls
+
+    @worker_cls.setter
+    def worker_cls(self, value: str):
+        self.parallel_args.worker_cls = value
+
+    @property
+    def worker_extension_cls(self) -> str:
+        return self.parallel_args.worker_extension_cls
+
+    @worker_extension_cls.setter
+    def worker_extension_cls(self, value: str):
+        self.parallel_args.worker_extension_cls = value
+
+    # Properties for backward compatibility - Cache args
+    @property
+    def block_size(self) -> Optional[int]:
+        return self.cache_args.block_size
+
+    @block_size.setter
+    def block_size(self, value: Optional[int]):
+        self.cache_args.block_size = value
+
+    @property
+    def swap_space(self) -> float:
+        return self.cache_args.swap_space
+
+    @swap_space.setter
+    def swap_space(self, value: float):
+        self.cache_args.swap_space = value
+
+    @property
+    def cpu_offload_gb(self) -> float:
+        return self.cache_args.cpu_offload_gb
+
+    @cpu_offload_gb.setter
+    def cpu_offload_gb(self, value: float):
+        self.cache_args.cpu_offload_gb = value
+
+    @property
+    def gpu_memory_utilization(self) -> float:
+        return self.cache_args.gpu_memory_utilization
+
+    @gpu_memory_utilization.setter
+    def gpu_memory_utilization(self, value: float):
+        self.cache_args.gpu_memory_utilization = value
+
+    @property
+    def kv_cache_dtype(self) -> str:
+        return self.cache_args.kv_cache_dtype
+
+    @kv_cache_dtype.setter
+    def kv_cache_dtype(self, value: str):
+        self.cache_args.kv_cache_dtype = value
+
+    @property
+    def enable_prefix_caching(self) -> Optional[bool]:
+        return self.cache_args.enable_prefix_caching
+
+    @enable_prefix_caching.setter
+    def enable_prefix_caching(self, value: Optional[bool]):
+        self.cache_args.enable_prefix_caching = value
+
+    @property
+    def use_v2_block_manager(self) -> bool:
+        return self.cache_args.use_v2_block_manager
+
+    @use_v2_block_manager.setter
+    def use_v2_block_manager(self, value: bool):
+        self.cache_args.use_v2_block_manager = value
+
+    @property
+    def num_gpu_blocks_override(self) -> Optional[int]:
+        return self.cache_args.num_gpu_blocks_override
+
+    @num_gpu_blocks_override.setter
+    def num_gpu_blocks_override(self, value: Optional[int]):
+        self.cache_args.num_gpu_blocks_override = value
+
+    @property
+    def num_lookahead_slots(self) -> int:
+        return self.cache_args.num_lookahead_slots
+
+    @num_lookahead_slots.setter
+    def num_lookahead_slots(self, value: int):
+        self.cache_args.num_lookahead_slots = value
+
+    @property
+    def calculate_kv_scales(self) -> Optional[bool]:
+        return self.cache_args.calculate_kv_scales
+
+    @calculate_kv_scales.setter
+    def calculate_kv_scales(self, value: Optional[bool]):
+        self.cache_args.calculate_kv_scales = value
+
+    @property
+    def preemption_mode(self) -> Optional[str]:
+        return self.cache_args.preemption_mode
+
+    @preemption_mode.setter
+    def preemption_mode(self, value: Optional[str]):
+        self.cache_args.preemption_mode = value
+
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Shared CLI arguments for vLLM engine."""
 
         # Model arguments
-        parser.add_argument(
+        model_group = parser.add_argument_group('Model Arguments')
+        model_group.add_argument(
             '--model',
             type=str,
-            default=EngineArgs.model,
+            default=EngineArgs.model_args.model,
             help='Name or path of the huggingface model to use.')
-        parser.add_argument(
+        model_group.add_argument(
             '--task',
-            default=EngineArgs.task,
+            default=EngineArgs.model_args.task,
             choices=get_args(TaskOption),
             help='The task to use the model for. Each vLLM instance only '
             'supports one task, even if the same model can be used for '
             'multiple tasks. When the model only supports one task, ``"auto"`` '
             'can be used to select it; otherwise, you must specify explicitly '
             'which task to use.')
-        parser.add_argument(
+        model_group.add_argument(
             '--tokenizer',
             type=nullable_str,
-            default=EngineArgs.tokenizer,
+            default=EngineArgs.model_args.tokenizer,
             help='Name or path of the huggingface tokenizer to use. '
             'If unspecified, model name or path will be used.')
-        parser.add_argument(
+        model_group.add_argument(
             "--hf-config-path",
             type=nullable_str,
-            default=EngineArgs.hf_config_path,
+            default=EngineArgs.model_args.hf_config_path,
             help='Name or path of the huggingface config to use. '
             'If unspecified, model name or path will be used.')
-        parser.add_argument(
+        model_group.add_argument(
             '--skip-tokenizer-init',
             action='store_true',
             help='Skip initialization of tokenizer and detokenizer. '
             'Expects valid prompt_token_ids and None for prompt from '
             'the input. The generated output will contain token ids.')
-        parser.add_argument(
+        model_group.add_argument(
             '--revision',
             type=nullable_str,
             default=None,
             help='The specific model version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
-        parser.add_argument(
+        model_group.add_argument(
             '--code-revision',
             type=nullable_str,
             default=None,
             help='The specific revision to use for the model code on '
             'Hugging Face Hub. It can be a branch name, a tag name, or a '
             'commit id. If unspecified, will use the default version.')
-        parser.add_argument(
+        model_group.add_argument(
             '--tokenizer-revision',
             type=nullable_str,
             default=None,
             help='Revision of the huggingface tokenizer to use. '
             'It can be a branch name, a tag name, or a commit id. '
             'If unspecified, will use the default version.')
-        parser.add_argument(
+        model_group.add_argument(
             '--tokenizer-mode',
             type=str,
-            default=EngineArgs.tokenizer_mode,
+            default=EngineArgs.model_args.tokenizer_mode,
             choices=['auto', 'slow', 'mistral', 'custom'],
             help='The tokenizer mode.\n\n* "auto" will use the '
             'fast tokenizer if available.\n* "slow" will '
@@ -312,26 +751,27 @@ class EngineArgs:
             '"mistral" will always use the `mistral_common` tokenizer. \n* '
             '"custom" will use --tokenizer to select the '
             'preregistered tokenizer.')
-        parser.add_argument('--trust-remote-code',
-                            action='store_true',
-                            help='Trust remote code from huggingface.')
-        parser.add_argument(
+        model_group.add_argument('--trust-remote-code',
+                                 action='store_true',
+                                 help='Trust remote code from huggingface.')
+        model_group.add_argument(
             '--allowed-local-media-path',
             type=str,
             help="Allowing API requests to read local images or videos "
             "from directories specified by the server file system. "
             "This is a security risk. "
             "Should only be enabled in trusted environments.")
-        parser.add_argument('--download-dir',
-                            type=nullable_str,
-                            default=EngineArgs.download_dir,
-                            help='Directory to download and load the weights, '
-                            'default to the default cache dir of '
-                            'huggingface.')
-        parser.add_argument(
+        model_group.add_argument(
+            '--download-dir',
+            type=nullable_str,
+            default=EngineArgs.model_args.download_dir,
+            help='Directory to download and load the weights, '
+            'default to the default cache dir of '
+            'huggingface.')
+        model_group.add_argument(
             '--load-format',
             type=str,
-            default=EngineArgs.load_format,
+            default=EngineArgs.model_args.load_format,
             choices=[f.value for f in LoadFormat],
             help='The format of the model weights to load.\n\n'
             '* "auto" will try to load the weights in the safetensors format '
@@ -350,17 +790,17 @@ class EngineArgs:
             'Model Streamer \n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
             'quantization.\n')
-        parser.add_argument(
+        model_group.add_argument(
             '--config-format',
-            default=EngineArgs.config_format,
+            default=EngineArgs.model_args.config_format,
             choices=[f.value for f in ConfigFormat],
             help='The format of the model config to load.\n\n'
             '* "auto" will try to load the config in hf format '
             'if available else it will try to load in mistral format ')
-        parser.add_argument(
+        model_group.add_argument(
             '--dtype',
             type=str,
-            default=EngineArgs.dtype,
+            default=EngineArgs.model_args.dtype,
             choices=[
                 'auto', 'half', 'float16', 'bfloat16', 'float', 'float32'
             ],
@@ -372,19 +812,23 @@ class EngineArgs:
             '* "bfloat16" for a balance between precision and range.\n'
             '* "float" is shorthand for FP32 precision.\n'
             '* "float32" for FP32 precision.')
-        parser.add_argument(
+
+        # Cache arguments
+        cache_group = parser.add_argument_group('KV Cache Arguments')
+        cache_group.add_argument(
             '--kv-cache-dtype',
             type=str,
             choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3'],
-            default=EngineArgs.kv_cache_dtype,
+            default=EngineArgs.cache_args.kv_cache_dtype,
             help='Data type for kv cache storage. If "auto", will use model '
             'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
             'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
-        parser.add_argument('--max-model-len',
-                            type=int,
-                            default=EngineArgs.max_model_len,
-                            help='Model context length. If unspecified, will '
-                            'be automatically derived from the model config.')
+        model_group.add_argument(
+            '--max-model-len',
+            type=int,
+            default=EngineArgs.model_args.max_model_len,
+            help='Model context length. If unspecified, will '
+            'be automatically derived from the model config.')
         parser.add_argument(
             '--guided-decoding-backend',
             type=str,
@@ -1468,6 +1912,103 @@ class EngineArgs:
         Override the EngineConfig's configs based on the usage context for V1.
         """
         assert envs.VLLM_USE_V1, "V1 is not enabled"
+
+    # Properties for backward compatibility - Scheduler args
+    @property
+    def max_num_batched_tokens(self) -> Optional[int]:
+        return self.scheduler_args.max_num_batched_tokens
+
+    @max_num_batched_tokens.setter
+    def max_num_batched_tokens(self, value: Optional[int]):
+        self.scheduler_args.max_num_batched_tokens = value
+
+    @property
+    def max_num_seqs(self) -> Optional[int]:
+        return self.scheduler_args.max_num_seqs
+
+    @max_num_seqs.setter
+    def max_num_seqs(self, value: Optional[int]):
+        self.scheduler_args.max_num_seqs = value
+
+    @property
+    def max_num_partial_prefills(self) -> Optional[int]:
+        return self.scheduler_args.max_num_partial_prefills
+
+    @max_num_partial_prefills.setter
+    def max_num_partial_prefills(self, value: Optional[int]):
+        self.scheduler_args.max_num_partial_prefills = value
+
+    @property
+    def max_long_partial_prefills(self) -> Optional[int]:
+        return self.scheduler_args.max_long_partial_prefills
+
+    @max_long_partial_prefills.setter
+    def max_long_partial_prefills(self, value: Optional[int]):
+        self.scheduler_args.max_long_partial_prefills = value
+
+    @property
+    def long_prefill_token_threshold(self) -> Optional[int]:
+        return self.scheduler_args.long_prefill_token_threshold
+
+    @long_prefill_token_threshold.setter
+    def long_prefill_token_threshold(self, value: Optional[int]):
+        self.scheduler_args.long_prefill_token_threshold = value
+
+    @property
+    def scheduler_delay_factor(self) -> float:
+        return self.scheduler_args.scheduler_delay_factor
+
+    @scheduler_delay_factor.setter
+    def scheduler_delay_factor(self, value: float):
+        self.scheduler_args.scheduler_delay_factor = value
+
+    @property
+    def enable_chunked_prefill(self) -> Optional[bool]:
+        return self.scheduler_args.enable_chunked_prefill
+
+    @enable_chunked_prefill.setter
+    def enable_chunked_prefill(self, value: Optional[bool]):
+        self.scheduler_args.enable_chunked_prefill = value
+
+    @property
+    def num_scheduler_steps(self) -> int:
+        return self.scheduler_args.num_scheduler_steps
+
+    @num_scheduler_steps.setter
+    def num_scheduler_steps(self, value: int):
+        self.scheduler_args.num_scheduler_steps = value
+
+    @property
+    def multi_step_stream_outputs(self) -> bool:
+        return self.scheduler_args.multi_step_stream_outputs
+
+    @multi_step_stream_outputs.setter
+    def multi_step_stream_outputs(self, value: bool):
+        self.scheduler_args.multi_step_stream_outputs = value
+
+    @property
+    def scheduling_policy(self) -> Literal["fcfs", "priority"]:
+        return self.scheduler_args.scheduling_policy
+
+    @scheduling_policy.setter
+    def scheduling_policy(self, value: Literal["fcfs", "priority"]):
+        self.scheduler_args.scheduling_policy = value
+
+    @property
+    def scheduler_cls(self) -> Union[str, Type[object]]:
+        return self.scheduler_args.scheduler_cls
+
+    @scheduler_cls.setter
+    def scheduler_cls(self, value: Union[str, Type[object]]):
+        self.scheduler_args.scheduler_cls = value
+
+    @property
+    def disable_async_output_proc(self) -> bool:
+        return self.scheduler_args.disable_async_output_proc
+
+    @disable_async_output_proc.setter
+    def disable_async_output_proc(self, value: bool):
+        self.scheduler_args.disable_async_output_proc = value
 
 
 @dataclass
