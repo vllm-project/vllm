@@ -437,7 +437,8 @@ def safetensors_weights_iterator(
 
 
 def runai_safetensors_weights_iterator(
-        hf_weights_files: List[str], use_tqdm_on_load: bool
+    hf_weights_files: List[str],
+    use_tqdm_on_load: bool,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
@@ -452,7 +453,8 @@ def runai_safetensors_weights_iterator(
 
 
 def pt_weights_iterator(
-        hf_weights_files: List[str], use_tqdm_on_load: bool
+    hf_weights_files: List[str],
+    use_tqdm_on_load: bool,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
     for bin_file in tqdm(

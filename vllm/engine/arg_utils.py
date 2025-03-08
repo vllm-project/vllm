@@ -1188,7 +1188,7 @@ class EngineArgs:
             download_dir=self.download_dir,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
-            use_tqdm_on_load=not self.use_tqdm_on_load,
+            use_tqdm_on_load=self.use_tqdm_on_load,
         )
 
     def create_engine_config(self,
