@@ -513,7 +513,6 @@ class LLMEngine:
         vllm_config = engine_args.create_engine_config(usage_context)
 
         engine_cls = cls
-        print(f"{envs.VLLM_USE_V1=}")
         if envs.VLLM_USE_V1:
             from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
             engine_cls = V1LLMEngine

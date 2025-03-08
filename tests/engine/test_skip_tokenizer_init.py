@@ -6,8 +6,6 @@ from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
 
 
-# TODO(V1 TEST): move this to another directory once we support
-# skip_tokenizer_init on V1.
 @pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 def test_skip_tokenizer_initialization(model: str):
     # This test checks if the flag skip_tokenizer_init skips the initialization
