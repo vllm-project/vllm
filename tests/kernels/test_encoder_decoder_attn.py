@@ -129,7 +129,6 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
     '''
 
     scale = float(1.0 / (test_pt.head_size**0.5))
-
     attn = Attention(
         test_pt.num_heads,
         test_pt.head_size,
