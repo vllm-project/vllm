@@ -29,7 +29,8 @@ from vllm.v1.attention.backends.pallas import (NUM_KV_PAGES_PER_BLOCK,
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
+                             ModelRunnerOutput)
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -302,10 +303,10 @@ class TPUModelRunner:
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
-        Generates the KVCacheSpec by parsing the kv cache format from each 
+        Generates the KVCacheSpec by parsing the kv cache format from each
         Attention module in the static forward context.
         Returns:
-            KVCacheSpec: A dictionary mapping layer names to their KV cache 
+            KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
 
@@ -322,6 +323,7 @@ class TPUModelRunner:
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=attn_module.dtype,
+                    use_mla=False,
                 )
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
@@ -546,6 +548,9 @@ class TPUModelRunner:
     ) -> ModelRunnerOutput:
         # Update cached state
         self._update_states(scheduler_output)
+        if not scheduler_output.total_num_scheduled_tokens:
+            # Return empty ModelRunnerOuptut if there's no work to do.
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -760,7 +765,7 @@ class TPUModelRunner:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
-            kv_cache_config: Configuration for the KV cache, including the KV 
+            kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
         if len(kv_cache_config.groups) > 1:

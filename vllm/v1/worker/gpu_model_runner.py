@@ -32,7 +32,8 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
+                             ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -919,6 +920,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
         self._update_states(scheduler_output)
+        if not scheduler_output.total_num_scheduled_tokens:
+            # Return empty ModelRunnerOuptut if there's no work to do.
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -1069,7 +1073,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids = self.generate_draft_token_ids(
                 valid_sampled_token_ids)
 
-        model_runner_output = ModelRunnerOutput(
+        return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
@@ -1077,7 +1081,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
-        return model_runner_output
 
     def generate_draft_token_ids(
         self,
@@ -1467,13 +1470,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
+        use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: KVCacheSpec = {}
         for layer_name, attn_module in forward_ctx.items():
             if isinstance(attn_module, FusedMoE):
                 continue
 
             # TODO: Support other attention modules, e.g., sliding window,
-            # cross-attention, MLA.
+            # cross-attention
             assert isinstance(attn_module, Attention)
             if attn_module.attn_type == AttentionType.DECODER:
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -1481,7 +1485,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=attn_module.dtype,
-                )
+                    use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
