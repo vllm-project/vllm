@@ -303,10 +303,10 @@ class TPUModelRunner:
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
-        Generates the KVCacheSpec by parsing the kv cache format from each 
+        Generates the KVCacheSpec by parsing the kv cache format from each
         Attention module in the static forward context.
         Returns:
-            KVCacheSpec: A dictionary mapping layer names to their KV cache 
+            KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
 
@@ -323,6 +323,7 @@ class TPUModelRunner:
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=attn_module.dtype,
+                    use_mla=False,
                 )
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
@@ -764,7 +765,7 @@ class TPUModelRunner:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
-            kv_cache_config: Configuration for the KV cache, including the KV 
+            kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
         if len(kv_cache_config.groups) > 1:
