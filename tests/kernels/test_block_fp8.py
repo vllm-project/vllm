@@ -419,8 +419,6 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
     #sorted_token_ids = sorted_token_ids[:num_pad]
 
-    print("GOT HERE1")
-
     num_tokens = topk * M
 
     pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) * block_m) - sorted_token_ids.numel()
@@ -437,17 +435,11 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     p("orig m_indices", m_indices)
     m_indices = torch.repeat_interleave(m_indices, block_m, dim=0)
 
-    print("GOT HERE2")
-
     assert sorted_token_ids[sorted_token_ids >= num_tokens].sum() == 0
-
-    print("GOT HERE2A")
 
     inv_perm = torch.argsort(sorted_token_ids)
 
     p("m_indices", m_indices)
-
-    print("GOT HERE2B")
 
     a_q, a_s = per_token_group_quant_fp8(a, block_m)
 
@@ -459,13 +451,9 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
                    a_s.shape[1]).repeat(1, topk,
                                         1).reshape(-1, a_s.shape[1])
 
-    print("GOT HERE2C")
-
     # Permute activations according to sorted token ids
     a_q = fp8_perm(a_q, sorted_token_ids)
     a_s = a_s[sorted_token_ids]
-
-    print("GOT HERE3")
 
     #a_q.view(dtype=torch.uint8)[mask] = 0
 
@@ -482,13 +470,9 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
                             device=a.device)
 
 
-    print("GOT HERE4")
-
     deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous((a_q, a_s), (w1, w1_s),
                                                         inter_out, m_indices)
 
-
-    print("GOT HERE5")
 
     #inter_out = inter_out[inv_perm, ...]
 
@@ -503,16 +487,10 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
                       dtype=torch.bfloat16,
                       device=a.device)
 
-    print("GOT HERE6")
-
     deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
         (act_out_q, act_out_s), (w2, w2_s), out, m_indices)
 
-    print("GOT HERE7")
-
     out = out[inv_perm,...]
-
-    print("GOT HERE8")
 
     #topk_weight = topk_weight[inv_perm]
     #out[:,num_pad:] = 0
@@ -523,19 +501,13 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     #final_out = (out.view(M, -1, w2.shape[1]) *
     #   topk_weight.view(M, -1, 1).to(out.dtype))[:topk*M].sum(dim=1)
 
-    print(f"GOT HERE9 {out.shape}, {M}, {num_tokens}")
-
     tmp_out = out.view(-1, topk, w2.shape[1])[:M, ...]
     #tmp_out = out[:M, ...].view(M, -1, w2.shape[1])
-
-    print(f"GOT HERE10 {tmp_out.shape}, {topk_weight.shape}")
 
     final_out = (tmp_out * topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
 
     #final_out = (out.view(-1, topk, w2.shape[1])[:topk*M] *
     #   topk_weight.view(M, -1, 1).to(out.dtype)).sum(dim=1)
-
-    print("GOT HERE11")
 
     p("final_out", final_out)
 
@@ -574,7 +546,6 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
         pytest.skip(f"Skipping test; invalid size m={M}, n={N}, k={K}, topk={topk}, E={E}")
 
     pp(f"\nTEST M={M}, N={N}, K={K}, E={E}, topk={topk}, block_size={block_size}, dtype={dtype}")
-    print(f"\nTEST M={M}, N={N}, K={K}, E={E}, topk={topk}, block_size={block_size}, dtype={dtype}")
 
     torch.set_printoptions(profile="full")
 
@@ -592,8 +563,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
     w2_bf16 = ((torch.rand((E, K, N), dtype=torch.bfloat16) - 0.5) * 2 *
                fp8_max).clamp(min=fp8_min, max=fp8_max)
 
-    score = torch.randn((M, E), dtype=dtype)  # does not work
-    #score = iota((M, E), dtype=dtype)
+    score = torch.randn((M, E), dtype=dtype)
 
     block_n, block_k = block_size[0], block_size[1]
     n_tiles_w1 = ((2 * N) + block_n - 1) // block_n
