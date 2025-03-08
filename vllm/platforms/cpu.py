@@ -56,7 +56,6 @@ class CpuPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
-
         model_config = vllm_config.model_config
         # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid

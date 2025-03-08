@@ -335,11 +335,12 @@ class Platform:
         """
         Whether to use allgather in LogitsProcessor to gather the logits.
         """
+        import vllm.envs as envs
         from vllm.config import get_current_vllm_config
 
         parallel_config = get_current_vllm_config().parallel_config
-        use_v1 = get_current_vllm_config().use_v1
-        return (use_v1 or parallel_config.distributed_executor_backend
+        return (envs.VLLM_USE_V1
+                or parallel_config.distributed_executor_backend
                 == "external_launcher")
 
 

@@ -2,7 +2,6 @@
 
 from typing import TYPE_CHECKING, Optional
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .interface import Platform, PlatformEnum
@@ -33,9 +32,6 @@ class NeuronPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        if envs.VLLM_USE_V1:
-            raise NotImplementedError(
-                "V1 is not supported on Neuron. Set VLLM_USE_V1=0")
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":

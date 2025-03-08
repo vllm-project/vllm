@@ -44,9 +44,6 @@ class HpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        if envs.VLLM_USE_V1:
-            raise NotImplementedError(
-                "V1 is not supported on HPU. Set VLLM_USE_V1=0")
 
         scheduler_config = vllm_config.scheduler_config
         if scheduler_config.is_multi_step:
