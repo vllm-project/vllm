@@ -89,14 +89,17 @@ def _create_bad_words_token_ids(
                                          replace=True).tolist()
             token_ids_single_batch.append(token_ids)
         bad_words_token_ids[batch_idx] = token_ids_single_batch
+    if batch_size >= 2:
+        # Test no bad_words for some batch
+        no_bad_words_batch_idx = np.random.choice(batch_size)
+        bad_words_token_ids.pop(no_bad_words_batch_idx, None)
     return bad_words_token_ids
 
 
-def _update_output_token_ids_for_bad_words(metadata: SamplingMetadata,
-                                           vocab_size: int) -> list[list[int]]:
-    bad_words_last_tokens = []
-    for batch_idx in range(len(metadata.bad_words_token_ids)):
-        bad_words_token_ids = metadata.bad_words_token_ids[batch_idx]
+def _update_output_token_ids_for_bad_words(
+        metadata: SamplingMetadata, vocab_size: int) -> dict[int, list[int]]:
+    bad_words_last_tokens = {}
+    for batch_idx, bad_words_token_ids in metadata.bad_words_token_ids.items():
         output_token_ids = metadata.output_token_ids[batch_idx]
         bad_words_last_token: list[int] = []
         for i, bad_word_token_ids in enumerate(bad_words_token_ids):
@@ -113,7 +116,7 @@ def _update_output_token_ids_for_bad_words(metadata: SamplingMetadata,
                 else:  # Make sure no accidental match to bad words
                     output_token_ids[-1] = (bad_word_token_ids[-2] +
                                             1) % vocab_size
-        bad_words_last_tokens.append(bad_words_last_token)
+        bad_words_last_tokens[batch_idx] = bad_words_last_token
     return bad_words_last_tokens
 
 
@@ -535,7 +538,8 @@ def test_sampler_bad_words(device: str, batch_size: int,
     for batch_idx in range(batch_size):
         logits_for_req = logits[batch_idx]
         for token_id in range(VOCAB_SIZE):
-            if token_id in bad_words_last_tokens[batch_idx]:
+            if (batch_idx in bad_words_last_tokens
+                    and token_id in bad_words_last_tokens[batch_idx]):
                 assert logits_for_req[token_id] == -float("inf")
             else:
                 assert logits_for_req[token_id] != -float("inf")

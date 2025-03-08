@@ -2,7 +2,7 @@
 # Datastructures defining an input batch
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import numpy as np
 import torch
@@ -10,6 +10,7 @@ import torch
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.utils import swap_dict_values
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import BlockTable
@@ -43,22 +44,6 @@ class CachedRequestState:
     @property
     def num_tokens(self) -> int:
         return len(self.prompt_token_ids) + len(self.output_token_ids)
-
-
-def _swap_dict_values(obj: dict[int, Any], key1: int, key2: int) -> None:
-    """
-    Helper function to swap values for two keys
-    """
-    v1 = obj.get(key1)
-    v2 = obj.get(key2)
-    if v1 is not None:
-        obj[key2] = v1
-    else:
-        obj.pop(key2, None)
-    if v2 is not None:
-        obj[key1] = v2
-    else:
-        obj.pop(key1, None)
 
 
 class InputBatch:
@@ -436,9 +421,9 @@ class InputBatch:
         self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
         self.token_ids_cpu[i2, ...] = tmp
 
-        _swap_dict_values(self.generators, i1, i2)
-        _swap_dict_values(self.min_tokens, i1, i2)
-        _swap_dict_values(self.bad_words_token_ids, i1, i2)
+        swap_dict_values(self.generators, i1, i2)
+        swap_dict_values(self.min_tokens, i1, i2)
+        swap_dict_values(self.bad_words_token_ids, i1, i2)
 
         self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
             self.request_lora_mapping[i2], self.request_lora_mapping[i1]

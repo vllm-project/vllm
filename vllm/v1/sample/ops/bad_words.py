@@ -33,6 +33,6 @@ def apply_bad_words(
     bad_words_token_ids: dict[int, list[list[int]]],
     past_tokens_ids: list[list[int]],
 ) -> None:
-    for i in range(logits.shape[0]):
-        _apply_bad_words_single_batch(logits[i], bad_words_token_ids[i],
+    for i, bad_words_ids in bad_words_token_ids.items():
+        _apply_bad_words_single_batch(logits[i], bad_words_ids,
                                       past_tokens_ids[i])
