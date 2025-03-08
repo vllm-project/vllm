@@ -146,6 +146,7 @@ def get_local_guided_decoding_logits_processor(
     # Get the reasoner if needed, it will be None if reasoning_
     reasoner = get_reasoner(tokenizer, reasoning_backend)
 
+    print(f"guided_params backend_name: {guided_params.backend_name}")
     # CFG grammar not supported by LMFE, so we use outlines instead
     if guided_params.backend_name == 'outlines':
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
