@@ -708,6 +708,8 @@ class VllmRunner:
     def __init__(
         self,
         model_name: str,
+        /,
+        *,
         task: TaskOption = "auto",
         tokenizer_name: Optional[str] = None,
         tokenizer_mode: str = "auto",

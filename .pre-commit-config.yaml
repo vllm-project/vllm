@@ -9,11 +9,15 @@ repos:
   - id: yapf
     args: [--in-place, --verbose]
     additional_dependencies: [toml] # TODO: Remove when yapf is upgraded
+    exclude: "^(csrc|vllm/assets|vllm/inputs|vllm/multimodal|vllm/usage)/.*"
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.9.3
   hooks:
-  - id: ruff
-    args: [--output-format, github, --fix]
+    - id: ruff
+      args: [--output-format, github, --fix, --exit-non-zero-on-fix, --show-fixes]
+    - id: ruff-format
+      types_or: [python]
+      exclude: "^(?!(csrc|vllm/assets|vllm/inputs|vllm/multimodal|vllm/usage)/).*"
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.0
   hooks:
@@ -24,6 +28,7 @@ repos:
   rev: 0a0b7a830386ba6a31c2ec8316849ae4d1b8240d # 6.0.0
   hooks:
   - id: isort
+    exclude: "^(csrc|vllm/assets|vllm/inputs|vllm/multimodal|vllm/usage)/.*"
 - repo: https://github.com/pre-commit/mirrors-clang-format
   rev: v19.1.7
   hooks:

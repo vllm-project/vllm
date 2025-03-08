@@ -57,15 +57,24 @@ ignore_patterns = [
 [tool.ruff]
 # Allow lines to be as long as 80.
 line-length = 80
+indent-width = 4
+target-version = "py39"
 exclude = [
     # External file, leaving license intact
     "examples/other/fp8/quantizer/quantize.py"
 ]
 
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
 [tool.ruff.lint.per-file-ignores]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
+"vllm/**/*.py" = ["I"]
+"vllm/v1/**/*.py" = []
 # Python 3.8 typing. TODO: Remove these excludes after v1.0.0
 "vllm/adapter_commons/**/*.py" = ["UP006", "UP035"]
 "vllm/attention/**/*.py" = ["UP006", "UP035"]
@@ -100,7 +109,7 @@ select = [
     # flake8-simplify
     "SIM",
     # isort
-    # "I",
+    "I",
     "G",
 ]
 ignore = [
@@ -108,6 +117,9 @@ ignore = [
     "F405", "F403",
     # lambda expression assignment
     "E731",
+    # Ignore line to long. Most cases are either Exception
+    # or inline notes/docstring
+    "E501",
     # Loop control variable not used within loop body
     "B007",
     # f-string format
