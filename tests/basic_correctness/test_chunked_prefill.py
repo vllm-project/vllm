@@ -165,12 +165,16 @@ def test_models_with_fp8_kv_cache(
     enforce_eager: bool,
     tensor_parallel_size: int,
     disable_async_output_proc: bool,
+    monkeypatch,
 ) -> None:
     """
     Check output logprobs match between no_chunked_prefill and chunked_prefill
     with fp8 kv cache. General fp8 kv-cache tests are covered in test_fp8.py,
     so here we only check chunked prefill.
     """
+    # NOTE: THIS TEST SHOULD BE DEPRECATED WITH V1.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
+
     NUM_LOG_PROBS = 8
 
     max_num_seqs = chunked_prefill_token_size
@@ -222,11 +226,15 @@ def test_with_prefix_caching(
     chunk_size: int,
     tensor_parallel_size: int,
     dtype: str,
+    monkeypatch,
 ) -> None:
     """
     Checks exact match decode with and without prefix caching
     with chunked prefill enabled.
     """
+    # NOTE: THIS TEST SHOULD BE DEPRECATED WITH V1.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
+
     model = "meta-llama/Llama-3.2-1B-Instruct"
     # The common prompt has 142 tokens with Llama-2 tokenizer.
     common_prompt = "You are a helpful AI assistant " * 20
@@ -283,6 +291,8 @@ def test_models_cpu(
     attention_backend: str,
     monkeypatch,
 ) -> None:
+    # NOTE: THIS TEST SHOULD BE DEPRECATED WITH V1.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     test_models(
         hf_runner,
         vllm_runner,
