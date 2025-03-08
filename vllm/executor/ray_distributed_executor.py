@@ -111,6 +111,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         self.input_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
         self.output_decoder = msgspec.msgpack.Decoder(
             Optional[List[SamplerOutput]])
+        self.use_v1 = envs.VLLM_USE_V1
 
         self.pp_locks: Optional[List[asyncio.Lock]] = None
         if not self.use_ray_compiled_dag:
@@ -442,12 +443,12 @@ class RayDistributedExecutor(DistributedExecutorBase):
         if self.forward_dag is None:
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
-        if envs.VLLM_USE_V1:
+        if self.use_v1:
             serialized_data = execute_model_req
         else:
             serialized_data = self.input_encoder.encode(execute_model_req)
         outputs = ray.get(self.forward_dag.execute(serialized_data))
-        if envs.VLLM_USE_V1:
+        if self.use_v1:
             output = outputs[0]
         else:
             output = self.output_decoder.decode(outputs[0])
@@ -574,7 +575,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
             for pp_rank, tp_group in enumerate(self.pp_tp_workers):
                 # Each PP worker takes in the output of the previous PP worker,
                 # and the TP group executes in SPMD fashion.
-                if envs.VLLM_USE_V1:
+                if self.use_v1:
                     outputs = [
                         worker.execute_model_ray.
                         bind(  # type: ignore[attr-defined]
