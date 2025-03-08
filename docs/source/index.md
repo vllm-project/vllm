@@ -105,6 +105,7 @@ features/compatibility_matrix
 :maxdepth: 1
 
 training/trl.md
+training/rlhf.md
 
 :::
 
