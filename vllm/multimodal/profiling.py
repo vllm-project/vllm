@@ -144,9 +144,11 @@ class MultiModalProfiler(Generic[_I]):
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         )
 
-    def get_dummy_data(self,
-                       seq_len: int,
-                       is_encoder_data: bool = False) -> DummyData:
+    def get_dummy_data(
+        self,
+        seq_len: int,
+        is_encoder_data: bool = False,
+    ) -> DummyData:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
