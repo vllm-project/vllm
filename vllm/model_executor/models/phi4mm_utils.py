@@ -1018,21 +1018,10 @@ class CausalConv2D(nn.Conv2d):
         self,
         x,
     ):
-        if self.training:
-            x = F.pad(
-                x,
-                pad=(
-                    self._left_padding,
-                    self._right_padding,
-                    self._left_padding,
-                    self._right_padding,
-                ),
-            )
-        else:
-            x = F.pad(
-                x,
-                pad=(self._left_padding, self._right_padding, 0, 0),
-            )
+        x = F.pad(
+            x,
+            pad=(self._left_padding, self._right_padding, 0, 0),
+        )
         x = super().forward(x)
         return x
 

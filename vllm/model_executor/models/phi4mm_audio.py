@@ -494,14 +494,6 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         # Create mask matrix for streaming
         # S stores start index. if chunksize is 18, s is [0,18,36,....]
         chunk_start_idx = np.arange(0, seq_len, chunk_size_train_eff)
-        # avoid randomness when run evaluation or decoding
-        if self.training and np.random.rand() > 0.5:
-            # Either first or last chunk is not complete.
-            # If only the last one is not complete, EOS is not effective
-            chunk_start_idx = seq_len - chunk_start_idx
-            chunk_start_idx = chunk_start_idx[::-1]
-            chunk_start_idx = chunk_start_idx[:-1]
-            chunk_start_idx = np.insert(chunk_start_idx, 0, 0)
 
         enc_streaming_mask = (adaptive_enc_mask(
             seq_len, chunk_start_idx,
@@ -1276,16 +1268,4 @@ class AudioEmbedding(nn.Module):
                     hidden_states.dtype).to(hidden_states.device))
                 idx += cnt
 
-        else:
-            if self.training:
-                # hidden_states[:, 0:img_set_tensor.shape[0]]  =
-                # hidden_states[:, 0:img_set_tensor.shape[0]] +
-                # 0 * img_set_tensor.to(hidden_states.dtype)
-                # .to(hidden_states.device)
-                hidden_states[:, 0:1] = hidden_states[:, 0:1] + \
-                    0 * audio_set_tensor[:, 0:1].to(hidden_states.dtype)\
-                        .to(hidden_states.device)
-
-        if self.drop is not None:
-            hidden_states = self.drop(hidden_states)
         return hidden_states
