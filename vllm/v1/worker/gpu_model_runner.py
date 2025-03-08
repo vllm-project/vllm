@@ -10,7 +10,6 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
@@ -94,11 +93,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.head_size = model_config.get_head_size()
         self.hidden_size = model_config.get_hidden_size()
 
-        if not envs.VLLM_USE_V1:
-            raise ValueError(
-                "In V1 GPUModelRunner, but got envs.VLLM_USE_V1 = False. "
-                "Raise this issue on GitHub and explicitly set VLLM_USE_V1=1.")
-
         self.attn_backend = get_attn_backend(
             self.head_size,
             self.dtype,
@@ -106,7 +100,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.block_size,
             self.model_config.is_attention_free,
             use_mla=self.model_config.use_mla,
-            use_v1=True,
         )
         if self.attn_backend is None:
             error_msg = (
