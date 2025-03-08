@@ -123,7 +123,7 @@ def test_cumem_with_cudagraph():
         # sleep mode with pytorch checkpoint
         ("facebook/opt-125m", False),
     ])
-def test_end_to_end(model: str, use_v1: bool, monkeypatch):
+def test_end_to_end(model: str, use_v1: bool):
     import os
     os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
     free, total = torch.cuda.mem_get_info()
