@@ -101,6 +101,14 @@ features/compatibility_matrix
 % Details about running vLLM
 
 :::{toctree}
+:caption: Training
+:maxdepth: 1
+
+training/trl.md
+
+:::
+
+:::{toctree}
 :caption: Inference and Serving
 :maxdepth: 1
 
@@ -157,6 +165,7 @@ design/multiprocessing
 :caption: V1 Design Documents
 :maxdepth: 2
 
+design/v1/torch_compile
 design/v1/prefix_caching
 design/v1/metrics
 :::

@@ -104,7 +104,7 @@ class EngineArgs:
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
-    seed: int = 0
+    seed: Optional[int] = None
     max_model_len: Optional[int] = None
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
@@ -207,7 +207,7 @@ class EngineArgs:
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
-    generation_config: Optional[str] = None
+    generation_config: Optional[str] = "auto"
     override_generation_config: Optional[Dict[str, Any]] = None
     enable_sleep_mode: bool = False
     model_impl: str = "auto"
@@ -276,7 +276,9 @@ class EngineArgs:
         parser.add_argument(
             '--skip-tokenizer-init',
             action='store_true',
-            help='Skip initialization of tokenizer and detokenizer.')
+            help='Skip initialization of tokenizer and detokenizer. '
+            'Expects valid prompt_token_ids and None for prompt from '
+            'the input. The generated output will contain token ids.')
         parser.add_argument(
             '--revision',
             type=nullable_str,
@@ -1032,13 +1034,13 @@ class EngineArgs:
         parser.add_argument(
             "--generation-config",
             type=nullable_str,
-            default=None,
+            default="auto",
             help="The folder path to the generation config. "
-            "Defaults to None, no generation config is loaded, vLLM defaults "
-            "will be used. If set to 'auto', the generation config will be "
-            "loaded from model path. If set to a folder path, the generation "
-            "config will be loaded from the specified folder path. If "
-            "`max_new_tokens` is specified in generation config, then "
+            "Defaults to 'auto', the generation config will be loaded from "
+            "model path. If set to 'vllm', no generation config is loaded, "
+            "vLLM defaults will be used. If set to a folder path, the "
+            "generation config will be loaded from the specified folder path. "
+            "If `max_new_tokens` is specified in generation config, then "
             "it sets a server-wide limit on the number of output tokens "
             "for all requests.")
 
