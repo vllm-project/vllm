@@ -288,14 +288,13 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_wNa16_group_channel(self, weight_quant: BaseModel,
                                 input_quant: BaseModel) -> bool:
         input_quant_none = input_quant is None
-        is_symmetric = weight_quant.symmetric
+        #is_symmetric = weight_quant.symmetric
         is_channel_group = (
             weight_quant.strategy == QuantizationStrategy.CHANNEL.value
             or weight_quant.strategy == QuantizationStrategy.GROUP.value)
         is_static = not weight_quant.dynamic
 
-        return (is_channel_group and input_quant_none and is_symmetric
-                and is_static)
+        return (is_channel_group and input_quant_none and is_static)
 
     def _get_scheme_from_parts(
             self, weight_quant: BaseModel,
