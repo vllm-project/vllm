@@ -1351,6 +1351,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     return out_hidden_states
 
 
+#TODO make the grouped gemm kernel consistent with scaled gemm kernel
 def fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -1456,3 +1457,67 @@ def fused_moe(
                          a1_scale=a1_scale,
                          a2_scale=a2_scale,
                          block_shape=block_shape)
+
+
+def cutlass_moe(
+    a_q: torch.Tensor,
+    a_scale: torch.Tensor,
+    w1_q: torch.Tensor,
+    w2_q: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    m: int,
+    n: int,
+    k: int,
+    num_groups: int,
+    ab_strides1: torch.Tensor,
+    c_strides1: torch.Tensor,
+    ab_strides2: torch.Tensor,
+    c_strides2: torch.Tensor,
+):
+    topk = topk_ids.shape[1]
+    per_act_token = a_scale.numel() != 1
+    device = a_q.device
+
+    expert_offsets = torch.empty((num_groups + 1),
+                                 dtype=torch.int32,
+                                 device=device)
+    problem_sizes1 = torch.empty((num_groups, 3),
+                                 dtype=torch.int32,
+                                 device=device)
+    problem_sizes2 = torch.empty((num_groups, 3),
+                                 dtype=torch.int32,
+                                 device=device)
+
+    a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+    c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+
+    torch.ops._C.get_grouped_mm_data(topk_ids, expert_offsets, problem_sizes1,
+                                     problem_sizes2, a_map, c_map, num_groups,
+                                     n, k)
+
+    rep_a_q = a_q.view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
+    rep_a_scales = a_scale[a_map] if per_act_token else a_scale
+
+    c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.half)
+    c2 = torch.empty((m * topk, k), device=device, dtype=torch.half)
+
+    torch.ops._C.cutlass_grouped_mm(c1, rep_a_q, w1_q, rep_a_scales, w1_scale,
+                                    expert_offsets[:-1], problem_sizes1,
+                                    ab_strides1, ab_strides1, c_strides1)
+
+    intermediate = torch.empty((m * topk, n), device=device, dtype=torch.half)
+    torch.ops._C.silu_and_mul(intermediate, c1)
+
+    intemediate_q, intermediate_scales = ops.scaled_fp8_quant(
+        intermediate, use_per_token_if_dynamic=per_act_token)
+
+    torch.ops._C.cutlass_grouped_mm(c2, intemediate_q, w2_q,
+                                    intermediate_scales, w2_scale,
+                                    expert_offsets[:-1], problem_sizes2,
+                                    ab_strides2, ab_strides2, c_strides2)
+
+    return (c2[c_map].view(m, topk, k) *
+            topk_weights.view(m, topk, 1).half()).sum(dim=1)
