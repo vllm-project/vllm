@@ -437,7 +437,7 @@ def set_cpu_affinity():
     if nvml_available:
         # The below code is based on https://github.com/NVIDIA/DeepLearningExamples/blob/master/TensorFlow2/LanguageModeling/BERT/gpu_affinity.py
         pynvml.nvmlInit()
-        num_elements = math.ceil(os.cpu_count() / 64)
+        num_elements = math.ceil((os.cpu_count() or 2) / 64)
         handle = pynvml.nvmlDeviceGetHandleByIndex(envs.LOCAL_RANK)
         affinity_string = ""
         for j in pynvml.nvmlDeviceGetCpuAffinity(handle, num_elements):
