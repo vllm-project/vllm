@@ -96,9 +96,8 @@ def test_models_distributed(
     model: str,
     distributed_executor_backend: str,
     attention_backend: str,
-    monkeypatch,
 ) -> None:
-    override_backend_env_variable(monkeypatch, attention_backend)
+    override_backend_env_variable(attention_backend)
 
     if (model == "meta-llama/Llama-3.2-1B-Instruct"
             and distributed_executor_backend == "ray"):
@@ -167,7 +166,6 @@ def test_models_with_fp8_kv_cache(
     enforce_eager: bool,
     tensor_parallel_size: int,
     disable_async_output_proc: bool,
-    monkeypatch,
 ) -> None:
     """
     Check output logprobs match between no_chunked_prefill and chunked_prefill

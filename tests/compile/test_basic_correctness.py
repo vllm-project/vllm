@@ -90,7 +90,7 @@ test_settings = [
 # we cannot afford testing the full Catesian product
 # of all models and all levels
 @pytest.mark.parametrize("test_setting", test_settings)
-def test_compile_correctness(test_setting: TestSetting, monkeypatch):
+def test_compile_correctness(test_setting: TestSetting):
     # this test is run under multiple suits, with different GPUs.
     # make sure we only run the test with correct CUDA devices.
     # don't use "<", as it will duplicate the tests.
@@ -103,7 +103,8 @@ def test_compile_correctness(test_setting: TestSetting, monkeypatch):
     fullgraph = test_setting.fullgraph
     if cuda_device_count_stateless() != pp_size * tp_size:
         pytest.skip("Not correct CUDA devices for the test.")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
+    import os
+    os.environ["VLLM_ATTENTION_BACKEND"] = attn_backend
     final_args = ["--enforce-eager"] + model_args + ["-pp", str(pp_size)] + \
                 ["-tp", str(tp_size)]
 
