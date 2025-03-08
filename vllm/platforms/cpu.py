@@ -56,9 +56,6 @@ class CpuPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
-        if envs.VLLM_USE_V1:
-            raise NotImplementedError(
-                "V1 is not supported on CPU. Set VLLM_USE_V1=0")
 
         model_config = vllm_config.model_config
         # Reminder: Please update docs/source/features/compatibility_matrix.md
