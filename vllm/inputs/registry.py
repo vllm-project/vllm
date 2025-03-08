@@ -335,8 +335,10 @@ class InputRegistry:
                                                      tokenizer,
                                                      disable_cache=True)
             profiler = MultiModalProfiler(processor)
-            dummy_data = profiler.get_dummy_data(
-                seq_len, is_encoder_data=is_encoder_data)
+            dummy_data_factory = (profiler.get_encoder_dummy_data
+                                  if is_encoder_data else
+                                  profiler.get_decoder_dummy_data)
+            dummy_data = dummy_data_factory(seq_len)
         else:
             model_cls, _ = get_model_architecture(model_config)
             if is_encoder_data:

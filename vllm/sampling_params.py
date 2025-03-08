@@ -186,6 +186,9 @@ class SamplingParams(
         allowed_token_ids: If provided, the engine will construct a logits
             processor which only retains scores for the given token ids.
             Defaults to None.
+        extra_args: Arbitrary additional args, that can be used by custom
+            sampling implementations. Not used by any in-tree sampling
+            implementations.
     """
 
     n: int = 1
@@ -228,6 +231,7 @@ class SamplingParams(
     guided_decoding: Optional[GuidedDecodingParams] = None
     logit_bias: Optional[dict[int, float]] = None
     allowed_token_ids: Optional[list[int]] = None
+    extra_args: Optional[dict[str, Any]] = None
 
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
@@ -264,6 +268,7 @@ class SamplingParams(
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
+        extra_args: Optional[dict[str, Any]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -305,6 +310,7 @@ class SamplingParams(
             guided_decoding=guided_decoding,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
+            extra_args=extra_args,
         )
 
     def __post_init__(self) -> None:
@@ -559,7 +565,8 @@ class SamplingParams(
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
-            f"guided_decoding={self.guided_decoding})")
+            f"guided_decoding={self.guided_decoding}, "
+            f"extra_args={self.extra_args})")
 
 
 class BeamSearchParams(

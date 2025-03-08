@@ -35,7 +35,7 @@ function cpu_tests() {
   # Run basic model test
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "
     set -e
-    pip install -r vllm/requirements-test.txt
+    pip install -r vllm/requirements/test.txt
     pytest -v -s tests/models/decoder_only/language -m cpu_model
     pytest -v -s tests/models/embedding/language -m cpu_model
     pytest -v -s tests/models/encoder_decoder/language -m cpu_model

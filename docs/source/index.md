@@ -101,6 +101,15 @@ features/compatibility_matrix
 % Details about running vLLM
 
 :::{toctree}
+:caption: Training
+:maxdepth: 1
+
+training/trl.md
+training/rlhf.md
+
+:::
+
+:::{toctree}
 :caption: Inference and Serving
 :maxdepth: 1
 
