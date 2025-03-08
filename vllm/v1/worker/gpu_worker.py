@@ -119,6 +119,8 @@ class Worker(WorkerBase):
         self.model_runner: GPUModelRunner = GPUModelRunner(
             self.vllm_config, self.device)
 
+    # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
+    # to hijack tensor allocation.
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
