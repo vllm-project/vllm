@@ -15,9 +15,7 @@ ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install minimal dependencies and uv
-RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
-    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
-    && apt-get update -y \
+RUN apt-get update -y \
     && apt-get install -y ccache git curl wget sudo \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
@@ -174,9 +172,7 @@ RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
 # Install minimal dependencies and uv
-RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
-    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
-    && apt-get update -y \
+RUN apt-get update -y \
     && apt-get install -y ccache git curl wget sudo vim \
     && apt-get install -y ffmpeg libsm6 libxext6 libgl1 libibverbs-dev \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
