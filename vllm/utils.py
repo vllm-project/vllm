@@ -2361,3 +2361,19 @@ class LazyLoader(types.ModuleType):
         if self._module is None:
             self._module = self._load()
         return dir(self._module)
+
+
+def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
+    """
+    Helper function to swap values for two keys
+    """
+    v1 = obj.get(key1)
+    v2 = obj.get(key2)
+    if v1 is not None:
+        obj[key2] = v1
+    else:
+        obj.pop(key2, None)
+    if v2 is not None:
+        obj[key1] = v2
+    else:
+        obj.pop(key1, None)

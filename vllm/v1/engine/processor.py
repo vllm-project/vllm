@@ -94,9 +94,6 @@ class Processor:
         # Best of not yet supported.
         if params.best_of is not None and params.best_of > 1:
             raise ValueError("VLLM V1 does not yet support best_of.")
-        # Bad words not yet supported.
-        if params.bad_words:
-            raise ValueError("VLLM V1 does not yet support bad_words.")
         # Logits processors not supported.
         if params.logits_processors:
             raise ValueError("VLLM V1 does not support per request "
@@ -203,6 +200,8 @@ class Processor:
         sampling_params = params.clone()
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
+        sampling_params.update_from_tokenizer(
+            self.tokenizer.get_lora_tokenizer(lora_request))
 
         # Multimodal related.
         # Compute MM hashes (if enabled)
