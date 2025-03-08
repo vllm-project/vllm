@@ -25,13 +25,15 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, cdiv, is_pin_memory_available)
+                        LayerBlockType, LazyLoader, cdiv,
+                        is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
+                             ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -40,7 +42,11 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 if TYPE_CHECKING:
+    import xgrammar as xgr
+
     from vllm.v1.core.scheduler_output import SchedulerOutput
+else:
+    xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
 
@@ -456,8 +462,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Some attention backends (namely MLA) may want to separate requests
         # based on if the attention computation will be compute-bound or
         # memory-bound. This gives them a hook to do that.
-        self.attn_metadata_builder.reorder_batch(self.input_batch,
-                                                 scheduler_output)
+        modified_batch = self.attn_metadata_builder.reorder_batch(
+            self.input_batch, scheduler_output)
+        if modified_batch:
+            self.input_batch.refresh_sampling_metadata()
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -858,6 +866,53 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
+    def apply_grammar_bitmask(
+        self,
+        scheduler_output: "SchedulerOutput",
+        logits: torch.Tensor,
+    ):
+        # Serialization of np.ndarray is much more efficient than a tensor,
+        # so we receive it in that format.
+        grammar_bitmask = scheduler_output.grammar_bitmask
+        if grammar_bitmask is None:
+            return
+
+        # We receive the structured output bitmask from the scheduler, but the
+        # indices of the requests in the batch may not match the indices of
+        # the bitmask since the scheduler doesn't know how the gpu runner is
+        # ordering the requests in the batch. We need to sort the bitmask to
+        # match the order of the requests used here.
+        struct_out_req_batch_indices: dict[str, int] = {}
+        indices_match = True
+        for req_id in self.input_batch.req_ids:
+            mask_index = scheduler_output.structured_output_request_ids.get(
+                req_id)
+            if mask_index is None:
+                # not a structured output request
+                continue
+            batch_index = self.input_batch.req_id_to_index[req_id]
+            if batch_index != mask_index:
+                indices_match = False
+            struct_out_req_batch_indices[req_id] = batch_index
+
+        if not indices_match:
+            # Sort the bitmask to match the order of the requests
+            sorted_bitmask = np.zeros_like(grammar_bitmask)
+            for req_id, batch_index in struct_out_req_batch_indices.items():
+                orig_index = scheduler_output.structured_output_request_ids[
+                    req_id]
+                sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
+            grammar_bitmask = sorted_bitmask
+
+        grammar_bitmask = torch.from_numpy(grammar_bitmask)
+
+        # TODO: compatibility with spec decode
+        xgr.apply_token_bitmask_inplace(
+            logits,
+            grammar_bitmask.to(self.device, non_blocking=True),
+            indices=list(struct_out_req_batch_indices.values()),
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -865,6 +920,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
         self._update_states(scheduler_output)
+        if not scheduler_output.total_num_scheduled_tokens:
+            # Return empty ModelRunnerOuptut if there's no work to do.
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -943,6 +1001,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
+        # Apply structured output bitmasks if present
+        if scheduler_output.grammar_bitmask is not None:
+            self.apply_grammar_bitmask(scheduler_output, logits)
+
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         if not self.use_spec_decode:
@@ -1011,7 +1073,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids = self.generate_draft_token_ids(
                 valid_sampled_token_ids)
 
-        model_runner_output = ModelRunnerOutput(
+        return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
@@ -1019,7 +1081,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
-        return model_runner_output
 
     def generate_draft_token_ids(
         self,
@@ -1177,6 +1238,42 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         return hidden_states
 
+    @torch.inference_mode()
+    def _dummy_sampler_run(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+
+        logits = self.model.compute_logits(hidden_states, None)
+        num_reqs = logits.size(0)
+
+        dummy_tensors = lambda v: torch.full(
+            (num_reqs, ), v, device=self.device)
+
+        dummy_metadata = SamplingMetadata(
+            temperature=dummy_tensors(0.5),
+            all_greedy=False,
+            all_random=False,
+            top_p=dummy_tensors(0.9),
+            top_k=dummy_tensors(logits.size(1) - 1),
+            min_p=None,
+            generators={},
+            max_num_logprobs=None,
+            no_penalties=True,
+            prompt_token_ids=None,
+            frequency_penalties=dummy_tensors(0.1),
+            presence_penalties=dummy_tensors(0.1),
+            repetition_penalties=dummy_tensors(0.1),
+            output_token_ids=[[] for _ in range(num_reqs)],
+            min_tokens={},
+            logit_bias=[None for _ in range(num_reqs)],
+            allowed_token_ids_mask=None,
+        )
+        sampler_output = self.model.sample(logits=logits,
+                                           sampling_metadata=dummy_metadata)
+
+        return sampler_output
+
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
         # TODO: handle encoder-decoder models once we support them.
@@ -1292,37 +1389,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states = self._dummy_run(self.max_num_tokens)
             if get_pp_group().is_last_rank:
                 hidden_states = hidden_states[logit_indices]
-                logits = self.model.compute_logits(hidden_states, None)
-                dummy_tensors = lambda v: torch.full(
-                    (num_reqs, ), v, device=self.device)
-                dummy_metadata = SamplingMetadata(
-                    temperature=dummy_tensors(0.5),
-                    all_greedy=False,
-                    all_random=False,
-                    top_p=dummy_tensors(0.9),
-                    top_k=dummy_tensors(logits.size(1) - 1),
-                    min_p=None,
-                    generators={},
-                    max_num_logprobs=None,
-                    no_penalties=True,
-                    prompt_token_ids=torch.ones_like(logits,
-                                                     dtype=torch.int64),
-                    frequency_penalties=dummy_tensors(0.1),
-                    presence_penalties=dummy_tensors(0.1),
-                    repetition_penalties=dummy_tensors(0.1),
-                    output_token_ids=[[] for _ in range(num_reqs)],
-                    min_tokens={},
-                    logit_bias=[None for _ in range(num_reqs)],
-                    allowed_token_ids_mask=None,
-                )
-                sampler_output = self.model.sample(
-                    logits=logits, sampling_metadata=dummy_metadata)
+                sampler_output = self._dummy_sampler_run(hidden_states)
             else:
-                logits = None
                 sampler_output = None
-                dummy_metadata = None
             torch.cuda.synchronize()
-            del hidden_states, logits, sampler_output, dummy_metadata
+            del hidden_states, sampler_output
             self.encoder_cache.clear()
         gc.collect()
 
@@ -1399,13 +1470,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
+        use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: KVCacheSpec = {}
         for layer_name, attn_module in forward_ctx.items():
             if isinstance(attn_module, FusedMoE):
                 continue
 
             # TODO: Support other attention modules, e.g., sliding window,
-            # cross-attention, MLA.
+            # cross-attention
             assert isinstance(attn_module, Attention)
             if attn_module.attn_type == AttentionType.DECODER:
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -1413,7 +1485,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=attn_module.dtype,
-                )
+                    use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.

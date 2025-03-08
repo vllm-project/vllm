@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -16,40 +16,45 @@ logger = init_logger(__name__)
 class IncrementalDetokenizer:
 
     # Generation data
-    output_text: str
-    tokens: list[str]
     token_ids: list[int]
-    prompt_len: int
+    output_text: str = ""
+    tokens: list[str] = field(default_factory=list)
+    prompt_len: int = 0
 
     # Stop strings
-    stop: list[str]
-    include_stop_str_in_output: bool
+    stop: list[str] = field(default_factory=list)
+    include_stop_str_in_output: bool = False
 
     # Metadata for incremental detokenization
-    prefix_offset: int
-    read_offset: int
+    prefix_offset: int = 0
+    read_offset: int = 0
 
     # Parameters for detokenization
-    skip_special_tokens: bool
-    spaces_between_special_tokens: bool
+    skip_special_tokens: bool = True
+    spaces_between_special_tokens: bool = True
 
-    # Tokenizer for this request
-    tokenizer: AnyTokenizer
+    # Tokenizer for this request,
+    # None if detokenization is disabled.
+    tokenizer: Optional[AnyTokenizer] = None
 
     # Accounting for stop string buffering
-    stop_buffer_length: int
+    stop_buffer_length: int = 0
     _last_output_text_offset: int = 0
 
     @property
     def output_token_ids(self) -> list[int]:
-        return self.token_ids[self.prompt_len:]
+        return self.token_ids if not self.prompt_len else (
+            self.token_ids[self.prompt_len:])
 
     @classmethod
     def from_new_request(
         cls,
-        tokenizer: AnyTokenizer,
+        tokenizer: Optional[AnyTokenizer],
         request: EngineCoreRequest,
     ) -> "IncrementalDetokenizer":
+
+        if tokenizer is None:
+            return cls(token_ids=[])
 
         tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
             tokenizer=tokenizer,
@@ -66,7 +71,6 @@ class IncrementalDetokenizer:
             stop_buffer_length = 0
 
         return cls(
-            output_text="",
             tokens=tokens,
             # Detokenizer mutates this list, so need a unique copy.
             # NOTE(Nick): could we take ownership of it though?
@@ -92,6 +96,10 @@ class IncrementalDetokenizer:
 
         Return matched stop string or None.
         """
+
+        if self.tokenizer is None:
+            self.token_ids.extend(new_token_ids)
+            return None
 
         # 1) Detokenize the new token ids incrementally.
         # TODO(woosuk): This method becomes very inefficient when the number of

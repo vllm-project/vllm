@@ -842,13 +842,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
-- * `PaliGemmaForConditionalGeneration`\*
-  * PaliGemma, PaliGemma 2
+- * `PaliGemmaForConditionalGeneration`
+  * PaliGemma (see note), PaliGemma 2 (see note)
   * T + I<sup>E</sup>
   * `google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, `google/paligemma2-3b-ft-docci-448`, etc.
   *
   * ✅︎
-  *
+  * ✅︎
 - * `Phi3VForCausalLM`
   * Phi-3-Vision, Phi-3.5-Vision
   * T + I<sup>E+</sup>
@@ -866,7 +866,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
-  * `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b` (see note), etc.
+  * `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b`, etc.
   *
   * ✅︎
   * ✅︎
@@ -928,10 +928,6 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 
 :::{note}
 Currently the PaliGemma model series is implemented without PrefixLM attention mask. This model series may be deprecated in a future release.
-:::
-
-:::{note}
-`mistral-community/pixtral-12b` does not support V1 yet.
 :::
 
 :::{note}
