@@ -91,7 +91,13 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return not enforce_eager
+        if enforce_eager:
+            logger.warning(
+                "To see benefits of async output processing, enable CUDA "
+                "graph. Since, enforce-eager is enabled, async output "
+                "processor cannot be used")
+            return False
+        return True
 
     @classmethod
     def is_full_nvlink(cls, device_ids: List[int]) -> bool:
@@ -226,7 +232,6 @@ class CudaPlatformBase(Platform):
                 "Cannot use FlashAttention-2 backend for dtype other than "
                 "torch.float16 or torch.bfloat16.")
             target_backend = _Backend.XFORMERS
-
         elif kv_cache_dtype is not None and \
             kv_cache_dtype.startswith("fp8"):
             logger.info(
