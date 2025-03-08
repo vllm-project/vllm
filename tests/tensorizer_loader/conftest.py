@@ -22,9 +22,7 @@ _R = TypeVar("_R")
 
 
 def retry_until_skip(n: int):
-
     def decorator_retry(func: Callable[_P, _R]) -> Callable[_P, _R]:
-
         @functools.wraps(func)
         def wrapper_retry(*args: _P.args, **kwargs: _P.kwargs) -> _R:
             for i in range(n):

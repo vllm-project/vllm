@@ -6,6 +6,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
  all workers in a node other than the head node, which can cause the test
  to fail.
 """
+
 import json
 import os
 from dataclasses import dataclass
@@ -54,7 +55,8 @@ class PPTestSettings:
             raise ValueError(
                 f"Length mismatch: distributed_backends "
                 f"({len(self.distributed_backends)}) != "
-                f"vllm_major_versions ({len(self.vllm_major_versions)})")
+                f"vllm_major_versions ({len(self.vllm_major_versions)})"
+            )
 
     @staticmethod
     def detailed(
@@ -67,33 +69,44 @@ class PPTestSettings:
     ):
         return PPTestSettings(
             parallel_setups=[
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=pp_base,
-                              eager_mode=False,
-                              chunked_prefill=False),
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=2 * pp_base,
-                              eager_mode=False,
-                              chunked_prefill=True),
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=2 * pp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
-                ParallelSetup(tp_size=2 * tp_base,
-                              pp_size=pp_base,
-                              eager_mode=False,
-                              chunked_prefill=True),
-                ParallelSetup(tp_size=2 * tp_base,
-                              pp_size=pp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
+                ParallelSetup(
+                    tp_size=tp_base,
+                    pp_size=pp_base,
+                    eager_mode=False,
+                    chunked_prefill=False,
+                ),
+                ParallelSetup(
+                    tp_size=tp_base,
+                    pp_size=2 * pp_base,
+                    eager_mode=False,
+                    chunked_prefill=True,
+                ),
+                ParallelSetup(
+                    tp_size=tp_base,
+                    pp_size=2 * pp_base,
+                    eager_mode=True,
+                    chunked_prefill=False,
+                ),
+                ParallelSetup(
+                    tp_size=2 * tp_base,
+                    pp_size=pp_base,
+                    eager_mode=False,
+                    chunked_prefill=True,
+                ),
+                ParallelSetup(
+                    tp_size=2 * tp_base,
+                    pp_size=pp_base,
+                    eager_mode=True,
+                    chunked_prefill=False,
+                ),
             ],
             # only ray is supported for V1
             distributed_backends=["mp", "ray", "ray"],
             vllm_major_versions=["0", "0", "1"],
             task=task,
-            test_options=PPTestOptions(multi_node_only=multi_node_only,
-                                       load_format=load_format),
+            test_options=PPTestOptions(
+                multi_node_only=multi_node_only, load_format=load_format
+            ),
         )
 
     @staticmethod
@@ -107,26 +120,36 @@ class PPTestSettings:
     ):
         return PPTestSettings(
             parallel_setups=[
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=pp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
+                ParallelSetup(
+                    tp_size=tp_base,
+                    pp_size=pp_base,
+                    eager_mode=True,
+                    chunked_prefill=False,
+                ),
             ],
             distributed_backends=["mp"],
             vllm_major_versions=["0"],
             task=task,
-            test_options=PPTestOptions(multi_node_only=multi_node_only,
-                                       load_format=load_format),
+            test_options=PPTestOptions(
+                multi_node_only=multi_node_only, load_format=load_format
+            ),
         )
 
     def iter_params(self, model_id: str):
         opts = self.test_options
 
         for parallel_setup in self.parallel_setups:
-            for backend, vllm_major_version in zip(self.distributed_backends,
-                                                   self.vllm_major_versions):
-                yield (model_id, parallel_setup, backend, vllm_major_version,
-                       self.task, opts)
+            for backend, vllm_major_version in zip(
+                self.distributed_backends, self.vllm_major_versions
+            ):
+                yield (
+                    model_id,
+                    parallel_setup,
+                    backend,
+                    vllm_major_version,
+                    self.task,
+                    opts,
+                )
 
 
 # NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
@@ -292,8 +315,10 @@ def _compare_tp(
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
     if VLLM_MULTI_NODE and distributed_backend == "mp":
-        pytest.skip("Skipping multi-node pipeline parallel test for "
-                    "multiprocessing distributed backend")
+        pytest.skip(
+            "Skipping multi-node pipeline parallel test for "
+            "multiprocessing distributed backend"
+        )
     if multi_node_only and not VLLM_MULTI_NODE:
         pytest.skip("Not in multi-node setting")
 
@@ -322,8 +347,9 @@ def _compare_tp(
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
-    if distributed_backend == "ray" and (vllm_major_version == "1"
-                                         or specific_case):
+    if distributed_backend == "ray" and (
+        vllm_major_version == "1" or specific_case
+    ):
         # For V1, test Ray Compiled Graph for all the tests
         # For V0, test Ray Compiled Graph for a subset of the tests
         pp_env = {
@@ -373,11 +399,19 @@ def _compare_tp(
 
 
 @pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "task", "test_options"),
+    (
+        "model_id",
+        "parallel_setup",
+        "distributed_backend",
+        "vllm_major_version",
+        "task",
+        "test_options",
+    ),
     [
-        params for model_id, settings in TEXT_GENERATION_MODELS.items()
-        for params in settings.iter_params(model_id) if model_id in TEST_MODELS
+        params
+        for model_id, settings in TEXT_GENERATION_MODELS.items()
+        for params in settings.iter_params(model_id)
+        if model_id in TEST_MODELS
     ],
 )
 @fork_new_process_for_each_test
@@ -390,23 +424,33 @@ def test_tp_language_generation(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(model_id,
-                parallel_setup,
-                distributed_backend,
-                vllm_major_version,
-                task,
-                test_options,
-                num_gpus_available,
-                method="generate",
-                is_multimodal=False)
+    _compare_tp(
+        model_id,
+        parallel_setup,
+        distributed_backend,
+        vllm_major_version,
+        task,
+        test_options,
+        num_gpus_available,
+        method="generate",
+        is_multimodal=False,
+    )
 
 
 @pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "task", "test_options"),
+    (
+        "model_id",
+        "parallel_setup",
+        "distributed_backend",
+        "vllm_major_version",
+        "task",
+        "test_options",
+    ),
     [
-        params for model_id, settings in EMBEDDING_MODELS.items()
-        for params in settings.iter_params(model_id) if model_id in TEST_MODELS
+        params
+        for model_id, settings in EMBEDDING_MODELS.items()
+        for params in settings.iter_params(model_id)
+        if model_id in TEST_MODELS
     ],
 )
 @fork_new_process_for_each_test
@@ -419,23 +463,33 @@ def test_tp_language_embedding(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(model_id,
-                parallel_setup,
-                distributed_backend,
-                vllm_major_version,
-                task,
-                test_options,
-                num_gpus_available,
-                method="encode",
-                is_multimodal=False)
+    _compare_tp(
+        model_id,
+        parallel_setup,
+        distributed_backend,
+        vllm_major_version,
+        task,
+        test_options,
+        num_gpus_available,
+        method="encode",
+        is_multimodal=False,
+    )
 
 
 @pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "task", "test_options"),
+    (
+        "model_id",
+        "parallel_setup",
+        "distributed_backend",
+        "vllm_major_version",
+        "task",
+        "test_options",
+    ),
     [
-        params for model_id, settings in MULTIMODAL_MODELS.items()
-        for params in settings.iter_params(model_id) if model_id in TEST_MODELS
+        params
+        for model_id, settings in MULTIMODAL_MODELS.items()
+        for params in settings.iter_params(model_id)
+        if model_id in TEST_MODELS
     ],
 )
 @fork_new_process_for_each_test
@@ -448,12 +502,14 @@ def test_tp_multimodal_generation(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(model_id,
-                parallel_setup,
-                distributed_backend,
-                vllm_major_version,
-                task,
-                test_options,
-                num_gpus_available,
-                method="generate",
-                is_multimodal=True)
+    _compare_tp(
+        model_id,
+        parallel_setup,
+        distributed_backend,
+        vllm_major_version,
+        task,
+        test_options,
+        num_gpus_available,
+        method="generate",
+        is_multimodal=True,
+    )

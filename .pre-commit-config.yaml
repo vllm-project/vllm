@@ -11,7 +11,7 @@ repos:
           [--output-format, github, --fix, --exit-non-zero-on-fix, --show-fixes]
       - id: ruff-format
         types_or: [python]
-        files: "(vllm/v1)/"
+        files: "(vllm/v1|tests)/"
         exclude: "(csrc)/"
   - repo: https://github.com/codespell-project/codespell
     rev: v2.4.0

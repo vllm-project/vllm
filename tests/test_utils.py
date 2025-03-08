@@ -11,17 +11,24 @@ import torch
 from vllm_test_utils import monitor
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.utils import (FlexibleArgumentParser, MemorySnapshot,
-                        PlaceholderModule, StoreBoolean, bind_kv_cache,
-                        deprecate_kwargs, get_open_port, memory_profiling,
-                        merge_async_iterators, supports_kw)
+from vllm.utils import (
+    FlexibleArgumentParser,
+    MemorySnapshot,
+    PlaceholderModule,
+    StoreBoolean,
+    bind_kv_cache,
+    deprecate_kwargs,
+    get_open_port,
+    memory_profiling,
+    merge_async_iterators,
+    supports_kw,
+)
 
 from .utils import error_on_warning, fork_new_process_for_each_test
 
 
 @pytest.mark.asyncio
 async def test_merge_async_iterators():
-
     async def mock_async_iterator(idx: int):
         try:
             while True:
@@ -55,7 +62,6 @@ async def test_merge_async_iterators():
 
 
 def test_deprecate_kwargs_always():
-
     @deprecate_kwargs("old_arg", is_deprecated=True)
     def dummy(*, old_arg: object = None, new_arg: object = None):
         pass
@@ -68,7 +74,6 @@ def test_deprecate_kwargs_always():
 
 
 def test_deprecate_kwargs_never():
-
     @deprecate_kwargs("old_arg", is_deprecated=False)
     def dummy(*, old_arg: object = None, new_arg: object = None):
         pass
@@ -103,7 +108,6 @@ def test_deprecate_kwargs_dynamic():
 
 
 def test_deprecate_kwargs_additional_message():
-
     @deprecate_kwargs("old_arg", is_deprecated=True, additional_message="abcd")
     def dummy(*, old_arg: object = None, new_arg: object = None):
         pass
@@ -128,97 +132,124 @@ def test_get_open_port():
 @pytest.fixture
 def parser():
     parser = FlexibleArgumentParser()
-    parser.add_argument('--image-input-type',
-                        choices=['pixel_values', 'image_features'])
-    parser.add_argument('--model-name')
-    parser.add_argument('--batch-size', type=int)
-    parser.add_argument('--enable-feature', action='store_true')
+    parser.add_argument(
+        "--image-input-type", choices=["pixel_values", "image_features"]
+    )
+    parser.add_argument("--model-name")
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--enable-feature", action="store_true")
     return parser
 
 
 @pytest.fixture
 def parser_with_config():
     parser = FlexibleArgumentParser()
-    parser.add_argument('serve')
-    parser.add_argument('model_tag')
-    parser.add_argument('--served-model-name', type=str)
-    parser.add_argument('--config', type=str)
-    parser.add_argument('--port', type=int)
-    parser.add_argument('--tensor-parallel-size', type=int)
-    parser.add_argument('--trust-remote-code', action='store_true')
-    parser.add_argument('--multi-step-stream-outputs', action=StoreBoolean)
+    parser.add_argument("serve")
+    parser.add_argument("model_tag")
+    parser.add_argument("--served-model-name", type=str)
+    parser.add_argument("--config", type=str)
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--tensor-parallel-size", type=int)
+    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--multi-step-stream-outputs", action=StoreBoolean)
     return parser
 
 
 def test_underscore_to_dash(parser):
-    args = parser.parse_args(['--image_input_type', 'pixel_values'])
-    assert args.image_input_type == 'pixel_values'
+    args = parser.parse_args(["--image_input_type", "pixel_values"])
+    assert args.image_input_type == "pixel_values"
 
 
 def test_mixed_usage(parser):
-    args = parser.parse_args([
-        '--image_input_type', 'image_features', '--model-name',
-        'facebook/opt-125m'
-    ])
-    assert args.image_input_type == 'image_features'
-    assert args.model_name == 'facebook/opt-125m'
+    args = parser.parse_args(
+        [
+            "--image_input_type",
+            "image_features",
+            "--model-name",
+            "facebook/opt-125m",
+        ]
+    )
+    assert args.image_input_type == "image_features"
+    assert args.model_name == "facebook/opt-125m"
 
 
 def test_with_equals_sign(parser):
     args = parser.parse_args(
-        ['--image_input_type=pixel_values', '--model-name=facebook/opt-125m'])
-    assert args.image_input_type == 'pixel_values'
-    assert args.model_name == 'facebook/opt-125m'
+        ["--image_input_type=pixel_values", "--model-name=facebook/opt-125m"]
+    )
+    assert args.image_input_type == "pixel_values"
+    assert args.model_name == "facebook/opt-125m"
 
 
 def test_with_int_value(parser):
-    args = parser.parse_args(['--batch_size', '32'])
+    args = parser.parse_args(["--batch_size", "32"])
     assert args.batch_size == 32
-    args = parser.parse_args(['--batch-size', '32'])
+    args = parser.parse_args(["--batch-size", "32"])
     assert args.batch_size == 32
 
 
 def test_with_bool_flag(parser):
-    args = parser.parse_args(['--enable_feature'])
+    args = parser.parse_args(["--enable_feature"])
     assert args.enable_feature is True
-    args = parser.parse_args(['--enable-feature'])
+    args = parser.parse_args(["--enable-feature"])
     assert args.enable_feature is True
 
 
 def test_invalid_choice(parser):
     with pytest.raises(SystemExit):
-        parser.parse_args(['--image_input_type', 'invalid_choice'])
+        parser.parse_args(["--image_input_type", "invalid_choice"])
 
 
 def test_missing_required_argument(parser):
-    parser.add_argument('--required-arg', required=True)
+    parser.add_argument("--required-arg", required=True)
     with pytest.raises(SystemExit):
         parser.parse_args([])
 
 
 def test_cli_override_to_config(parser_with_config):
-    args = parser_with_config.parse_args([
-        'serve', 'mymodel', '--config', './data/test_config.yaml',
-        '--tensor-parallel-size', '3'
-    ])
+    args = parser_with_config.parse_args(
+        [
+            "serve",
+            "mymodel",
+            "--config",
+            "./data/test_config.yaml",
+            "--tensor-parallel-size",
+            "3",
+        ]
+    )
     assert args.tensor_parallel_size == 3
-    args = parser_with_config.parse_args([
-        'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
-        './data/test_config.yaml'
-    ])
+    args = parser_with_config.parse_args(
+        [
+            "serve",
+            "mymodel",
+            "--tensor-parallel-size",
+            "3",
+            "--config",
+            "./data/test_config.yaml",
+        ]
+    )
     assert args.tensor_parallel_size == 3
     assert args.port == 12312
-    args = parser_with_config.parse_args([
-        'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
-        './data/test_config.yaml', '--port', '666'
-    ])
+    args = parser_with_config.parse_args(
+        [
+            "serve",
+            "mymodel",
+            "--tensor-parallel-size",
+            "3",
+            "--config",
+            "./data/test_config.yaml",
+            "--port",
+            "666",
+        ]
+    )
     assert args.tensor_parallel_size == 3
     assert args.port == 666
 
 
 def test_config_args(parser_with_config):
     args = parser_with_config.parse_args(
-        ['serve', 'mymodel', '--config', './data/test_config.yaml'])
+        ["serve", "mymodel", "--config", "./data/test_config.yaml"]
+    )
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code
     assert not args.multi_step_stream_outputs
@@ -227,23 +258,33 @@ def test_config_args(parser_with_config):
 def test_config_file(parser_with_config):
     with pytest.raises(FileNotFoundError):
         parser_with_config.parse_args(
-            ['serve', 'mymodel', '--config', 'test_config.yml'])
+            ["serve", "mymodel", "--config", "test_config.yml"]
+        )
 
     with pytest.raises(ValueError):
         parser_with_config.parse_args(
-            ['serve', 'mymodel', '--config', './data/test_config.json'])
+            ["serve", "mymodel", "--config", "./data/test_config.json"]
+        )
 
     with pytest.raises(ValueError):
-        parser_with_config.parse_args([
-            'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
-            '--batch-size', '32'
-        ])
+        parser_with_config.parse_args(
+            [
+                "serve",
+                "mymodel",
+                "--tensor-parallel-size",
+                "3",
+                "--config",
+                "--batch-size",
+                "32",
+            ]
+        )
 
 
 def test_no_model_tag(parser_with_config):
     with pytest.raises(ValueError):
         parser_with_config.parse_args(
-            ['serve', '--config', './data/test_config.yaml'])
+            ["serve", "--config", "./data/test_config.yaml"]
+        )
 
 
 # yapf: enable
@@ -264,24 +305,29 @@ def test_no_model_tag(parser_with_config):
         (lambda foo, **kwargs: None, "something_else", False, True, True),
         (lambda foo, **kwargs: None, "kwargs", True, True, False),
         (lambda foo, **kwargs: None, "foo", True, True, False),
-    ])
+    ],
+)
 # yapf: disable
-def test_supports_kw(callable,kw_name,requires_kw_only,
-                     allow_var_kwargs,is_supported):
-    assert supports_kw(
-        callable=callable,
-        kw_name=kw_name,
-        requires_kw_only=requires_kw_only,
-        allow_var_kwargs=allow_var_kwargs
-    ) == is_supported
+def test_supports_kw(
+    callable, kw_name, requires_kw_only, allow_var_kwargs, is_supported
+):
+    assert (
+        supports_kw(
+            callable=callable,
+            kw_name=kw_name,
+            requires_kw_only=requires_kw_only,
+            allow_var_kwargs=allow_var_kwargs,
+        )
+        == is_supported
+    )
 
 
 @fork_new_process_for_each_test
 def test_memory_profiling():
     # Fake out some model loading + inference memory usage to test profiling
     # Memory used by other processes will show up as cuda usage outside of torch
-    from vllm.distributed.device_communicators.cuda_wrapper import (
-        CudaRTLibrary)
+    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+
     lib = CudaRTLibrary()
     # 512 MiB allocation outside of this instance
     handle1 = lib.cudaMalloc(512 * 1024 * 1024)
@@ -290,9 +336,9 @@ def test_memory_profiling():
 
     # load weights
 
-    weights = torch.randn(128, 1024, 1024, device='cuda', dtype=torch.float32)
+    weights = torch.randn(128, 1024, 1024, device="cuda", dtype=torch.float32)
 
-    weights_memory = 128 * 1024 * 1024 * 4 # 512 MiB
+    weights_memory = 128 * 1024 * 1024 * 4  # 512 MiB
 
     def measure_current_non_torch():
         free, total = torch.cuda.mem_get_info()
@@ -301,11 +347,14 @@ def test_memory_profiling():
         current_non_torch = current_used - current_torch
         return current_non_torch
 
-    with memory_profiling(baseline_snapshot=baseline_snapshot,
-    weights_memory=weights_memory) as result, \
-        monitor(measure_current_non_torch) as monitored_values:
+    with (
+        memory_profiling(
+            baseline_snapshot=baseline_snapshot, weights_memory=weights_memory
+        ) as result,
+        monitor(measure_current_non_torch) as monitored_values,
+    ):
         # make a memory spike, 1 GiB
-        spike = torch.randn(256, 1024, 1024, device='cuda', dtype=torch.float32)
+        spike = torch.randn(256, 1024, 1024, device="cuda", dtype=torch.float32)
         del spike
 
         # Add some extra non-torch memory 256 MiB (simulate NCCL)
@@ -320,7 +369,7 @@ def test_memory_profiling():
     # 5% tolerance is caused by cuda runtime.
     # we cannot control cuda runtime in the granularity of bytes,
     # which causes a small error (<10 MiB in practice)
-    non_torch_ratio = result.non_torch_increase / (256 * 1024 * 1024) # noqa
+    non_torch_ratio = result.non_torch_increase / (256 * 1024 * 1024)  # noqa
     assert abs(non_torch_ratio - 1) <= 0.05
     assert result.torch_peak_increase == 1024 * 1024 * 1024
     del weights
@@ -332,38 +381,39 @@ def test_bind_kv_cache():
     from vllm.attention import Attention
 
     ctx = {
-        'layers.0.self_attn': Attention(32, 128, 0.1),
-        'layers.1.self_attn': Attention(32, 128, 0.1),
-        'layers.2.self_attn': Attention(32, 128, 0.1),
-        'layers.3.self_attn': Attention(32, 128, 0.1),
+        "layers.0.self_attn": Attention(32, 128, 0.1),
+        "layers.1.self_attn": Attention(32, 128, 0.1),
+        "layers.2.self_attn": Attention(32, 128, 0.1),
+        "layers.3.self_attn": Attention(32, 128, 0.1),
     }
     kv_cache = [
-        torch.zeros((1, )),
-        torch.zeros((1, )),
-        torch.zeros((1, )),
-        torch.zeros((1, )),
+        torch.zeros((1,)),
+        torch.zeros((1,)),
+        torch.zeros((1,)),
+        torch.zeros((1,)),
     ]
     bind_kv_cache(ctx, [kv_cache])
-    assert ctx['layers.0.self_attn'].kv_cache[0] is kv_cache[0]
-    assert ctx['layers.1.self_attn'].kv_cache[0] is kv_cache[1]
-    assert ctx['layers.2.self_attn'].kv_cache[0] is kv_cache[2]
-    assert ctx['layers.3.self_attn'].kv_cache[0] is kv_cache[3]
+    assert ctx["layers.0.self_attn"].kv_cache[0] is kv_cache[0]
+    assert ctx["layers.1.self_attn"].kv_cache[0] is kv_cache[1]
+    assert ctx["layers.2.self_attn"].kv_cache[0] is kv_cache[2]
+    assert ctx["layers.3.self_attn"].kv_cache[0] is kv_cache[3]
+
 
 def test_bind_kv_cache_non_attention():
     from vllm.attention import Attention
 
     # example from Jamba PP=2
     ctx = {
-        'model.layers.20.attn': Attention(32, 128, 0.1),
-        'model.layers.28.attn': Attention(32, 128, 0.1),
+        "model.layers.20.attn": Attention(32, 128, 0.1),
+        "model.layers.28.attn": Attention(32, 128, 0.1),
     }
     kv_cache = [
-        torch.zeros((1, )),
-        torch.zeros((1, )),
+        torch.zeros((1,)),
+        torch.zeros((1,)),
     ]
     bind_kv_cache(ctx, [kv_cache])
-    assert ctx['model.layers.20.attn'].kv_cache[0] is kv_cache[0]
-    assert ctx['model.layers.28.attn'].kv_cache[0] is kv_cache[1]
+    assert ctx["model.layers.20.attn"].kv_cache[0] is kv_cache[0]
+    assert ctx["model.layers.28.attn"].kv_cache[0] is kv_cache[1]
 
 
 def test_bind_kv_cache_encoder_decoder():
@@ -371,51 +421,51 @@ def test_bind_kv_cache_encoder_decoder():
 
     # example from bart
     ctx = {
-        'encoder.layers.0.self_attn.attn':
-            Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER),
-        'decoder.layers.0.encoder_attn.attn':
-            Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER),
-        'decoder.layers.0.self_attn.attn':
-            Attention(32, 128, 0.1, attn_type=AttentionType.DECODER),
+        "encoder.layers.0.self_attn.attn": Attention(
+            32, 128, 0.1, attn_type=AttentionType.ENCODER
+        ),
+        "decoder.layers.0.encoder_attn.attn": Attention(
+            32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER
+        ),
+        "decoder.layers.0.self_attn.attn": Attention(
+            32, 128, 0.1, attn_type=AttentionType.DECODER
+        ),
     }
 
     kv_cache = [
-        torch.zeros((1, )),
+        torch.zeros((1,)),
     ]
-    encoder_kv_cache = ctx['encoder.layers.0.self_attn.attn'].kv_cache
+    encoder_kv_cache = ctx["encoder.layers.0.self_attn.attn"].kv_cache
 
     bind_kv_cache(ctx, [kv_cache])
-    assert ctx['encoder.layers.0.self_attn.attn'].kv_cache is encoder_kv_cache
-    assert ctx['decoder.layers.0.encoder_attn.attn'].kv_cache[0] is kv_cache[0]
-    assert ctx['decoder.layers.0.self_attn.attn'].kv_cache[0] is kv_cache[0]
+    assert ctx["encoder.layers.0.self_attn.attn"].kv_cache is encoder_kv_cache
+    assert ctx["decoder.layers.0.encoder_attn.attn"].kv_cache[0] is kv_cache[0]
+    assert ctx["decoder.layers.0.self_attn.attn"].kv_cache[0] is kv_cache[0]
 
 
 def test_bind_kv_cache_pp():
     with patch("vllm.utils.cuda_device_count_stateless", lambda: 2):
         # this test runs with 1 GPU, but we simulate 2 GPUs
         cfg = VllmConfig(
-            parallel_config=ParallelConfig(pipeline_parallel_size=2))
+            parallel_config=ParallelConfig(pipeline_parallel_size=2)
+        )
     with set_current_vllm_config(cfg):
         from vllm.attention import Attention
 
         ctx = {
-            'layers.0.self_attn': Attention(32, 128, 0.1),
+            "layers.0.self_attn": Attention(32, 128, 0.1),
         }
-        kv_cache = [
-            [torch.zeros((1, ))],
-            [torch.zeros((1, ))]
-        ]
+        kv_cache = [[torch.zeros((1,))], [torch.zeros((1,))]]
         bind_kv_cache(ctx, kv_cache)
-        assert ctx['layers.0.self_attn'].kv_cache[0] is kv_cache[0][0]
-        assert ctx['layers.0.self_attn'].kv_cache[1] is kv_cache[1][0]
+        assert ctx["layers.0.self_attn"].kv_cache[0] is kv_cache[0][0]
+        assert ctx["layers.0.self_attn"].kv_cache[1] is kv_cache[1][0]
 
 
 def test_placeholder_module_error_handling():
     placeholder = PlaceholderModule("placeholder_1234")
 
     def build_ctx():
-        return pytest.raises(ModuleNotFoundError,
-                             match="No module named")
+        return pytest.raises(ModuleNotFoundError, match="No module named")
 
     with build_ctx():
         int(placeholder)

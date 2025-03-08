@@ -14,8 +14,8 @@ GGUF_SAMPLE = snapshot_download("Isotr0py/test-gguf-sample")
 
 
 def get_gguf_sample_tensors(
-        hidden_size: int,
-        quant_type: GGMLQuantizationType) -> list[ReaderTensor]:
+    hidden_size: int, quant_type: GGMLQuantizationType
+) -> list[ReaderTensor]:
     sample_dir = GGUF_SAMPLE
     filename = f"Quant_{quant_type.name}_{hidden_size}.gguf"
     sample_file = Path(sample_dir) / filename
@@ -55,17 +55,20 @@ QUANT_TYPES = [
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_type", QUANT_TYPES)
 @torch.inference_mode()
-def test_dequantize(hidden_size: int, dtype: torch.dtype,
-                    quant_type: GGMLQuantizationType):
+def test_dequantize(
+    hidden_size: int, dtype: torch.dtype, quant_type: GGMLQuantizationType
+):
     tensors = get_gguf_sample_tensors(hidden_size, quant_type)
     for tensor in tensors:
         shape_str = tensor.name.split("_")[-1]
         shape = map(int, shape_str.split("x"))
 
-        ref_output = torch.tensor(dequantize(tensor.data, quant_type),
-                                  device="cuda").to(dtype)
-        output = ops.ggml_dequantize(torch.tensor(tensor.data, device="cuda"),
-                                     quant_type, *list(shape)).to(dtype)
+        ref_output = torch.tensor(
+            dequantize(tensor.data, quant_type), device="cuda"
+        ).to(dtype)
+        output = ops.ggml_dequantize(
+            torch.tensor(tensor.data, device="cuda"), quant_type, *list(shape)
+        ).to(dtype)
 
         torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=4e-2)
 
@@ -74,20 +77,23 @@ def test_dequantize(hidden_size: int, dtype: torch.dtype,
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_type", QUANT_TYPES)
 @torch.inference_mode()
-def test_mmvq(hidden_size: int, dtype: torch.dtype,
-              quant_type: GGMLQuantizationType):
+def test_mmvq(
+    hidden_size: int, dtype: torch.dtype, quant_type: GGMLQuantizationType
+):
     current_platform.seed_everything(0)
 
     tensors = get_gguf_sample_tensors(hidden_size, quant_type)
     x = torch.rand((1, hidden_size), dtype=dtype, device="cuda")
     for tensor in tensors:
-        weight = torch.tensor(dequantize(tensor.data, quant_type),
-                              device="cuda").to(dtype)
+        weight = torch.tensor(
+            dequantize(tensor.data, quant_type), device="cuda"
+        ).to(dtype)
         ref_output = x @ weight.T
 
         qweight = torch.tensor(tensor.data, device="cuda")
-        output = ops.ggml_mul_mat_vec_a8(qweight, x, quant_type,
-                                         qweight.shape[0]).to(dtype)
+        output = ops.ggml_mul_mat_vec_a8(
+            qweight, x, quant_type, qweight.shape[0]
+        ).to(dtype)
 
         torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)
 
@@ -108,21 +114,28 @@ def test_mmvq(hidden_size: int, dtype: torch.dtype,
         GGMLQuantizationType.Q4_0,
         GGMLQuantizationType.Q5_0,
         GGMLQuantizationType.Q8_0,
-    ])
+    ],
+)
 @torch.inference_mode()
-def test_mmq(num_tokens: int, hidden_size: int, dtype: torch.dtype,
-             quant_type: GGMLQuantizationType):
+def test_mmq(
+    num_tokens: int,
+    hidden_size: int,
+    dtype: torch.dtype,
+    quant_type: GGMLQuantizationType,
+):
     current_platform.seed_everything(0)
 
     tensors = get_gguf_sample_tensors(hidden_size, quant_type)
     x = torch.rand((num_tokens, hidden_size), dtype=dtype, device="cuda")
     for tensor in tensors:
-        weight = torch.tensor(dequantize(tensor.data, quant_type),
-                              device="cuda").to(dtype)
+        weight = torch.tensor(
+            dequantize(tensor.data, quant_type), device="cuda"
+        ).to(dtype)
         ref_output = x @ weight.T
 
         qweight = torch.tensor(tensor.data, device="cuda")
-        output = ops.ggml_mul_mat_a8(qweight, x, quant_type,
-                                     qweight.shape[0]).to(dtype)
+        output = ops.ggml_mul_mat_a8(
+            qweight, x, quant_type, qweight.shape[0]
+        ).to(dtype)
 
         torch.testing.assert_close(output, ref_output, atol=1, rtol=1e-1)

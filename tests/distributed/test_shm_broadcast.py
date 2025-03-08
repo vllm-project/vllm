@@ -25,13 +25,13 @@ def distributed_run(fn, world_size):
     processes = []
     for i in range(number_of_processes):
         env = {}
-        env['RANK'] = str(i)
-        env['LOCAL_RANK'] = str(i)
-        env['WORLD_SIZE'] = str(number_of_processes)
-        env['LOCAL_WORLD_SIZE'] = str(number_of_processes)
-        env['MASTER_ADDR'] = 'localhost'
-        env['MASTER_PORT'] = '12345'
-        p = multiprocessing.Process(target=fn, args=(env, ))
+        env["RANK"] = str(i)
+        env["LOCAL_RANK"] = str(i)
+        env["WORLD_SIZE"] = str(number_of_processes)
+        env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
+        env["MASTER_ADDR"] = "localhost"
+        env["MASTER_PORT"] = "12345"
+        p = multiprocessing.Process(target=fn, args=(env,))
         processes.append(p)
         p.start()
 
@@ -56,7 +56,6 @@ def worker_fn_wrapper(fn):
 
 @worker_fn_wrapper
 def worker_fn():
-
     rank = dist.get_rank()
     if rank == 0:
         port = get_open_port()
@@ -67,14 +66,15 @@ def worker_fn():
         dist.broadcast_object_list(recv, src=0)
         ip, port = recv
 
-    stateless_pg = StatelessProcessGroup.create(ip, port, rank,
-                                                dist.get_world_size())
+    stateless_pg = StatelessProcessGroup.create(
+        ip, port, rank, dist.get_world_size()
+    )
 
     for pg in [dist.group.WORLD, stateless_pg]:
-
         writer_rank = 2
         broadcaster = MessageQueue.create_from_process_group(
-            pg, 40 * 1024, 2, writer_rank)
+            pg, 40 * 1024, 2, writer_rank
+        )
         if rank == writer_rank:
             seed = random.randint(0, 1000)
             dist.broadcast_object_list([seed], writer_rank)

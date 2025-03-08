@@ -30,10 +30,12 @@ async def client(server):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
-    completion = await client.completions.create(model=model_name,
-                                                 prompt="Hello, my name is",
-                                                 max_tokens=5,
-                                                 temperature=0.0)
+    completion = await client.completions.create(
+        model=model_name,
+        prompt="Hello, my name is",
+        max_tokens=5,
+        temperature=0.0,
+    )
 
     assert completion.id is not None
     assert completion.choices is not None and len(completion.choices) == 1
@@ -42,7 +44,8 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
     assert len(choice.text) >= 5
     assert choice.finish_reason == "length"
     assert completion.usage == openai.types.CompletionUsage(
-        completion_tokens=5, prompt_tokens=2, total_tokens=7)
+        completion_tokens=5, prompt_tokens=2, total_tokens=7
+    )
 
     # test using token IDs
     completion = await client.completions.create(

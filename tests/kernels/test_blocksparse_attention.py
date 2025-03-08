@@ -8,7 +8,8 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.ops.blocksparse_attention.interface import (
-    LocalStridedBlockSparseAttn)
+    LocalStridedBlockSparseAttn,
+)
 from vllm.platforms import current_platform
 from vllm.utils import get_max_shared_memory_bytes
 
@@ -34,7 +35,7 @@ BLOCK_SIZES = [16]
 USE_ALIBI = [False, True]
 KV_CACHE_DTYPE = ["auto", "fp8"]
 SEEDS = [0]
-CUDA_DEVICES = ['cuda:0']
+CUDA_DEVICES = ["cuda:0"]
 BLOCKSPARSE_LOCAL_BLOCKS = [16]
 BLOCKSPARSE_VERT_STRIDES = [8]
 
@@ -111,8 +112,7 @@ def ref_single_query_cached_kv_attention(
             # Create the ALiBi bias used in the paged attention kernel.
             position_ids = torch.arange(seq_len).int()
             alibi_bias = (position_ids - seq_len + 1).float()
-            alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(
-                1, 1, -1)
+            alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(1, 1, -1)
 
         if blocksparse_vert_stride >= 1:
             bsize = blocksparse_block_size
@@ -120,19 +120,20 @@ def ref_single_query_cached_kv_attention(
             vert = blocksparse_vert_stride
             locals = blocksparse_local_blocks
             qb = (seq_len - 1) // bsize
-            attn_mask = q.new_zeros(
-                (num_query_heads, 1, seq_len)).float() - torch.inf
+            attn_mask = (
+                q.new_zeros((num_query_heads, 1, seq_len)).float() - torch.inf
+            )
             for h in range(num_query_heads):
                 if hsliding >= 0:  # slide with q heads
                     bs_offset = (tp_rank * num_query_heads + h) * hsliding + 1
                 else:  # slide with kv heads
-                    bs_offset = (tp_rank * num_kv_heads +
-                                 h // num_queries_per_kv) * (-hsliding) + 1
+                    bs_offset = (
+                        tp_rank * num_kv_heads + h // num_queries_per_kv
+                    ) * (-hsliding) + 1
                 for kb in range(qb + 1):
                     kj = kb * bsize
-                    if (qb - kb) < locals or \
-                        (kb + bs_offset) % vert == 0:
-                        attn_mask[h, 0, kj:min(kj + bsize, seq_len)] = 0
+                    if (qb - kb) < locals or (kb + bs_offset) % vert == 0:
+                        attn_mask[h, 0, kj : min(kj + bsize, seq_len)] = 0
             if alibi_bias is not None:
                 attn_mask += alibi_bias
         else:
@@ -156,8 +157,9 @@ def ref_single_query_cached_kv_attention(
 @pytest.mark.parametrize("blocksparse_local_blocks", BLOCKSPARSE_LOCAL_BLOCKS)
 @pytest.mark.parametrize("blocksparse_vert_stride", BLOCKSPARSE_VERT_STRIDES)
 @pytest.mark.parametrize("blocksparse_block_size", BLOCKSPARSE_BLOCK_SIZES)
-@pytest.mark.parametrize("blocksparse_head_sliding_step",
-                         BLOCKSPARSE_HEADS_SLIDINGS)
+@pytest.mark.parametrize(
+    "blocksparse_head_sliding_step", BLOCKSPARSE_HEADS_SLIDINGS
+)
 def test_paged_attention(
     kv_cache_factory,
     version: str,
@@ -205,10 +207,17 @@ def test_paged_attention(
     block_tables = torch.tensor(block_tables, dtype=torch.int)
 
     # Create the KV caches.
-    key_caches, value_caches = kv_cache_factory(NUM_BLOCKS, block_size, 1,
-                                                num_kv_heads, head_size,
-                                                kv_cache_dtype, dtype, seed,
-                                                device)
+    key_caches, value_caches = kv_cache_factory(
+        NUM_BLOCKS,
+        block_size,
+        1,
+        num_kv_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        seed,
+        device,
+    )
     key_cache, value_cache = key_caches[0], value_caches[0]
 
     # Using default kv_scale
@@ -240,7 +249,7 @@ def test_paged_attention(
             blocksparse_head_sliding_step=blocksparse_head_sliding_step,
         )
     elif version == "v2":
-        num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
+        num_partitions = (max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE
         assert PARTITION_SIZE % block_size == 0
         num_seqs, num_heads, head_size = output.shape
         tmp_output = torch.empty(
@@ -283,18 +292,23 @@ def test_paged_attention(
     if kv_cache_dtype == "fp8":
         # Convert cache data back to dtype.
         x = 16 // torch.tensor([], dtype=dtype).element_size()
-        key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x,
-                           block_size, x)
-        dequantized_key_cache = torch.empty(size=key_cache_shape,
-                                            dtype=dtype,
-                                            device=device)
+        key_cache_shape = (
+            NUM_BLOCKS,
+            num_kv_heads,
+            head_size // x,
+            block_size,
+            x,
+        )
+        dequantized_key_cache = torch.empty(
+            size=key_cache_shape, dtype=dtype, device=device
+        )
         ops.convert_fp8(dequantized_key_cache, key_cache)
         key_cache = dequantized_key_cache
 
         value_cache_shape = value_cache.shape
-        dequantized_value_cache = torch.empty(size=value_cache_shape,
-                                              dtype=dtype,
-                                              device=device)
+        dequantized_value_cache = torch.empty(
+            size=value_cache_shape, dtype=dtype, device=device
+        )
         ops.convert_fp8(dequantized_value_cache, value_cache)
         value_cache = dequantized_value_cache
 
@@ -346,8 +360,9 @@ def ref_multi_query_kv_attention(
         seq_len = end_idx - start_idx
 
         # Create attention mask.
-        attn_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=dtype),
-                               diagonal=1)
+        attn_mask = torch.triu(
+            torch.ones(seq_len, seq_len, dtype=dtype), diagonal=1
+        )
         attn_mask = attn_mask * torch.finfo(dtype).min
         attn_mask = attn_mask.to(dtype=dtype)
 
@@ -401,13 +416,13 @@ def test_varlen_blocksparse_attention_prefill(
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
 
-    qkv = torch.empty(num_tokens,
-                      num_query_heads + 2 * num_kv_heads,
-                      head_size,
-                      dtype=dtype)
+    qkv = torch.empty(
+        num_tokens, num_query_heads + 2 * num_kv_heads, head_size, dtype=dtype
+    )
     qkv.uniform_(-scale, scale)
     query, key, value = qkv.split(
-        [num_query_heads, num_kv_heads, num_kv_heads], dim=1)
+        [num_query_heads, num_kv_heads, num_kv_heads], dim=1
+    )
 
     bs_attn_op = LocalStridedBlockSparseAttn(
         num_query_heads,
@@ -417,13 +432,12 @@ def test_varlen_blocksparse_attention_prefill(
         block_size=blocksparse_block_size,
         device=device,
         dtype=dtype,
-        homo_head=blocksparse_homo_heads)
+        homo_head=blocksparse_homo_heads,
+    )
 
-    output = bs_attn_op(query,
-                        key,
-                        value,
-                        cu_seq_lens.to(device),
-                        sm_scale=scale)
+    output = bs_attn_op(
+        query, key, value, cu_seq_lens.to(device), sm_scale=scale
+    )
 
     if num_queries_per_kv > 1:
         # Handle MQA and GQA

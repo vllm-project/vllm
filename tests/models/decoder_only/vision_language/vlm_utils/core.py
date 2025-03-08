@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Core test implementation to be shared across modalities."""
+
 from typing import Any, Callable, Optional, Union
 
 import torch
@@ -72,16 +73,18 @@ def run_test(
     if vllm_runner_kwargs:
         vllm_runner_kwargs_.update(vllm_runner_kwargs)
 
-    with vllm_runner(model,
-                     max_model_len=max_model_len,
-                     max_num_seqs=max_num_seqs,
-                     dtype=dtype,
-                     limit_mm_per_prompt=limit_mm_per_prompt,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=enforce_eager,
-                     task=task,
-                     **vllm_runner_kwargs_) as vllm_model:
+    with vllm_runner(
+        model,
+        max_model_len=max_model_len,
+        max_num_seqs=max_num_seqs,
+        dtype=dtype,
+        limit_mm_per_prompt=limit_mm_per_prompt,
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend=distributed_executor_backend,
+        enforce_eager=enforce_eager,
+        task=task,
+        **vllm_runner_kwargs_,
+    ) as vllm_model:
         tokenizer = vllm_model.model.get_tokenizer()
 
         vllm_kwargs: dict[str, Any] = {}
@@ -93,14 +96,17 @@ def run_test(
         for prompts, media in vllm_inputs:
             vllm_kwargs[runner_mm_key] = media
             vllm_output = vllm_model.generate_greedy_logprobs(
-                prompts, max_tokens, num_logprobs=num_logprobs, **vllm_kwargs)
+                prompts, max_tokens, num_logprobs=num_logprobs, **vllm_kwargs
+            )
             vllm_outputs_per_mm.append(vllm_output)
 
-    hf_model = hf_runner(model,
-                         dtype=dtype,
-                         auto_cls=auto_cls,
-                         postprocess_inputs=postprocess_inputs,
-                         model_kwargs=hf_model_kwargs)
+    hf_model = hf_runner(
+        model,
+        dtype=dtype,
+        auto_cls=auto_cls,
+        postprocess_inputs=postprocess_inputs,
+        model_kwargs=hf_model_kwargs,
+    )
 
     # Some models need to patch things like the model processor, e.g., internvl
     if patch_hf_runner is not None:
@@ -126,7 +132,8 @@ def run_test(
                 max_tokens,
                 num_logprobs=num_logprobs,
                 tokenizer=tokenizer,
-                **hf_kwargs)
+                **hf_kwargs,
+            )
             hf_outputs_per_mm.append(hf_output)
 
     # Apply output processing / sanitation to the vLLM and HF runner results
@@ -138,8 +145,7 @@ def run_test(
         second_runner_processor=vllm_output_post_proc,
     )
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_mm,
-                                        vllm_outputs_per_mm):
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_mm, vllm_outputs_per_mm):
         # This is usually check_logprobs_close, but it's passed through to
         # allow things like check_outputs_equal where needed
         comparator(
@@ -159,15 +165,19 @@ def process_runner_outputs(
 ):
     """Applies the runner processor(s) to the runner outputs, if any."""
     if first_runner_processor is not None:
-        first_runner_outputs = process_outputs(first_runner_processor, model,
-                                               first_runner_outputs)
+        first_runner_outputs = process_outputs(
+            first_runner_processor, model, first_runner_outputs
+        )
     if second_runner_processor is not None:
-        second_runner_outputs = process_outputs(second_runner_processor, model,
-                                                second_runner_outputs)
+        second_runner_outputs = process_outputs(
+            second_runner_processor, model, second_runner_outputs
+        )
     return first_runner_outputs, second_runner_outputs
 
 
 def process_outputs(output_processor, model, outputs_per_image):
     """Applies a model specific post-processor function to a runner's output"""
-    return [[output_processor(res, model) for res in outputs]
-            for outputs in outputs_per_image]
+    return [
+        [output_processor(res, model) for res in outputs]
+        for outputs in outputs_per_image
+    ]

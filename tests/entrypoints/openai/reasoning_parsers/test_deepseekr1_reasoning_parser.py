@@ -4,9 +4,12 @@ import pytest
 from transformers import AutoTokenizer
 
 from tests.entrypoints.openai.reasoning_parsers.utils import (
-    run_reasoning_extraction)
-from vllm.entrypoints.openai.reasoning_parsers import (ReasoningParser,
-                                                       ReasoningParserManager)
+    run_reasoning_extraction,
+)
+from vllm.entrypoints.openai.reasoning_parsers import (
+    ReasoningParser,
+    ReasoningParserManager,
+)
 
 parser_name = "deepseek_r1"
 start_token = "<think>"
@@ -182,11 +185,12 @@ def test_reasoning(
         tokenizer.convert_tokens_to_string([token]) for token in output
     ]
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
-        parser_name)(tokenizer)
+        parser_name
+    )(tokenizer)
 
-    reasoning, content = run_reasoning_extraction(parser,
-                                                  output_tokens,
-                                                  streaming=streaming)
+    reasoning, content = run_reasoning_extraction(
+        parser, output_tokens, streaming=streaming
+    )
 
     assert reasoning == param_dict["reasoning_content"]
     assert content == param_dict["content"]

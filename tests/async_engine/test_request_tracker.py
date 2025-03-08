@@ -59,7 +59,8 @@ async def test_request_tracker():
     stream_5 = tracker.add_request("5")
     assert tracker.new_requests_event.is_set()
     tracker.process_request_output(
-        RequestOutput("2", "output", [], [], [], finished=True))
+        RequestOutput("2", "output", [], [], [], finished=True)
+    )
     await tracker.wait_for_new_requests()
     new, aborted = tracker.get_new_and_aborted_requests()
     assert not tracker.new_requests_event.is_set()

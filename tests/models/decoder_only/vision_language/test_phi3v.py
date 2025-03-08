@@ -14,20 +14,20 @@ from vllm.sequence import SampleLogprobs
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ...utils import check_logprobs_close
 
-HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign":
-    "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
-    "cherry_blossom":
-    "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
-})
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
+    {
+        "stop_sign": "<|user|>\n<|image_1|>\nWhat's the content of the image?<|end|>\n<|assistant|>\n",  # noqa: E501
+        "cherry_blossom": "<|user|>\n<|image_1|>\nWhat is the season?<|end|>\n<|assistant|>\n",
+    }
+)
 HF_MULTIIMAGE_IMAGE_PROMPT = "<|user|>\n<|image_1|>\n<|image_2|>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
 
 models = ["microsoft/Phi-3.5-vision-instruct"]
 
 
-def vllm_to_hf_output(vllm_output: tuple[list[int], str,
-                                         Optional[SampleLogprobs]],
-                      model: str):
+def vllm_to_hf_output(
+    vllm_output: tuple[list[int], str, Optional[SampleLogprobs]], model: str
+):
     """Sanitize vllm output to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
 
@@ -78,47 +78,54 @@ def run_test(
     """
     # HACK - this is an attempted workaround for the following bug
     # https://github.com/huggingface/transformers/issues/34307
-    from transformers import AutoImageProcessor  # noqa: F401
-    from transformers import AutoProcessor  # noqa: F401
+    from transformers import (
+        AutoImageProcessor,  # noqa: F401
+        AutoProcessor,  # noqa: F401
+    )
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(model,
-                     task="generate",
-                     max_model_len=4096,
-                     max_num_seqs=2,
-                     dtype=dtype,
-                     limit_mm_per_prompt={"image": mm_limit},
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(
+        model,
+        task="generate",
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype=dtype,
+        limit_mm_per_prompt={"image": mm_limit},
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend=distributed_executor_backend,
+        enforce_eager=True,
+    ) as vllm_model:
         vllm_outputs_per_case = [
-            vllm_model.generate_greedy_logprobs(prompts,
-                                                max_tokens,
-                                                num_logprobs=num_logprobs,
-                                                images=images)
+            vllm_model.generate_greedy_logprobs(
+                prompts, max_tokens, num_logprobs=num_logprobs, images=images
+            )
             for prompts, images in inputs
         ]
 
     # use eager mode for hf runner, since phi3_v didn't work with flash_attn
     hf_model_kwargs = {"_attn_implementation": "eager"}
-    with hf_runner(model, dtype=dtype,
-                   model_kwargs=hf_model_kwargs) as hf_model:
+    with hf_runner(
+        model, dtype=dtype, model_kwargs=hf_model_kwargs
+    ) as hf_model:
         eos_token_id = hf_model.processor.tokenizer.eos_token_id
         hf_outputs_per_case = [
-            hf_model.generate_greedy_logprobs_limit(prompts,
-                                                    max_tokens,
-                                                    num_logprobs=num_logprobs,
-                                                    images=images,
-                                                    eos_token_id=eos_token_id)
+            hf_model.generate_greedy_logprobs_limit(
+                prompts,
+                max_tokens,
+                num_logprobs=num_logprobs,
+                images=images,
+                eos_token_id=eos_token_id,
+            )
             for prompts, images in inputs
         ]
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_case,
-                                        vllm_outputs_per_case):
+    for hf_outputs, vllm_outputs in zip(
+        hf_outputs_per_case, vllm_outputs_per_case
+    ):
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
             outputs_1_lst=[
@@ -149,14 +156,25 @@ def run_test(
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
-                dtype: str, max_tokens: int, num_logprobs: int) -> None:
+def test_models(
+    hf_runner,
+    vllm_runner,
+    image_assets,
+    model,
+    size_factors,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_image = [(
-        [prompt for _ in size_factors],
-        [rescale_image_size(image, factor) for factor in size_factors],
-    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    inputs_per_image = [
+        (
+            [prompt for _ in size_factors],
+            [rescale_image_size(image, factor) for factor in size_factors],
+        )
+        for image, prompt in zip(images, HF_IMAGE_PROMPTS)
+    ]
 
     run_test(
         hf_runner,
@@ -173,8 +191,9 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
 
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", [target_dtype])
-def test_regression_7840(hf_runner, vllm_runner, image_assets, model,
-                         dtype) -> None:
+def test_regression_7840(
+    hf_runner, vllm_runner, image_assets, model, dtype
+) -> None:
     images = [asset.pil_image for asset in image_assets]
 
     inputs_regresion_7840 = [
@@ -212,15 +231,26 @@ def test_regression_7840(hf_runner, vllm_runner, image_assets, model,
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
-                             size_factors, dtype: str, max_tokens: int,
-                             num_logprobs: int) -> None:
+def test_multi_images_models(
+    hf_runner,
+    vllm_runner,
+    image_assets,
+    model,
+    size_factors,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_case = [
-        ([HF_MULTIIMAGE_IMAGE_PROMPT for _ in size_factors],
-         [[rescale_image_size(image, factor) for image in images]
-          for factor in size_factors])
+        (
+            [HF_MULTIIMAGE_IMAGE_PROMPT for _ in size_factors],
+            [
+                [rescale_image_size(image, factor) for image in images]
+                for factor in size_factors
+            ],
+        )
     ]
 
     run_test(

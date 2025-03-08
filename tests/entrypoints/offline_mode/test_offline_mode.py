@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for HF_HUB_OFFLINE mode"""
+
 import importlib
 import sys
 
@@ -62,10 +63,12 @@ def test_offline_mode(monkeypatch):
         def disable_connect(*args, **kwargs):
             raise RuntimeError("No http calls allowed")
 
-        monkeypatch.setattr(urllib3.connection.HTTPConnection, "connect",
-                            disable_connect)
-        monkeypatch.setattr(urllib3.connection.HTTPSConnection, "connect",
-                            disable_connect)
+        monkeypatch.setattr(
+            urllib3.connection.HTTPConnection, "connect", disable_connect
+        )
+        monkeypatch.setattr(
+            urllib3.connection.HTTPSConnection, "connect", disable_connect
+        )
 
         # Need to re-import huggingface_hub and friends to setup offline mode
         _re_import_modules()
@@ -86,7 +89,9 @@ def _re_import_modules():
         k for k in sys.modules if k.startswith("huggingface_hub")
     ]
     transformers_module_names = [
-        k for k in sys.modules if k.startswith("transformers")
+        k
+        for k in sys.modules
+        if k.startswith("transformers")
         and not k.startswith("transformers_modules")
     ]
 

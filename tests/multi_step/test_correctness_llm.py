@@ -79,24 +79,30 @@ def test_multi_step_llm(
     assert len(prompts) == num_prompts
 
     with vllm_runner(
-            model,
-            dtype=dtype,
-            enforce_eager=enforce_eager,
-            gpu_memory_utilization=0.7,
-            tensor_parallel_size=tp_size,
-            enable_chunked_prefill=enable_chunked_prefill,
-            num_scheduler_steps=num_scheduler_steps,
+        model,
+        dtype=dtype,
+        enforce_eager=enforce_eager,
+        gpu_memory_utilization=0.7,
+        tensor_parallel_size=tp_size,
+        enable_chunked_prefill=enable_chunked_prefill,
+        num_scheduler_steps=num_scheduler_steps,
     ) as vllm_model:
-        vllm_outputs = (vllm_model.generate_greedy(prompts, max_tokens)
-                        if num_logprobs is None else
-                        vllm_model.generate_greedy_logprobs(
-                            prompts, max_tokens, num_logprobs))
+        vllm_outputs = (
+            vllm_model.generate_greedy(prompts, max_tokens)
+            if num_logprobs is None
+            else vllm_model.generate_greedy_logprobs(
+                prompts, max_tokens, num_logprobs
+            )
+        )
 
     with hf_runner(model, dtype=dtype) as hf_model:
-        hf_outputs = (hf_model.generate_greedy(prompts, max_tokens)
-                      if num_logprobs is None else
-                      hf_model.generate_greedy_logprobs_limit(
-                          prompts, max_tokens, num_logprobs))
+        hf_outputs = (
+            hf_model.generate_greedy(prompts, max_tokens)
+            if num_logprobs is None
+            else hf_model.generate_greedy_logprobs_limit(
+                prompts, max_tokens, num_logprobs
+            )
+        )
 
     if num_logprobs is None:
         check_outputs_equal(
@@ -175,31 +181,33 @@ def test_multi_step_llm_w_prompt_logprobs(
     assert len(prompts) == num_prompts
 
     with vllm_runner(
-            model,
-            dtype=dtype,
-            enforce_eager=enforce_eager,
-            gpu_memory_utilization=0.7,
-            tensor_parallel_size=tp_size,
-            num_scheduler_steps=num_scheduler_steps,
+        model,
+        dtype=dtype,
+        enforce_eager=enforce_eager,
+        gpu_memory_utilization=0.7,
+        tensor_parallel_size=tp_size,
+        num_scheduler_steps=num_scheduler_steps,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             prompts,
             max_tokens,
             num_logprobs,
-            num_prompt_logprobs=num_prompt_logprobs)
+            num_prompt_logprobs=num_prompt_logprobs,
+        )
 
     with vllm_runner(
-            model,
-            dtype=dtype,
-            enforce_eager=enforce_eager,
-            gpu_memory_utilization=0.7,
-            tensor_parallel_size=tp_size,
+        model,
+        dtype=dtype,
+        enforce_eager=enforce_eager,
+        gpu_memory_utilization=0.7,
+        tensor_parallel_size=tp_size,
     ) as vllm_model:
         single_step_vllm_outputs = vllm_model.generate_greedy_logprobs(
             prompts,
             max_tokens,
             num_logprobs,
-            num_prompt_logprobs=num_prompt_logprobs)
+            num_prompt_logprobs=num_prompt_logprobs,
+        )
 
     check_logprobs_close(
         outputs_0_lst=single_step_vllm_outputs,
@@ -297,59 +305,67 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
 
     assert len(example_prompts) >= 2
     challenge_prompts = copy.deepcopy(example_prompts)
-    challenge_prompts[0] = ('vLLM is a high-throughput and memory-efficient '
-                            'inference and serving engine for LLMs.\n'
-                            )  # 24 tok
+    challenge_prompts[0] = (
+        "vLLM is a high-throughput and memory-efficient "
+        "inference and serving engine for LLMs.\n"
+    )  # 24 tok
     challenge_prompts[1] = (
-        'Briefly describe the major milestones in the '
-        'development of artificial intelligence from 1950 to 2020.\n'
+        "Briefly describe the major milestones in the "
+        "development of artificial intelligence from 1950 to 2020.\n"
     )  # 30 tok
 
     # If necessary, adjust the length of `challenge_prompts` to match
     # `num_prompts`
     if len(challenge_prompts) < num_prompts:
-        challenge_prompts = (challenge_prompts *
-                             ((num_prompts // len(challenge_prompts)) + 1))
+        challenge_prompts = challenge_prompts * (
+            (num_prompts // len(challenge_prompts)) + 1
+        )
     challenge_prompts = challenge_prompts[:num_prompts]
     assert len(challenge_prompts) == num_prompts
 
     # Single-step scheduler baseline
     with vllm_runner(
-            model,
-            dtype=dtype,
-            enforce_eager=enforce_eager,
-            gpu_memory_utilization=0.7,
-            tensor_parallel_size=tp_size,
-            num_scheduler_steps=num_scheduler_steps,
-            max_model_len=48,
-            max_num_batched_tokens=48,
-            max_num_seqs=4,
-            block_size=16,
+        model,
+        dtype=dtype,
+        enforce_eager=enforce_eager,
+        gpu_memory_utilization=0.7,
+        tensor_parallel_size=tp_size,
+        num_scheduler_steps=num_scheduler_steps,
+        max_model_len=48,
+        max_num_batched_tokens=48,
+        max_num_seqs=4,
+        block_size=16,
     ) as vllm_model:
-        outputs_baseline = (vllm_model.generate_greedy(
-            challenge_prompts, max_tokens) if num_logprobs is None else
-                            vllm_model.generate_greedy_logprobs(
-                                challenge_prompts, max_tokens, num_logprobs))
+        outputs_baseline = (
+            vllm_model.generate_greedy(challenge_prompts, max_tokens)
+            if num_logprobs is None
+            else vllm_model.generate_greedy_logprobs(
+                challenge_prompts, max_tokens, num_logprobs
+            )
+        )
 
     # multi-step+"single-step chunked prefill"+APC
     with vllm_runner(
-            model,
-            dtype=dtype,
-            enforce_eager=enforce_eager,
-            gpu_memory_utilization=0.7,
-            tensor_parallel_size=tp_size,
-            enable_chunked_prefill=True,
-            enable_prefix_caching=True,
-            num_scheduler_steps=num_scheduler_steps,
-            max_model_len=48,
-            max_num_batched_tokens=48,
-            max_num_seqs=4,
-            block_size=16,
+        model,
+        dtype=dtype,
+        enforce_eager=enforce_eager,
+        gpu_memory_utilization=0.7,
+        tensor_parallel_size=tp_size,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+        num_scheduler_steps=num_scheduler_steps,
+        max_model_len=48,
+        max_num_batched_tokens=48,
+        max_num_seqs=4,
+        block_size=16,
     ) as vllm_model:
-        outputs_w_features = (vllm_model.generate_greedy(
-            challenge_prompts, max_tokens) if num_logprobs is None else
-                              vllm_model.generate_greedy_logprobs(
-                                  challenge_prompts, max_tokens, num_logprobs))
+        outputs_w_features = (
+            vllm_model.generate_greedy(challenge_prompts, max_tokens)
+            if num_logprobs is None
+            else vllm_model.generate_greedy_logprobs(
+                challenge_prompts, max_tokens, num_logprobs
+            )
+        )
 
     if num_logprobs is None:
         # No-logprobs test

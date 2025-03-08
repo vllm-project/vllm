@@ -9,9 +9,16 @@ from unittest.mock import patch
 import pytest
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VllmConfig)
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    LoadConfig,
+    LoRAConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.lora.models import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.v1.worker.gpu_worker import Worker as V1Worker
@@ -28,9 +35,9 @@ def v1(run_with_both_engines_lora):
 
 @patch.dict(os.environ, {"RANK": "0"})
 def test_worker_apply_lora(sql_lora_files):
-
-    def set_active_loras(worker: Union[Worker, V1Worker],
-                         lora_requests: list[LoRARequest]):
+    def set_active_loras(
+        worker: Union[Worker, V1Worker], lora_requests: list[LoRARequest]
+    ):
         lora_mapping = LoRAMapping([], [])
         if isinstance(worker, Worker):
             # v0 case
@@ -38,7 +45,8 @@ def test_worker_apply_lora(sql_lora_files):
         else:
             # v1 case
             worker.model_runner.lora_manager.set_active_adapters(
-                lora_requests, lora_mapping)
+                lora_requests, lora_mapping
+            )
 
     worker_cls = V1Worker if envs.VLLM_USE_V1 else Worker
 
@@ -60,12 +68,13 @@ def test_worker_apply_lora(sql_lora_files):
         parallel_config=ParallelConfig(1, 1, False),
         scheduler_config=SchedulerConfig("generate", 32, 32, 32),
         device_config=DeviceConfig("cuda"),
-        cache_config=CacheConfig(block_size=16,
-                                 gpu_memory_utilization=1.,
-                                 swap_space=0,
-                                 cache_dtype="auto"),
-        lora_config=LoRAConfig(max_lora_rank=8, max_cpu_loras=32,
-                               max_loras=32),
+        cache_config=CacheConfig(
+            block_size=16,
+            gpu_memory_utilization=1.0,
+            swap_space=0,
+            cache_dtype="auto",
+        ),
+        lora_config=LoRAConfig(max_lora_rank=8, max_cpu_loras=32, max_loras=32),
     )
     worker = worker_cls(
         vllm_config=vllm_config,
@@ -87,17 +96,17 @@ def test_worker_apply_lora(sql_lora_files):
 
     set_active_loras(worker, lora_requests)
     assert worker.list_loras() == {
-        lora_request.lora_int_id
-        for lora_request in lora_requests
+        lora_request.lora_int_id for lora_request in lora_requests
     }
 
     for i in range(32):
         random.seed(i)
-        iter_lora_requests = random.choices(lora_requests,
-                                            k=random.randint(1, n_loras))
+        iter_lora_requests = random.choices(
+            lora_requests, k=random.randint(1, n_loras)
+        )
         random.shuffle(iter_lora_requests)
-        iter_lora_requests = iter_lora_requests[:-random.randint(0, n_loras)]
+        iter_lora_requests = iter_lora_requests[: -random.randint(0, n_loras)]
         set_active_loras(worker, lora_requests)
         assert worker.list_loras().issuperset(
-            {lora_request.lora_int_id
-             for lora_request in iter_lora_requests})
+            {lora_request.lora_int_id for lora_request in iter_lora_requests}
+        )

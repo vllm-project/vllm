@@ -11,21 +11,26 @@ from vllm.model_executor.utils import set_random_seed
 
 
 @pytest.fixture
-def baseline_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
-                           baseline_llm_kwargs, seed):
-    return create_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
-                                baseline_llm_kwargs, seed)
+def baseline_llm_generator(
+    common_llm_kwargs, per_test_common_llm_kwargs, baseline_llm_kwargs, seed
+):
+    return create_llm_generator(
+        common_llm_kwargs, per_test_common_llm_kwargs, baseline_llm_kwargs, seed
+    )
 
 
 @pytest.fixture
-def test_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
-                       test_llm_kwargs, seed):
-    return create_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
-                                test_llm_kwargs, seed)
+def test_llm_generator(
+    common_llm_kwargs, per_test_common_llm_kwargs, test_llm_kwargs, seed
+):
+    return create_llm_generator(
+        common_llm_kwargs, per_test_common_llm_kwargs, test_llm_kwargs, seed
+    )
 
 
-def create_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
-                         distinct_llm_kwargs, seed):
+def create_llm_generator(
+    common_llm_kwargs, per_test_common_llm_kwargs, distinct_llm_kwargs, seed
+):
     kwargs = {
         **common_llm_kwargs,
         **per_test_common_llm_kwargs,
@@ -46,11 +51,12 @@ def create_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
         del llm
 
 
-def get_text_from_llm_generator(llm_generator: Iterable[LLM],
-                                prompts,
-                                sampling_params,
-                                llm_cb: Optional[Callable[[LLM],
-                                                          None]] = None):
+def get_text_from_llm_generator(
+    llm_generator: Iterable[LLM],
+    prompts,
+    sampling_params,
+    llm_cb: Optional[Callable[[LLM], None]] = None,
+):
     for llm in llm_generator:
         if llm_cb:
             llm_cb(llm)

@@ -7,7 +7,9 @@ Run `pytest tests/quantization/test_quark.py`.
 import torch
 
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
-    QuarkLinearMethod, QuarkW8A8Fp8)
+    QuarkLinearMethod,
+    QuarkW8A8Fp8,
+)
 
 
 def test_quark_fp8(vllm_runner):
@@ -25,7 +27,7 @@ def test_quark_fp8(vllm_runner):
             if isinstance(qkv_proj.scheme, QuarkW8A8Fp8):
                 assert len(qkv_proj.input_scale.shape) == 0
                 assert qkv_proj.weight.dtype is torch.float8_e4m3fn
-                #assert qkv_proj.weight.dtype is torch.float8_e4m3fnuz
+                # assert qkv_proj.weight.dtype is torch.float8_e4m3fnuz
                 assert len(qkv_proj.weight_scale.shape) == 0
 
         llm.apply_model(check_model)

@@ -6,13 +6,16 @@ VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 has to be set before running this test.
 Run `VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1
 pytest tests/basic_correctness/test_preemption.py`.
 """
+
 import pytest
 from prometheus_client import REGISTRY
 
 import vllm.envs as envs
 from vllm import SamplingParams
-from vllm.core.scheduler import (ARTIFICIAL_PREEMPTION_MAX_CNT,
-                                 ENABLE_ARTIFICIAL_PREEMPT)
+from vllm.core.scheduler import (
+    ARTIFICIAL_PREEMPTION_MAX_CNT,
+    ENABLE_ARTIFICIAL_PREEMPT,
+)
 
 from ..models.utils import check_outputs_equal
 
@@ -26,7 +29,8 @@ def check_settings():
     assert ENABLE_ARTIFICIAL_PREEMPT is True, (
         "Use an env var VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1."
         "`VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 "
-        "pytest tests/basic_correctness/test_preemption.py`")
+        "pytest tests/basic_correctness/test_preemption.py`"
+    )
 
 
 @pytest.fixture
@@ -62,25 +66,29 @@ def test_chunked_prefill_recompute(
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
     with vllm_runner(
-            model,
-            dtype=dtype,
-            max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=enable_chunked_prefill,
-            max_num_seqs=max_num_seqs,
-            distributed_executor_backend=distributed_executor_backend,
-            disable_log_stats=False,
+        model,
+        dtype=dtype,
+        max_num_batched_tokens=max_num_batched_tokens,
+        enable_chunked_prefill=enable_chunked_prefill,
+        max_num_seqs=max_num_seqs,
+        distributed_executor_backend=distributed_executor_backend,
+        disable_log_stats=False,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-        assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
-                < ARTIFICIAL_PREEMPTION_MAX_CNT)
+        assert (
+            vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
+            < ARTIFICIAL_PREEMPTION_MAX_CNT
+        )
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
         vllm_output_ids, vllm_output_str = vllm_outputs[i]
         assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
+            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}"
+        )
         assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}"
+        )
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -102,16 +110,19 @@ def test_preemption(
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
     with vllm_runner(
-            model,
-            dtype=dtype,
-            disable_log_stats=False,
-            distributed_executor_backend=distributed_executor_backend,
+        model,
+        dtype=dtype,
+        disable_log_stats=False,
+        distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-        assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
-                < ARTIFICIAL_PREEMPTION_MAX_CNT)
-        total_preemption = (
-            vllm_model.model.llm_engine.scheduler[0].num_cumulative_preemption)
+        assert (
+            vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
+            < ARTIFICIAL_PREEMPTION_MAX_CNT
+        )
+        total_preemption = vllm_model.model.llm_engine.scheduler[
+            0
+        ].num_cumulative_preemption
 
     check_outputs_equal(
         outputs_0_lst=hf_outputs,
@@ -120,8 +131,10 @@ def test_preemption(
         name_1="vllm",
     )
 
-    assert ("is preempted by PreemptionMode.RECOMPUTE mode because there "
-            "is not enough KV cache space." in caplog_vllm.text)
+    assert (
+        "is preempted by PreemptionMode.RECOMPUTE mode because there "
+        "is not enough KV cache space." in caplog_vllm.text
+    )
     # Ensure the count bucket of request-level histogram metrics matches
     # the number of requests as a simple sanity check to ensure metrics are
     # generated
@@ -152,25 +165,26 @@ def test_preemption_infeasible(
     prefill_blocks = 2
     decode_blocks = max_tokens // BLOCK_SIZE
     with vllm_runner(
-            model,
-            dtype=dtype,
-            block_size=BLOCK_SIZE,
-            # Not enough gpu blocks to complete a single sequence.
-            # preemption should happen, and the sequence should be
-            # ignored instead of hanging forever.
-            num_gpu_blocks_override=prefill_blocks + decode_blocks // 2,
-            max_model_len=((prefill_blocks + decode_blocks // 2) * BLOCK_SIZE),
-            distributed_executor_backend=distributed_executor_backend,
+        model,
+        dtype=dtype,
+        block_size=BLOCK_SIZE,
+        # Not enough gpu blocks to complete a single sequence.
+        # preemption should happen, and the sequence should be
+        # ignored instead of hanging forever.
+        num_gpu_blocks_override=prefill_blocks + decode_blocks // 2,
+        max_model_len=((prefill_blocks + decode_blocks // 2) * BLOCK_SIZE),
+        distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
-        sampling_params = SamplingParams(max_tokens=max_tokens,
-                                         ignore_eos=True)
+        sampling_params = SamplingParams(max_tokens=max_tokens, ignore_eos=True)
         req_outputs = vllm_model.model.generate(
             example_prompts,
             sampling_params=sampling_params,
         )
 
-        assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
-                < ARTIFICIAL_PREEMPTION_MAX_CNT)
+        assert (
+            vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
+            < ARTIFICIAL_PREEMPTION_MAX_CNT
+        )
 
     # Verify the request is ignored and not hang.
     for req_output in req_outputs:

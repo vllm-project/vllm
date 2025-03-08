@@ -10,8 +10,10 @@ from vllm.config import MultiModalConfig
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_models import (BaseModelPath,
-                                                    OpenAIServingModels)
+from vllm.entrypoints.openai.serving_models import (
+    BaseModelPath,
+    OpenAIServingModels,
+)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MODEL_NAME = "openai-community/gpt2"
@@ -46,7 +48,6 @@ class MockModelConfig:
 
 @dataclass
 class MockEngine:
-
     async def get_model_config(self):
         return MockModelConfig()
 
@@ -56,13 +57,15 @@ async def _async_serving_chat_init():
     model_config = await engine.get_model_config()
 
     models = OpenAIServingModels(engine, model_config, BASE_MODEL_PATHS)
-    serving_completion = OpenAIServingChat(engine,
-                                           model_config,
-                                           models,
-                                           response_role="assistant",
-                                           chat_template=CHAT_TEMPLATE,
-                                           chat_template_content_format="auto",
-                                           request_logger=None)
+    serving_completion = OpenAIServingChat(
+        engine,
+        model_config,
+        models,
+        response_role="assistant",
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
     return serving_completion
 
 
@@ -76,22 +79,23 @@ def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=MockModelConfig())
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     MockModelConfig(),
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+        model_config=MockModelConfig(),
+    )
+    serving_chat = OpenAIServingChat(
+        mock_engine,
+        MockModelConfig(),
+        models,
+        response_role="assistant",
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
     req = ChatCompletionRequest(
         model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
+        messages=[{"role": "user", "content": "what is 1+1?"}],
         guided_decoding_backend="outlines",
     )
 
@@ -119,24 +123,25 @@ def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.errored = False
 
     # Initialize the serving chat
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=mock_model_config)
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     mock_model_config,
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+        model_config=mock_model_config,
+    )
+    serving_chat = OpenAIServingChat(
+        mock_engine,
+        mock_model_config,
+        models,
+        response_role="assistant",
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
 
     # Test Case 1: No max_tokens specified in request
     req = ChatCompletionRequest(
         model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
+        messages=[{"role": "user", "content": "what is 1+1?"}],
         guided_decoding_backend="outlines",
     )
 
@@ -174,24 +179,25 @@ def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.errored = False
 
     # Initialize the serving chat
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=mock_model_config)
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     mock_model_config,
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+        model_config=mock_model_config,
+    )
+    serving_chat = OpenAIServingChat(
+        mock_engine,
+        mock_model_config,
+        models,
+        response_role="assistant",
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
 
     # Test case 1: No max_tokens specified, defaults to context_window
     req = ChatCompletionRequest(
         model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
+        messages=[{"role": "user", "content": "what is 1+1?"}],
         guided_decoding_backend="outlines",
     )
 
@@ -218,11 +224,10 @@ def test_serving_chat_should_set_correct_max_tokens():
 
 
 def test_serving_chat_could_load_correct_generation_config():
-
     mock_model_config = MockModelConfig()
     mock_model_config.diff_sampling_param = {
         "temperature": 0.5,
-        "repetition_penalty": 1.05
+        "repetition_penalty": 1.05,
     }
 
     mock_engine = MagicMock(spec=MQLLMEngineClient)
@@ -230,22 +235,23 @@ def test_serving_chat_could_load_correct_generation_config():
     mock_engine.errored = False
 
     # Initialize the serving chat
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=mock_model_config)
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     mock_model_config,
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+        model_config=mock_model_config,
+    )
+    serving_chat = OpenAIServingChat(
+        mock_engine,
+        mock_model_config,
+        models,
+        response_role="assistant",
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
     req = ChatCompletionRequest(
         model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": "what is 1+1?"
-        }],
+        messages=[{"role": "user", "content": "what is 1+1?"}],
         guided_decoding_backend="outlines",
     )
 

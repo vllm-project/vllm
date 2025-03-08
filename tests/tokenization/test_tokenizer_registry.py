@@ -3,15 +3,16 @@
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.transformers_utils.tokenizer_base import (TokenizerBase,
-                                                    TokenizerRegistry)
+from vllm.transformers_utils.tokenizer_base import (
+    TokenizerBase,
+    TokenizerRegistry,
+)
 
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 
 class TestTokenizer(TokenizerBase):
-
     @classmethod
     def from_pretrained(cls, *args, **kwargs) -> "TestTokenizer":
         return TestTokenizer()
@@ -80,23 +81,25 @@ class TestTokenizer(TokenizerBase):
     ) -> list[int]:
         raise NotImplementedError()
 
-    def encode(self,
-               text: str,
-               add_special_tokens: Optional[bool] = None) -> list[int]:
+    def encode(
+        self, text: str, add_special_tokens: Optional[bool] = None
+    ) -> list[int]:
         raise NotImplementedError()
 
-    def apply_chat_template(self,
-                            messages: list["ChatCompletionMessageParam"],
-                            tools: Optional[list[dict[str, Any]]] = None,
-                            **kwargs) -> list[int]:
+    def apply_chat_template(
+        self,
+        messages: list["ChatCompletionMessageParam"],
+        tools: Optional[list[dict[str, Any]]] = None,
+        **kwargs,
+    ) -> list[int]:
         raise NotImplementedError()
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
         raise NotImplementedError()
 
-    def decode(self,
-               ids: Union[list[int], int],
-               skip_special_tokens: bool = True) -> str:
+    def decode(
+        self, ids: Union[list[int], int], skip_special_tokens: bool = True
+    ) -> str:
         raise NotImplementedError()
 
     def convert_ids_to_tokens(
@@ -108,9 +111,11 @@ class TestTokenizer(TokenizerBase):
 
 
 def test_customized_tokenizer():
-    TokenizerRegistry.register("test_tokenizer",
-                               "tests.tokenization.test_tokenizer_registry",
-                               "TestTokenizer")
+    TokenizerRegistry.register(
+        "test_tokenizer",
+        "tests.tokenization.test_tokenizer_registry",
+        "TestTokenizer",
+    )
 
     tokenizer = TokenizerRegistry.get_tokenizer("test_tokenizer")
     assert isinstance(tokenizer, TestTokenizer)

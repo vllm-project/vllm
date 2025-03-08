@@ -11,19 +11,28 @@ from transformers import ProcessorMixin
 
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
+
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
-                                        PromptIndexTargets, PromptInsertion,
-                                        PromptReplacement, apply_text_matches,
-                                        apply_token_matches,
-                                        find_mm_placeholders,
-                                        find_text_matches, find_token_matches,
-                                        iter_token_matches)
+from vllm.multimodal.processing import (
+    PlaceholderFeaturesInfo,
+    PromptIndexTargets,
+    PromptInsertion,
+    PromptReplacement,
+    apply_text_matches,
+    apply_token_matches,
+    find_mm_placeholders,
+    find_text_matches,
+    find_token_matches,
+    iter_token_matches,
+)
+
 # yapf: enable
 from vllm.multimodal.profiling import MultiModalProfiler
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               cached_tokenizer_from_config)
+from vllm.transformers_utils.tokenizer import (
+    AnyTokenizer,
+    cached_tokenizer_from_config,
+)
 from vllm.utils import full_groupby
 
 from .utils import random_image

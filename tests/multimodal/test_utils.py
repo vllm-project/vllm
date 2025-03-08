@@ -12,9 +12,11 @@ from PIL import Image, ImageChops
 from transformers import AutoConfig, AutoTokenizer
 
 from vllm.multimodal.inputs import PlaceholderRange
-from vllm.multimodal.utils import (MediaConnector,
-                                   merge_and_sort_multimodal_metadata,
-                                   repeat_and_pad_placeholder_tokens)
+from vllm.multimodal.utils import (
+    MediaConnector,
+    merge_and_sort_multimodal_metadata,
+    repeat_and_pad_placeholder_tokens,
+)
 
 if TYPE_CHECKING:
     from vllm.multimodal.hasher import MultiModalHashDict
@@ -41,10 +43,10 @@ def url_images() -> dict[str, Image.Image]:
 
 def get_supported_suffixes() -> tuple[str, ...]:
     # We should at least test the file types mentioned in GPT-4 with Vision
-    OPENAI_SUPPORTED_SUFFIXES = ('.png', '.jpeg', '.jpg', '.webp', '.gif')
+    OPENAI_SUPPORTED_SUFFIXES = (".png", ".jpeg", ".jpg", ".webp", ".gif")
 
     # Additional file types that are supported by us
-    EXTRA_SUPPORTED_SUFFIXES = ('.bmp', '.tiff')
+    EXTRA_SUPPORTED_SUFFIXES = (".bmp", ".tiff")
 
     return OPENAI_SUPPORTED_SUFFIXES + EXTRA_SUPPORTED_SUFFIXES
 
@@ -66,8 +68,9 @@ async def test_fetch_image_http(image_url: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
-async def test_fetch_image_base64(url_images: dict[str, Image.Image],
-                                  image_url: str, suffix: str):
+async def test_fetch_image_base64(
+    url_images: dict[str, Image.Image], image_url: str, suffix: str
+):
     connector = MediaConnector()
     url_image = url_images[image_url]
 
@@ -77,14 +80,14 @@ async def test_fetch_image_base64(url_images: dict[str, Image.Image],
         try:
             mime_type = mimetypes.types_map[suffix]
         except KeyError:
-            pytest.skip('No MIME type')
+            pytest.skip("No MIME type")
 
     with NamedTemporaryFile(suffix=suffix) as f:
         try:
             url_image.save(f.name)
         except Exception as e:
-            if e.args[0] == 'cannot write mode RGBA as JPEG':
-                pytest.skip('Conversion not supported')
+            if e.args[0] == "cannot write mode RGBA as JPEG":
+                pytest.skip("Conversion not supported")
 
             raise
 
@@ -110,30 +113,38 @@ async def test_fetch_image_local_files(image_url: str):
         local_connector = MediaConnector(allowed_local_media_path=temp_dir)
 
         origin_image = connector.fetch_image(image_url)
-        origin_image.save(os.path.join(temp_dir, os.path.basename(image_url)),
-                          quality=100,
-                          icc_profile=origin_image.info.get('icc_profile'))
+        origin_image.save(
+            os.path.join(temp_dir, os.path.basename(image_url)),
+            quality=100,
+            icc_profile=origin_image.info.get("icc_profile"),
+        )
 
         image_async = await local_connector.fetch_image_async(
-            f"file://{temp_dir}/{os.path.basename(image_url)}")
+            f"file://{temp_dir}/{os.path.basename(image_url)}"
+        )
         image_sync = local_connector.fetch_image(
-            f"file://{temp_dir}/{os.path.basename(image_url)}")
+            f"file://{temp_dir}/{os.path.basename(image_url)}"
+        )
         # Check that the images are equal
         assert not ImageChops.difference(image_sync, image_async).getbbox()
 
         with pytest.raises(ValueError, match="must be a subpath"):
             await local_connector.fetch_image_async(
-                f"file://{temp_dir}/../{os.path.basename(image_url)}")
+                f"file://{temp_dir}/../{os.path.basename(image_url)}"
+            )
         with pytest.raises(RuntimeError, match="Cannot load local files"):
             await connector.fetch_image_async(
-                f"file://{temp_dir}/../{os.path.basename(image_url)}")
+                f"file://{temp_dir}/../{os.path.basename(image_url)}"
+            )
 
         with pytest.raises(ValueError, match="must be a subpath"):
             local_connector.fetch_image(
-                f"file://{temp_dir}/../{os.path.basename(image_url)}")
+                f"file://{temp_dir}/../{os.path.basename(image_url)}"
+            )
         with pytest.raises(RuntimeError, match="Cannot load local files"):
             connector.fetch_image(
-                f"file://{temp_dir}/../{os.path.basename(image_url)}")
+                f"file://{temp_dir}/../{os.path.basename(image_url)}"
+            )
 
 
 @pytest.mark.parametrize("model", ["llava-hf/llava-v1.6-mistral-7b-hf"])
@@ -182,17 +193,16 @@ def test_repeat_and_pad_placeholder_tokens(model):
     ]  # yapf: disable
 
     for (
-            prompt,
-            repeat_count,
-            expected_prompt,
-            expected_token_ids,
-            expected_ranges,
+        prompt,
+        repeat_count,
+        expected_prompt,
+        expected_token_ids,
+        expected_ranges,
     ) in test_cases:
         new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
             tokenizer=tokenizer,
             prompt=prompt,
-            prompt_token_ids=tokenizer.encode(prompt,
-                                              add_special_tokens=False),
+            prompt_token_ids=tokenizer.encode(prompt, add_special_tokens=False),
             placeholder_token_id=image_token_id,
             repeat_count=repeat_count,
         )
@@ -211,7 +221,6 @@ class TestCase(NamedTuple):
 
 
 def test_merge_and_sort_multimodal_metadata():
-
     test_cases = [
         # Single modality should return result as is but flattened
         TestCase(
@@ -229,7 +238,6 @@ def test_merge_and_sort_multimodal_metadata():
             ],
             expected_hashes=["hash1", "hash2"],
         ),
-
         # Single modality without hashes return None for mm hash.
         TestCase(
             mm_positions={
@@ -246,7 +254,6 @@ def test_merge_and_sort_multimodal_metadata():
             ],
             expected_hashes=None,
         ),
-
         # Multiple modalities with hashes should return sorted modalities
         # and flattened ranges and hashes.
         TestCase(
@@ -258,7 +265,7 @@ def test_merge_and_sort_multimodal_metadata():
                 "audio": [
                     PlaceholderRange(offset=0, length=2),
                     PlaceholderRange(offset=2, length=3),
-                ]
+                ],
             },
             mm_hashes={
                 "image": ["image_hash1", "image_hash2"],
@@ -272,10 +279,12 @@ def test_merge_and_sort_multimodal_metadata():
                 PlaceholderRange(offset=11, length=5),
             ],
             expected_hashes=[
-                "audio_hash1", "audio_hash2", "image_hash1", "image_hash2"
+                "audio_hash1",
+                "audio_hash2",
+                "image_hash1",
+                "image_hash2",
             ],
         ),
-
         # Multiple modalities without hashes should return sorted modalities
         # and flattened ranges and None.
         TestCase(
@@ -287,7 +296,7 @@ def test_merge_and_sort_multimodal_metadata():
                 "audio": [
                     PlaceholderRange(offset=0, length=2),
                     PlaceholderRange(offset=2, length=3),
-                ]
+                ],
             },
             mm_hashes=None,
             expected_modalities=["audio", "image"],
@@ -299,7 +308,6 @@ def test_merge_and_sort_multimodal_metadata():
             ],
             expected_hashes=None,
         ),
-
         # Three modalities
         TestCase(
             mm_positions={
@@ -314,12 +322,12 @@ def test_merge_and_sort_multimodal_metadata():
                     PlaceholderRange(offset=3, length=4),
                     PlaceholderRange(offset=7, length=5),
                     PlaceholderRange(offset=12, length=6),
-                ]
+                ],
             },
             mm_hashes={
                 "image": ["image_hash1", "image_hash2"],
                 "audio": ["audio_hash1"],
-                "video": ["video_hash1", "video_hash2", "video_hash3"]
+                "video": ["video_hash1", "video_hash2", "video_hash3"],
             },
             expected_modalities=["audio", "video", "image"],
             expected_ranges=[
@@ -331,16 +339,26 @@ def test_merge_and_sort_multimodal_metadata():
                 PlaceholderRange(offset=22, length=8),
             ],
             expected_hashes=[
-                "audio_hash1", "video_hash1", "video_hash2", "video_hash3",
-                "image_hash1", "image_hash2"
+                "audio_hash1",
+                "video_hash1",
+                "video_hash2",
+                "video_hash3",
+                "image_hash1",
+                "image_hash2",
             ],
         ),
     ]
 
-    for (mm_positions, mm_hashes, expected_modalities, expected_ranges,
-         expected_hashes) in test_cases:
+    for (
+        mm_positions,
+        mm_hashes,
+        expected_modalities,
+        expected_ranges,
+        expected_hashes,
+    ) in test_cases:
         modalities, ranges, hashes = merge_and_sort_multimodal_metadata(
-            mm_positions, mm_hashes)
+            mm_positions, mm_hashes
+        )
 
         assert modalities == expected_modalities
         assert ranges == expected_ranges
@@ -348,9 +366,7 @@ def test_merge_and_sort_multimodal_metadata():
 
 
 def test_merge_and_sort_multimodal_metadata_with_interleaving():
-
     test_cases = [
-
         # <image> <audio> <image> <audio>
         TestCase(
             mm_positions={
@@ -361,7 +377,7 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                 "audio": [
                     PlaceholderRange(offset=5, length=2),
                     PlaceholderRange(offset=11, length=4),
-                ]
+                ],
             },
             mm_hashes={
                 "image": ["image_hash1", "image_hash2"],
@@ -371,7 +387,6 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
             expected_ranges=[],
             expected_hashes=None,
         ),
-
         # <image> <image> <video> <audio> <image>
         TestCase(
             mm_positions={
@@ -385,7 +400,7 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
                 ],
                 "video": [
                     PlaceholderRange(offset=8, length=5),
-                ]
+                ],
             },
             mm_hashes=None,
             expected_modalities=[],
@@ -396,7 +411,8 @@ def test_merge_and_sort_multimodal_metadata_with_interleaving():
 
     for case in test_cases:
         with pytest.raises(ValueError) as ex_info:
-            merge_and_sort_multimodal_metadata(case.mm_positions,
-                                               case.mm_hashes)
+            merge_and_sort_multimodal_metadata(
+                case.mm_positions, case.mm_hashes
+            )
 
         assert "Interleaved mixed-modality" in str(ex_info.value)

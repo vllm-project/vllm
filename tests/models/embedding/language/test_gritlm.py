@@ -15,8 +15,9 @@ import vllm.config
 from ....utils import RemoteOpenAIServer
 
 # GritLM embedding implementation is only supported by XFormers backend.
-pytest.mark.skipif(not importlib.util.find_spec("xformers"),
-                   reason="GritLM requires XFormers")
+pytest.mark.skipif(
+    not importlib.util.find_spec("xformers"), reason="GritLM requires XFormers"
+)
 
 MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
 MAX_MODEL_LEN = 4000
@@ -80,14 +81,18 @@ async def client_generate(server_generate: RemoteOpenAIServer):
         yield async_client
 
 
-def run_llm_encode(llm: vllm.LLM, queries: list[str],
-                   instruction: str) -> list[float]:
-    outputs = llm.encode([instruction + q for q in queries], )
+def run_llm_encode(
+    llm: vllm.LLM, queries: list[str], instruction: str
+) -> list[float]:
+    outputs = llm.encode(
+        [instruction + q for q in queries],
+    )
     return [output.outputs.embedding for output in outputs]
 
 
-async def run_client_embeddings(client: vllm.LLM, queries: list[str],
-                                instruction: str) -> list[float]:
+async def run_client_embeddings(
+    client: vllm.LLM, queries: list[str], instruction: str
+) -> list[float]:
     outputs = await client.embeddings.create(
         model=MODEL_NAME,
         input=[instruction + q for q in queries],
@@ -96,8 +101,11 @@ async def run_client_embeddings(client: vllm.LLM, queries: list[str],
 
 
 def gritlm_instruction(instruction):
-    return ("<|user|>\n" + instruction +
-            "\n<|embed|>\n" if instruction else "<|embed|>\n")
+    return (
+        "<|user|>\n" + instruction + "\n<|embed|>\n"
+        if instruction
+        else "<|embed|>\n"
+    )
 
 
 def get_test_data():
@@ -106,7 +114,8 @@ def get_test_data():
     README.md in https://github.com/ContextualAI/gritlm
     """
     q_instruction = gritlm_instruction(
-        "Given a scientific paper title, retrieve the paper's abstract")
+        "Given a scientific paper title, retrieve the paper's abstract"
+    )
     queries = [
         "Bitcoin: A Peer-to-Peer Electronic Cash System",
         "Generative Representational Instruction Tuning",
@@ -160,7 +169,8 @@ def test_gritlm_offline_embedding(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_gritlm_api_server_embedding(
-        client_embedding: openai.AsyncOpenAI):
+    client_embedding: openai.AsyncOpenAI,
+):
     queries, q_instruction, documents, d_instruction = get_test_data()
 
     d_rep = await run_client_embeddings(

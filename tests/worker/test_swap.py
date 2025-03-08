@@ -10,16 +10,17 @@ from vllm.worker.worker import Worker
 
 def test_swap() -> None:
     # Configure the engine.
-    engine_args = EngineArgs(model="distilbert/distilgpt2",
-                             dtype="half",
-                             load_format="dummy")
+    engine_args = EngineArgs(
+        model="distilbert/distilgpt2", dtype="half", load_format="dummy"
+    )
     engine_config = engine_args.create_engine_config()
     engine_config.cache_config.num_gpu_blocks = 1000
     engine_config.cache_config.num_cpu_blocks = 1000
 
     # Create the worker.
     distributed_init_method = get_distributed_init_method(
-        get_ip(), get_open_port())
+        get_ip(), get_open_port()
+    )
     worker = Worker(
         vllm_config=engine_config,
         local_rank=0,
@@ -33,7 +34,8 @@ def test_swap() -> None:
     worker.load_model()
     worker.initialize_cache(
         num_gpu_blocks=engine_config.cache_config.num_gpu_blocks,
-        num_cpu_blocks=engine_config.cache_config.num_cpu_blocks)
+        num_cpu_blocks=engine_config.cache_config.num_cpu_blocks,
+    )
 
     # Randomly initialize the cache.
     gpu_cache = worker.cache_engine[0].gpu_cache
@@ -48,7 +50,8 @@ def test_swap() -> None:
         cpu_value_cache.random_()
 
     allclose = lambda a, b: torch.allclose(
-        a.cuda(), b.cuda(), rtol=0.0, atol=0.0)
+        a.cuda(), b.cuda(), rtol=0.0, atol=0.0
+    )
 
     # Test swap out.
     blocks_to_swap_out = [(3, 72), (56, 35), (84, 34)]

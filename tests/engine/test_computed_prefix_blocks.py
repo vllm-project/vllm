@@ -17,15 +17,17 @@ def test_computed_prefix_blocks(model: str, block_size: int):
     prompt = (
         "You are a helpful assistant. How do I build a car from cardboard and "
         "paper clips? Is there an easy to follow video tutorial available "
-        "online for free?")
+        "online for free?"
+    )
     prompt2 = (
         " Please recommend to me some resources where I can learn not only to "
         "handle technical difficulties of building a car, but also "
-        "decoration.")
+        "decoration."
+    )
 
-    engine_args = EngineArgs(model=model,
-                             block_size=block_size,
-                             enable_prefix_caching=True)
+    engine_args = EngineArgs(
+        model=model, block_size=block_size, enable_prefix_caching=True
+    )
 
     engine = LLMEngine.from_engine_args(engine_args)
     sampling_params = SamplingParams()

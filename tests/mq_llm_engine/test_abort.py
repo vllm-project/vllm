@@ -25,9 +25,9 @@ def tmp_socket():
 
 @pytest.mark.asyncio
 async def test_abort(tmp_socket):
-    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
-                           ipc_path=tmp_socket) as engine:
-
+    with RemoteMQLLMEngine(
+        engine_args=ENGINE_ARGS, ipc_path=tmp_socket
+    ) as engine:
         client = await engine.make_client()
 
         request_id_to_be_aborted = "request-aborted"
@@ -39,17 +39,22 @@ async def test_abort(tmp_socket):
         for request_id in request_ids_a:
             tasks.append(
                 asyncio.create_task(
-                    generate(client, request_id, EXPECTED_TOKENS)))
+                    generate(client, request_id, EXPECTED_TOKENS)
+                )
+            )
 
         # Aborted.
         task_aborted = asyncio.create_task(
-            generate(client, request_id_to_be_aborted, EXPECTED_TOKENS))
+            generate(client, request_id_to_be_aborted, EXPECTED_TOKENS)
+        )
 
         # Requests started after one to be aborted.
         for request_id in request_ids_b:
             tasks.append(
                 asyncio.create_task(
-                    generate(client, request_id, EXPECTED_TOKENS)))
+                    generate(client, request_id, EXPECTED_TOKENS)
+                )
+            )
 
         # Actually abort.
         await asyncio.sleep(0.5)
@@ -59,7 +64,8 @@ async def test_abort(tmp_socket):
         for task in tasks:
             count, request_id = await task
             assert count == EXPECTED_TOKENS, (
-                f"{request_id} generated only {count} tokens")
+                f"{request_id} generated only {count} tokens"
+            )
 
         # Cancel task (this will hang indefinitely if not).
         task_aborted.cancel()

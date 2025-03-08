@@ -4,12 +4,12 @@ import pytest
 
 from ..conftest import IMAGE_ASSETS
 
-HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign":
-    "USER: <image>\nWhat's the content of the image?\nASSISTANT:",
-    "cherry_blossom":
-    "USER: <image>\nWhat is the season?\nASSISTANT:",
-})
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
+    {
+        "stop_sign": "USER: <image>\nWhat's the content of the image?\nASSISTANT:",
+        "cherry_blossom": "USER: <image>\nWhat is the season?\nASSISTANT:",
+    }
+)
 
 models = ["llava-hf/llava-1.5-7b-hf"]
 
@@ -26,6 +26,6 @@ def test_context_length_too_short(vllm_runner, image_assets, model):
         )
 
         with vllm_model:
-            vllm_model.generate_greedy([HF_IMAGE_PROMPTS[0]],
-                                       max_tokens=1,
-                                       images=[images[0]])
+            vllm_model.generate_greedy(
+                [HF_IMAGE_PROMPTS[0]], max_tokens=1, images=[images[0]]
+            )

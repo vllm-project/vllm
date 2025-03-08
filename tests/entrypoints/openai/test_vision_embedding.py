@@ -57,31 +57,25 @@ def base64_encoded_image() -> dict[str, str]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
-async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
-                               image_url: str):
-    messages = [{
-        "role":
-        "user",
-        "content": [
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url
-                }
-            },
-            {
-                "type": "text",
-                "text": "Represent the given image."
-            },
-        ],
-    }]
+async def test_image_embedding(
+    server: RemoteOpenAIServer, model_name: str, image_url: str
+):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "Represent the given image."},
+            ],
+        }
+    ]
 
     response = requests.post(
         server.url_for("v1/embeddings"),
         json={
             "model": model_name,
             "messages": messages,
-            "encoding_format": "float"
+            "encoding_format": "float",
         },
     )
     response.raise_for_status()

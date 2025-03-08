@@ -3,6 +3,7 @@
 
 Run `pytest tests/models/test_cls_models.py`.
 """
+
 import pytest
 import torch
 from transformers import AutoModelForSequenceClassification
@@ -11,8 +12,10 @@ from transformers import AutoModelForSequenceClassification
 @pytest.mark.parametrize(
     "model",
     [
-        pytest.param("jason9693/Qwen2.5-1.5B-apeach",
-                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        pytest.param(
+            "jason9693/Qwen2.5-1.5B-apeach",
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
     ],
 )
 @pytest.mark.parametrize("dtype", ["float"])
@@ -33,9 +36,9 @@ def test_classification_models(
 
         vllm_model.apply_model(print_model)
 
-    with hf_runner(model,
-                   dtype=dtype,
-                   auto_cls=AutoModelForSequenceClassification) as hf_model:
+    with hf_runner(
+        model, dtype=dtype, auto_cls=AutoModelForSequenceClassification
+    ) as hf_model:
         hf_outputs = hf_model.classify(example_prompts)
 
     # check logits difference

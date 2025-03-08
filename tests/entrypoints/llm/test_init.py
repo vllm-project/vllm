@@ -19,6 +19,7 @@ def test_pos_args_deprecated():
     with pytest.warns(DeprecationWarning, match="'tokenizer'"):
         LLM(MODEL_NAME, MODEL_NAME)
 
-    with pytest.warns(DeprecationWarning,
-                      match="'tokenizer', 'tokenizer_mode'"):
+    with pytest.warns(
+        DeprecationWarning, match="'tokenizer', 'tokenizer_mode'"
+    ):
         LLM(MODEL_NAME, MODEL_NAME, "auto")

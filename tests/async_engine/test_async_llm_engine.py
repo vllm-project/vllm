@@ -34,7 +34,6 @@ class MockModelConfig:
 
 
 class MockEngine:
-
     def __init__(self):
         self.step_calls = 0
         self.add_request_calls = 0
@@ -47,8 +46,11 @@ class MockEngine:
     async def step_async(self, virtual_engine):
         # PP size is 1, ignore virtual engine
         self.step_calls += 1
-        return [RequestOutput(
-            request_id=self.request_id)] if self.request_id else []
+        return (
+            [RequestOutput(request_id=self.request_id)]
+            if self.request_id
+            else []
+        )
 
     async def process_model_inputs_async(self, *args, **kwargs):
         pass
@@ -65,7 +67,7 @@ class MockEngine:
     def add_request(self, **kwargs):
         del kwargs  # Unused
         self.add_request_calls += 1
-        print(f'Request calls: {self.add_request_calls}')
+        print(f"Request calls: {self.add_request_calls}")
 
     async def add_request_async(self, **kwargs):
         self.add_request_calls += 1
@@ -140,9 +142,12 @@ def start_engine():
     print(f"Starting engine with num_scheduler_steps={num_scheduler_steps}")
 
     return AsyncLLMEngine.from_engine_args(
-        AsyncEngineArgs(model="facebook/opt-125m",
-                        enforce_eager=True,
-                        num_scheduler_steps=num_scheduler_steps))
+        AsyncEngineArgs(
+            model="facebook/opt-125m",
+            enforce_eager=True,
+            num_scheduler_steps=num_scheduler_steps,
+        )
+    )
 
 
 def uid() -> str:
@@ -151,8 +156,9 @@ def uid() -> str:
 
 @pytest_asyncio.fixture(scope="module")
 async def async_engine():
-    engine = await asyncio.get_event_loop().run_in_executor(executor=None,
-                                                            func=start_engine)
+    engine = await asyncio.get_event_loop().run_in_executor(
+        executor=None, func=start_engine
+    )
     try:
         yield engine
     finally:
@@ -171,7 +177,6 @@ def should_do_global_cleanup_after_test(request) -> bool:
 @pytest.mark.asyncio(scope="module")
 @pytest.mark.parametrize("stop", [None, ["a stop string"]])
 async def test_asyncio_run(async_engine, stop):
-
     scheduler_config = await async_engine.get_scheduler_config()
     num_scheduler_steps = scheduler_config.num_scheduler_steps
 
@@ -185,9 +190,9 @@ async def test_asyncio_run(async_engine, stop):
 
         output_count = 0
         final_output = None
-        async for output in async_engine.generate(prompt,
-                                                  sampling_params,
-                                                  request_id=uid()):
+        async for output in async_engine.generate(
+            prompt, sampling_params, request_id=uid()
+        ):
             output_count += 1
             final_output = output
         return final_output, output_count
@@ -236,18 +241,21 @@ async def test_output_kinds(async_engine, stop):
 
         output_count = 0
         final_output = None
-        async for output in async_engine.generate(prompt,
-                                                  params,
-                                                  request_id=uid()):
+        async for output in async_engine.generate(
+            prompt, params, request_id=uid()
+        ):
             output_count += 1
             final_output = output
 
         assert final_output is not None
         assert final_output.finished
 
-        return (final_output.prompt_token_ids,
-                final_output.outputs[0].token_ids,
-                final_output.outputs[0].text, output_count)
+        return (
+            final_output.prompt_token_ids,
+            final_output.outputs[0].token_ids,
+            final_output.outputs[0].text,
+            output_count,
+        )
 
     async def run_deltas(prompt: str):
         params = copy(sampling_params)
@@ -258,9 +266,9 @@ async def test_output_kinds(async_engine, stop):
         output_text = ""
         output_count = 0
         final_output = None
-        async for output in async_engine.generate(prompt,
-                                                  params,
-                                                  request_id=uid()):
+        async for output in async_engine.generate(
+            prompt, params, request_id=uid()
+        ):
             token_ids = output.outputs[0].token_ids
             text = output.outputs[0].text
             final_output = output
@@ -287,7 +295,8 @@ async def test_output_kinds(async_engine, stop):
     results = await asyncio.gather(
         run("common input prompt", RequestOutputKind.CUMULATIVE),
         run("common input prompt", RequestOutputKind.FINAL_ONLY),
-        run_deltas("common input prompt"))
+        run_deltas("common input prompt"),
+    )
 
     # Make sure outputs are the same
     prompt_set = set(tuple(prompt_ids) for prompt_ids, _, _, _ in results)
@@ -331,9 +340,9 @@ async def test_cancellation(async_engine, stop):
 
     i = 0
     with pytest.raises(CancelledError):
-        async for output in async_engine.generate("test2",
-                                                  sampling_params,
-                                                  request_id=request_id):
+        async for output in async_engine.generate(
+            "test2", sampling_params, request_id=request_id
+        ):
             assert not output.finished
             i += 1
             if i == stop_at:

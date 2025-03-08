@@ -9,11 +9,14 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize("activation", ["silu_and_mul", "gelu_fast"])
-@pytest.mark.parametrize("num_tokens,d,dtype", [
-    (7, 512, torch.half),
-    (7, 512, torch.float),
-    (83, 512, torch.half),
-])
+@pytest.mark.parametrize(
+    "num_tokens,d,dtype",
+    [
+        (7, 512, torch.half),
+        (7, 512, torch.float),
+        (83, 512, torch.half),
+    ],
+)
 @torch.inference_mode()
 def test_act_and_mul(
     activation: str,
@@ -35,7 +38,8 @@ def test_act_and_mul(
         fn = F.gelu
     else:
         raise NotImplementedError(
-            f"activation {activation} is not implemented.")
+            f"activation {activation} is not implemented."
+        )
     assert x.is_xla, "input tensor under testing is expected to be XLA tensor."
     out = layer.to(device=device).forward_neuron(x)
     ref_out = fn(x.cpu())

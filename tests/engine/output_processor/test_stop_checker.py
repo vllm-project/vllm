@@ -11,8 +11,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob, Sequence, SequenceStatus
 
 
-def sequence_with_eos(text: str, eos_token: str,
-                      eos_token_id: int) -> Sequence:
+def sequence_with_eos(text: str, eos_token: str, eos_token_id: int) -> Sequence:
     """
     Create a Sequence that ends with an EOS token.
     """
@@ -27,22 +26,31 @@ def sequence_with_eos(text: str, eos_token: str,
     offset = eos_token_id + 1
     for i in range(offset, len(text) + offset):
         seq.append_token_id(token_id=i, logprobs={i: Logprob(0.0)})
-    seq.append_token_id(token_id=eos_token_id,
-                        logprobs={eos_token_id: Logprob(0.0)})
+    seq.append_token_id(
+        token_id=eos_token_id, logprobs={eos_token_id: Logprob(0.0)}
+    )
 
     seq.status = SequenceStatus.RUNNING
 
     return seq
 
 
-@pytest.mark.parametrize(["text_wo_eos", "eos_token", "eos_token_id"], [
-    ("This text ends with EOS token", "</s>", 2),
-])
+@pytest.mark.parametrize(
+    ["text_wo_eos", "eos_token", "eos_token_id"],
+    [
+        ("This text ends with EOS token", "</s>", 2),
+    ],
+)
 @pytest.mark.parametrize("ignore_eos", [True, False])
 @pytest.mark.parametrize("include_stop_str_in_output", [True, False])
 @pytest.mark.skip_global_cleanup
-def test_stop_on_eos_token(text_wo_eos: str, eos_token: str, eos_token_id: int,
-                           ignore_eos: bool, include_stop_str_in_output: bool):
+def test_stop_on_eos_token(
+    text_wo_eos: str,
+    eos_token: str,
+    eos_token_id: int,
+    ignore_eos: bool,
+    include_stop_str_in_output: bool,
+):
     """
     Test the behavior of the StopChecker's maybe_stop_sequence method
     when an EOS token is encountered.
@@ -55,8 +63,9 @@ def test_stop_on_eos_token(text_wo_eos: str, eos_token: str, eos_token_id: int,
 
     tokenizer = MagicMock(spec=PreTrainedTokenizer)
     get_tokenizer_for_seq = MagicMock(return_value=tokenizer)
-    stop_checker = StopChecker(max_model_len=1024,
-                               get_tokenizer_for_seq=get_tokenizer_for_seq)
+    stop_checker = StopChecker(
+        max_model_len=1024, get_tokenizer_for_seq=get_tokenizer_for_seq
+    )
 
     seq = sequence_with_eos(
         text=text_wo_eos,
@@ -69,7 +78,8 @@ def test_stop_on_eos_token(text_wo_eos: str, eos_token: str, eos_token_id: int,
     sampling_params = SamplingParams(
         min_tokens=1,
         ignore_eos=ignore_eos,
-        include_stop_str_in_output=include_stop_str_in_output)
+        include_stop_str_in_output=include_stop_str_in_output,
+    )
 
     stop_checker.maybe_stop_sequence(
         seq=seq,

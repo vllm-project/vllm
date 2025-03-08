@@ -14,14 +14,14 @@ HF_TEXT_PROMPTS = [
     "Retrieve an image of this caption: cherry blossom",
 ]
 
-HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    # T + I -> X
-    "stop_sign":
-    "<|image_1|> Select the portion of the image that isolates the object of the given label: The label of the object is stop sign",  # noqa: E501
-    # I -> X
-    "cherry_blossom":
-    "<|image_1|> Represent the given image for classification",  # noqa: E501
-})
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
+    {
+        # T + I -> X
+        "stop_sign": "<|image_1|> Select the portion of the image that isolates the object of the given label: The label of the object is stop sign",  # noqa: E501
+        # I -> X
+        "cherry_blossom": "<|image_1|> Represent the given image for classification",  # noqa: E501
+    }
+)
 
 MODELS = ["TIGER-Lab/VLM2Vec-Full"]
 
@@ -39,22 +39,25 @@ def _run_test(
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    with vllm_runner(model, task="embed", dtype=dtype,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(
+        model, task="embed", dtype=dtype, enforce_eager=True
+    ) as vllm_model:
         vllm_outputs = vllm_model.encode(input_texts, images=input_images)
 
     # use eager mode for hf runner, since phi3_v didn't work with flash_attn
     hf_model_kwargs = {"_attn_implementation": "eager"}
-    with hf_runner(model, dtype=dtype,
-                   model_kwargs=hf_model_kwargs) as hf_model:
+    with hf_runner(
+        model, dtype=dtype, model_kwargs=hf_model_kwargs
+    ) as hf_model:
         all_inputs = hf_model.get_inputs(input_texts, images=input_images)
 
         all_outputs = []
         for inputs in all_inputs:
             # Based on: https://github.com/TIGER-AI-Lab/VLM2Vec/blob/db3b951bccabba220c1f53ab46a734e50dd2fc08/src/model.py
             outputs = hf_model.model(
-                **hf_model.wrap_device(inputs,
-                                       device=hf_model.model.device.type),
+                **hf_model.wrap_device(
+                    inputs, device=hf_model.model.device.type
+                ),
                 return_dict=True,
                 output_hidden_states=True,
             )
