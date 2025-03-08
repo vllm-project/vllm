@@ -14,21 +14,21 @@ template <typename scalar_t, bool is_column_major>
 __global__ void per_token_group_quant_fp8_kernel(
     const scalar_t* __restrict__ input, FP8_TYPE* __restrict__ output_q,
     float* __restrict__ output_s, const int group_size,
-    const int groups_per_row, const int num_rows, const int y_s_stride) {
+    const int groups_per_row, const int y_s_stride) {
   float const min_scaling_factor = 1.0f / (FP8_E4M3_MAX * 512.f);
 
   // Each block processes one group
   const int tid = threadIdx.x;
-  const int group_idx = blockIdx.x;
 
   // Calculate row and group within row
-  const int row = group_idx / groups_per_row;
-  const int row_group_id = group_idx % groups_per_row;
+  const int row = blockIdx.x;
+  const int row_group_id = blockIdx.y;
 
-  if (row >= num_rows) return;
+  // Calculate group_idx
+  const int64_t group_idx = row * groups_per_row + row_group_id;
 
   // Calculate input and output pointers
-  const int input_offset =
+  const int64_t input_offset =
       row * (groups_per_row * group_size) + row_group_id * group_size;
   scalar_t const* __restrict__ group_input = input + input_offset;
   FP8_TYPE* __restrict__ group_output = output_q + input_offset;
@@ -85,7 +85,7 @@ __global__ void per_token_group_quant_fp8_kernel(
 void per_token_group_quant_fp8(torch::Tensor const& input,
                                torch::Tensor& output_q, torch::Tensor& output_s,
                                int64_t group_size, bool column_major_scales) {
-  TORCH_CHECK(input.dim() >= 2, "Input tensor must have at least 2 dimensions");
+  TORCH_CHECK(input.dim() == 2, "Input tensor must have 2 dimensions");
   TORCH_CHECK(input.stride(-1) == 1, "Last dimension must be contiguous");
   TORCH_CHECK(input.size(-1) % group_size == 0,
               "Last dimension must be divisible by group_size");
@@ -93,12 +93,12 @@ void per_token_group_quant_fp8(torch::Tensor const& input,
   // Dimensions for kernel launch
   const int num_rows = input.size(0);
   const int groups_per_row = input.size(-1) / group_size;
-  const int num_groups = input.numel() / group_size;
-  const int y_s_stride = column_major_scales ? output_s.stride(0) : 1;
+  const int y_s_stride = column_major_scales ? output_s.stride(-1) : 1;
+  std::cout << "y_s_stride:" << y_s_stride << std::endl;
 
   // Launch parameters
   const int block_size = std::min(1024, static_cast<int>(group_size));
-  dim3 grid(num_groups);
+  dim3 grid(num_rows, groups_per_row);
   dim3 block(block_size);
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
@@ -112,14 +112,14 @@ void per_token_group_quant_fp8(torch::Tensor const& input,
                   static_cast<scalar_t*>(input.data_ptr()),
                   static_cast<FP8_TYPE*>(output_q.data_ptr()),
                   static_cast<float*>(output_s.data_ptr()), group_size,
-                  groups_per_row, num_rows, y_s_stride);
+                  groups_per_row, y_s_stride);
         } else {
           per_token_group_quant_fp8_kernel<scalar_t, false>
               <<<grid, block, 0, stream>>>(
                   static_cast<scalar_t*>(input.data_ptr()),
                   static_cast<FP8_TYPE*>(output_q.data_ptr()),
                   static_cast<float*>(output_s.data_ptr()), group_size,
-                  groups_per_row, num_rows, y_s_stride);
+                  groups_per_row, y_s_stride);
         }
         return true;
       });

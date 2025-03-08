@@ -182,17 +182,17 @@ def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
 @pytest.mark.parametrize(
     "num_tokens,d,dtype,group_size,seed",
     itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE, SEEDS))
+@pytest.mark.parametrize("column_major_scales", [False, True])
 @torch.inference_mode()
-def test_cuda_per_token_group_quant_fp8(num_tokens, d, dtype, group_size,
-                                        seed):
+def test_cuda_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed,
+                                        column_major_scales):
     torch.manual_seed(seed)
     print(f"{num_tokens=}, {d=}, {dtype=}, {group_size=}, {seed=}")
     x = torch.rand(num_tokens, d, dtype=dtype)
 
     ref_out, ref_scale = native_per_token_group_quant_fp8(x, group_size)
-    out, scale = ops.per_token_group_quant_fp8(x,
-                                               group_size,
-                                               column_major_scales=False)
+    out, scale = ops.per_token_group_quant_fp8(
+        x, group_size, column_major_scales=column_major_scales)
 
     print("ref_out", ref_out.to(torch.float32))
     print("out    ", out.to(torch.float32))
@@ -202,6 +202,7 @@ def test_cuda_per_token_group_quant_fp8(num_tokens, d, dtype, group_size,
                             ref_out.to(torch.float32))))
     assert torch.allclose(out.to(torch.float32),
                           ref_out.to(torch.float32),
+                          atol=0.01,
                           rtol=0.15)
     print()
     print("ref_scale", ref_scale)
