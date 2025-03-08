@@ -1094,7 +1094,6 @@ class CacheConfig:
         enable_prefix_caching: bool = False,
         cpu_offload_gb: float = 0,
         calculate_kv_scales: Optional[bool] = None,
-        use_v1: bool = False,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -1106,7 +1105,6 @@ class CacheConfig:
         self.enable_prefix_caching = enable_prefix_caching
         self.cpu_offload_gb = cpu_offload_gb
         self.calculate_kv_scales = calculate_kv_scales
-        self.use_v1 = use_v1
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -1138,7 +1136,7 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
-            if self.use_v1:
+            if envs.VLLM_USE_V1:
                 raise NotImplementedError(
                     "V1 does not yet support fp8 KV cache. "
                     "Set VLLM_USE_V1=0 to enable fp8 kv cache.")
@@ -2975,7 +2973,6 @@ class CompilationConfig(BaseModel):
         sufficient for most cases. It might be beneficial to compile for
         certain small batchsizes, where inductor is good at optimizing.
     """ # noqa
-    use_v1: bool = False
     level: int = 0
     debug_dump_path: str = ""
     cache_dir: str = ""
