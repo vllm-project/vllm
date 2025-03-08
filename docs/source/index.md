@@ -108,6 +108,7 @@ serving/offline_inference
 serving/openai_compatible_server
 serving/multimodal_inputs
 serving/distributed_serving
+serving/weights_loading_with_fastsafetensor
 serving/metrics
 serving/engine_args
 serving/env_vars

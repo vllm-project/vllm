@@ -49,9 +49,10 @@ from vllm.model_executor.model_loader.utils import (ParamMapping,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
-    filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_gguf_extra_tensor_names, get_lock, gguf_quant_weights_iterator,
-    initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
+    fastsafetensors_weights_iterator, filter_duplicate_safetensors_files,
+    filter_files_not_needed_for_inference, get_gguf_extra_tensor_names,
+    get_lock, gguf_quant_weights_iterator, initialize_dummy_weights,
+    np_cache_weights_iterator, pt_weights_iterator,
     runai_safetensors_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -356,7 +357,15 @@ class DefaultModelLoader(BaseModelLoader):
                 hf_weights_files,
             )
         elif use_safetensors:
-            weights_iterator = safetensors_weights_iterator(hf_weights_files)
+            use_fastsafe_tensor = os.getenv('USE_FASTSAFETENSOR',
+                                            'False').lower() == 'true'
+            if use_fastsafe_tensor:
+                logger.info("Using fastsafetensor for loading weights")
+                weights_iterator = fastsafetensors_weights_iterator(
+                    hf_weights_files)
+            else:
+                weights_iterator = safetensors_weights_iterator(
+                    hf_weights_files)
         else:
             weights_iterator = pt_weights_iterator(hf_weights_files)
 
