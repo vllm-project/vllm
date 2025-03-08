@@ -38,7 +38,7 @@ def stats() -> Response:
 if __name__ == "__main__":
     parser = FlexibleArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
-    parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--port", type=int, default=8000)
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 

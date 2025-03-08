@@ -12,7 +12,7 @@ import requests
 
 
 def _query_server(prompt: str, max_tokens: int = 5) -> dict:
-    response = requests.post("http://localhost:8001/generate",
+    response = requests.post("http://localhost:8000/generate",
                              json={
                                  "prompt": prompt,
                                  "max_tokens": max_tokens,
@@ -84,7 +84,7 @@ def test_api_server(api_server, tokenizer_pool_size: int,
             assert result
 
         num_aborted_requests = requests.get(
-            "http://localhost:8001/stats").json()["num_aborted_requests"]
+            "http://localhost:8000/stats").json()["num_aborted_requests"]
         assert num_aborted_requests == 0
 
         # Try with 100 prompts
@@ -105,7 +105,7 @@ def test_api_server(api_server, tokenizer_pool_size: int,
         time.sleep(1)
 
         num_aborted_requests = requests.get(
-            "http://localhost:8001/stats").json()["num_aborted_requests"]
+            "http://localhost:8000/stats").json()["num_aborted_requests"]
         assert num_aborted_requests > 0
 
     # check that server still runs after cancellations
