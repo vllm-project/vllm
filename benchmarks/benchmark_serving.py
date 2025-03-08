@@ -31,7 +31,7 @@ import os
 import random
 import time
 import warnings
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -54,7 +54,7 @@ except ImportError:
 
 from benchmark_dataset import (VISION_ARENA_DATASET_PATH, BurstGPTDataset,
                                HuggingFaceDataset, RandomDataset,
-                               ShareGPTDataset, SonnetDataset,
+                               SampleRequest, ShareGPTDataset, SonnetDataset,
                                VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 
@@ -92,17 +92,17 @@ class BenchmarkMetrics:
 
 
 async def get_request(
-    input_requests: list[tuple[str, int, int]],
+    input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-) -> AsyncGenerator[tuple[str, int, int], None]:
+) -> AsyncGenerator[SampleRequest, None]:
     """
     Asynchronously generates requests at a specified rate
     with OPTIONAL burstiness.
 
     Args:
         input_requests:
-            A list of input requests, each represented as a tuple.
+            A list of input requests, each represented as a SampleRequest.
         request_rate:
             The rate at which requests are generated (requests/s).
         burstiness (optional):
@@ -114,7 +114,7 @@ async def get_request(
             in more bursty requests, while a higher burstiness value
             (burstiness > 1) results in a more uniform arrival of requests.
     """
-    input_requests = iter(input_requests)
+    input_requests: Iterable[SampleRequest] = iter(input_requests)
 
     # Calculate scale parameter theta to maintain the desired request_rate.
     assert burstiness > 0, (
@@ -136,7 +136,7 @@ async def get_request(
 
 
 def calculate_metrics(
-    input_requests: list[tuple[str, int, int]],
+    input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
@@ -167,7 +167,7 @@ def calculate_metrics(
                     tokenizer(outputs[i].generated_text,
                               add_special_tokens=False).input_ids)
             actual_output_lens.append(output_len)
-            total_input += input_requests[i][1]
+            total_input += input_requests[i].prompt_len
             tpot = 0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
@@ -250,18 +250,18 @@ async def benchmark(
     model_id: str,
     model_name: str,
     tokenizer: PreTrainedTokenizerBase,
-    input_requests: list[tuple[str, int, int]],
+    input_requests: list[SampleRequest],
     logprobs: Optional[int],
     request_rate: float,
     burstiness: float,
     disable_tqdm: bool,
     profile: bool,
     selected_percentile_metrics: list[str],
-    selected_percentiles: list[str],
+    selected_percentiles: list[float],
     ignore_eos: bool,
     goodput_config_dict: dict[str, float],
     max_concurrency: Optional[int],
-    lora_modules: Optional[list[str]],
+    lora_modules: Optional[Iterable[str]],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -269,12 +269,16 @@ async def benchmark(
         raise ValueError(f"Unknown backend: {backend}")
 
     print("Starting initial single prompt test run...")
-    test_prompt, test_prompt_len, test_output_len, test_mm_content = (
-        input_requests[0])
+    test_prompt, test_prompt_len, test_output_len, test_mm_content = \
+        input_requests[0].prompt, input_requests[0].prompt_len, \
+        input_requests[0].expected_output_len, \
+            input_requests[0].multi_modal_data
+
     if backend != "openai-chat" and test_mm_content is not None:
         # multi-modal benchmark is only available on OpenAI Chat backend.
         raise ValueError(
             "Multi-modal content is only supported on 'openai-chat' backend.")
+    assert test_mm_content is None or isinstance(test_mm_content, dict)
     test_input = RequestFuncInput(
         model=model_id,
         model_name=model_name,
@@ -298,7 +302,8 @@ async def benchmark(
     if lora_modules:
         # For each input request, choose a LoRA module at random.
         lora_modules = iter(
-            [random.choice(lora_modules) for _ in range(len(input_requests))])
+            [random.choice(lora_modules) \
+                for _ in range(len(input_requests))])
 
     if profile:
         print("Starting profiler...")
@@ -344,7 +349,9 @@ async def benchmark(
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate, burstiness):
-        prompt, prompt_len, output_len, mm_content = request
+        prompt, prompt_len, output_len, mm_content = request.prompt, \
+            request.prompt_len, request.expected_output_len, \
+                request.multi_modal_data
         req_model_id, req_model_name = model_id, model_name
         if lora_modules:
             req_lora_module = next(lora_modules)
@@ -570,13 +577,11 @@ def main(args: argparse.Namespace):
         )
         # For the "sonnet" dataset, formatting depends on the backend.
         if args.backend == "openai-chat":
-            input_requests = dataset.sample(for_online_benchmark=True,
-                                            return_prompt_formatted=False)
+            input_requests = dataset.sample(return_prompt_formatted=False)
         else:
             assert tokenizer.chat_template or tokenizer.default_chat_template, (
                 "Tokenizer/model must have chat template for sonnet dataset.")
-            input_requests = dataset.sample(for_online_benchmark=True,
-                                            return_prompt_formatted=True)
+            input_requests = dataset.sample(return_prompt_formatted=True)
 
     elif args.dataset_name == "hf":
         # Choose between VisionArenaDataset
@@ -990,5 +995,5 @@ if __name__ == "__main__":
                         "script chooses a LoRA module at random.")
 
     args = parser.parse_args()
-    
+
     main(args)

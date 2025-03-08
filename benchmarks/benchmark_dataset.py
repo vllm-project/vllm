@@ -36,6 +36,120 @@ from vllm.multimodal.inputs import ImageItem
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 
 # -----------------------------------------------------------------------------
+# Data Classes
+# -----------------------------------------------------------------------------
+
+
+@dataclass
+class SampleRequest:
+    """
+    Represents a single inference request for benchmarking.
+    """
+
+    prompt: str
+    prompt_len: int
+    expected_output_len: int
+    multi_modal_data: Optional[Union[MultiModalDataDict, dict]] = None
+    lora_request: Optional[LoRARequest] = None
+
+
+# -----------------------------------------------------------------------------
+# Benchmark Dataset Base Class
+# -----------------------------------------------------------------------------
+
+
+class BenchmarkDataset(ABC):
+    DEFAULT_NUM_REQUESTS = 1000
+    DEFAULT_SEED = 0
+
+    # num_requests has default 1000 in both the benchmark_serving.py and
+    # benchmark_throughput.py
+
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        enable_lora_tokenizer: bool = False,
+        lora_path: Optional[str] = None,
+        max_loras: Optional[int] = None,
+        num_requests: int = DEFAULT_NUM_REQUESTS,
+        input_len: Optional[int] = None,
+        output_len: Optional[int] = None,
+        dataset_path: Optional[str] = None,
+        model: Optional[str] = None,
+        data: Optional[list] = None,
+        random_seed: int = DEFAULT_SEED,
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.data = data  # For datasets that require pre-loading
+        self.dataset_path = dataset_path
+        self.random_seed = (random_seed
+                            if random_seed is not None else self.DEFAULT_SEED)
+
+        # LoRA related
+        self.enable_lora_tokenizer = enable_lora_tokenizer
+        self.lora_path = lora_path
+        self.max_loras = max_loras
+
+        self.num_requests = (num_requests if num_requests is not None else
+                             self.DEFAULT_NUM_REQUESTS)
+        self.input_len = input_len
+        self.output_len = output_len
+
+        self.model = model
+
+        if self.enable_lora_tokenizer and not self.lora_path:
+            raise ValueError("LoRA is enabled but no lora_path provided.")
+
+    def load_data(self) -> None:
+        """
+        Load data from the specified dataset path.  RandomDataset does not need
+        to implement this method.
+        """
+        raise NotImplementedError(
+            "load_data must be implemented in subclasses.")
+
+    def get_random_lora_request(
+        self,
+        for_online_benchmark=False
+    ) -> tuple[Optional[LoRARequest], AnyTokenizer]:
+        """
+        Return a tuple (lora_request, tokenizer) for tokenizing requests.  If
+        LoRA is enabled, returns the LoRA-specific tokenizer; otherwise, the
+        base tokenizer.
+        """
+        if not self.enable_lora_tokenizer or for_online_benchmark:
+            return None, self.tokenizer
+
+        if self.max_loras is None:
+            raise ValueError(
+                "max_lora must be set when enabling LoRA tokenizer.")
+
+        # Generate a random LoRA ID in the range [1, max_loras].
+        lora_id = random.randint(1, self.max_loras)
+        lora_request = LoRARequest(
+            lora_name=str(lora_id),
+            lora_int_id=lora_id,
+            lora_path=lora_path_on_disk(self.lora_path),
+        )
+        if lora_id not in lora_tokenizer_cache:
+            lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
+        return lora_request, lora_tokenizer_cache[lora_id]
+
+    @abstractmethod
+    def sample(
+        self,
+        for_online_benchmark: bool = False
+    ) -> list[Union[
+            SampleRequest,
+            tuple[str, int, int, Optional[MultiModalDataDict]],
+    ]]:
+        """
+        Generate sample requests from the dataset.
+        """
+        raise NotImplementedError("sample must be implemented in subclasses.")
+
+
+# -----------------------------------------------------------------------------
 # Utility Functions and Global Caches
 # -----------------------------------------------------------------------------
 
@@ -139,152 +253,6 @@ def process_image(
 
 
 # -----------------------------------------------------------------------------
-# Data Classes
-# -----------------------------------------------------------------------------
-
-
-@dataclass
-class SampleRequest:
-    """
-    Represents a single inference request for benchmarking.
-    """
-
-    prompt: str
-    prompt_len: int
-    expected_output_len: int
-    multi_modal_data: Optional[MultiModalDataDict] = None
-    lora_request: Optional[LoRARequest] = None
-
-
-# -----------------------------------------------------------------------------
-# Benchmark Dataset Base Class
-# -----------------------------------------------------------------------------
-
-
-class BenchmarkDataset(ABC):
-    DEFAULT_NUM_REQUESTS = 1000
-    DEFAULT_SEED = 0
-
-    # num_requests has default 1000 in both the benchmark_serving.py and
-    # benchmark_throughput.py
-
-    def __init__(
-        self,
-        tokenizer: PreTrainedTokenizerBase,
-        enable_lora_tokenizer: bool = False,
-        lora_path: Optional[str] = None,
-        max_loras: Optional[int] = None,
-        num_requests: int = DEFAULT_NUM_REQUESTS,
-        input_len: Optional[int] = None,
-        output_len: Optional[int] = None,
-        dataset_path: Optional[str] = None,
-        model: Optional[str] = None,
-        data: Optional[list] = None,
-        random_seed: int = DEFAULT_SEED,
-    ) -> None:
-        self.tokenizer = tokenizer
-        self.data = data  # For datasets that require pre-loading
-        self.dataset_path = dataset_path
-        self.random_seed = (random_seed
-                            if random_seed is not None else self.DEFAULT_SEED)
-
-        # LoRA related
-        self.enable_lora_tokenizer = enable_lora_tokenizer
-        self.lora_path = lora_path
-        self.max_loras = max_loras
-
-        self.num_requests = (num_requests if num_requests is not None else
-                             self.DEFAULT_NUM_REQUESTS)
-        self.input_len = input_len
-        self.output_len = output_len
-
-        self.model = model
-
-        if self.enable_lora_tokenizer and not self.lora_path:
-            raise ValueError("LoRA is enabled but no lora_path provided.")
-
-    def _get_prompt_for_image_model(self, text_prompt: str) -> str:
-        """
-        Prepend and append special tokens around the text prompt.
-        """
-        model = self.model.lower() if self.model else ""
-        if "pixtral" in model:
-            return f"<s>[INST]{text_prompt}\n[IMG][/INST]"
-        raise ValueError(f"Unsupported model {model}")
-
-    def load_data(self) -> None:
-        """
-        Load data from the specified dataset path.  RandomDataset does not need
-        to implement this method.
-        """
-        raise NotImplementedError(
-            "load_data must be implemented in subclasses.")
-
-    def get_random_lora_request(
-        self, ) -> tuple[Optional[LoRARequest], AnyTokenizer]:
-        """
-        Return a tuple (lora_request, tokenizer) for tokenizing requests.  If
-        LoRA is enabled, returns the LoRA-specific tokenizer; otherwise, the
-        base tokenizer.
-        """
-        if not self.enable_lora_tokenizer:
-            return None, self.tokenizer
-
-        if self.max_loras is None:
-            raise ValueError(
-                "max_lora must be set when enabling LoRA tokenizer.")
-
-        # Generate a random LoRA ID in the range [1, max_loras].
-        lora_id = random.randint(1, self.max_loras)
-        lora_request = LoRARequest(
-            lora_name=str(lora_id),
-            lora_int_id=lora_id,
-            lora_path=lora_path_on_disk(self.lora_path),
-        )
-        if lora_id not in lora_tokenizer_cache:
-            lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
-        return lora_request, lora_tokenizer_cache[lora_id]
-
-    def create_sample(
-        self,
-        prompt: str,
-        prompt_len: int,
-        output_len: int,
-        mm_content: Optional[MultiModalDataDict] = None,
-        lora_request: Optional[LoRARequest] = None,
-        for_online_benchmark: bool = False,
-    ) -> Union[
-            SampleRequest,
-            tuple[str, int, int, Optional[MultiModalDataDict]],
-    ]:
-        """
-        Helper to build a sample in either tuple or SampleRequest format.
-        """
-        if for_online_benchmark:
-            return (prompt, prompt_len, output_len, mm_content)
-        return SampleRequest(
-            prompt=prompt,
-            prompt_len=prompt_len,
-            expected_output_len=output_len,
-            multi_modal_data=mm_content,
-            lora_request=lora_request,
-        )
-
-    @abstractmethod
-    def sample(
-        self,
-        for_online_benchmark: bool = False
-    ) -> list[Union[
-            SampleRequest,
-            tuple[str, int, int, Optional[MultiModalDataDict]],
-    ]]:
-        """
-        Generate sample requests from the dataset.
-        """
-        pass
-
-
-# -----------------------------------------------------------------------------
 # Random Dataset Implementation (Synthetic Data)
 # -----------------------------------------------------------------------------
 
@@ -339,13 +307,10 @@ class RandomDataset(BenchmarkDataset):
             prompt = self.tokenizer.decode(token_sequence)
             total_input_len = self.prefix_len + int(input_lens[i])
             requests.append(
-                self.create_sample(
+                SampleRequest(
                     prompt,
                     total_input_len,
                     int(output_lens[i]),
-                    mm_content=None,
-                    lora_request=None,
-                    for_online_benchmark=for_online_benchmark,
                 ))
         return requests
 
@@ -379,6 +344,15 @@ class ShareGPTDataset(BenchmarkDataset):
         ]
         random.shuffle(self.data)
 
+    def _get_prompt_for_image_model(self, text_prompt: str) -> str:
+        """
+        Prepend and append special tokens around the text prompt.
+        """
+        model = self.model.lower() if self.model else ""
+        if "pixtral" in model:
+            return f"<s>[INST]{text_prompt}\n[IMG][/INST]"
+        raise ValueError(f"Unsupported model {model}")
+
     def sample(self, for_online_benchmark: bool = False) -> list:
         samples: list = []
         for entry in self.data:
@@ -390,12 +364,15 @@ class ShareGPTDataset(BenchmarkDataset):
 
             # Process image input if available.
             if "image" in entry:
-                mm_content = process_image(entry["image"])
+                mm_content = process_image(
+                    entry["image"],
+                    return_multi_modal_data_dict=not for_online_benchmark)
                 if not mm_content:
                     continue
                 prompt = self._get_prompt_for_image_model(prompt)
 
-            lora_request, tokenizer = self.get_random_lora_request()
+            lora_request, tokenizer = self.get_random_lora_request(
+                for_online_benchmark=for_online_benchmark)
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
             prompt_len = len(prompt_ids)
@@ -409,13 +386,12 @@ class ShareGPTDataset(BenchmarkDataset):
             ):
                 continue
             samples.append(
-                self.create_sample(
+                SampleRequest(
                     prompt,
                     prompt_len,
                     output_len,
                     mm_content,
                     lora_request,
-                    for_online_benchmark,
                 ))
         return samples
 
@@ -463,7 +439,6 @@ class SonnetDataset(BenchmarkDataset):
 
     def sample(
         self,
-        for_online_benchmark: bool = False,
         return_prompt_formatted: bool = False,
     ) -> list:
         # Calculate average token length for a poem line.
@@ -500,13 +475,10 @@ class SonnetDataset(BenchmarkDataset):
                 msg, add_generation_prompt=True, tokenize=False)
             prompt_len = len(self.tokenizer(prompt_formatted).input_ids)
             samples.append(
-                self.create_sample(
+                SampleRequest(
                     prompt_formatted if return_prompt_formatted else prompt,
                     prompt_len,
                     self.output_len,
-                    mm_content=None,
-                    lora_request=None,
-                    for_online_benchmark=for_online_benchmark,
                 ))
         return samples
 
@@ -555,20 +527,19 @@ class BurstGPTDataset(BenchmarkDataset):
         for i in range(self.num_requests):
             input_len = int(self.data[i][2])
             output_len = int(self.data[i][3])
-            lora_req, tokenizer = self.get_random_lora_request()
+            lora_req, tokenizer = self.get_random_lora_request(
+                for_online_benchmark=for_online_benchmark)
             vocab_size = tokenizer.vocab_size
             # Generate a synthetic prompt: a list of token IDs computed as (i +
             # j) modulo vocab_size.
             token_ids = [(i + j) % vocab_size for j in range(input_len)]
             prompt = tokenizer.decode(token_ids)
             samples.append(
-                self.create_sample(
+                SampleRequest(
                     prompt,
                     input_len,
                     output_len,
-                    mm_content=None,
                     lora_request=lora_req,
-                    for_online_benchmark=for_online_benchmark,
                 ))
         return samples
 
@@ -626,7 +597,8 @@ class HuggingFaceDataset(BenchmarkDataset):
             conv = item["conversations"]
             prompt, completion = conv[0]["value"], conv[1]["value"]
 
-            lora_request, tokenizer = self.get_random_lora_request()
+            lora_request, tokenizer = self.get_random_lora_request(
+                for_online_benchmark=for_online_benchmark)
 
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
@@ -643,13 +615,12 @@ class HuggingFaceDataset(BenchmarkDataset):
                 return_multi_modal_data_dict=not for_online_benchmark,
             ) if "image" in item else None
             sampled_requests.append(
-                self.create_sample(
+                SampleRequest(
                     prompt,
                     prompt_len,
                     output_len,
                     mm_content,
                     lora_request=lora_request,
-                    for_online_benchmark=for_online_benchmark,
                 ))
         return sampled_requests
 
@@ -717,11 +688,10 @@ class VisionArenaDataset(BenchmarkDataset):
                 return_multi_modal_data_dict=not for_online_benchmark,
             )
             sampled_requests.append(
-                self.create_sample(
+                SampleRequest(
                     prompt,
                     prompt_len,
                     self.output_len,
                     mm_content,
-                    for_online_benchmark=for_online_benchmark,
                 ))
         return sampled_requests
