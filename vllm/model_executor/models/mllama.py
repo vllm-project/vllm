@@ -1149,8 +1149,12 @@ class MllamaForCausalLM(nn.Module):
 class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                      SupportsV0Only):
     packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"]
+        "cross_attn.qkv_proj.q_proj_decoder": ["cross_attn.q_proj"],
+        "cross_attn.qkv_proj.kv_proj_encoder":
+        ["cross_attn.k_proj", "cross_attn.v_proj"],
+        "self_attn.qkv_proj":
+        ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1420,6 +1424,12 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
+            (".cross_attn.qkv_proj.q_proj_decoder", ".cross_attn.q_proj", None
+             ),
+            (".cross_attn.qkv_proj.kv_proj_encoder", ".cross_attn.k_proj",
+             "k"),
+            (".cross_attn.qkv_proj.kv_proj_encoder", ".cross_attn.v_proj",
+             "v"),
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
@@ -1451,7 +1461,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
                 param = params_dict[name]
                 updated_params.add(name)
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                shard_id = (shard_id, ) if shard_id is not None else ()
+                weight_loader(param, loaded_weight, *shard_id)
                 break
             else:
                 orig_name = name
