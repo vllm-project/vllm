@@ -127,8 +127,6 @@ def cleanup_VLLM_USE_V1(monkeypatch):
     # cause monkeypatch to clean up VLLM_USE_V1 upon exit
     # if VLLM modifies the value of envs.VLLM_USE_V1.
     if "VLLM_USE_V1" not in os.environ:
-        pass
-    else:
         monkeypatch.setenv("VLLM_USE_V1", "")
         monkeypatch.delenv("VLLM_USE_V1")
 
