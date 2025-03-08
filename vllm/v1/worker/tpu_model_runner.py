@@ -141,16 +141,8 @@ class TPUModelRunner:
                                             device="cpu")
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
-        # self.input_batch.block_table has a shape of [max_num_reqs,
-        # max_num_blocks_per_req]. To reduce the number of recompilation,
-        # we want the block_table.shape[0] to be num_tokens.
-        # To make the block_table to be compatible with the paged attention
-        # kernel, we want the block_table[1] to be multiple of
-        # NUM_KV_PAGES_PER_BLOCK.
-        padded_max_num_blocks_per_req = _get_padded_number(
-            self.max_num_blocks_per_req, NUM_KV_PAGES_PER_BLOCK)
         self.block_table_cpu = torch.zeros(
-            (self.max_num_tokens, padded_max_num_blocks_per_req),
+            (self.max_num_tokens, self.max_num_blocks_per_req),
             dtype=self.input_batch.block_table.get_cpu_tensor().dtype,
             device="cpu")
 
