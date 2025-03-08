@@ -24,6 +24,18 @@ logger = init_logger("test_pipeline_parallel")
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
 
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    For PP, we fall back to V0 by default. This means
+    that the TP baseline runs with V1 while the PP engine
+    runs with V0. This gives divergent results with dummy
+    weights. Once we enable V1 by default for PP, we can
+    remove this.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
@@ -389,10 +401,7 @@ def test_tp_language_generation(
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available,
-    monkeypatch,
 ):
-    # TODO(V1): enable this once PP becomes V1 by default.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
     _compare_tp(model_id,
                 parallel_setup,
                 distributed_backend,
@@ -421,10 +430,7 @@ def test_tp_language_embedding(
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available,
-    monkeypatch,
 ):
-    # TODO(V1): enable this once PP becomes V1 by default.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
     _compare_tp(model_id,
                 parallel_setup,
                 distributed_backend,
@@ -453,10 +459,7 @@ def test_tp_multimodal_generation(
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available,
-    monkeypatch,
 ):
-    # TODO(V1): enable this once PP becomes V1 by default.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
     _compare_tp(model_id,
                 parallel_setup,
                 distributed_backend,
