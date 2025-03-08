@@ -389,7 +389,10 @@ def test_tp_language_generation(
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available,
+    monkeypatch,
 ):
+    # TODO(V1): enable this once PP becomes V1 by default.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     _compare_tp(model_id,
                 parallel_setup,
                 distributed_backend,
@@ -418,7 +421,10 @@ def test_tp_language_embedding(
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available,
+    monkeypatch,
 ):
+    # TODO(V1): enable this once PP becomes V1 by default.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     _compare_tp(model_id,
                 parallel_setup,
                 distributed_backend,
@@ -447,7 +453,10 @@ def test_tp_multimodal_generation(
     task: TaskOption,
     test_options: PPTestOptions,
     num_gpus_available,
+    monkeypatch,
 ):
+    # TODO(V1): enable this once PP becomes V1 by default.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     _compare_tp(model_id,
                 parallel_setup,
                 distributed_backend,

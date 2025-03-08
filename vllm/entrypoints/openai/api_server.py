@@ -227,9 +227,9 @@ async def build_async_engine_client_from_engine_args(
         engine_alive = multiprocessing.Value('b', True, lock=False)
         engine_process = context.Process(
             target=run_mp_engine,
-            args=(vllm_config, UsageContext.OPENAI_API_SERVER,
+            args=(vllm_config, UsageContext.OPENAI_API_SERVER, ipc_path,
                   engine_args.disable_log_stats,
-                  engine_args.disable_log_requests, ipc_path, engine_alive))
+                  engine_args.disable_log_requests, engine_alive))
         engine_process.start()
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
