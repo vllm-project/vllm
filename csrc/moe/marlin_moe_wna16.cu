@@ -172,8 +172,8 @@ dequant<half, vllm::kU4B8.id()>(int q) {
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
   // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point
   // directly into `SUB` and `ADD`.
   const int SUB = 0x64086408;
@@ -196,9 +196,9 @@ dequant<nv_bfloat16, vllm::kU4B8.id()>(int q) {
 
   // Guarantee that the `(a & b) | c` operations are LOP3s.
 
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
   q >>= 4;
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
 
   typename ScalarType<nv_bfloat16>::FragB frag_b;
   static constexpr uint32_t MUL = 0x3F803F80;
@@ -220,8 +220,8 @@ dequant<half, vllm::kU4.id()>(int q) {
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
 
   const int SUB = 0x64006400;
   const int MUL = 0x2c002c00;
@@ -243,9 +243,9 @@ dequant<nv_bfloat16, vllm::kU4.id()>(int q) {
 
   // Guarantee that the `(a & b) | c` operations are LOP3s.
 
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
   q >>= 4;
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
 
   typename ScalarType<nv_bfloat16>::FragB frag_b;
   static constexpr uint32_t MUL = 0x3F803F80;
@@ -535,8 +535,7 @@ __global__ void Marlin(
     const int32_t* __restrict__ sorted_token_ids_ptr,
     const int32_t* __restrict__ expert_ids_ptr,
     const int32_t* __restrict__ num_tokens_past_padded_ptr,
-    const float* __restrict__ topk_weights_ptr,
-    int top_k,
+    const float* __restrict__ topk_weights_ptr, int top_k,
     bool mul_topk_weights,
     int num_groups,       // number of scale groups per output channel
     int prob_m,           // batch dimension m
@@ -624,19 +623,22 @@ __global__ void Marlin(
     expert_idx = expert_ids_ptr[par_id];
 
     B_expert_off = expert_idx * prob_n * prob_k / (pack_factor * 4);
-    scales_ptr += (expert_idx - old_expert_idx) * prob_n * prob_k / group_size / 8;
-    zp_ptr += (expert_idx - old_expert_idx) * prob_n * prob_k / group_size / (pack_factor * 4);
+    scales_ptr +=
+        (expert_idx - old_expert_idx) * prob_n * prob_k / group_size / 8;
+    zp_ptr += (expert_idx - old_expert_idx) * prob_n * prob_k / group_size /
+              (pack_factor * 4);
 
     block_num_valid_tokens = moe_block_size;
-    int4 *tmp_block_sorted_ids = reinterpret_cast<int4*>(block_sorted_ids);
+    int4* tmp_block_sorted_ids = reinterpret_cast<int4*>(block_sorted_ids);
     for (int i = 0; i < moe_block_size / 4; i++) {
-      tmp_block_sorted_ids[i] = ((int4*)sorted_token_ids_ptr)[par_id * moe_block_size / 4 + i];
+      tmp_block_sorted_ids[i] =
+          ((int4*)sorted_token_ids_ptr)[par_id * moe_block_size / 4 + i];
     }
     for (int i = 0; i < moe_block_size; i++) {
       if (block_sorted_ids[i] >= prob_m * top_k) {
         block_num_valid_tokens = i;
         break;
-      }; 
+      };
     }
 
     if (mul_topk_weights) {
@@ -941,9 +943,8 @@ __global__ void Marlin(
         int row = a_idx / a_gl_stride;
         int sorted_row = block_sorted_ids[row] / top_k;
         int true_idx = sorted_row * a_gl_stride + a_idx % a_gl_stride;
-        cp_async4_pred(
-            &sh_a_stage[a_sh_wr_trans[i]],
-            &A[true_idx], row < block_num_valid_tokens);
+        cp_async4_pred(&sh_a_stage[a_sh_wr_trans[i]], &A[true_idx],
+                       row < block_num_valid_tokens);
       }
       int4* sh_b_stage = sh_b + b_sh_stage * pipe;
   #pragma unroll
@@ -1445,7 +1446,8 @@ __global__ void Marlin(
             c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
         int sorted_row = block_sorted_ids[c_idx / c_gl_stride];
         int true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
-        if (c_idx / c_gl_stride < block_num_valid_tokens) sh_red[c_sh_wr + c_sh_wr_delta * i] = C[true_idx];
+        if (c_idx / c_gl_stride < block_num_valid_tokens)
+          sh_red[c_sh_wr + c_sh_wr_delta * i] = C[true_idx];
       }
     }
 
@@ -1587,7 +1589,7 @@ __global__ void Marlin(
       int sorted_row = block_sorted_ids[row];
       int true_idx = sorted_row * c_gl_stride + c_gl_wr % c_gl_stride;
       scalar_t2 topk_weight_score =
-        Dtype::num2num2(Dtype::float2num(block_topk_weights[row]));
+          Dtype::num2num2(Dtype::float2num(block_topk_weights[row]));
       if (row < block_num_valid_tokens) {
         if (use_atomic_add && slice_count > 1 || mul_topk_weights) {
           scalar_t2* C_half2 = reinterpret_cast<scalar_t2*>(&C[true_idx]);
@@ -1963,11 +1965,9 @@ bool is_valid_config(thread_config_t const& th_config, int moe_block_size,
 }
 
 thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
-                                        int moe_block_size,
-                                        int num_bits, int group_size,
-                                        bool has_act_order, bool is_k_full,
-                                        int max_shared_mem) {
-
+                                        int moe_block_size, int num_bits,
+                                        int group_size, bool has_act_order,
+                                        bool is_k_full, int max_shared_mem) {
   if (moe_block_size <= 16) {
     for (auto th_config : small_batch_thread_configs) {
       if (is_valid_config(th_config, moe_block_size, prob_m, prob_n, prob_k,
@@ -2083,10 +2083,10 @@ thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
                void* zp, void* g_idx, void* perm, void* a_tmp,
-               void* sorted_token_ids, void* expert_ids, void* num_tokens_past_padded,
-               void* topk_weights, int moe_block_size,
-               int top_k, bool mul_topk_weights,
-               int prob_m, int prob_n, int prob_k, void* workspace,
+               void* sorted_token_ids, void* expert_ids,
+               void* num_tokens_past_padded, void* topk_weights,
+               int moe_block_size, int top_k, bool mul_topk_weights, int prob_m,
+               int prob_n, int prob_k, void* workspace,
                vllm::ScalarType const& q_type, bool has_act_order,
                bool is_k_full, bool has_zp, int num_groups, int group_size,
                int dev, cudaStream_t stream, int thread_k, int thread_n,
@@ -2124,14 +2124,14 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
     thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
   } else {
     // Auto config
-    thread_tfg =
-        determine_thread_config(prob_m, prob_n, prob_k, moe_block_size, num_bits,
-                                group_size, has_act_order, is_k_full, max_shared_mem);
+    thread_tfg = determine_thread_config(prob_m, prob_n, prob_k, moe_block_size,
+                                         num_bits, group_size, has_act_order,
+                                         is_k_full, max_shared_mem);
   }
 
-  TORCH_CHECK(is_valid_config(thread_tfg, moe_block_size,
-                              prob_m, prob_n, prob_k, num_bits, group_size,
-                              has_act_order, is_k_full, max_shared_mem),
+  TORCH_CHECK(is_valid_config(thread_tfg, moe_block_size, prob_m, prob_n,
+                              prob_k, num_bits, group_size, has_act_order,
+                              is_k_full, max_shared_mem),
               "Invalid thread config: moe_block_size = ", moe_block_size,
               ", thread_k = ", thread_tfg.thread_k,
               ", thread_n = ", thread_tfg.thread_n,
@@ -2186,10 +2186,11 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   const int* g_idx_ptr = (const int*)g_idx;
   const int* perm_ptr = (const int*)perm;
   int4* a_tmp_ptr = (int4*)a_tmp;
-  const int32_t* sorted_token_ids_ptr = (const int32_t*) sorted_token_ids;
-  const int32_t* expert_ids_ptr = (const int32_t*) expert_ids;
-  const int32_t* num_tokens_past_padded_ptr = (const int32_t*) num_tokens_past_padded;
-  const float* topk_weights_ptr = (const float*) topk_weights;
+  const int32_t* sorted_token_ids_ptr = (const int32_t*)sorted_token_ids;
+  const int32_t* expert_ids_ptr = (const int32_t*)expert_ids;
+  const int32_t* num_tokens_past_padded_ptr =
+      (const int32_t*)num_tokens_past_padded;
+  const float* topk_weights_ptr = (const float*)topk_weights;
   int* locks = (int*)workspace;
 
   if (has_act_order) {
@@ -2232,41 +2233,30 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   HQQ_CALL_IF(vllm::kU4, 8, 4, 128)
   HQQ_CALL_IF(vllm::kU4, 4, 8, 128)
   else {
-      TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
-                  ", ", prob_k, "]", ", has_act_order = ", has_act_order,
-                  ", num_groups = ", num_groups, ", group_size = ", group_size,
-                  ", thread_m_blocks = ", thread_m_blocks,
-                  ", thread_n_blocks = ", thread_n_blocks,
-                  ", thread_k_blocks = ", thread_k_blocks,
-                  ", num_bits = ", num_bits);
+    TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
+                ", ", prob_k, "]", ", has_act_order = ", has_act_order,
+                ", num_groups = ", num_groups, ", group_size = ", group_size,
+                ", thread_m_blocks = ", thread_m_blocks,
+                ", thread_n_blocks = ", thread_n_blocks,
+                ", thread_k_blocks = ", thread_k_blocks,
+                ", num_bits = ", num_bits);
   }
 }
 
 }  // namespace MARLIN_NAMESPACE_NAME
 
-
 torch::Tensor moe_wna16_marlin_gemm(
-  torch::Tensor& a,
-  std::optional<torch::Tensor> const& c_or_none,
-  torch::Tensor& b_q_weight,
-  torch::Tensor& b_scales,
-  std::optional<torch::Tensor> const& b_zeros_or_none,
-  std::optional<torch::Tensor> const& g_idx_or_none,
-  std::optional<torch::Tensor> const& perm_or_none,
-  torch::Tensor& workspace,
-  torch::Tensor& sorted_token_ids,
-  torch::Tensor& expert_ids,
-  torch::Tensor& num_tokens_past_padded,
-  torch::Tensor& topk_weights,
-  int64_t moe_block_size,
-  int64_t top_k,
-  bool mul_topk_weights,
-  vllm::ScalarTypeId const& b_q_type_id,
-  int64_t size_m, int64_t size_n, int64_t size_k,
-  bool is_k_full, bool use_atomic_add,
-  bool use_fp32_reduce, bool is_zp_float) {
-
-
+    torch::Tensor& a, std::optional<torch::Tensor> const& c_or_none,
+    torch::Tensor& b_q_weight, torch::Tensor& b_scales,
+    std::optional<torch::Tensor> const& b_zeros_or_none,
+    std::optional<torch::Tensor> const& g_idx_or_none,
+    std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
+    torch::Tensor& sorted_token_ids, torch::Tensor& expert_ids,
+    torch::Tensor& num_tokens_past_padded, torch::Tensor& topk_weights,
+    int64_t moe_block_size, int64_t top_k, bool mul_topk_weights,
+    vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
+    int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
+    bool is_zp_float) {
   vllm::ScalarType const b_q_type = vllm::ScalarType::from_id(b_q_type_id);
   int pack_factor = 32 / b_q_type.size_bits();
 
@@ -2277,15 +2267,19 @@ torch::Tensor moe_wna16_marlin_gemm(
               ", size_k = ", size_k);
 
   // Verify B
-  TORCH_CHECK(size_k % MARLIN_NAMESPACE_NAME::tile_size == 0, "size_k = ", size_k,
-              " is not divisible by tile_size = ", MARLIN_NAMESPACE_NAME::tile_size);
+  TORCH_CHECK(
+      size_k % MARLIN_NAMESPACE_NAME::tile_size == 0, "size_k = ", size_k,
+      " is not divisible by tile_size = ", MARLIN_NAMESPACE_NAME::tile_size);
   TORCH_CHECK((size_k / MARLIN_NAMESPACE_NAME::tile_size) == b_q_weight.size(1),
               "Shape mismatch: b_q_weight.size(1) = ", b_q_weight.size(1),
-              ", size_k = ", size_k, ", tile_size = ", MARLIN_NAMESPACE_NAME::tile_size);
-  TORCH_CHECK(b_q_weight.size(2) % MARLIN_NAMESPACE_NAME::tile_size == 0,
-              "b_q_weight.size(2) = ", b_q_weight.size(2),
-              " is not divisible by tile_size = ", MARLIN_NAMESPACE_NAME::tile_size);
-  int actual_size_n = (b_q_weight.size(2) / MARLIN_NAMESPACE_NAME::tile_size) * pack_factor;
+              ", size_k = ", size_k,
+              ", tile_size = ", MARLIN_NAMESPACE_NAME::tile_size);
+  TORCH_CHECK(
+      b_q_weight.size(2) % MARLIN_NAMESPACE_NAME::tile_size == 0,
+      "b_q_weight.size(2) = ", b_q_weight.size(2),
+      " is not divisible by tile_size = ", MARLIN_NAMESPACE_NAME::tile_size);
+  int actual_size_n =
+      (b_q_weight.size(2) / MARLIN_NAMESPACE_NAME::tile_size) * pack_factor;
   TORCH_CHECK(size_n == actual_size_n, "size_n = ", size_n,
               ", actual_size_n = ", actual_size_n);
 
@@ -2317,15 +2311,16 @@ torch::Tensor moe_wna16_marlin_gemm(
     c = c_or_none.value();
     TORCH_CHECK(c.device().is_cuda(), "c is not on GPU");
     TORCH_CHECK(c.is_contiguous(), "c is not contiguous");
-    TORCH_CHECK(c.size(0) == size_m * top_k, "Shape mismatch: c.size(0) = ",
-                c.size(0), ", size_m * topk = ", size_m * top_k);
+    TORCH_CHECK(c.size(0) == size_m * top_k,
+                "Shape mismatch: c.size(0) = ", c.size(0),
+                ", size_m * topk = ", size_m * top_k);
     TORCH_CHECK(c.size(1) == size_n, "Shape mismatch: c.size(1) = ", a.size(1),
                 ", size_k = ", size_k);
     c.zero_();
   } else if (use_atomic_add) {
-      c = torch::zeros({size_m * top_k, size_n}, options);
+    c = torch::zeros({size_m * top_k, size_n}, options);
   } else {
-      c = torch::empty({size_m * top_k, size_n}, options);
+    c = torch::empty({size_m * top_k, size_n}, options);
   }
 
   // Alloc C tmp buffer that is going to be used for the global reduce
@@ -2333,9 +2328,9 @@ torch::Tensor moe_wna16_marlin_gemm(
   auto options_fp32 =
       torch::TensorOptions().dtype(at::kFloat).device(a.device());
   if (use_fp32_reduce && !use_atomic_add) {
-    const int max_c_tmp_size = min(
-      (int) (size_n * sorted_token_ids.size(0)),
-      (int) (sms * moe_block_size * MARLIN_NAMESPACE_NAME::max_thread_n));
+    const int max_c_tmp_size =
+        min((int)(size_n * sorted_token_ids.size(0)),
+            (int)(sms * moe_block_size * MARLIN_NAMESPACE_NAME::max_thread_n));
     c_tmp = torch::empty({max_c_tmp_size}, options_fp32);
   } else {
     c_tmp = torch::empty({0}, options_fp32);
@@ -2351,7 +2346,8 @@ torch::Tensor moe_wna16_marlin_gemm(
               " is not size_n = ", size_n);
   num_groups = b_scales.size(1);
 
-  torch::Tensor g_idx, perm, a_tmp;;
+  torch::Tensor g_idx, perm, a_tmp;
+  ;
   if (g_idx_or_none.has_value() && perm_or_none.has_value()) {
     g_idx = g_idx_or_none.value();
     perm = perm_or_none.value();
@@ -2448,13 +2444,14 @@ torch::Tensor moe_wna16_marlin_gemm(
   }
 
   // Verify workspace size
-  TORCH_CHECK(size_n % MARLIN_NAMESPACE_NAME::min_thread_n == 0, "size_n = ", size_n,
-              ", is not divisible by min_thread_n = ", MARLIN_NAMESPACE_NAME::min_thread_n);
+  TORCH_CHECK(size_n % MARLIN_NAMESPACE_NAME::min_thread_n == 0,
+              "size_n = ", size_n, ", is not divisible by min_thread_n = ",
+              MARLIN_NAMESPACE_NAME::min_thread_n);
 
   if (!use_atomic_add) {
     int max_n_tiles = size_n / MARLIN_NAMESPACE_NAME::min_thread_n;
     int min_workspace_size = min(
-      max_n_tiles * (int) (sorted_token_ids.size(0) / moe_block_size), sms);
+        max_n_tiles * (int)(sorted_token_ids.size(0) / moe_block_size), sms);
     TORCH_CHECK(workspace.numel() >= min_workspace_size,
                 "workspace.numel = ", workspace.numel(),
                 " is below min_workspace_size = ", min_workspace_size);
@@ -2466,15 +2463,13 @@ torch::Tensor moe_wna16_marlin_gemm(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
         c_tmp.data_ptr<float>(), b_scales.data_ptr<at::Half>(),
         b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
-        a_tmp.data_ptr<at::Half>(),
-        sorted_token_ids.data_ptr(), expert_ids.data_ptr(),
-        num_tokens_past_padded.data_ptr(), topk_weights.data_ptr(),
-        moe_block_size, top_k, mul_topk_weights,
-        size_m, size_n, size_k,
-        workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
-        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-        thread_k, thread_n, sms, use_atomic_add,
-        use_fp32_reduce, is_zp_float);
+        a_tmp.data_ptr<at::Half>(), sorted_token_ids.data_ptr(),
+        expert_ids.data_ptr(), num_tokens_past_padded.data_ptr(),
+        topk_weights.data_ptr(), moe_block_size, top_k, mul_topk_weights,
+        size_m, size_n, size_k, workspace.data_ptr(), b_q_type, has_act_order,
+        is_k_full, has_zp, num_groups, group_size, dev,
+        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
+        use_atomic_add, use_fp32_reduce, is_zp_float);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
     MARLIN_NAMESPACE_NAME::marlin_mm<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
@@ -2483,12 +2478,10 @@ torch::Tensor moe_wna16_marlin_gemm(
         perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
         sorted_token_ids.data_ptr(), expert_ids.data_ptr(),
         num_tokens_past_padded.data_ptr(), topk_weights.data_ptr(),
-        moe_block_size, top_k, mul_topk_weights,
-        size_m, size_n, size_k,
+        moe_block_size, top_k, mul_topk_weights, size_m, size_n, size_k,
         workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-        thread_k, thread_n, sms, use_atomic_add,
-        use_fp32_reduce, is_zp_float);
+        thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float);
   } else {
     TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
   }
