@@ -148,7 +148,7 @@ To build vLLM using an existing PyTorch installation:
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 python use_existing_torch.py
-pip install -r requirements-build.txt
+pip install -r requirements/build.txt
 pip install -e . --no-build-isolation
 ```
 

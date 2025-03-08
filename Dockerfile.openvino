@@ -16,7 +16,7 @@ RUN --mount=type=bind,source=.git,target=.git \
 
 RUN python3 -m pip install -U pip
 # install build requirements
-RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python3 -m pip install -r /workspace/requirements-build.txt
+RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python3 -m pip install -r /workspace/requirements/build.txt
 # build vLLM with OpenVINO backend
 RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" VLLM_TARGET_DEVICE="openvino" python3 -m pip install /workspace
 

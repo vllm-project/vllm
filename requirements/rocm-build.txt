@@ -1,5 +1,5 @@
 # Common dependencies
--r requirements-common.txt
+-r common.txt
 
 --extra-index-url https://download.pytorch.org/whl/rocm6.2
 torch==2.5.1

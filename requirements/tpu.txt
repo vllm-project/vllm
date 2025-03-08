@@ -1,5 +1,5 @@
 # Common dependencies
--r requirements-common.txt
+-r common.txt
 
 # Dependencies for TPU
 cmake>=3.26

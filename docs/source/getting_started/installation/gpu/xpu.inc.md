@@ -25,7 +25,7 @@ Currently, there are no pre-built XPU wheels.
 ```console
 source /opt/intel/oneapi/setvars.sh
 pip install --upgrade pip
-pip install -v -r requirements-xpu.txt
+pip install -v -r requirements/xpu.txt
 ```
 
 - Finally, build and install vLLM XPU backend:
