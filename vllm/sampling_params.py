@@ -63,7 +63,6 @@ class GuidedDecodingParams:
             whitespace_pattern=whitespace_pattern,
         )
 
-    @property
     def backend_name(self) -> str:
         """Return the backend name without any options.
         
