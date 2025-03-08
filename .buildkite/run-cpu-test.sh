@@ -26,6 +26,7 @@ docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/hugg
 function cpu_tests() {
   set -e
   export NUMA_NODE=$2
+  export BUILDKITE_BUILD_NUMBER=$3
 
   # offline inference
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-avx2-"$NUMA_NODE" bash -c "
@@ -36,6 +37,7 @@ function cpu_tests() {
   docker exec cpu-test-"$BUILDKITE_BUILD_NUMBER"-"$NUMA_NODE" bash -c "
     set -e
     pip install -r vllm/requirements-test.txt
+    pip install -r vllm/requirements-cpu.txt
     pytest -v -s tests/models/decoder_only/language -m cpu_model
     pytest -v -s tests/models/embedding/language -m cpu_model
     pytest -v -s tests/models/encoder_decoder/language -m cpu_model
@@ -85,4 +87,4 @@ function cpu_tests() {
 
 # All of CPU tests are expected to be finished less than 40 mins.
 export -f cpu_tests
-timeout 40m bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+timeout 40m bash -c "cpu_tests $CORE_RANGE $NUMA_NODE $BUILDKITE_BUILD_NUMBER"
