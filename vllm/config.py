@@ -3196,6 +3196,7 @@ class CompilationConfig(BaseModel):
 
     def set_splitting_ops_for_v1(self):
         # If default, override splitting ops for piecewise cudagraph on V1.
+        # NOTE: this function needs to be called
         if not self.splitting_ops:
             self.splitting_ops = [
                 "vllm.unified_attention",

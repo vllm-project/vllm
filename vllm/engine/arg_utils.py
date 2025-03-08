@@ -1378,94 +1378,92 @@ class EngineArgs:
         """Oracle for whether to use V0 or V1 Engine by default."""
 
         #############################################################
-        # Low priority feature flags that are not supported on V1.
+        # Unsupported Feature Flags on V1.
 
         if (self.logits_processor_pattern
                 != EngineArgs.logits_processor_pattern):
 
-            _raise_or_warning(feature_name="--logits-processor-pattern",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name="--logits-processor-pattern",
+                               recommend_to_remove=False)
             return False
 
         if self.preemption_mode != EngineArgs.preemption_mode:
-            _raise_or_warning(feature_name="--preemption-mode",
-                              recommend_to_remove=True)
+            _raise_or_fallback(feature_name="--preemption-mode",
+                               recommend_to_remove=True)
             return False
 
         if (self.disable_async_output_proc
                 != EngineArgs.disable_async_output_proc):
-            _raise_or_warning(feature_name="--disable-async-output-proc",
-                              recommend_to_remove=True)
+            _raise_or_fallback(feature_name="--disable-async-output-proc",
+                               recommend_to_remove=True)
             return False
 
         if self.scheduling_policy != EngineArgs.scheduling_policy:
-            _raise_or_warning(feature_name="--scheduling-policy",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name="--scheduling-policy",
+                               recommend_to_remove=False)
             return False
 
         if self.scheduler_cls != EngineArgs.scheduler_cls:
-            _raise_or_warning(feature_name="--scheduler-cls",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name="--scheduler-cls",
+                               recommend_to_remove=False)
             return False
 
         if self.worker_cls != EngineArgs.worker_cls:
-            _raise_or_warning(feature_name="--worker-cls",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name="--worker-cls",
+                               recommend_to_remove=False)
             return False
 
         if self.num_scheduler_steps != EngineArgs.num_scheduler_steps:
-            _raise_or_warning(feature_name="--num-scheduler-steps",
-                              recommend_to_remove=True)
+            _raise_or_fallback(feature_name="--num-scheduler-steps",
+                               recommend_to_remove=True)
             return False
 
         if self.scheduler_delay_factor != EngineArgs.scheduler_delay_factor:
-            _raise_or_warning(feature_name="--scheduler-delay-factor",
-                              recommend_to_remove=True)
+            _raise_or_fallback(feature_name="--scheduler-delay-factor",
+                               recommend_to_remove=True)
             return False
 
         if self.additional_config != EngineArgs.additional_config:
-            _raise_or_warning(feature_name="--additional-config",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name="--additional-config",
+                               recommend_to_remove=False)
             return False
 
-        #############################################################
-        # Important feature flags we plan to support on V1 but not yet.
-
+        # Only support Xgrammar for guided decoding so far.
         if self.guided_decoding_backend != "xgrammar":
-            _raise_or_warning(feature_name="--guided-decoding-backend",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name="--guided-decoding-backend",
+                               recommend_to_remove=False)
             return False
 
-        # Require at least Ampere (Flash Attention needed for V1 so far).
+        # Need at least Ampere for now (FA support required).
         from vllm.platforms import current_platform
         if (current_platform.is_cuda()
                 and current_platform.get_device_capability().major < 8):
-            _raise_or_warning(feature_name="Compute Capability < 8.0",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name="Compute Capability < 8.0",
+                               recommend_to_remove=False)
             return False
 
         # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
-            _raise_or_warning(feature_name="--kv-cache-dtype",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name="--kv-cache-dtype",
+                               recommend_to_remove=False)
             return False
 
         # No Prompt Adapter so far.
         if self.enable_prompt_adapter:
-            _raise_or_warning(feature_name="--enable-prompt-adapter",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name="--enable-prompt-adapter",
+                               recommend_to_remove=False)
             return False
 
         # No Embedding Models so far.
         if model_config.task not in ["generate"]:
-            _raise_or_warning(feature_name=f"--task {model_config.task}",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name=f"--task {model_config.task}",
+                               recommend_to_remove=False)
             return False
 
         # No Mamba or Encoder-Decoder so far.
         if not model_config.is_v1_compatible:
-            _raise_or_warning(feature_name=model_config.architectures,
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name=model_config.architectures,
+                               recommend_to_remove=False)
             return False
 
         # No Concurrent Partial Prefills.
@@ -1475,14 +1473,14 @@ class EngineArgs:
                 != EngineArgs.max_long_partial_prefills
                 or self.long_prefill_token_threshold
                 != EngineArgs.long_prefill_token_threshold):
-            _raise_or_warning(feature_name="Concurrent Partial Prefill",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name="Concurrent Partial Prefill",
+                               recommend_to_remove=False)
             return False
 
         # No OTLP observability so far.
         if (self.otlp_traces_endpoint or self.collect_detailed_traces):
-            _raise_or_warning(feature_name="--otlp-traces-endpoint",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name="--otlp-traces-endpoint",
+                               recommend_to_remove=False)
             return False
 
         # Only Ngram speculative decoding so far.
@@ -1492,13 +1490,13 @@ class EngineArgs:
             if self.speculative_model == "[ngram]":
                 pass
             else:
-                _raise_or_warning(feature_name="Speculative Decoding",
-                                  recommend_to_remove=False)
+                _raise_or_fallback(feature_name="Speculative Decoding",
+                                   recommend_to_remove=False)
                 return False
 
         if self.kv_transfer_config != EngineArgs.kv_transfer_config:
-            _raise_or_warning(feature_name="--kv-transfer-config",
-                              recommend_to_remove=False)
+            _raise_or_fallback(feature_name="--kv-transfer-config",
+                               recommend_to_remove=False)
             return False
 
         V1_BACKENDS = [
@@ -1507,7 +1505,7 @@ class EngineArgs:
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
             name = f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}"
-            _raise_or_warning(feature_name=name, recommend_to_remove=True)
+            _raise_or_fallback(feature_name=name, recommend_to_remove=True)
             return False
 
         #############################################################
@@ -1515,47 +1513,26 @@ class EngineArgs:
         # to opt into this and log a warning if they do.
 
         # MLA is is supported on V1, but off by default for now.
-        if model_config.use_mla:
-            if envs.VLLM_USE_V1:
-                _experimental_warning(feature_name="MLA")
-            else:
-                _fallback_info(feature_name="MLA")
-                return False
+        if model_config.use_mla and _warn_or_fallback("MLA"):
+            return False
 
         # LoRA is supported on V1, but off by default for now.
-        if self.enable_lora:
-            if envs.VLLM_USE_V1:
-                _experimental_warning(feature_name="LoRA")
-            else:
-                _fallback_info(feature_name="LoRA")
-                return False
+        if self.enable_lora and _warn_or_fallback("LORA"):
+            return False
 
         # PP is supported on V1, but off by default for now.
-        if self.pipeline_parallel_size > 1:
-            if envs.VLLM_USE_V1:
-                _experimental_warning(feature_name="Pipeline Parallel")
-            else:
-                _fallback_info(feature_name="Pipeline Parallel")
-                return False
+        if self.pipeline_parallel_size > 1 and _warn_or_fallback("PP"):
+            return False
 
         # ngram is supported on V1, but off by default for now.
-        if self.speculative_model == "[ngram]":
-            if envs.VLLM_USE_V1:
-                _experimental_warning(
-                    feature_name="ngram Speculative Decoding")
-            else:
-                _fallback_info(feature_name="ngram Speculative Decoding")
-                return False
+        if self.speculative_model == "[ngram]" and _warn_or_fallback("ngram"):
+            return False
 
         # Non-CUDA is supported on V1, but off by default for now.
-        if not current_platform.is_cuda():
-            if envs.VLLM_USE_V1:
-                _experimental_warning(
-                    feature_name=current_platform.device_type)
-            else:
-                _fallback_info(feature_name=current_platform.device_type)
-                return False
-
+        not_cuda = not current_platform.is_cuda()
+        if not_cuda and _warn_or_fallback(  # noqa: SIM103
+                current_platform.device_type):
+            return False
         #############################################################
 
         return True
@@ -1683,10 +1660,10 @@ class AsyncEngineArgs(EngineArgs):
         return parser
 
 
-def _raise_or_warning(feature_name: str, recommend_to_remove: bool):
+def _raise_or_fallback(feature_name: str, recommend_to_remove: bool):
     if envs.VLLM_USE_V1:
         raise NotImplementedError(
-            f"VLLM_USE_V1=1 is not supported with {feature_name}")
+            f"VLLM_USE_V1=1 is not supported with {feature_name}.")
     msg = f"{feature_name} is not supported by the V1 Engine. "
     msg += "Falling back to V0. "
     if recommend_to_remove:
@@ -1695,17 +1672,19 @@ def _raise_or_warning(feature_name: str, recommend_to_remove: bool):
     logger.warning(msg)
 
 
-def _experimental_warning(feature_name: str):
-    logger.warning(
-        "Detected VLLM_USE_V1=1 with %s. Usage should "
-        "be considered experimental. Please report any "
-        "issues on Github.", feature_name)
-
-
-def _fallback_info(feature_name: str):
-    logger.info(
-        "%s is experimental on VLLM_USE_V1=1. "
-        "Falling back to V0 Engine.", feature_name)
+def _warn_or_fallback(feature_name: str) -> bool:
+    if envs.VLLM_USE_V1:
+        logger.warning(
+            "Detected VLLM_USE_V1=1 with %s. Usage should "
+            "be considered experimental. Please report any "
+            "issues on Github.", feature_name)
+        should_exit = False
+    else:
+        logger.info(
+            "%s is experimental on VLLM_USE_V1=1. "
+            "Falling back to V0 Engine.", feature_name)
+        should_exit = True
+    return should_exit
 
 
 # These functions are used by sphinx to build the documentation
