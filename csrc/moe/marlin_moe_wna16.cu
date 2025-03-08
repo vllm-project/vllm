@@ -20,7 +20,7 @@
  */
 
 #ifndef MARLIN_NAMESPACE_NAME
-#define MARLIN_NAMESPACE_NAME marlin_moe_wna16
+  #define MARLIN_NAMESPACE_NAME marlin_moe_wna16
 #endif
 
 #include "quantization/gptq_marlin/marlin.cuh"
@@ -34,9 +34,7 @@
                     std::is_same<scalar_t, nv_bfloat16>::value, \
                 "only float16 and bfloat16 is supported");
 
-
 namespace MARLIN_NAMESPACE_NAME {
-
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
@@ -1595,7 +1593,7 @@ __global__ void Marlin(
           scalar_t2* C_half2 = reinterpret_cast<scalar_t2*>(&C[true_idx]);
           scalar_t2* sh_red_half2 =
               reinterpret_cast<scalar_t2*>(&sh_red[c_sh_rd]);
-    #pragma unroll
+  #pragma unroll
           for (int a = 0; a < 4; a++) {
             scalar_t2 res = sh_red_half2[a];
             if (mul_topk_weights) {
@@ -1838,9 +1836,9 @@ __global__ void Marlin(
             <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                 \
                 A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,      \
                 sorted_token_ids_ptr, expert_ids_ptr,                          \
-                num_tokens_past_padded_ptr, topk_weights_ptr, top_k, mul_topk_weights,  \
-                num_groups, prob_m, prob_n, prob_k, locks, use_atomic_add,     \
-                use_fp32_reduce);                                              \
+                num_tokens_past_padded_ptr, topk_weights_ptr, top_k,           \
+                mul_topk_weights, num_groups, prob_m, prob_n, prob_k, locks,   \
+                use_atomic_add, use_fp32_reduce);                              \
       }                                                                        \
     }
 
@@ -1989,7 +1987,6 @@ thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
   }
   return thread_config_t{-1, -1, -1};
 }
-
 
   #define GPTQ_CALL_IF(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)             \
     __CALL_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, false, 0, NUM_THREADS,   \

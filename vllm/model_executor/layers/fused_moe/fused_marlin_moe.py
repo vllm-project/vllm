@@ -91,28 +91,38 @@ def single_marlin_moe(
             (sorted_token_ids.size(0) // block_size_m)
         device = hidden_states.device
         sms = torch.cuda.get_device_properties(device).multi_processor_count
-        max_workspace_size = min(max_workspace_size,sms)
-        workspace = torch.zeros(max_workspace_size, dtype=torch.int,
-                                device=device, requires_grad=False)
+        max_workspace_size = min(max_workspace_size, sms)
+        workspace = torch.zeros(max_workspace_size,
+                                dtype=torch.int,
+                                device=device,
+                                requires_grad=False)
 
     scalar_type = get_scalar_type(num_bits, w_zeros is not None)
 
-    intermediate_cache = ops.moe_wna16_marlin_gemm(
-        hidden_states, None,
-        w, scales, w_zeros, g_idx, sort_indices, workspace,
-        sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights,
-        moe_block_size=block_size_m,
-        top_k=topk,
-        mul_topk_weights=False,
-        b_q_type=scalar_type,
-        size_m=M,
-        size_n=2 * N,
-        size_k=K,
-        is_k_full=is_k_full,
-        use_atomic_add=False,
-        use_fp32_reduce=True,
-        is_zp_float=False
-    ).view(-1, topk, 2 * N)
+    intermediate_cache = ops.moe_wna16_marlin_gemm(hidden_states,
+                                                   None,
+                                                   w,
+                                                   scales,
+                                                   w_zeros,
+                                                   g_idx,
+                                                   sort_indices,
+                                                   workspace,
+                                                   sorted_token_ids,
+                                                   expert_ids,
+                                                   num_tokens_post_padded,
+                                                   topk_weights,
+                                                   moe_block_size=block_size_m,
+                                                   top_k=topk,
+                                                   mul_topk_weights=False,
+                                                   b_q_type=scalar_type,
+                                                   size_m=M,
+                                                   size_n=2 * N,
+                                                   size_k=K,
+                                                   is_k_full=is_k_full,
+                                                   use_atomic_add=False,
+                                                   use_fp32_reduce=True,
+                                                   is_zp_float=False).view(
+                                                       -1, topk, 2 * N)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
@@ -226,9 +236,11 @@ def fused_marlin_moe(
             (sorted_token_ids.size(0) // block_size_m)
         device = hidden_states.device
         sms = torch.cuda.get_device_properties(device).multi_processor_count
-        max_workspace_size = min(max_workspace_size,sms)
-        workspace = torch.zeros(max_workspace_size, dtype=torch.int,
-                                device=device, requires_grad=False)
+        max_workspace_size = min(max_workspace_size, sms)
+        workspace = torch.zeros(max_workspace_size,
+                                dtype=torch.int,
+                                device=device,
+                                requires_grad=False)
 
     scalar_type1 = get_scalar_type(num_bits, w1_zeros is not None)
     scalar_type2 = get_scalar_type(num_bits, w2_zeros is not None)
@@ -240,9 +252,18 @@ def fused_marlin_moe(
     )
 
     intermediate_cache1 = ops.moe_wna16_marlin_gemm(
-        hidden_states, None,
-        w1, w1_scale, w1_zeros, g_idx1, sort_indices1, workspace,
-        sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights,
+        hidden_states,
+        None,
+        w1,
+        w1_scale,
+        w1_zeros,
+        g_idx1,
+        sort_indices1,
+        workspace,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        topk_weights,
         moe_block_size=block_size_m,
         top_k=topk,
         mul_topk_weights=False,
@@ -253,16 +274,24 @@ def fused_marlin_moe(
         is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
-        is_zp_float=False
-    )
+        is_zp_float=False)
 
     torch.ops._C.silu_and_mul(intermediate_cache2,
                               intermediate_cache1.view(-1, 2 * N))
 
     intermediate_cache3 = ops.moe_wna16_marlin_gemm(
-        intermediate_cache2, None,
-        w2, w2_scale, w2_zeros, g_idx2, sort_indices2, workspace,
-        sorted_token_ids, expert_ids, num_tokens_post_padded, topk_weights,
+        intermediate_cache2,
+        None,
+        w2,
+        w2_scale,
+        w2_zeros,
+        g_idx2,
+        sort_indices2,
+        workspace,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        topk_weights,
         moe_block_size=block_size_m,
         top_k=1,
         mul_topk_weights=True,
@@ -273,8 +302,7 @@ def fused_marlin_moe(
         is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
-        is_zp_float=False
-    ).view(-1, topk, K)
+        is_zp_float=False).view(-1, topk, K)
 
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                      dim=1)

@@ -10,7 +10,7 @@
 #include <iostream>
 
 #ifndef MARLIN_NAMESPACE_NAME
-#define MARLIN_NAMESPACE_NAME marlin
+  #define MARLIN_NAMESPACE_NAME marlin
 #endif
 
 namespace MARLIN_NAMESPACE_NAME {

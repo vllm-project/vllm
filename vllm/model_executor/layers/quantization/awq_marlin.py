@@ -17,7 +17,6 @@ from vllm.model_executor.layers.quantization.awq import (AWQConfig,
                                                          is_layer_skipped_awq)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_awq_marlin_linear, awq_to_marlin_zero_points, check_marlin_supported,
@@ -388,8 +387,10 @@ class AWQMoEMethod(FusedMoEMethodBase):
 
         device = layer.w13_qweight.device
         sms = torch.cuda.get_device_properties(device).multi_processor_count
-        layer.workspace = torch.zeros((sms,), dtype=torch.int,
-                                      device=device, requires_grad=False)
+        layer.workspace = torch.zeros((sms, ),
+                                      dtype=torch.int,
+                                      device=device,
+                                      requires_grad=False)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.w13_qweight.shape[0]
