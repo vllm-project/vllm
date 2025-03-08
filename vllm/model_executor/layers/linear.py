@@ -1229,7 +1229,7 @@ class RowParallelLinear(LinearBase):
         return s
 
 
-class QKVCrossParallelLinear(torch.nn.Module):
+class QKVCrossParallelLinear(LinearBase):
 
     def __init__(self,
                  hidden_size: int,
@@ -1241,12 +1241,26 @@ class QKVCrossParallelLinear(torch.nn.Module):
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
-        super().__init__()
+        # input_size and output_size are not used, just for alignment
+        input_size = hidden_size
+        output_size = (total_num_heads + (total_num_kv_heads or 0)) * head_size
+        super().__init__(input_size=input_size,
+                         output_size=output_size,
+                         skip_bias_add=skip_bias_add,
+                         params_dtype=params_dtype,
+                         quant_config=quant_config,
+                         prefix=prefix)
+
         # Empty placeholders for loading as a single module.
-        self.weight = torch.nn.Parameter()
-        set_weight_attrs(self.weight, {
-            "weight_loader": self.weight_loader_weight,
-        })
+        placeholder_size = 0
+        quant_method = quant_config.get_quant_method(self, prefix=prefix)
+        quant_method.create_weights(self,
+                                    placeholder_size, [placeholder_size],
+                                    placeholder_size,
+                                    placeholder_size,
+                                    self.params_dtype,
+                                    weight_loader=self.weight_loader_weight)
+
         # Use a dictionary to avoid submodules parameters auto-registration:
         # drop-in replacement for a `QKVParallelLinear` module.
         self.proj = dict()
