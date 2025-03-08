@@ -1,23 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with PagedAttention on rocm"""
+
 from typing import Any, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionMetadata,
+    AttentionType,
+)
 from vllm.attention.ops.chunked_prefill_paged_decode import (
-    chunked_prefill_paged_decode)
+    chunked_prefill_paged_decode,
+)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.flash_attn import (
-    FlashAttentionMetadata, FlashAttentionMetadataBuilder)
+    FlashAttentionMetadata,
+    FlashAttentionMetadataBuilder,
+)
 
 logger = init_logger(__name__)
 
 
 class ROCmAttentionBackend(AttentionBackend):
-
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -57,7 +64,6 @@ class ROCmAttentionBackend(AttentionBackend):
 
 
 class ROCmAttentionImpl(AttentionImpl):
-
     def __init__(
         self,
         num_heads: int,
@@ -73,7 +79,8 @@ class ROCmAttentionImpl(AttentionImpl):
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
-                "ROCmAttention does not support block-sparse attention.")
+                "ROCmAttention does not support block-sparse attention."
+            )
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -94,13 +101,16 @@ class ROCmAttentionImpl(AttentionImpl):
         if head_size not in support_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by ROCmAttention. "
-                f"Supported head sizes are: {support_head_sizes}.")
+                f"Supported head sizes are: {support_head_sizes}."
+            )
 
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "ROCmAttentionImpl")
+            raise NotImplementedError(
+                "Encoder self-attention and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "ROCmAttentionImpl"
+            )
 
     def forward(
         self,
@@ -142,7 +152,8 @@ class ROCmAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size)
+            kv_cache, self.num_kv_heads, self.head_size
+        )
 
         # Reshape the input keys and values and store them in the cache.
         PagedAttention.write_to_paged_cache(
@@ -173,6 +184,7 @@ class ROCmAttentionImpl(AttentionImpl):
             v_scale=layer._v_scale,
             alibi_slopes=self.alibi_slopes,
             sliding_window=self.sliding_window[0],
-            sm_scale=self.scale)
+            sm_scale=self.scale,
+        )
 
         return output

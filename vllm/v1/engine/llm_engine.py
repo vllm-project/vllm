@@ -18,7 +18,9 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import (
-    BaseTokenizerGroup, init_tokenizer_from_configs)
+    BaseTokenizerGroup,
+    init_tokenizer_from_configs,
+)
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -62,18 +64,20 @@ class LLMEngine:
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
-            lora_config=vllm_config.lora_config)
+            lora_config=vllm_config.lora_config,
+        )
         self.tokenizer.ping()
 
         # Processor (convert Inputs --> EngineCoreRequests)
-        self.processor = Processor(vllm_config=vllm_config,
-                                   tokenizer=self.tokenizer,
-                                   input_registry=input_registry,
-                                   mm_registry=mm_registry)
+        self.processor = Processor(
+            vllm_config=vllm_config,
+            tokenizer=self.tokenizer,
+            input_registry=input_registry,
+            mm_registry=mm_registry,
+        )
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
-        self.output_processor = OutputProcessor(self.tokenizer,
-                                                log_stats=False)
+        self.output_processor = OutputProcessor(self.tokenizer, log_stats=False)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
@@ -107,12 +111,14 @@ class LLMEngine:
             enable_multiprocessing = True
 
         # Create the LLMEngine.
-        return cls(vllm_config=vllm_config,
-                   executor_class=executor_class,
-                   log_stats=not engine_args.disable_log_stats,
-                   usage_context=usage_context,
-                   stat_loggers=stat_loggers,
-                   multiprocess_mode=enable_multiprocessing)
+        return cls(
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=not engine_args.disable_log_stats,
+            usage_context=usage_context,
+            stat_loggers=stat_loggers,
+            multiprocess_mode=enable_multiprocessing,
+        )
 
     def get_num_unfinished_requests(self) -> int:
         return self.output_processor.get_num_unfinished_requests()
@@ -125,7 +131,8 @@ class LLMEngine:
 
     def has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
         aggregated_has_unfinished = ParallelConfig.has_unfinished_dp(
-            self.dp_group, has_unfinished)
+            self.dp_group, has_unfinished
+        )
         if not has_unfinished and aggregated_has_unfinished:
             self.should_execute_dummy_batch = True
         return aggregated_has_unfinished
@@ -159,11 +166,16 @@ class LLMEngine:
                 request_id, params = parent_req.get_child_info(idx)
 
             # 2) Process raw inputs into the request.
-            request = self.processor.process_inputs(request_id, prompt, params,
-                                                    arrival_time, lora_request,
-                                                    trace_headers,
-                                                    prompt_adapter_request,
-                                                    priority)
+            request = self.processor.process_inputs(
+                request_id,
+                prompt,
+                params,
+                arrival_time,
+                lora_request,
+                trace_headers,
+                prompt_adapter_request,
+                priority,
+            )
 
             # 3) Make a new RequestState and queue.
             self.output_processor.add_request(request, parent_req, idx)
@@ -172,7 +184,6 @@ class LLMEngine:
             self.engine_core.add_request(request)
 
     def step(self) -> list[RequestOutput]:
-
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
             self.engine_core.execute_dummy_batch()
@@ -183,7 +194,8 @@ class LLMEngine:
 
         # 2) Process EngineCoreOutputs.
         processed_outputs = self.output_processor.process_outputs(
-            outputs.outputs)
+            outputs.outputs
+        )
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
@@ -215,12 +227,15 @@ class LLMEngine:
         tokenizer_group = self.tokenizer
 
         if tokenizer_group is None:
-            raise ValueError("Unable to get tokenizer because "
-                             "skip_tokenizer_init is True")
+            raise ValueError(
+                "Unable to get tokenizer because skip_tokenizer_init is True"
+            )
         if not isinstance(tokenizer_group, group_type):
-            raise TypeError("Invalid type of tokenizer group. "
-                            f"Expected type: {group_type}, but "
-                            f"found type: {type(tokenizer_group)}")
+            raise TypeError(
+                "Invalid type of tokenizer group. "
+                f"Expected type: {group_type}, but "
+                f"found type: {type(tokenizer_group)}"
+            )
 
         return tokenizer_group
 

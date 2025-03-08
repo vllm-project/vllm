@@ -27,7 +27,7 @@ class MsgpackDecoder:
     """Decoder with custom torch tensor serialization."""
 
     def __init__(self, t: Optional[Any] = None):
-        args = () if t is None else (t, )
+        args = () if t is None else (t,)
         self.decoder = msgpack.Decoder(*args, ext_hook=custom_ext_hook)
 
     def decode(self, obj: Any):

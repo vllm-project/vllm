@@ -6,15 +6,16 @@ import torch.nn as nn
 
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.penalties import (apply_all_penalties,
-                                          apply_min_token_penalties)
+from vllm.v1.sample.ops.penalties import (
+    apply_all_penalties,
+    apply_min_token_penalties,
+)
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
 _SAMPLING_EPS = 1e-5
 
 
 class Sampler(nn.Module):
-
     def __init__(self):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
@@ -47,8 +48,13 @@ class Sampler(nn.Module):
 
         # Gather the logprobs of the topk and sampled token (if requested).
         # Get logprobs and rank tensors (if requested)
-        logprobs_tensors = None if num_logprobs is None else \
-            self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
+        logprobs_tensors = (
+            None
+            if num_logprobs is None
+            else self.gather_logprobs(
+                raw_logprobs, num_logprobs, token_ids=sampled
+            )
+        )
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
@@ -79,8 +85,9 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
-        assert not (sampling_metadata.all_greedy
-                    and sampling_metadata.all_random)
+        assert not (
+            sampling_metadata.all_greedy and sampling_metadata.all_random
+        )
         if sampling_metadata.all_random:
             greedy_sampled = None
         else:
@@ -116,8 +123,9 @@ class Sampler(nn.Module):
         )
         return sampled
 
-    def compute_probs(self, logits: torch.Tensor,
-                      sampling_metadata: SamplingMetadata) -> torch.Tensor:
+    def compute_probs(
+        self, logits: torch.Tensor, sampling_metadata: SamplingMetadata
+    ) -> torch.Tensor:
         if sampling_metadata.all_greedy:
             return logits
         # Apply temperature. This is an in-place op changing logits.
@@ -151,9 +159,7 @@ class Sampler(nn.Module):
           Sampled token rank tensor, (num tokens)
         """
         # Find the topK values.
-        topk_logprobs, topk_indices = torch.topk(logprobs,
-                                                 num_logprobs,
-                                                 dim=-1)
+        topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
 
         # Get with the logprob of the prompt or sampled token.
         token_ids = token_ids.unsqueeze(-1)
@@ -177,9 +183,11 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
         if sampling_metadata.min_tokens:
-            apply_min_token_penalties(logits,
-                                      sampling_metadata.output_token_ids,
-                                      sampling_metadata.min_tokens)
+            apply_min_token_penalties(
+                logits,
+                sampling_metadata.output_token_ids,
+                sampling_metadata.min_tokens,
+            )
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
             logits = apply_all_penalties(
@@ -203,15 +211,13 @@ class Sampler(nn.Module):
         # Convert logits to probability distribution
         probability_values = torch.nn.functional.softmax(logits, dim=-1)
         # Calculate maximum probabilities per sequence
-        max_probabilities = torch.amax(probability_values,
-                                       dim=-1,
-                                       keepdim=True)
+        max_probabilities = torch.amax(probability_values, dim=-1, keepdim=True)
         # Reshape min_p for broadcasting
         adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
         # Identify valid tokens using threshold comparison
         valid_token_mask = probability_values >= adjusted_min_p
         # Apply mask using boolean indexing
-        logits[~valid_token_mask] = -float('inf')
+        logits[~valid_token_mask] = -float("inf")
         return logits
 
     def apply_logits_bias(
@@ -234,6 +240,7 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
         if sampling_metadata.allowed_token_ids_mask is not None:
-            logits.masked_fill_(sampling_metadata.allowed_token_ids_mask,
-                                float("-inf"))
+            logits.masked_fill_(
+                sampling_metadata.allowed_token_ids_mask, float("-inf")
+            )
         return logits

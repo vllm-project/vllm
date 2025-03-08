@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A GPU worker class."""
+
 import gc
 import os
 from typing import TYPE_CHECKING, Optional
@@ -11,9 +12,11 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.device_allocator.cumem import CuMemAllocator
-from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment,
-                              set_custom_all_reduce)
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+    set_custom_all_reduce,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -31,7 +34,6 @@ if TYPE_CHECKING:
 
 
 class Worker(WorkerBase):
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -40,24 +42,28 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
-
-        super().__init__(vllm_config=vllm_config,
-                         local_rank=local_rank,
-                         rank=rank,
-                         distributed_init_method=distributed_init_method,
-                         is_driver_worker=is_driver_worker)
+        super().__init__(
+            vllm_config=vllm_config,
+            local_rank=local_rank,
+            rank=rank,
+            distributed_init_method=distributed_init_method,
+            is_driver_worker=is_driver_worker,
+        )
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
+
             init_cached_hf_modules()
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info("Profiling enabled. Traces will be saved to: %s",
-                        torch_profiler_trace_dir)
+            logger.info(
+                "Profiling enabled. Traces will be saved to: %s",
+                torch_profiler_trace_dir,
+            )
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
@@ -65,22 +71,26 @@ class Worker(WorkerBase):
                 ],
                 with_stack=True,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir, use_gzip=True))
+                    torch_profiler_trace_dir, use_gzip=True
+                ),
+            )
         else:
             self.profiler = None
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
         allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
+        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
             "Sleep mode freed %.2f GiB memory, "
-            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
-            used_bytes / GiB_bytes)
+            "%.2f GiB memory is still in use.",
+            freed_bytes / GiB_bytes,
+            used_bytes / GiB_bytes,
+        )
 
     def wake_up(self) -> None:
         allocator = CuMemAllocator.get_instance()
@@ -107,34 +117,40 @@ class Worker(WorkerBase):
             self.init_gpu_memory = torch.cuda.mem_get_info()[0]
         else:
             raise RuntimeError(
-                f"Not support device type: {self.device_config.device}")
+                f"Not support device type: {self.device_config.device}"
+            )
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank,
-                                            self.distributed_init_method,
-                                            self.local_rank)
+        init_worker_distributed_environment(
+            self.parallel_config,
+            self.rank,
+            self.distributed_init_method,
+            self.local_rank,
+        )
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
         self.model_runner: GPUModelRunner = GPUModelRunner(
-            self.vllm_config, self.device)
+            self.vllm_config, self.device
+        )
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
             assert allocator.get_current_usage() == 0, (
-                "Sleep mode can only be "
-                "used for one instance per process.")
+                "Sleep mode can only be used for one instance per process."
+            )
             context = allocator.use_memory_pool(tag="weights")
         else:
             from contextlib import nullcontext
+
             context = nullcontext()
         with context:
             self.model_runner.load_model()
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
-        """Profiles the peak memory usage of the model to determine how much 
+        """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
@@ -160,7 +176,8 @@ class Worker(WorkerBase):
             "Error in memory profiling. "
             f"Initial free memory {self.init_gpu_memory}, current free memory"
             f" {free_gpu_memory}. This happens when the GPU memory was "
-            "not properly cleaned up before initializing the vLLM instance.")
+            "not properly cleaned up before initializing the vLLM instance."
+        )
 
         # Get the peak memory allocation recorded by torch
         peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
@@ -169,16 +186,19 @@ class Worker(WorkerBase):
         # gpu outside of `torch`. NCCL operations, for example, can use a few
         # GB during a forward pass
         torch.cuda.empty_cache()
-        torch_allocated_bytes = torch.cuda.memory_stats(
-        )["allocated_bytes.all.current"]
-        total_allocated_bytes = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
+        torch_allocated_bytes = torch.cuda.memory_stats()[
+            "allocated_bytes.all.current"
+        ]
+        total_allocated_bytes = (
+            torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
+        )
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
         available_kv_cache_memory = (
-            total_gpu_memory * self.cache_config.gpu_memory_utilization -
-            peak_memory)
+            total_gpu_memory * self.cache_config.gpu_memory_utilization
+            - peak_memory
+        )
 
         return int(available_kv_cache_memory)
 
@@ -192,6 +212,7 @@ class Worker(WorkerBase):
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
             from contextlib import nullcontext
+
             context = nullcontext()
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
@@ -203,8 +224,10 @@ class Worker(WorkerBase):
         warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
         if not self.model_config.enforce_eager:
             warmup_sizes = [
-                x for x in warmup_sizes if x not in
-                self.vllm_config.compilation_config.cudagraph_capture_sizes
+                x
+                for x in warmup_sizes
+                if x
+                not in self.vllm_config.compilation_config.cudagraph_capture_sizes
             ]
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
@@ -263,11 +286,14 @@ def init_worker_distributed_environment(
     """Initialize the distributed environment."""
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
-    init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank)
+    init_distributed_environment(
+        parallel_config.world_size, rank, distributed_init_method, local_rank
+    )
 
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+    ensure_model_parallel_initialized(
+        parallel_config.tensor_parallel_size,
+        parallel_config.pipeline_parallel_size,
+    )
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
@@ -287,4 +313,5 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
                 "You can use float16 instead by explicitly setting the "
-                "`dtype` flag in CLI, for example: --dtype=half.")
+                "`dtype` flag in CLI, for example: --dtype=half."
+            )

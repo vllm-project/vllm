@@ -13,13 +13,13 @@ logger = init_logger(__name__)
 
 try:
     import flashinfer.sampling
+
     is_flashinfer_available = True
 except ImportError:
     is_flashinfer_available = False
 
 
 class TopKTopPSampler(nn.Module):
-
     def __init__(self):
         super().__init__()
         if current_platform.is_cuda:
@@ -40,13 +40,15 @@ class TopKTopPSampler(nn.Module):
                         "FlashInfer is available, but it is not enabled. "
                         "Falling back to the PyTorch-native implementation of "
                         "top-p & top-k sampling. For the best performance, "
-                        "please set VLLM_USE_FLASHINFER_SAMPLER=1.")
+                        "please set VLLM_USE_FLASHINFER_SAMPLER=1."
+                    )
                     self.forward = self.forward_native
             else:
                 logger.warning(
                     "FlashInfer is not available. Falling back to the PyTorch-"
                     "native implementation of top-p & top-k sampling. For the "
-                    "best performance, please install FlashInfer.")
+                    "best performance, please install FlashInfer."
+                )
                 self.forward = self.forward_native
         else:
             self.forward = self.forward_native
@@ -150,7 +152,7 @@ def flashinfer_sample(
     Statistically, this function is equivalent to the `random_sample` function.
     However, this function is faster because it avoids sorting the logits tensor
     via rejection sampling.
-    
+
     NOTE: The outputs of this function do not necessarily match the outputs of
     the `random_sample` function. It only guarantees that the outputs are
     statistically equivalent.
@@ -162,8 +164,9 @@ def flashinfer_sample(
     assert not (k is None and p is None)
     max_top_k_round = 32
     batch_size = probs.shape[0]
-    uniform_samples = torch.empty((max_top_k_round, batch_size),
-                                  device=probs.device)
+    uniform_samples = torch.empty(
+        (max_top_k_round, batch_size), device=probs.device
+    )
     if len(generators) != batch_size:
         uniform_samples.uniform_()
     if generators:
@@ -173,16 +176,20 @@ def flashinfer_sample(
     if k is None:
         # Top-p only.
         next_token_ids, success = flashinfer.sampling.top_p_sampling_from_probs(
-            probs, uniform_samples, p, deterministic=True)
+            probs, uniform_samples, p, deterministic=True
+        )
     elif p is None:
         # Top-k only.
         next_token_ids, success = flashinfer.sampling.top_k_sampling_from_probs(
-            probs, uniform_samples, k, deterministic=True)
+            probs, uniform_samples, k, deterministic=True
+        )
     else:
         # Both top-k and top-p.
         next_token_ids, success = (
             flashinfer.sampling.top_k_top_p_sampling_from_probs(
-                probs, uniform_samples, k, p, deterministic=True))
+                probs, uniform_samples, k, p, deterministic=True
+            )
+        )
 
     # NOTE: CPU-GPU synchronization happens here.
     if not success.all():
@@ -191,5 +198,6 @@ def flashinfer_sample(
         if p is not None:
             probs = flashinfer.sampling.top_p_renorm_prob(probs, p)
         next_token_ids = flashinfer.sampling.sampling_from_probs(
-            probs, uniform_samples[0], deterministic=True)
+            probs, uniform_samples[0], deterministic=True
+        )
     return next_token_ids.view(-1)

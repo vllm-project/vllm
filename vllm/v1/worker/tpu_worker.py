@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A TPU worker class."""
+
 import os
 from typing import Optional
 
@@ -12,14 +13,19 @@ import torch_xla.runtime as xr
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment)
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.scheduler import SchedulerOutput
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
@@ -28,7 +34,6 @@ logger = init_logger(__name__)
 
 
 class TPUWorker:
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -59,11 +64,13 @@ class TPUWorker:
             self.cache_dtype = self.model_config.dtype
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-                self.cache_config.cache_dtype]
+                self.cache_config.cache_dtype
+            ]
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
+
             init_cached_hf_modules()
 
         self.profiler = None
@@ -71,8 +78,10 @@ class TPUWorker:
             # For TPU, we can only have 1 active profiler session for 1 profiler
             # server. So we only profile on rank0.
             self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info("Profiling enabled. Traces will be saved to: %s",
-                        self.profile_dir)
+            logger.info(
+                "Profiling enabled. Traces will be saved to: %s",
+                self.profile_dir,
+            )
             self.profiler = xp.start_server(9012)
 
         if self.model_config.seed is None:
@@ -84,10 +93,12 @@ class TPUWorker:
         torch.set_default_dtype(self.model_config.dtype)
 
         # Initialize the distributed environment.
-        init_tpu_worker_distributed_environment(self.parallel_config,
-                                                self.rank,
-                                                self.distributed_init_method,
-                                                self.local_rank)
+        init_tpu_worker_distributed_environment(
+            self.parallel_config,
+            self.rank,
+            self.distributed_init_method,
+            self.local_rank,
+        )
 
         # Device initialization should happen after initializing
         # the distributed runtime.
@@ -108,8 +119,9 @@ class TPUWorker:
         # can have slightly different XLA graphs.
         world_size = self.parallel_config.world_size
         rank = xr.global_ordinal()
-        per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                     f"tp{world_size}_rank{rank}")
+        per_rank_path = os.path.join(
+            envs.VLLM_XLA_CACHE_PATH, f"tp{world_size}_rank{rank}"
+        )
         xr.initialize_cache(per_rank_path, readonly=False)
 
         # Init ModelRunner here, so that we have access to self.device.
@@ -135,7 +147,8 @@ class TPUWorker:
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
-            runner_kv_caches)
+            runner_kv_caches,
+        )
 
         self.model_runner._dummy_run(
             runner_kv_caches,
@@ -152,8 +165,9 @@ class TPUWorker:
         profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
 
         # Calculate the TPU KV cache size based on profiling.
-        usable_memory_size = int(total_memory_size *
-                                 self.cache_config.gpu_memory_utilization)
+        usable_memory_size = int(
+            total_memory_size * self.cache_config.gpu_memory_utilization
+        )
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
 
         return int(tpu_kv_cache_bytes)
@@ -219,5 +233,7 @@ def init_tpu_worker_distributed_environment(
         distributed_init_method=distributed_init_method,
         backend="gloo",
     )
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+    ensure_model_parallel_initialized(
+        parallel_config.tensor_parallel_size,
+        parallel_config.pipeline_parallel_size,
+    )

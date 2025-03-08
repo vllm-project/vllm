@@ -9,9 +9,11 @@ import torch.distributed as dist
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.uniproc_executor import (  # noqa
-    ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0)
+    ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0,
+)
 from vllm.executor.uniproc_executor import (  # noqa
-    UniProcExecutor as UniProcExecutorV0)
+    UniProcExecutor as UniProcExecutorV0,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -26,20 +28,25 @@ class Executor(ExecutorBase):
         executor_class: type[Executor]
         parallel_config = vllm_config.parallel_config
         distributed_executor_backend = (
-            parallel_config.distributed_executor_backend)
+            parallel_config.distributed_executor_backend
+        )
         # distributed_executor_backend must be set in VllmConfig.__post_init__
         if isinstance(distributed_executor_backend, type):
             if not issubclass(distributed_executor_backend, ExecutorBase):
                 raise TypeError(
                     "distributed_executor_backend must be a subclass of "
-                    f"ExecutorBase. Got {distributed_executor_backend}.")
+                    f"ExecutorBase. Got {distributed_executor_backend}."
+                )
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
             from vllm.v1.executor.ray_distributed_executor import (  # noqa
-                RayDistributedExecutor)
+                RayDistributedExecutor,
+            )
+
             executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
             executor_class = MultiprocExecutor
         elif distributed_executor_backend == "uni":
             executor_class = UniProcExecutor
@@ -48,18 +55,20 @@ class Executor(ExecutorBase):
             # to support external launcher
             executor_class = ExecutorWithExternalLauncher
         else:
-            raise ValueError("Unknown distributed executor backend: "
-                             f"{distributed_executor_backend}")
+            raise ValueError(
+                "Unknown distributed executor backend: "
+                f"{distributed_executor_backend}"
+            )
         return executor_class
 
-    def initialize_from_config(self,
-                               kv_cache_configs: list[KVCacheConfig]) -> None:
+    def initialize_from_config(
+        self, kv_cache_configs: list[KVCacheConfig]
+    ) -> None:
         """
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        self.collective_rpc("initialize_from_config",
-                            args=(kv_cache_configs, ))
+        self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
         self.collective_rpc("compile_or_warm_up_model")
 
     def determine_available_memory(self) -> int:  # in bytes
@@ -77,8 +86,7 @@ class Executor(ExecutorBase):
         self,
         scheduler_output,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
-        output = self.collective_rpc("execute_model",
-                                     args=(scheduler_output, ))
+        output = self.collective_rpc("execute_model", args=(scheduler_output,))
         return output[0]
 
     @property
@@ -86,7 +94,7 @@ class Executor(ExecutorBase):
         return 1
 
     def profile(self, is_start: bool = True):
-        self.collective_rpc("profile", args=(is_start, ))
+        self.collective_rpc("profile", args=(is_start,))
 
 
 class UniProcExecutor(UniProcExecutorV0, Executor):
@@ -94,12 +102,12 @@ class UniProcExecutor(UniProcExecutorV0, Executor):
 
 
 class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
-
     def determine_available_memory(self) -> int:  # in bytes
         # same as determine_num_available_blocks in v0,
         # we need to get the min across all ranks.
         memory = super().determine_available_memory()
         from vllm.distributed.parallel_state import get_world_group
+
         cpu_group = get_world_group().cpu_group
         memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)
         dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)

@@ -4,11 +4,16 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
+
 # Required to register custom ops.
 import torch_xla.experimental.custom_kernel  # noqa: F401
 
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer, AttentionType)
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionLayer,
+    AttentionType,
+)
 from vllm.attention.backends.utils import CommonAttentionState
 
 # These are the 2 tunable parameters of the paged attention Pallas kernel.
@@ -17,7 +22,6 @@ NUM_KV_PAGES_PER_BLOCK = 256
 
 
 class PallasAttentionBackend(AttentionBackend):
-
     @staticmethod
     def get_name() -> str:
         return "PALLAS_VLLM_V1"
@@ -71,7 +75,6 @@ class PallasMetadata:
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
-
     def __init__(
         self,
         num_heads: int,
@@ -86,8 +89,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
         attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
-            raise ValueError("Paged attention Pallas kernel does "
-                             "not support block-sparse attention.")
+            raise ValueError(
+                "Paged attention Pallas kernel does "
+                "not support block-sparse attention."
+            )
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -107,13 +112,16 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Blocksparse is not supported.")
         if logits_soft_cap is not None:
             raise NotImplementedError(
-                "Attention logits soft-capping is not supported.")
+                "Attention logits soft-capping is not supported."
+            )
 
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "PallasAttentionBackendImpl")
+            raise NotImplementedError(
+                "Encoder self-attention and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "PallasAttentionBackendImpl"
+            )
 
         tpu_version = torch_xla.tpu.version()
         if tpu_version < 4:
@@ -142,7 +150,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = ([num_blocks, block_size, num_kv_heads, head_size], 
+            kv_cache = ([num_blocks, block_size, num_kv_heads, head_size],
                         [num_blocks, block_size, num_kv_heads, head_size])
             attn_metadata: Metadata for attention.
         Returns:
@@ -177,7 +185,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             num_queries_per_block=NUM_QUERIES_PER_BLOCK,
             vmem_limit_bytes=self.vmem_limit_bytes,
             use_kernel=True,
-            sm_scale=self.scale)
+            sm_scale=self.scale,
+        )
 
         return output.reshape(num_tokens, hidden_size)
 
@@ -189,7 +198,7 @@ def write_to_kv_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
 ) -> None:
-    """ Write the key and values to the KV cache.
+    """Write the key and values to the KV cache.
 
     Args:
         key: shape = [num_tokens, num_kv_heads, head_size]

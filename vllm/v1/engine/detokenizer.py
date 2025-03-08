@@ -6,7 +6,10 @@ from typing import Optional
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.transformers_utils.detokenizer_utils import (
-    AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
+    AnyTokenizer,
+    convert_prompt_ids_to_tokens,
+    detokenize_incrementally,
+)
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -14,7 +17,6 @@ logger = init_logger(__name__)
 
 @dataclass
 class IncrementalDetokenizer:
-
     # Generation data
     token_ids: list[int]
     output_text: str = ""
@@ -43,8 +45,11 @@ class IncrementalDetokenizer:
 
     @property
     def output_token_ids(self) -> list[int]:
-        return self.token_ids if not self.prompt_len else (
-            self.token_ids[self.prompt_len:])
+        return (
+            self.token_ids
+            if not self.prompt_len
+            else (self.token_ids[self.prompt_len :])
+        )
 
     @classmethod
     def from_new_request(
@@ -52,7 +57,6 @@ class IncrementalDetokenizer:
         tokenizer: Optional[AnyTokenizer],
         request: EngineCoreRequest,
     ) -> "IncrementalDetokenizer":
-
         if tokenizer is None:
             return cls(token_ids=[])
 
@@ -76,13 +80,11 @@ class IncrementalDetokenizer:
             # NOTE(Nick): could we take ownership of it though?
             token_ids=request.prompt_token_ids.copy(),
             stop=stops,
-            include_stop_str_in_output=request.sampling_params.
-            include_stop_str_in_output,
+            include_stop_str_in_output=request.sampling_params.include_stop_str_in_output,
             prefix_offset=prefix_offset,
             read_offset=read_offset,
             skip_special_tokens=request.sampling_params.skip_special_tokens,
-            spaces_between_special_tokens=request.sampling_params.
-            spaces_between_special_tokens,
+            spaces_between_special_tokens=request.sampling_params.spaces_between_special_tokens,
             prompt_len=len(request.prompt_token_ids),
             tokenizer=tokenizer,
             stop_buffer_length=stop_buffer_length,
@@ -107,17 +109,17 @@ class IncrementalDetokenizer:
         decoded_text = ""
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
-            (new_tokens, new_decoded_token_text, prefix_offset,
-             read_offset) = detokenize_incrementally(
-                 tokenizer=self.tokenizer,
-                 all_input_ids=self.token_ids,
-                 prev_tokens=self.tokens,
-                 prefix_offset=self.prefix_offset,
-                 read_offset=self.read_offset,
-                 skip_special_tokens=self.skip_special_tokens,
-                 spaces_between_special_tokens=self.
-                 spaces_between_special_tokens,
-             )
+            (new_tokens, new_decoded_token_text, prefix_offset, read_offset) = (
+                detokenize_incrementally(
+                    tokenizer=self.tokenizer,
+                    all_input_ids=self.token_ids,
+                    prev_tokens=self.tokens,
+                    prefix_offset=self.prefix_offset,
+                    read_offset=self.read_offset,
+                    skip_special_tokens=self.skip_special_tokens,
+                    spaces_between_special_tokens=self.spaces_between_special_tokens,
+                )
+            )
 
             self.tokens.extend(new_tokens)
             self.prefix_offset = prefix_offset
@@ -150,8 +152,11 @@ class IncrementalDetokenizer:
         # We return the full output text if the sequence is finished.
         buffer_length = 0 if finished else self.stop_buffer_length
         if not delta:
-            return self.output_text[:-buffer_length] if buffer_length else (
-                self.output_text)
+            return (
+                self.output_text[:-buffer_length]
+                if buffer_length
+                else (self.output_text)
+            )
         length = len(self.output_text) - buffer_length
         last_offset = self._last_output_text_offset
         if last_offset < length:

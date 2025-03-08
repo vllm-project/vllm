@@ -7,8 +7,11 @@ from typing import Optional
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
-                                         hash_request_tokens)
+from vllm.v1.core.kv_cache_utils import (
+    BlockHashType,
+    KVCacheBlock,
+    hash_request_tokens,
+)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
@@ -16,7 +19,6 @@ logger = init_logger(__name__)
 
 
 class KVCacheManager:
-
     def __init__(
         self,
         block_size: int,
@@ -53,14 +55,16 @@ class KVCacheManager:
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
-        self.req_to_blocks: defaultdict[str,
-                                        list[KVCacheBlock]] = defaultdict(list)
+        self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(
+            list
+        )
 
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
-        self.req_to_block_hashes: defaultdict[
-            str, list[BlockHashType]] = defaultdict(list)
+        self.req_to_block_hashes: defaultdict[str, list[BlockHashType]] = (
+            defaultdict(list)
+        )
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
@@ -89,7 +93,8 @@ class KVCacheManager:
         return stats
 
     def get_computed_blocks(
-            self, request: Request) -> tuple[list[KVCacheBlock], int]:
+        self, request: Request
+    ) -> tuple[list[KVCacheBlock], int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -120,8 +125,7 @@ class KVCacheManager:
                 # block_hashes is a chain of block hashes. If a block hash
                 # is not in the cached_block_hash_to_id, the following
                 # block hashes are not computed yet for sure.
-                if cached_block := self.block_pool.get_cached_block(
-                        block_hash):
+                if cached_block := self.block_pool.get_cached_block(block_hash):
                     computed_blocks.append(cached_block)
                 else:
                     break
@@ -142,7 +146,7 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[list[KVCacheBlock]] = None
+        new_computed_blocks: Optional[list[KVCacheBlock]] = None,
     ) -> Optional[list[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -175,21 +179,29 @@ class KVCacheManager:
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
-        num_computed_tokens = (request.num_computed_tokens +
-                               len(new_computed_blocks) * self.block_size)
-        num_required_blocks = cdiv(num_computed_tokens + num_tokens,
-                                   self.block_size)
+        num_computed_tokens = (
+            request.num_computed_tokens
+            + len(new_computed_blocks) * self.block_size
+        )
+        num_required_blocks = cdiv(
+            num_computed_tokens + num_tokens, self.block_size
+        )
         req_blocks = self.req_to_blocks[request.request_id]
-        num_new_blocks = (num_required_blocks - len(req_blocks) -
-                          len(new_computed_blocks))
+        num_new_blocks = (
+            num_required_blocks - len(req_blocks) - len(new_computed_blocks)
+        )
 
         # If a computed block of a request is an eviction candidate (in the
         # free queue and ref_cnt == 0), it cannot be counted as a free block
         # when allocating this request.
-        num_evictable_computed_blocks = sum(1 for blk in new_computed_blocks
-                                            if blk.ref_cnt == 0)
-        if (num_new_blocks > self.block_pool.get_num_free_blocks() -
-                num_evictable_computed_blocks):
+        num_evictable_computed_blocks = sum(
+            1 for blk in new_computed_blocks if blk.ref_cnt == 0
+        )
+        if (
+            num_new_blocks
+            > self.block_pool.get_num_free_blocks()
+            - num_evictable_computed_blocks
+        ):
             # Cannot allocate new blocks
             return None
 
@@ -199,7 +211,8 @@ class KVCacheManager:
         else:
             assert not new_computed_blocks, (
                 "Computed blocks should be empty when "
-                "prefix caching is disabled")
+                "prefix caching is disabled"
+            )
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
@@ -232,13 +245,15 @@ class KVCacheManager:
 
         # Use `new_computed_blocks` for a new request, and `num_cached_block`
         # for a running request.
-        num_cached_blocks = self.num_cached_block.get(request.request_id,
-                                                      len(new_computed_blocks))
+        num_cached_blocks = self.num_cached_block.get(
+            request.request_id, len(new_computed_blocks)
+        )
         # Speculated tokens might be rejected in the future, so we does
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
-        num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
-            request.spec_token_ids)) // self.block_size
+        num_full_blocks_after_append = (
+            num_computed_tokens + num_tokens - len(request.spec_token_ids)
+        ) // self.block_size
 
         self.block_pool.cache_full_blocks(
             request=request,
@@ -249,8 +264,7 @@ class KVCacheManager:
             block_size=self.block_size,
         )
 
-        self.num_cached_block[
-            request.request_id] = num_full_blocks_after_append
+        self.num_cached_block[request.request_id] = num_full_blocks_after_append
         return new_blocks
 
     def free(self, request: Request) -> None:
