@@ -471,8 +471,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             dummy_data = self.input_registry \
                 .dummy_data_for_profiling(self.model_config,
                                           seq_len,
-                                          self.mm_registry,
-                                          use_v1=False)
+                                          self.mm_registry)
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
