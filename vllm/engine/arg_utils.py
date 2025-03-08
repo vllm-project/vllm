@@ -754,9 +754,11 @@ class EngineArgs:
                                   'scheduler call.'))
         parser.add_argument(
             '--use-tqdm-on-load',
-            action=StoreBoolean,
+            dest='use_tqdm_on_load',
+            action=argparse.BooleanOptionalAction,
             default=EngineArgs.use_tqdm_on_load,
-            help='Whether to disable progress bar (using tqdm)',
+            help='Whether to enable/disable progress bar '
+            'when loading model weights.',
         )
 
         parser.add_argument(

@@ -366,10 +366,9 @@ def filter_files_not_needed_for_inference(
 _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]\n"  # noqa: E501
 
 
-def enable_tqdm(disable_progress_bar: bool):
-    return not disable_progress_bar and (
-        not torch.distributed.is_initialized()
-        or torch.distributed.get_rank() == 0)
+def enable_tqdm(use_tqdm_on_load: bool):
+    return use_tqdm_on_load and (not torch.distributed.is_initialized()
+                                 or torch.distributed.get_rank() == 0)
 
 
 def np_cache_weights_iterator(
@@ -377,7 +376,7 @@ def np_cache_weights_iterator(
     cache_dir: Optional[str],
     hf_folder: str,
     hf_weights_files: List[str],
-    disable_progress_bar: bool,
+    use_tqdm_on_load: bool,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model np files.
 
@@ -396,7 +395,7 @@ def np_cache_weights_iterator(
             for bin_file in tqdm(
                     hf_weights_files,
                     desc="Loading np_cache checkpoint shards",
-                    disable=not enable_tqdm(disable_progress_bar),
+                    disable=not enable_tqdm(use_tqdm_on_load),
                     bar_format=_BAR_FORMAT,
             ):
                 state = torch.load(bin_file,
@@ -421,13 +420,14 @@ def np_cache_weights_iterator(
 
 
 def safetensors_weights_iterator(
-    hf_weights_files: List[str], disable_progress_bar: bool
+    hf_weights_files: List[str],
+    use_tqdm_on_load: bool,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     for st_file in tqdm(
             hf_weights_files,
             desc="Loading safetensors checkpoint shards",
-            disable=not enable_tqdm(disable_progress_bar),
+            disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
     ):
         with safe_open(st_file, framework="pt") as f:
@@ -437,14 +437,14 @@ def safetensors_weights_iterator(
 
 
 def runai_safetensors_weights_iterator(
-    hf_weights_files: List[str], disable_progress_bar: bool
+        hf_weights_files: List[str], use_tqdm_on_load: bool
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
         for st_file in tqdm(
                 hf_weights_files,
                 desc="Loading safetensors using Runai Model Streamer",
-                disable=not enable_tqdm(disable_progress_bar),
+                disable=not enable_tqdm(use_tqdm_on_load),
                 bar_format=_BAR_FORMAT,
         ):
             streamer.stream_file(st_file)
@@ -452,13 +452,13 @@ def runai_safetensors_weights_iterator(
 
 
 def pt_weights_iterator(
-    hf_weights_files: List[str], disable_progress_bar: bool
+        hf_weights_files: List[str], use_tqdm_on_load: bool
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
     for bin_file in tqdm(
             hf_weights_files,
             desc="Loading pt checkpoint shards",
-            disable=not enable_tqdm(disable_progress_bar),
+            disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
     ):
         state = torch.load(bin_file, map_location="cpu", weights_only=True)
