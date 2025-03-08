@@ -2496,6 +2496,7 @@ torch::Tensor moe_wna16_marlin_gemm(
   return c;
 }
 
+#endif
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
   m.impl("moe_wna16_marlin_gemm", &moe_wna16_marlin_gemm);
