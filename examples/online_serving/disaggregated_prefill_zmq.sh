@@ -1,5 +1,5 @@
 #!/bin/bash
-# This file demonstrates the example usage of disaggregated prefilling
+# This file demonstrates the example usage of disaggregated prefilling with ZMQ
 # We will launch 2 vllm instances (1 for prefill and 1 for decode),
 # and then transfer the KV cache between them.
 
@@ -23,15 +23,7 @@ cleanup() {
 
 export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 
-# install quart first -- required for disagg prefill proxy serve
-if python3 -c "import quart" &> /dev/null; then
-    echo "Quart is already installed."
-else
-    echo "Quart is not installed. Installing..."
-    python3 -m pip install quart
-fi 
-
-# a function that waits vLLM server to start
+# a function that waits vLLM connect to start
 wait_for_server() {
   local port=$1
   timeout 1200 bash -c "
@@ -41,38 +33,48 @@ wait_for_server() {
 }
 
 
+# a function that waits vLLM disagg to start
+wait_for_disagg_server() {
+  local log_file=$1
+  timeout 1200 bash -c "
+    until grep -q 'zmq Server started at' $log_file; do
+      sleep 1
+    done" && return 0 || return 1
+}
+
+
 # You can also adjust --kv-ip and --kv-port for distributed inference.
 
 # prefilling instance, which is the KV producer
-CUDA_VISIBLE_DEVICES=0 vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
-    --port 8100 \
+CUDA_VISIBLE_DEVICES=0 vllm disagg meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --zmq-server-addr testipc0 \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
     --kv-transfer-config \
-    '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}' &
+    '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}' > vllm_disagg_prefill.log 2>&1 &
 
 # decoding instance, which is the KV consumer
-CUDA_VISIBLE_DEVICES=1 vllm serve meta-llama/Meta-Llama-3.1-8B-Instruct \
-    --port 8200 \
+CUDA_VISIBLE_DEVICES=1 vllm disagg meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --zmq-server-addr testipc1 \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
     --kv-transfer-config \
-    '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}' &
-
-# wait until prefill and decode instances are ready
-wait_for_server 8100
-wait_for_server 8200
+    '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}' > vllm_disagg_decode.log 2>&1 &
 
 # launch a proxy server that opens the service at port 8000
 # the workflow of this proxy:
-# - send the request to prefill vLLM instance (port 8100), change max_tokens 
+# - send the request to prefill vLLM instance (via zmq addr testipc0), change max_tokens
 #   to 1
 # - after the prefill vLLM finishes prefill, send the request to decode vLLM 
-#   instance
-# NOTE: the usage of this API is subject to change --- in the future we will 
-# introduce "vllm connect" to connect between prefill and decode instances
-python3 ../../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
-sleep 1
+#   instance (via zmq addr testipc1)
+vllm connect --port 8000 \
+    --prefill-addr testipc0 \
+    --decode-addr testipc1 &
+
+# wait until prefill, decode instances and proxy are ready
+wait_for_server 8000
+wait_for_disagg_server vllm_disagg_prefill.log
+wait_for_disagg_server vllm_disagg_decode.log 
 
 # serve two example requests
 output1=$(curl -X POST -s http://localhost:8000/v1/completions \
