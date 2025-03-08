@@ -151,7 +151,7 @@ pip uninstall torch torch-xla -y
 Install build dependencies:
 
 ```bash
-pip install -r requirements-tpu.txt
+pip install -r requirements/tpu.txt
 sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
 ```
 

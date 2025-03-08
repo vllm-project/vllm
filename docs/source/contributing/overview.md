@@ -23,7 +23,7 @@ Check out the [building from source](#build-from-source) documentation for detai
 ## Testing
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements/dev.txt
 
 # Linting, formatting and static type checking
 pre-commit install --hook-type pre-commit --hook-type commit-msg
