@@ -215,19 +215,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             topk_weights = topk_weights.to(x.dtype)
 
         final_hidden_states = torch.zeros_like(x)
-        num_experts = layer.w13_weight.shape[0]
-        n_expert_slice = layer.w13_weight.shape[0] // 8
+        num_experts = layer.w13_weight.data.shape[0]
+        n_expert_slice = layer.w13_weight.data.shape[0] // 8
         assert n_expert_slice * 8 == num_experts
 
         for i in range(8):
             min_expert = i * n_expert_slice
             max_expert = (i + 1) * n_expert_slice
             w13_list_slice = [
-                layer.w13_weight[j].squeeze().clone()
+                layer.w13_weight[j].data.squeeze().clone()
                 for j in range(min_expert, max_expert)
             ]
             w2_list_slice = [
-                layer.w2_weight[j].squeeze().clone()
+                layer.w2_weight[j].data.squeeze().clone()
                 for j in range(min_expert, max_expert)
             ]
             final_hidden_states += torch.ops.hpu.mixture_of_experts(

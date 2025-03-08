@@ -287,10 +287,10 @@ def apply_block_fp8_linear_hpu_dequant(
     weight: torch.Tensor,
     block_size: List[int],
     weight_scale: torch.Tensor,
-    input_scale: Optional[torch.Tensor] = None,
-    bias: Optional[torch.Tensor] = None,
-    original_M: Optional[torch.Tensor] = None,
-    original_N: Optional[torch.Tensor] = None,
+    input_scale: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    original_M: torch.Tensor,
+    original_N: torch.Tensor,
     do_unpad: bool = False,
 ) -> torch.Tensor:
     assert input_scale is None

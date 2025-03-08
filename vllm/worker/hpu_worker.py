@@ -265,8 +265,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
-        self.model_runner.bucketing_global_state.decode_block_bucket_cfg[
-            2] = num_gpu_blocks
 
         with HabanaMemoryProfiler() as m:
             self._init_cache_engine()
@@ -471,9 +469,9 @@ class HPUCacheEngine(CacheEngine):
         """Allocates KV cache on the specified device."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
-        if len(kv_cache_shape) == 2:
-            k_cache_shape = kv_cache_shape[0]
-            v_cache_shape = kv_cache_shape[1]
+        if len(kv_cache_shape) == 4:
+            k_cache_shape = list(kv_cache_shape[:-2]) + [kv_cache_shape[-2]]
+            v_cache_shape = list(kv_cache_shape[:-2]) + [kv_cache_shape[-1]]
         else:
             k_cache_shape = kv_cache_shape
             v_cache_shape = kv_cache_shape

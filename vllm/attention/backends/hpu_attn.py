@@ -127,19 +127,35 @@ class HPUAttentionBackend(AttentionBackend):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: torch.Tensor,
     ) -> None:
         HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        src_to_dists: torch.Tensor,
     ) -> None:
         HPUPagedAttention.copy_blocks(kv_caches, src_to_dists)
 
 
-class HPUMLAAttentionBackend(HPUAttentionBackend):
+class HPUMLAAttentionBackend(AttentionBackend):
+
+    @staticmethod
+    def get_name() -> str:
+        return "HPU_MLA"
+
+    @staticmethod
+    def get_impl_cls() -> Type["HPUMLAImpl"]:
+        return HPUMLAImpl
+
+    @staticmethod
+    def get_metadata_cls() -> Type["AttentionMetadata"]:
+        return HPUMLAMetadata
+
+    @staticmethod
+    def get_state_cls() -> Type["CommonAttentionState"]:
+        return CommonAttentionState
 
     @staticmethod
     def get_kv_cache_shape(
@@ -148,17 +164,22 @@ class HPUMLAAttentionBackend(HPUAttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (num_blocks, block_size,
-                head_size // 9 * 1), (num_blocks, block_size,
-                                      head_size // 9 * 8)
+        return (num_blocks, block_size, head_size // 9 * 1, head_size // 9 * 8)
 
     @staticmethod
-    def get_impl_cls() -> Type["HPUMLAImpl"]:
-        return HPUMLAImpl
+    def swap_blocks(
+        src_kv_cache: torch.Tensor,
+        dst_kv_cache: torch.Tensor,
+        src_to_dst: torch.Tensor,
+    ) -> None:
+        HPUPagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
-    def get_name() -> str:
-        return "HPU_MLA"
+    def copy_blocks(
+        kv_caches: List[torch.Tensor],
+        src_to_dists: torch.Tensor,
+    ) -> None:
+        HPUPagedAttention.copy_blocks(kv_caches, src_to_dists)
 
 
 def flat_pa_mla(query, key_cache, value_cache, block_list, block_mapping,
@@ -214,7 +235,14 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     input_positions: torch.Tensor
 
 
-class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
+@dataclass
+class HPUMLAMetadata(HPUAttentionMetadata, AttentionMetadata):
+    pass
+
+
+class HPUMLAImpl(
+        MLACommonImpl[HPUMLAMetadata],  # type: ignore
+        torch.nn.Module):
 
     def __init__(
             self,
@@ -231,10 +259,19 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             # MLA Specific Arguments
             **kwargs) -> None:
         torch.nn.Module.__init__(self)
-        MLACommonImpl.__init__(self, num_heads, head_size, scale, num_kv_heads,
-                               alibi_slopes, sliding_window, kv_cache_dtype,
-                               blocksparse_params, logits_soft_cap, attn_type,
-                               **kwargs)
+        MLACommonImpl.__init__(
+            self,
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,  # type: ignore
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            blocksparse_params,
+            logits_soft_cap,
+            attn_type,
+            **kwargs)
 
         self.matmul_qk = Matmul()
         self.softmax = Softmax()
@@ -259,8 +296,8 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                 self.fused_scaled_dot_product_attention = ModuleFusedSDPA(
                     FusedSDPA)
             except ImportError:
-                logger().warning("Could not import HPU FusedSDPA kernel. "
-                                 "vLLM will use native implementation.")
+                logger.warning("Could not import HPU FusedSDPA kernel. "
+                               "vLLM will use native implementation.")
 
         unsupported_features = [
             alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
@@ -284,7 +321,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
         k_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
-        attn_metadata: HPUAttentionMetadata,
+        attn_metadata: HPUMLAMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if output is not None:
@@ -327,7 +364,7 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
             dim=-1)
         latent_vec_k = latent_vec_k.view(
             -1, self.qk_rope_head_dim + self.kv_lora_rank)
-        if is_prefill:
+        if is_prefill and block_indices is not None:
             latent_vec_k = latent_vec_k.unflatten(0,
                                                   (block_indices.size(0), -1))
 
@@ -339,19 +376,19 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
                                           block_indices, block_offsets)
             v_cache = self.latent_cache_v(latent_vec_v, kv_cache[1],
                                           block_indices, block_offsets)
-            kv_cache = (k_cache, v_cache)
+            kv_cache_splitted = (k_cache, v_cache)
 
         if is_prefill:
-            return self._forward_prefill(q, k_c_normed, k_pe, attn_metadata,
-                                         batch_size)
+            return self._forward_prefill(q, k_c_normed, k_pe, None,
+                                         attn_metadata, batch_size)
         else:
-            return self._forward_decode(q_nope, q_pe, kv_cache, attn_metadata,
-                                        batch_size)
+            return self._forward_decode(q_nope, q_pe, kv_cache_splitted,
+                                        attn_metadata, batch_size)
 
-    def _forward_prefill(self, q: torch.Tensor, k_c_normed: torch.Tensor,
-                         k_pe: torch.Tensor,
-                         attn_metadata: HPUAttentionMetadata,
-                         batch_size: int) -> torch.Tensor:
+    def _forward_prefill(  # type: ignore[override]
+            self, q: torch.Tensor, k_c_normed: torch.Tensor,
+            k_pe: torch.Tensor, kv_c_and_k_pe_cache: Optional[torch.Tensor],
+            attn_metadata: HPUMLAMetadata, batch_size: int) -> torch.Tensor:
         kv_nope = self.kv_b_proj(k_c_normed)[0]\
             .view(-1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = kv_nope\
@@ -387,10 +424,10 @@ class HPUMLAImpl(MLACommonImpl[HPUAttentionMetadata], torch.nn.Module):
 
         return self.o_proj(attn_output)[0]
 
-    def _forward_decode(self, q_nope: torch.Tensor, q_pe: torch.Tensor,
-                        kv_cache: torch.Tensor,
-                        attn_metadata: HPUAttentionMetadata,
-                        batch_size: int) -> torch.Tensor:
+    def _forward_decode(  # type: ignore[override]
+            self, q_nope: torch.Tensor, q_pe: torch.Tensor,
+            kv_cache: tuple[torch.Tensor, torch.Tensor],
+            attn_metadata: HPUMLAMetadata, batch_size: int) -> torch.Tensor:
         q = torch.cat([q_nope, q_pe], dim=-1)
         kv_c_and_k_pe_cache = kv_cache[0].unsqueeze(2)
         kv_c_cache = kv_cache[1].unsqueeze(2)
@@ -482,8 +519,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 self.fused_scaled_dot_product_attention = ModuleFusedSDPA(
                     FusedSDPA)
             except ImportError:
-                logger().warning("Could not import HPU FusedSDPA kernel. "
-                                 "vLLM will use native implementation.")
+                logger.warning("Could not import HPU FusedSDPA kernel. "
+                               "vLLM will use native implementation.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
