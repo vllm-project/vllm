@@ -1358,6 +1358,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             break
 
         if tokens_in_chunk < CHUNK_SIZE and chunk > 0:
+            assert False # for now
             # Adjust the intermediate cache size and config for the last
             # chunk. Note that in most cases we only have one chunk
             # so the cache size and config are already set correctly and
@@ -1379,7 +1380,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             block_shape=block_shape)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
+            moe_align_block_size(curr_topk_ids, block_m,
                                  global_num_experts, expert_map))
 
         invoke_fused_moe_kernel(qcurr_hidden_states,
