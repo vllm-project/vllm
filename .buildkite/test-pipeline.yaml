@@ -99,7 +99,7 @@ steps:
   - vllm/distributed
   - tests/core
   commands:
-  - pytest -v -s core
+  - VLLM_USE_V1=0 pytest -v -s core
 
 - label: Entrypoints Test # 40min
   working_dir: "/vllm-workspace/tests"

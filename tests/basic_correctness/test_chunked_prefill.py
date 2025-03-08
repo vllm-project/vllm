@@ -49,6 +49,10 @@ def test_models(
     Checks exact match decode between huggingface model and vllm runner with
     chunked prefill.
     """
+
+    # NOTE: THIS TEST SHOULD BE DEPRECATED WITH V1.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
+
     override_backend_env_variable(monkeypatch, attention_backend)
 
     max_num_seqs = chunked_prefill_token_size
@@ -89,6 +93,9 @@ def test_models_distributed(
     attention_backend: str,
     monkeypatch,
 ) -> None:
+    # NOTE: THIS TEST SHOULD BE DEPRECATED WITH V1.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
+
     override_backend_env_variable(monkeypatch, attention_backend)
 
     if (model == "meta-llama/Llama-3.2-1B-Instruct"
