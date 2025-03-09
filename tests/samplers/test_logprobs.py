@@ -10,10 +10,13 @@ from ..conftest import VllmRunner
 MODELS = ["distilbert/distilgpt2"]
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    """We can run both engines for this test."""
-    pass
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This module is V0 only since it uses dtype=float, so
+    set VLLM_USE_V1=0 for all tests in the module.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 @pytest.mark.parametrize("model", MODELS)

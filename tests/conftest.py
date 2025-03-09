@@ -140,7 +140,7 @@ def run_with_both_engines(request, monkeypatch):
 
     if use_v1:
         if skip_v1:
-            pytest.skip("Skipping test on vllm V1")
+            pytest.skip("Skipping Test on V1.")
         monkeypatch.setenv('VLLM_USE_V1', '1')
     else:
         monkeypatch.setenv('VLLM_USE_V1', '0')
