@@ -159,4 +159,4 @@ def test_end_to_end(monkeypatch, model: str, use_v1: bool):
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
-    monkeypatch.delenv("VLLM_USE_V1", raising=False)
+    monkeypatch.delenv("VLLM_USE_V1", raising=True)
