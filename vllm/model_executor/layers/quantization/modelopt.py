@@ -174,8 +174,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
 
     def __init__(self,
                  is_checkpoint_nvfp4_serialized: bool = False,
-                 kv_cache_quant_algo: str = None,
-                 group_size: int = None,
+                 kv_cache_quant_algo: str = "",
+                 group_size: int = 16,
                  exclude_modules: List[str] = None) -> None:
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
         if is_checkpoint_nvfp4_serialized:
@@ -252,7 +252,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     Args: quant_config: The ModelOpt quantization config.
     """
 
-    def __init__(self, quant_config: ModelOptFp8Config):
+    def __init__(self, quant_config: ModelOptNvFp4Config):
         self.quant_config = quant_config
         self.cutlass_nvfp4_supported = cutlass_fp4_supported()
         if not self.cutlass_nvfp4_supported:
