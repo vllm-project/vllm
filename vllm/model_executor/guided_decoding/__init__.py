@@ -53,13 +53,6 @@ def maybe_backend_fallback(
     if guided_params.backend_name == "xgrammar":
         from vllm.model_executor.guided_decoding.xgrammar_decoding import (
             xgr_installed)
-        # xgrammar only has x86 wheels for linux, fallback to outlines
-        from vllm.platforms import current_platform
-        if current_platform.get_cpu_architecture() is not CpuArchEnum.X86:
-            fallback_or_error(guided_params,
-                              "xgrammar is only supported on x86 CPUs.",
-                              "outlines")
-
         # xgrammar doesn't support regex, fallback to outlines
         if guided_params.regex is not None:
             fallback_or_error(
