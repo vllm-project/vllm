@@ -1485,6 +1485,13 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
+        # No MistralTokenizer support so far (not compatible
+        # with xgrammar)
+        if model_config.tokenizer_mode == "mistral":
+            _raise_or_fallback(feature_name="--tokenizer-mode mistral",
+                               recommend_to_remove=False)
+            return False
+
         # Only Fp16 and Bf16 dtypes since we only support FA.
         V1_SUPPORTED_DTYPES = [torch.bfloat16, torch.float16]
         if model_config.dtype not in V1_SUPPORTED_DTYPES:
@@ -1519,7 +1526,12 @@ class EngineArgs:
                 recommend_to_remove=False)
             return False
 
-        # No Concurrent Partial Prefills.
+        # No CPU Offloading so far.
+        if self.cpu_offload_gb != EngineArgs.cpu_offload_gb:
+            _raise_or_fallback("--cpu-offload-gb", recommend_to_remove=False)
+            return False
+
+        # No Concurrent Partial Prefills so far.
         if (self.max_num_partial_prefills
                 != EngineArgs.max_num_partial_prefills
                 or self.max_long_partial_prefills
