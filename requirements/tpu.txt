@@ -9,6 +9,8 @@ setuptools-scm>=8
 wheel
 jinja2
 ray[default]
+# Required for xgrammar
+triton
 
 # Install torch_xla
 --pre
