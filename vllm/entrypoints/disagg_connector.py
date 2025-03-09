@@ -198,8 +198,8 @@ async def prefill(zmq_msg_request: ZmqMsgRequest) -> Union[JSONResponse, bool]:
 
 
 async def generate_stream_response(
-        fisrt_reply: str, generator: AsyncGenerator[ZmqMsgResponse]
-) -> AsyncGenerator[dict, str]:
+        fisrt_reply: str,
+        generator: AsyncGenerator[ZmqMsgResponse]) -> AsyncGenerator[str]:
     yield fisrt_reply
     async for reply in generator:
         yield reply.body
