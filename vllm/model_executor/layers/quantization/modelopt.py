@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from torch.nn import Module
@@ -9,10 +9,13 @@ from torch.nn.parameter import Parameter
 from vllm._custom_ops import (cutlass_scaled_fp4_mm,
                               cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ModelWeightParameter,
@@ -75,15 +78,6 @@ class ModelOptFp8Config(QuantizationConfig):
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
         return None
-
-
-class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
-    """
-    Supports loading kv-cache scaling factors from FP8 checkpoints.
-    """
-
-    def __init__(self, quant_config: ModelOptFp8Config):
-        super().__init__(quant_config)
 
 
 class ModelOptFp8LinearMethod(LinearMethodBase):
@@ -172,11 +166,13 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 class ModelOptNvFp4Config(QuantizationConfig):
     """Config class for ModelOpt FP4."""
 
-    def __init__(self,
-                 is_checkpoint_nvfp4_serialized: bool = False,
-                 kv_cache_quant_algo: str = "",
-                 group_size: int = 16,
-                 exclude_modules: List[str] = None) -> None:
+    def __init__(
+        self,
+        is_checkpoint_nvfp4_serialized: bool,
+        kv_cache_quant_algo: str,
+        exclude_modules: List[str],
+        group_size: int = 16,
+    ) -> None:
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
         if is_checkpoint_nvfp4_serialized:
             logger.warning(
@@ -221,12 +217,14 @@ class ModelOptNvFp4Config(QuantizationConfig):
                              "kv_cache_quant_algo specified in "
                              "hf_quant_config.json")
         return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo,
-                   group_size, exclude_modules)
+                   exclude_modules, group_size)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
+            if is_layer_skipped(prefix, self.exclude_modules):
+                return UnquantizedLinearMethod()
             return ModelOptNvFp4LinearMethod(self)
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
@@ -239,6 +237,16 @@ def cutlass_fp4_supported() -> bool:
     capability_tuple = current_platform.get_device_capability()
     capability = -1 if capability_tuple is None else capability_tuple.to_int()
     return cutlass_scaled_mm_supports_fp4(capability)
+
+
+class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
+    """
+    Supports loading kv-cache scaling factors from FP8 checkpoints.
+    """
+
+    def __init__(self, quant_config: Union[ModelOptFp8Config,
+                                           ModelOptNvFp4Config]):
+        super().__init__(quant_config)
 
 
 class ModelOptNvFp4LinearMethod(LinearMethodBase):
@@ -256,8 +264,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.cutlass_nvfp4_supported = cutlass_fp4_supported()
         if not self.cutlass_nvfp4_supported:
-            raise ValueError("Cannot run the requested FP4"
-                             " on the current platform.")
+            raise ValueError("Current platform does not support NVFP4"
+                             " quantization. Please use Blackwell and above.")
 
     def create_weights(
         self,
@@ -360,7 +368,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # Swizzle the weight blockscale.
         # contracting dimension is input dimension
         # block_size = 16;
-        # w_indim  = input_size_per_partition // self.quant_config.group_size
         assert (layer.weight_scale.shape[1] % 16 == 0), (
             "Expected weight_scale.dim(1) to be divisible by 16")
         assert (layer.weight_scale.dtype == torch.float8_e4m3fn), (
