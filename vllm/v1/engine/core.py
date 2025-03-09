@@ -16,6 +16,7 @@ import zmq.asyncio
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -37,6 +38,33 @@ logger = init_logger(__name__)
 POLLING_TIMEOUT_S = 2.5
 
 
+class ModelExecutionError(RuntimeError):
+    """Custom RuntimeError with input data for model execution
+    
+    In a nutshell, this object is useful for custom handling of exception for
+    the case the engine raises an error. For instance, it is used to log the
+    input metadata that is useful for debugging on engine crashes.
+    
+    Args:
+        scheduler_output: SchedulerOutput object that contains the input
+            data for model execution
+        
+    """
+    scheduler_output: SchedulerOutput
+
+    def __init__(self, *args, scheduler_output=None):
+        super().__init__(*args)
+        self.scheduler_output = scheduler_output
+
+    def __reduce__(self):
+        # To avoid pickle errors.
+        # This happens when we exchange this object between processes
+        # since scheduler_output can have objects that only makes sense
+        # to their context/process we remove them from the serialization
+        # and only send the summary of the error as a regular RuntimeError.
+        return (self.__class__, (self.args[0], ))
+
+
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
@@ -48,6 +76,7 @@ class EngineCore:
     ):
         assert vllm_config.model_config.runner_type != "pooling"
 
+        self.vllm_config = vllm_config
         logger.info("Initializing a V1 LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
 
@@ -170,8 +199,15 @@ class EngineCore:
                 outputs=[],
                 scheduler_stats=self.scheduler.make_stats(),
             )
-
-        output = self.model_executor.execute_model(scheduler_output)
+        try:
+            output = self.model_executor.execute_model(scheduler_output)
+        except BaseException as err:
+            err = ModelExecutionError(
+                f"Model execution failure,"
+                f"reason: {repr(err)}",
+                scheduler_output=scheduler_output)
+            dump_engine_exception(err, self.vllm_config)
+            raise err
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
 
