@@ -19,8 +19,8 @@ from transformers.models.pixtral.modeling_pixtral import (
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
+from vllm.inputs import (DecoderOnlyInputs, DummyData, InputContext,
+                         token_inputs)
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -34,7 +34,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (ImageItem, MultiModalDataDict,
                                     MultiModalFieldConfig, MultiModalInputs,
-                                    NestedTensors, PlaceholderRange)
+                                    MultiModalKwargsItem, NestedTensors,
+                                    PlaceholderRange)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -61,10 +62,10 @@ PIXTRAL_IMAGE_TOKEN = "[IMG]"
 
 def get_max_pixtral_image_tokens(ctx: InputContext):
     tokenizer = cached_tokenizer_from_config(ctx.model_config)
-    mm_encoder = tokenizer.instruct.mm_encoder
+    image_encoder = tokenizer.instruct.mm_encoder
 
-    image_config = mm_encoder.mm_config if hasattr(
-        mm_encoder, "mm_config") else mm_encoder.image_config
+    image_config = image_encoder.mm_config if hasattr(
+        image_encoder, "mm_config") else image_encoder.image_config
 
     max_image_size = image_config.max_image_size
     image_patch_size = image_config.image_patch_size
@@ -76,8 +77,8 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
                            mm_counts: Mapping[str, int]):
     tokenizer = cached_tokenizer_from_config(ctx.model_config)
 
-    mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
-    image_token_id = mm_encoder.special_ids.img
+    image_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
+    image_token_id = image_encoder.special_ids.img
 
     mm_config = ctx.get_mm_config()
     num_images = mm_config.get_limit_per_prompt("image")
@@ -193,21 +194,24 @@ class PixtralProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
-    def get_max_pixtral_image_tokens(self) -> int:
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        """
+        Return max number of image tokens + image break tokens + image end token
+        """
         tokenizer = self.get_tokenizer()
-        image_encoder = tokenizer.instruct.image_encoder
-
+        image_encoder = tokenizer.instruct.mm_encoder
         max_image_size = image_encoder.image_config.max_image_size
-        image_patch_size = image_encoder.image_config.image_patch_size
-
-        return ((max_image_size // image_patch_size)**2)
-
-    def get_mm_max_tokens_per_item(self, seq_len: int) -> Mapping[str, int]:
-        return {"image": self.get_max_pixtral_image_tokens()}
+        max_image = Image.new("RGB", (max_image_size, max_image_size), color=0)
+        max_num_tokens = len(image_encoder(ImageChunk(image=max_image)).tokens)
+        return {"image": max_num_tokens}
 
     def get_image_size_with_most_features(self) -> ImageSize:
         tokenizer = self.get_tokenizer()
-        image_encoder = tokenizer.instruct.image_encoder
+        image_encoder = tokenizer.instruct.mm_encoder
         max_image_size = image_encoder.image_config.max_image_size
 
         return ImageSize(width=max_image_size, height=max_image_size)
@@ -245,7 +249,25 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> MultiModalInputs:
-        # TODO(remi): check that there is multimodal data
+        tokenizer = self.info.get_tokenizer()
+        image_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
+        image_token_id = image_encoder.special_ids.img
+        image_break_id = image_encoder.special_ids.img_break
+        image_end_id = image_encoder.special_ids.img_end
+
+        # if prompt is a string, tokenize prompt
+        if isinstance(prompt, str):
+            prompt_token_ids = tokenizer.encode(prompt)
+        else:
+            prompt_token_ids = prompt
+
+        if image_token_id not in prompt_token_ids:
+            raise ValueError(
+                f"You've passed {prompt=} without {image_token_id=}"
+                " Make sure to process your input via mistral_common's"
+                " tokenizer or pass a chat completion request."
+                " For more info, see: "
+                "https://github.com/vllm-project/vllm/issues/8411.")
 
         mm_items = self._to_mm_items(mm_data)
 
@@ -267,51 +289,11 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         else:
             mm_hashes = None
 
-        tokenizer = self.info.get_tokenizer()
-
-        # if prompt is a string, tokenize prompt
-        if isinstance(prompt, str):
-            prompt_token_ids = tokenizer.encode(prompt)
-        else:
-            prompt_token_ids = prompt
-
-        image_encoder = tokenizer.mistral.instruct_tokenizer.image_encoder
-        image_token_id = image_encoder.special_ids.img
-        image_break_id = image_encoder.special_ids.img_break
-        image_end_id = image_encoder.special_ids.img_end
-
-        if image_token_id not in prompt_token_ids:
-            raise ValueError(
-                f"You've passed {prompt=} without {image_token_id=}"
-                " Make sure to process your input via mistral_common's"
-                " tokenizer or pass a chat completion request."
-                " For more info, see: "
-                "https://github.com/vllm-project/vllm/issues/8411.")
-
-        images = []
-        image_tokens_list = []
-        for image_data in mm_items.get_items("image", ImageProcessorItems):
-            image = ImageChunk(image=image_data)
-            encoding = tokenizer.instruct.mm_encoder(image)
-            image = torch.from_numpy(encoding.image).to(dtype=torch.float16)
-            images.append(image)
-            image_tokens_list.append(encoding.tokens)
-
-        mm_kwargs = self._get_mm_kwargs_from_images(images, image_tokens_list,
-                                                    hf_processor_mm_kwargs)
-
-        # unbound_prompt_repls = self._get_prompt_replacements(
-        #     mm_items,
-        #     hf_processor_mm_kwargs,
-        #     mm_kwargs,
-        # )
-        # mm_prompt_repls = self._bind_and_group_repls(unbound_prompt_repls)
-
-        mm_item_counts = mm_items.get_all_counts()
-        self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
+        mm_kwargs = self._cached_get_mm_kwargs(mm_items,
+                                               hf_processor_mm_kwargs)
 
         # Get precise tracking of placeholder positions
-        placeholder_ranges = []
+        placeholder_ranges: List[PlaceholderRange] = []
         curr_offset = -1
         curr_length = 0
         for i in range(len(prompt_token_ids)):
@@ -328,14 +310,8 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
             else:
                 pass
 
-        mm_placeholders = {"image": placeholder_ranges}
-
-        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
-
-        mm_placeholder_ranges = {
-            modality: [item.to_range() for item in placeholders]
-            for modality, placeholders in mm_placeholders.items()
-        }
+        assert len(placeholder_ranges) == mm_items.get_all_counts().get(
+            "image")
 
         return MultiModalInputs(
             type="multimodal",
@@ -343,8 +319,109 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
             prompt_token_ids=prompt_token_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
-            mm_placeholders=mm_placeholder_ranges,
+            mm_placeholders={"image": placeholder_ranges},
         )
+
+    def _get_mm_kwargs_from_mm_data(
+        self,
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalKwargs:
+        tokenizer = self.info.get_tokenizer()
+        images = []
+        image_tokens_list = []
+        for image_data in mm_data_items.get_items("image",
+                                                  ImageProcessorItems):
+            image = ImageChunk(image=image_data)
+            encoding = tokenizer.instruct.mm_encoder(image)
+            image = torch.from_numpy(encoding.image).to(dtype=torch.float16)
+            images.append(image)
+            image_tokens_list.append(encoding.tokens)
+
+        mm_kwargs = self._get_mm_kwargs_from_images(images, image_tokens_list,
+                                                    hf_processor_mm_kwargs)
+
+        mm_item_counts = mm_data_items.get_all_counts()
+        self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
+
+        return mm_kwargs
+
+    def _cached_get_mm_kwargs(
+        self,
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalKwargs:
+        cache = self.cache
+        model_id = self.info.model_id
+
+        _, passthrough_data = self._get_hf_mm_data(mm_data_items)
+        if cache is None or passthrough_data:
+            return self._get_mm_kwargs_from_mm_data(mm_data_items,
+                                                    hf_processor_mm_kwargs)
+
+        mm_maybe_cached_kw_items = {
+            modality: [
+                cache.get(model_id, modality, item, hf_processor_mm_kwargs)
+                for item in items
+            ]
+            for modality, items in mm_data_items.items()
+        }
+
+        mm_missing_idxs = {
+            modality:
+            [idx for idx, item in enumerate(kw_items) if item is None]
+            for modality, kw_items in mm_maybe_cached_kw_items.items()
+        }
+        mm_missing_data = {
+            modality: [mm_data_items[modality][idx] for idx in idxs]
+            for modality, idxs in mm_missing_idxs.items()
+        }
+        mm_missing_data_items = self._to_mm_items(mm_missing_data)
+
+        if not all([
+                len(mm_missing_idxs[modality]) == 0
+                for modality in mm_missing_idxs
+        ]):
+            mm_missing_kwargs = self._get_mm_kwargs_from_mm_data(
+                mm_missing_data_items, hf_processor_mm_kwargs)
+        else:
+            mm_missing_kwargs = {}
+
+        mm_missing_next_idx = {
+            modality: 0
+            for modality in mm_missing_data_items
+        }
+        merged_kw_items = list[MultiModalKwargsItem]()
+        for modality, kw_items in mm_maybe_cached_kw_items.items():
+            for idx, kw_item in enumerate(kw_items):
+                if kw_item is None:
+                    kw_item = mm_missing_kwargs.get_item(
+                        modality,
+                        mm_missing_next_idx[modality],
+                    )
+
+                    cache.put(
+                        model_id,
+                        modality,
+                        mm_data_items[modality][idx],
+                        hf_processor_mm_kwargs,
+                        kw_item,
+                    )
+
+                    mm_missing_next_idx[modality] += 1
+
+                merged_kw_items.append(kw_item)
+
+        if self.enable_sanity_checks:
+            mm_missing_counts = mm_missing_data_items.get_all_counts()
+            assert all(
+                item_count == mm_missing_counts[modality]
+                for modality, item_count in mm_missing_next_idx.items()), dict(
+                    mm_missing_next_idx=mm_missing_next_idx,
+                    mm_missing_counts=mm_missing_counts)
+
+        mm_kwargs = MultiModalKwargs.from_items(merged_kw_items)
+        return mm_kwargs
 
     def _get_prompt_replacements(
         self,
@@ -361,30 +438,36 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
     ) -> Mapping[str, MultiModalFieldConfig]:
         """Output the metadata of each field."""
         return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
+            images=MultiModalFieldConfig.batched("image"),
             image_tokens=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_mm_kwargs_from_images(
-            self, images: list[ImageItem], image_tokens_list: list[list[int]],
-            hf_processor_mm_kwargs: Mapping[str, object]) -> MultiModalKwargs:
+        self,
+        images: list[ImageItem],
+        image_tokens: List[torch.Tensor],
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> MultiModalKwargs:
         # Convert images and image tokens into compatible HF type BatchFeature
         # such that we can reuse from_hf_inputs() which builds the mm kwargs.
-        inputs = BatchFeature(
-            dict(
-                pixel_values=images,
-                image_tokens=image_tokens_list,
-            ))
+        inputs = BatchFeature(dict(
+            images=images,
+            image_tokens=image_tokens,
+        ))
         return MultiModalKwargs.from_hf_inputs(
             inputs,
             self._get_mm_fields_config(inputs, hf_processor_mm_kwargs),
         )
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_pixtral)
-@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_pixtral_image_tokens)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_pixtral)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_pixtral)
+# from vllm.inputs import INPUT_REGISTRY
+# @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_pixtral)
+# @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_pixtral_image_tokens)
+# @INPUT_REGISTRY.register_dummy_data(dummy_data_for_pixtral)
+# @INPUT_REGISTRY.register_input_processor(input_processor_for_pixtral)
+@MULTIMODAL_REGISTRY.register_processor(PixtralMultiModalProcessor,
+                                        info=PixtralProcessingInfo,
+                                        dummy_inputs=PixtralDummyInputsBuilder)
 class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsPP):
 
