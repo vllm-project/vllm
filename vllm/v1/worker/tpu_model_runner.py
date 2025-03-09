@@ -717,11 +717,6 @@ class TPUModelRunner:
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
         )
-        logits_indices = torch.zeros(
-            self.max_num_reqs,
-            dtype=torch.int32,
-            device=self.device,
-        )
 
         if self.is_multimodal_model:
             torch._dynamo.mark_dynamic(inputs_embeds, 0)
