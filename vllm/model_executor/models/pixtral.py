@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+import re
 from dataclasses import dataclass, fields
 from functools import cached_property
 from typing import Iterable, List, Mapping, Optional, Set, Tuple, Union
@@ -255,25 +256,23 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         image_break_id = image_encoder.special_ids.img_break
         image_end_id = image_encoder.special_ids.img_end
 
-        # if prompt is a string, tokenize prompt
-        if isinstance(prompt, str):
-            prompt_token_ids = tokenizer.encode(prompt)
-        else:
-            prompt_token_ids = prompt
-
-        if image_token_id not in prompt_token_ids:
-            raise ValueError(
-                f"You've passed {prompt=} without {image_token_id=}"
-                " Make sure to process your input via mistral_common's"
-                " tokenizer or pass a chat completion request."
-                " For more info, see: "
-                "https://github.com/vllm-project/vllm/issues/8411.")
-
         mm_items = self._to_mm_items(mm_data)
 
-        # Create MM hashes (only used in V1)
-        # TODO: Use these hash keys for caching operations in apply_hf_processor
-        # instead of rehashing.
+        if isinstance(prompt, str):
+            prompt, num_matched_images = re.subn(
+                PIXTRAL_IMAGE_TOKEN,
+                "",
+                prompt,
+            )
+            assert num_matched_images == mm_items.get_all_counts().get("image")
+        else:
+            if image_token_id not in prompt:
+                raise ValueError(
+                    f"You've passed {prompt=} without {image_token_id=}"
+                    " Make sure to process your input via mistral_common's"
+                    " tokenizer or pass a chat completion request."
+                    " For more info, see: "
+                    "https://github.com/vllm-project/vllm/issues/8411.")
 
         if envs.VLLM_USE_V1:
             model_id = self.info.model_id
@@ -291,6 +290,17 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
 
         mm_kwargs = self._cached_get_mm_kwargs(mm_items,
                                                hf_processor_mm_kwargs)
+
+        if isinstance(prompt, str):
+            tokenized_prompt = tokenizer.encode(prompt)
+            # Add all image tokens to the beginning of prompt
+            prompt_token_ids = []
+            for image_elem in mm_kwargs.get_items("image"):
+                prompt_token_ids.extend(
+                    image_elem["image_tokens"].data.tolist())
+            prompt_token_ids.extend(tokenized_prompt)
+        else:
+            prompt_token_ids = prompt
 
         # Get precise tracking of placeholder positions
         placeholder_ranges: List[PlaceholderRange] = []
@@ -338,7 +348,9 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
             images.append(image)
             image_tokens_list.append(encoding.tokens)
 
-        mm_kwargs = self._get_mm_kwargs_from_images(images, image_tokens_list,
+        image_tokens = [torch.tensor(tokens) for tokens in image_tokens_list]
+
+        mm_kwargs = self._get_mm_kwargs_from_images(images, image_tokens,
                                                     hf_processor_mm_kwargs)
 
         mm_item_counts = mm_data_items.get_all_counts()
