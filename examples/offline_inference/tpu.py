@@ -21,7 +21,9 @@ sampling_params = SamplingParams(temperature=0.7,
 
 # Set `enforce_eager=True` to avoid ahead-of-time compilation.
 # In real workloads, `enforace_eager` should be `False`.
-llm = LLM(model="google/gemma-2b", enforce_eager=True)
+llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
+          max_num_batched_tokens=64,
+          max_num_seqs=4)
 outputs = llm.generate(prompts, sampling_params)
 for output, answer in zip(outputs, answers):
     prompt = output.prompt
