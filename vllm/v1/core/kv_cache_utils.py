@@ -557,7 +557,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
 
     per_layer_size = page_size * num_blocks
     # All layers can be represented by the same virtual layer.
-    virtual_layer_map = [[layer_name for layer_name in kv_cache_spec]]
+    virtual_layer_map = [list(kv_cache_spec.keys())]
 
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
