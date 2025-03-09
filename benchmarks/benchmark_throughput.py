@@ -312,6 +312,7 @@ def main(args: argparse.Namespace):
                                args.output_len)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
+    total_prompt_tokens = sum(request.prompt_len for request in requests)
     total_num_tokens = sum(request.prompt_len + request.expected_output_len
                            for request in requests)
     total_output_tokens = sum(request.expected_output_len
@@ -321,9 +322,23 @@ def main(args: argparse.Namespace):
               "following metrics are not accurate because image tokens are not"
               " counted. See vllm-project/vllm/issues/9778 for details.")
         # TODO(vllm-project/vllm/issues/9778): Count molti-modal token length.
-    print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
-          f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
-          f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
+        # Print token counts with better formatting
+    print("=" * 60)
+    print("TOKEN METRICS:")
+    print(f"{'Total prompt tokens:':30} {total_prompt_tokens:10}")
+    print(f"{'Total tokens:':30} {total_num_tokens:10}")
+    print(f"{'Total output tokens:':30} {total_output_tokens:10}")
+    print("=" * 60)
+
+    # Print throughput metrics
+    print("THROUGHPUT:")
+    print(f"{'Requests per second:':30}\
+        {len(requests) / elapsed_time:10.2f}")
+    print(f"{'Total tokens per second:':30}\
+             {total_num_tokens / elapsed_time:10.2f}")
+    print(f"{'Output tokens per second:':30}\
+            {total_output_tokens / elapsed_time:10.2f}")
+    print("=" * 60)
 
     # Output JSON results if specified
     if args.output_json:
@@ -443,8 +458,8 @@ if __name__ == "__main__":
             stacklevel=2)
         args.dataset_path = args.dataset
     if args.dataset is None and args.dataset_path is None:
-        # for random dataset, the default sampling
-        # setting is in benchmark_dataset.RandomDataset
+        # for random dataset, the default sampling setting is in
+        # benchmark_dataset.RandomDataset
         print("When dataset is not set, it will default to random dataset")
     else:
         assert args.input_len is None

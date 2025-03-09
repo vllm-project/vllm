@@ -330,9 +330,6 @@ class ShareGPTDataset(BenchmarkDataset):
             entry for entry in self.data
             if "conversations" in entry and len(entry["conversations"]) >= 2
         ]
-        # Only keep the first two turns of each conversation.
-        self.data = [(data["conversations"][0]["value"],
-                      data["conversations"][1]["value"]) for data in self.data]
         random.shuffle(self.data)
 
     def sample(self,
@@ -346,8 +343,8 @@ class ShareGPTDataset(BenchmarkDataset):
         for entry in self.data:
             if len(samples) >= num_requests:
                 break
-            prompt = entry[0]
-            completion = entry[1]
+            prompt, completion = entry["conversations"][0]["value"],\
+                entry["conversations"][1]["value"]
 
             lora_request, tokenizer = self.get_random_lora_request(
                 tokenizer=tokenizer, max_loras=max_loras, lora_path=lora_path)
