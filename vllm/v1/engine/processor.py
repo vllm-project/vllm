@@ -7,7 +7,7 @@ from typing import Optional, Union
 from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
-from vllm.inputs.parse import is_encoder_decoder_inputs
+from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalHasher,
@@ -135,6 +135,23 @@ class Processor:
                              "speculative decoding.")
         validate_structured_output_request(params)
 
+    def _validate_prompt(self, prompt: PromptType,
+                         lora_request: Optional[LoRARequest]):
+        tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
+        if is_token_prompt(prompt):
+            prompt_ids = prompt["prompt_token_ids"]
+            if len(prompt_ids) == 0:
+                raise ValueError(
+                    "Length of the prompt must be greater than 0.")
+            max_input_id = max(prompt_ids)
+            if max_input_id > tokenizer.max_token_id:
+                raise ValueError(
+                    "Token id {} is out of vocabulary".format(max_input_id))
+        else:
+            # TODO: add more validation for other prompt types.
+            # https://github.com/vllm-project/vllm/issues/14525
+            pass
+
     def process_inputs(
         self,
         request_id: str,
@@ -150,6 +167,7 @@ class Processor:
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
+        self._validate_prompt(prompt, lora_request)
         self._validate_lora(lora_request)
         self._validate_params(params)
         if priority != 0:

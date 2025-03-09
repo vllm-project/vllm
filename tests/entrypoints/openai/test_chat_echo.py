@@ -10,7 +10,6 @@ from ...utils import RemoteOpenAIServer
 
 # # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
-DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 
 
 @pytest.fixture(scope="module")
@@ -22,8 +21,6 @@ def server():
         "--enforce-eager",
         "--max-model-len",
         "4080",
-        "--chat-template",
-        DUMMY_CHAT_TEMPLATE,
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -71,6 +68,7 @@ async def test_chat_session_with_echo_and_continue_final_message(
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
+    print(choice)
     assert choice.finish_reason == "stop"
 
     message = choice.message

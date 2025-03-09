@@ -1460,7 +1460,8 @@ class EngineArgs:
             return False
 
         # Only support Xgrammar for guided decoding so far.
-        if self.guided_decoding_backend != "xgrammar":
+        SUPPORTED_GUIDED_DECODING = ["xgrammar", "xgrammar:nofallback"]
+        if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
             _raise_or_fallback(feature_name="--guided-decoding-backend",
                                recommend_to_remove=False)
             return False

@@ -8,6 +8,7 @@ import jsonschema
 import pytest
 from pydantic import BaseModel
 
+from vllm import envs
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
@@ -15,6 +16,13 @@ from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
+
+# SPDX-License-Identifier: Apache-2.0
+
+# NOTE: since the fixture is at the module level, we cannot
+# use monkeypatch. We set VLLM_USE_V1=0 in test-pipeline.yaml.
+if envs.VLLM_USE_V1:
+    raise NotImplementedError("Only XGrammar is supported on V1.")
 
 
 @pytest.fixture(scope="module")

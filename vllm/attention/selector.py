@@ -92,7 +92,6 @@ def get_attn_backend(
     # value to be returned from the cache if the value changes between calls.
     # To avoid this, we read envs.VLLM_USE_V1 here and pass it explicitly to the
     # private function.
-    print("")
     return _cached_get_attn_backend(
         head_size=head_size,
         dtype=dtype,

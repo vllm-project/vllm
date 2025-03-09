@@ -216,21 +216,21 @@ def test_mistral_format(
     with vllm_runner(
             model,
             dtype=dtype,
-            tokenizer_mode="auto",
-            load_format="safetensors",
-            config_format="hf",
-    ) as hf_format_model:
-        hf_format_outputs = hf_format_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
-
-    with vllm_runner(
-            model,
-            dtype=dtype,
             tokenizer_mode="mistral",
             load_format="mistral",
             config_format="mistral",
     ) as mistral_format_model:
         mistral_format_outputs = mistral_format_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
+
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            tokenizer_mode="auto",
+            load_format="safetensors",
+            config_format="hf",
+    ) as hf_format_model:
+        hf_format_outputs = hf_format_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
     check_logprobs_close(
