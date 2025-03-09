@@ -87,14 +87,14 @@ class KVCacheTensor:
 
 
 @dataclass
-class VirtualLayer:
+class ManagerKVLayer:
     """
-    A dataclass for specifying a virtual layer, which represents multiple layers
-    that can share the same block_table.
+    Represents a set of model layers that share the same KV cache block table.
+    These layers are regarded as one layer in the KV cache manager.
     """
-    # The names of layers represented by this virtual layer
+    # The names of model layers represented by this manager layer
     layer_names: list[str]
-    # The KV cache spec of this virtual layer
+    # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
 
 
@@ -108,20 +108,24 @@ class KVCacheConfig:
     """layer_name -> how to initialize KV cache for that layer"""
     tensors: dict[str, KVCacheTensor]
     """
-    The virtual_layers of the model.
+    The manager_layers of the model.
     The layers in the models are repeated with some patterns, e.g., a model
     with 10 full attention layers and 20 sliding window attention layers can be
-    regarded as repeating the pattern (1 * full, 2 * sw) 10 times. And we regard
-    this pattern as virtual layers (3 virtual layers in this case, each
-    representing 10 layers).
-    The KVCacheManager allocates the blocks for each virtual layer, and the
-    model runner applies the block table of the virtual layer to all layers 
+    regarded as repeating the pattern (1 * full, 2 * sw) 10 times. 
+    The KVCacheManager allocate different block tables for each of the 3 layers
+    in the pattern, and repeat each of them 10 times to generate the 
+    block_table for the 30 layers in the model. 
+    From the view of KVCacheManager, there are only 3 layers, so we call the 3 
+    layers in the pattern "manager layers".
+
+    The KVCacheManager allocates the blocks for each manager layer, and the
+    model runner applies the block table of the manager layer to all layers 
     represented by it.
     For example:
-    1. A model only uses full attention. There is only one virtual layer, 
+    1. A model only uses full attention. There is only one manager layer, 
     and the block table is shared by all layers.
     2. (WIP) A model with 10 full attention layers and 20 sliding window 
-    attention. There are 3 virtual layers (1 * full, 2 * sw), and the block 
-    table of each virtual layer is shared by 10 layers of the same type.
+    attention. There are 3 manager layers (1 * full, 2 * sw), and the block 
+    table of each manager layer is shared by 10 layers of the same type.
     """
-    virtual_layers: list[VirtualLayer]
+    manager_layers: list[ManagerKVLayer]

@@ -8,7 +8,7 @@ from typing import Any, NamedTuple, Optional
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheSpec,
-                                        KVCacheTensor, VirtualLayer)
+                                        KVCacheTensor, ManagerKVLayer)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -486,9 +486,9 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
 
 def create_virtual_layer(
         kv_cache_spec: dict[str, KVCacheSpec],
-        virtual_layer_map: list[list[str]]) -> list[VirtualLayer]:
+        virtual_layer_map: list[list[str]]) -> list[ManagerKVLayer]:
     """
-     Create VirtualLayer object for each virtual layer.
+     Create ManagerKVLayer object for each virtual layer.
      The layers represented by the same virtual layer should share the same 
      KVCacheSpec.
 
@@ -500,9 +500,9 @@ def create_virtual_layer(
              names that represented by the same virtual layer and should share 
              the same KVCacheSpec.
      Returns:
-         A list of VirtualLayer objects, one for each virtual layer.
+         A list of ManagerKVLayer objects, one for each virtual layer.
      """
-    virtual_layers = []
+    manager_layers = []
     for layer_names in virtual_layer_map:
         layer_spec = kv_cache_spec[layer_names[0]]
         assert all(
@@ -510,8 +510,8 @@ def create_virtual_layer(
             for layer_name in layer_names[1:]
         ), ("All layers represented by one virtual layer must share the same "
             "KVCacheSpec.")
-        virtual_layers.append(VirtualLayer(layer_names, layer_spec))
-    return virtual_layers
+        manager_layers.append(ManagerKVLayer(layer_names, layer_spec))
+    return manager_layers
 
 
 def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
@@ -578,7 +578,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
             layer_name: KVCacheTensor(size=per_layer_size)
             for layer_name in kv_cache_spec
         },
-        virtual_layers=create_virtual_layer(kv_cache_spec, virtual_layer_map),
+        manager_layers=create_virtual_layer(kv_cache_spec, virtual_layer_map),
     )
     return kv_cache_config
 
@@ -624,14 +624,14 @@ def make_kv_cache_configs_consistent(kv_cache_configs: list[KVCacheConfig]):
     # Sort the virtual layers by the type_id of the KV cache spec.
     # This can avoid the inconsistency caused by the order of virtual layers.
     for kv_cache_config in kv_cache_configs:
-        kv_cache_config.virtual_layers.sort(
+        kv_cache_config.manager_layers.sort(
             key=lambda x: x.kv_cache_spec.type_id)
 
     # Verify that the virtual layers of each rank are the same.
     for kv_cache_config in kv_cache_configs[1:]:
         for virtual_layer1, virtual_layer2 in zip(
-                kv_cache_configs[0].virtual_layers,
-                kv_cache_config.virtual_layers):
+                kv_cache_configs[0].manager_layers,
+                kv_cache_config.manager_layers):
             assert virtual_layer1.kv_cache_spec == virtual_layer2.kv_cache_spec
 
     # Change the num_blocks of each rank to the smallest among all ranks. We
