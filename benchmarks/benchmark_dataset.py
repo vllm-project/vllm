@@ -94,6 +94,7 @@ class BenchmarkDataset(ABC):
         Raises:
             NotImplementedError: If a subclass does not implement this method.
         """
+        # TODO (jenniferzhao): add support for downloading data
         raise NotImplementedError(
             "load_data must be implemented in subclasses.")
 
@@ -164,8 +165,6 @@ class BenchmarkDataset(ABC):
 # -----------------------------------------------------------------------------
 # Utility Functions and Global Caches
 # -----------------------------------------------------------------------------
-
-VISION_ARENA_DATASET_PATH = "lmarena-ai/vision-arena-bench-v0.1"
 
 
 def is_valid_sequence(
