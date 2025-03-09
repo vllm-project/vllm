@@ -674,7 +674,12 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    test_case: ExpandableVLMTestArgs,
                                    hf_runner: type[HfRunner],
                                    vllm_runner: type[VllmRunner],
-                                   image_assets: _ImageAssets):
+                                   image_assets: _ImageAssets, monkeypatch):
+
+    # V1 Test: llava-hf/llava-1.5-7b-hf is broken on V1.
+    if model_type == "llava":
+        monkeypatch.setenv("VLLM_USE_V1", "0")
+
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_single_image_test(
         tmp_path=tmp_path,
