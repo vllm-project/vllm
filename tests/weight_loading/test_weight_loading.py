@@ -28,6 +28,7 @@ def test_weight_loading(vllm_runner):
             dtype=torch.half if QUANTIZATION == "gptq" else "auto",
             quantization=None if QUANTIZATION == "None" else QUANTIZATION,
             max_model_len=MAX_MODEL_LEN,
+            disable_sliding_window=True,
             tensor_parallel_size=2) as model:
 
         output = model.generate_greedy("Hello world!", max_tokens=20)
