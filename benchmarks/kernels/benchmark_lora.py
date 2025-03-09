@@ -153,7 +153,6 @@ def ref_group_gemm(ref_out: torch.Tensor, input: torch.Tensor,
         result = torch.nn.functional.linear(x, w)
         result *= scaling
         out_list.append(result)
-    torch.cat(out_list, dim=0)
 
     cat_result = torch.cat(out_list, dim=0)
 

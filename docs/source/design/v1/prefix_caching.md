@@ -183,7 +183,7 @@ When a request is finished, we free all its blocks if no other requests are usin
 
 When the head block (least recently used block) of the free queue is cached, we have to evict the block to prevent it from being used by other requests. Specifically, eviction involves the following steps:
 
-1. Pop the block from the head of the free queue. This is the LRU black to be evicted.  
+1. Pop the block from the head of the free queue. This is the LRU block to be evicted.  
 2. Remove the block ID from the Cache Block.  
 3. Remove the block hash.
 
@@ -221,7 +221,7 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 :alt: Example Time 6
 :::
 
-**Time 7: Request 2 comes in with the 33 prompt tokens, where the first 16 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
+**Time 7: Request 2 comes in with the 29 prompt tokens, where the first 12 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
 
 :::{image} /assets/design/v1/prefix_caching/example-time-7.png
 :alt: Example Time 7
