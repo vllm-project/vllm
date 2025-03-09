@@ -290,6 +290,9 @@ class ShareGPTDataset(BenchmarkDataset):
             entry for entry in self.data
             if "conversations" in entry and len(entry["conversations"]) >= 2
         ]
+        # Only keep the first two turns of each conversation.
+        self.data = [(data["conversations"][0]["value"],
+                      data["conversations"][1]["value"]) for data in self.data]
         random.shuffle(self.data)
 
     def sample(self,
@@ -303,28 +306,26 @@ class ShareGPTDataset(BenchmarkDataset):
         for entry in self.data:
             if len(samples) >= num_requests:
                 break
-            prompt = entry["conversations"][0]["value"]
-            completion = entry["conversations"][1]["value"]
+            prompt = entry[0]
+            completion = entry[1]
 
             lora_request, tokenizer = self.get_random_lora_request(
                 tokenizer=tokenizer, max_loras=max_loras, lora_path=lora_path)
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
             prompt_len = len(prompt_ids)
-            output_len = (len(completion_ids)
-                          if output_len is None else output_len)
-            if not is_valid_sequence(
-                    prompt_len,
-                    output_len,
-                    skip_min_output_len_check=output_len is not None
-                    and output_len > 0,
-            ):
+            new_output_len = (len(completion_ids)
+                              if output_len is None else output_len)
+            if not is_valid_sequence(prompt_len,
+                                     new_output_len,
+                                     skip_min_output_len_check=output_len
+                                     is not None):
                 continue
             samples.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
-                    expected_output_len=output_len,
+                    expected_output_len=new_output_len,
                     lora_request=lora_request,
                 ))
         return samples

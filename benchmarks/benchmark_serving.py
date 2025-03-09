@@ -620,10 +620,10 @@ def main(args: argparse.Namespace):
             "random":
             lambda: RandomDataset(dataset_path=args.dataset_path).sample(
                 tokenizer=tokenizer,
+                num_requests=args.num_prompts,
                 prefix_len=args.random_prefix_len,
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
-                num_requests=args.num_prompts,
                 range_ratio=args.random_range_ratio,
             )
         }
