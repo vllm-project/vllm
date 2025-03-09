@@ -142,16 +142,7 @@ def test_end_to_end(model: str, use_v1: bool):
     used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
     # now the memory usage is mostly cudagraph memory pool,
     # and it should be less than the model weights (1B model, 2GiB weights)
-
-    # NOTE: In V1, the memory buffer for logits (max_num_reqs x vocab_size)
-    # is captured but cannot be releasesd from PyTorch due to a known bug,
-    # therefore high memory usage after `llm.sleep` is called is expected.
-    # FIXME(youkaichao & ywang96): Fix memory buffer issue with sleep mode
-    # in V1.
-    if use_v1:
-        assert used_bytes < 7 * GiB_bytes
-    else:
-        assert used_bytes < 2 * GiB_bytes
+    assert used_bytes < 2 * GiB_bytes
 
     llm.wake_up()
     output2 = llm.generate(prompt, sampling_params)
