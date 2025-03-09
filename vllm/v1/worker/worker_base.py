@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -51,7 +51,7 @@ class WorkerBase(WorkerBaseV0):
         self.device: Optional[torch.device] = None
         self.model_runner: Optional[nn.Module] = None
 
-    def get_kv_cache_spec(self) -> Dict[str, KVCacheSpec]:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 

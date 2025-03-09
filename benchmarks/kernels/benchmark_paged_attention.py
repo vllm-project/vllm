@@ -2,7 +2,7 @@
 
 import random
 import time
-from typing import List, Optional
+from typing import Optional
 
 import torch
 
@@ -11,8 +11,9 @@ from vllm.platforms import current_platform
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
                         create_kv_caches_with_random)
 
-NUM_BLOCKS = 1024
+NUM_BLOCKS = 128 * 1024
 PARTITION_SIZE = 512
+PARTITION_SIZE_ROCM = 256
 
 
 @torch.inference_mode()
@@ -54,7 +55,7 @@ def main(
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
-    block_tables_lst: List[List[int]] = []
+    block_tables_lst: list[list[int]] = []
     for _ in range(num_seqs):
         block_table = [
             random.randint(0, NUM_BLOCKS - 1)
@@ -80,6 +81,12 @@ def main(
     # Prepare for the paged attention kernel.
     output = torch.empty_like(query)
     if version == "v2":
+        if current_platform.is_rocm():
+            global PARTITION_SIZE
+            if not args.custom_paged_attn:
+                PARTITION_SIZE = 1024
+            else:
+                PARTITION_SIZE = PARTITION_SIZE_ROCM
         num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
         tmp_output = torch.empty(
             size=(num_seqs, num_query_heads, num_partitions, head_size),
@@ -123,32 +130,53 @@ def main(
                     v_scale,
                 )
             elif version == "v2":
-                ops.paged_attention_v2(
-                    output,
-                    exp_sums,
-                    max_logits,
-                    tmp_output,
-                    query,
-                    key_cache,
-                    value_cache,
-                    num_kv_heads,
-                    scale,
-                    block_tables,
-                    seq_lens,
-                    block_size,
-                    max_seq_len,
-                    alibi_slopes,
-                    kv_cache_dtype,
-                    k_scale,
-                    v_scale,
-                )
+                if not args.custom_paged_attn:
+                    ops.paged_attention_v2(
+                        output,
+                        exp_sums,
+                        max_logits,
+                        tmp_output,
+                        query,
+                        key_cache,
+                        value_cache,
+                        num_kv_heads,
+                        scale,
+                        block_tables,
+                        seq_lens,
+                        block_size,
+                        max_seq_len,
+                        alibi_slopes,
+                        kv_cache_dtype,
+                        k_scale,
+                        v_scale,
+                    )
+                else:
+                    ops.paged_attention_rocm(
+                        output,
+                        exp_sums,
+                        max_logits,
+                        tmp_output,
+                        query,
+                        key_cache,
+                        value_cache,
+                        num_kv_heads,
+                        scale,
+                        block_tables,
+                        seq_lens,
+                        block_size,
+                        max_seq_len,
+                        alibi_slopes,
+                        kv_cache_dtype,
+                        k_scale,
+                        v_scale,
+                    )
             else:
                 raise ValueError(f"Invalid version: {version}")
         torch.cuda.synchronize()
 
         end_time = time.perf_counter()
         if profile:
-            torch.cuda.cudart().cudaProfilerStart()
+            torch.cuda.cudart().cudaProfilerStop()
         return (end_time - start_time) / num_iters
 
     # Warmup.
@@ -195,6 +223,9 @@ if __name__ == '__main__':
         help="Data type for kv cache storage. If 'auto', will use model "
         "data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. "
         "ROCm (AMD GPU) supports fp8 (=fp8_e4m3)")
+    parser.add_argument("--custom-paged-attn",
+                        action="store_true",
+                        help="Use custom paged attention")
     args = parser.parse_args()
     print(args)
 

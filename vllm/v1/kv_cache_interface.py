@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List
 
 import torch
 
@@ -24,9 +23,9 @@ class KVCacheSpec:
     def type_id(self) -> str:
         """
         The type identifier of this KV cache.
-        Return different strings for layers with different KV cache type (e.g., 
-        different number of tokens like full attention vs sliding window 
-        attention, different KV cache size per token like layers with different 
+        Return different strings for layers with different KV cache type (e.g.,
+        different number of tokens like full attention vs sliding window
+        attention, different KV cache size per token like layers with different
         number of heads)
 
         Returns:
@@ -60,6 +59,7 @@ class FullAttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
+    use_mla: bool
 
     @property
     def type_id(self) -> str:
@@ -67,7 +67,9 @@ class FullAttentionSpec(KVCacheSpec):
 
     @property
     def page_size_bytes(self) -> int:
-        return  2 * self.block_size * self.num_kv_heads * self.head_size \
+        # For MLA we only store a single latent vector
+        coef = 1 if self.use_mla else 2
+        return coef * self.block_size * self.num_kv_heads * self.head_size \
                 * get_dtype_size(self.dtype)
 
     def bytes_for_tokens(self, num_tokens: int) -> int:
@@ -91,7 +93,7 @@ class VirtualLayer:
     that can share the same block_table.
     """
     # The names of layers represented by this virtual layer
-    layer_names: List[str]
+    layer_names: list[str]
     # The KV cache spec of this virtual layer
     kv_cache_spec: KVCacheSpec
 
@@ -104,7 +106,7 @@ class KVCacheConfig:
     """The number of KV cache blocks"""
     num_blocks: int
     """layer_name -> how to initialize KV cache for that layer"""
-    tensors: Dict[str, KVCacheTensor]
+    tensors: dict[str, KVCacheTensor]
     """
     The virtual_layers of the model.
     The layers in the models are repeated with some patterns, e.g., a model
@@ -122,4 +124,4 @@ class KVCacheConfig:
     attention. There are 3 virtual layers (1 * full, 2 * sw), and the block 
     table of each virtual layer is shared by 10 layers of the same type.
     """
-    virtual_layers: List[VirtualLayer]
+    virtual_layers: list[VirtualLayer]

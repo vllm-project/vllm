@@ -5,7 +5,6 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future
-from typing import List
 
 import pytest
 from transformers import AutoTokenizer
@@ -103,14 +102,24 @@ def test_engine_core(monkeypatch):
         engine_core.add_request(req)
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0
+        assert engine_core.scheduler.has_unfinished_requests()
+        assert not engine_core.scheduler.has_finished_requests()
 
         _ = engine_core.step()
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 1
+        assert engine_core.scheduler.has_unfinished_requests()
+        assert not engine_core.scheduler.has_finished_requests()
 
         engine_core.abort_requests([request_id])
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 0
+        assert not engine_core.scheduler.has_unfinished_requests()
+        assert engine_core.scheduler.has_finished_requests()
+
+        _ = engine_core.step()
+        assert not engine_core.scheduler.has_unfinished_requests()
+        assert not engine_core.scheduler.has_finished_requests()
 
         # Add, step, abort 1 of the 3.
         req0 = make_request()
@@ -213,7 +222,7 @@ def test_engine_core_concurrent_batches(monkeypatch):
     class DummyExecutor(UniProcExecutor):
 
         def initialize_from_config(
-                self, kv_cache_configs: List[KVCacheConfig]) -> None:
+                self, kv_cache_configs: list[KVCacheConfig]) -> None:
             super().initialize_from_config(kv_cache_configs)
 
             # This executor actually can only run 1 batch at a time

@@ -86,7 +86,7 @@ async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
-    # test List[str]
+    # test list[str]
     input_texts = [
         "The cat sat on the mat.", "A feline was resting on a rug.",
         "Stars twinkle brightly in the night sky."
@@ -106,7 +106,7 @@ async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
     assert embeddings.usage.prompt_tokens == 33
     assert embeddings.usage.total_tokens == 33
 
-    # test List[List[int]]
+    # test list[list[int]]
     input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
                     [25, 32, 64, 77]]
     embedding_response = await client.embeddings.create(
