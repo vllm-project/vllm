@@ -607,18 +607,18 @@ def main(args: argparse.Namespace):
         # For datasets that follow a similar structure, use a mapping.
         dataset_mapping = {
             "sharegpt":
-            lambda: ShareGPTDataset(dataset_path=args.dataset_path, ).sample(
-                tokenizer=tokenizer,
-                num_requests=args.num_prompts,
-                output_len=args.sharegpt_output_len,
-            ),
+            lambda: ShareGPTDataset(random_seed=args.seed,
+                                    dataset_path=args.dataset_path).sample(
+                                        tokenizer=tokenizer,
+                                        num_requests=args.num_prompts,
+                                        output_len=args.sharegpt_output_len,
+                                    ),
             "burstgpt":
-            lambda: BurstGPTDataset(
-                random_seed=args.seed,
-                dataset_path=args.dataset_path,
-            ).sample(tokenizer=tokenizer, num_requests=args.num_prompts),
+            lambda: BurstGPTDataset(random_seed=args.seed,
+                                    dataset_path=args.dataset_path).
+            sample(tokenizer=tokenizer, num_requests=args.num_prompts),
             "random":
-            lambda: RandomDataset(dataset_path=args.dataset_path, ).sample(
+            lambda: RandomDataset(dataset_path=args.dataset_path).sample(
                 tokenizer=tokenizer,
                 prefix_len=args.random_prefix_len,
                 input_len=args.random_input_len,
@@ -628,11 +628,10 @@ def main(args: argparse.Namespace):
             )
         }
 
-        if args.dataset_name in dataset_mapping:
+        try:
             input_requests = dataset_mapping[args.dataset_name]()
-        else:
-            raise ValueError(f"Unknown dataset: {args.dataset_name}")
-
+        except KeyError as err:
+            raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
     goodput_config_dict = check_goodput_args(args)
 
     # Avoid GC processing "static" data - reduce pause times.

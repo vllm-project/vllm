@@ -284,7 +284,8 @@ def get_requests(args, tokenizer):
         common_kwargs["dataset_subset"] = args.hf_subset
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
-
+    # Remove None values
+    sample_kwargs = {k: v for k, v in sample_kwargs.items() if v is not None}
     return dataset_cls(**common_kwargs).sample(**sample_kwargs)
 
 
@@ -363,7 +364,8 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default=None,
-        help="(Deprecated)Path to the dataset. The dataset is expected to "
+        help="Path to the ShareGPT dataset, will be deprecated in\
+            the next release. The dataset is expected to "
         "be a json in form of list[dict[..., conversations: "
         "list[dict[..., value: <prompt_or_response>]]]]")
     parser.add_argument("--dataset-path",
@@ -419,7 +421,8 @@ if __name__ == "__main__":
     parser.add_argument("--prefix-len",
                         type=int,
                         default=None,
-                        help="Number of prefix tokens per request")
+                        help="Number of prefix tokens per request."
+                        "This is for the RandomDataset and SonnetDataset")
     # HF
     parser.add_argument("--hf-subset",
                         type=str,
@@ -443,9 +446,11 @@ if __name__ == "__main__":
     if args.tokenizer is None:
         args.tokenizer = args.model
     if args.dataset is not None:
-        warnings.warn("--dataset is deprecated",
-                      DeprecationWarning,
-                      stacklevel=2)
+        warnings.warn(
+            "The '--dataset' argument will be deprecated in the next "
+            "release. Please use '--dataset-name' and "
+            "'--dataset-path' in the future runs.",
+            stacklevel=2)
         args.dataset_path = args.dataset
     if args.dataset is None and args.dataset_path is None:
         # for random dataset, the default sampling

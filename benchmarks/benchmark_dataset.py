@@ -87,7 +87,7 @@ class BenchmarkDataset(ABC):
 
     def get_random_lora_request(
         self,
-        tokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         max_loras: Optional[int] = None,
         lora_path: Optional[str] = None,
     ) -> tuple[Optional[LoRARequest], AnyTokenizer]:
@@ -114,8 +114,8 @@ class BenchmarkDataset(ABC):
         return lora_request, lora_tokenizer_cache[lora_id] or tokenizer
 
     @abstractmethod
-    def sample(self,
-               tokenizer: PreTrainedTokenizerBase) -> list[SampleRequest]:
+    def sample(self, tokenizer: PreTrainedTokenizerBase,
+               num_requests: int) -> list[SampleRequest]:
         """
         Generate sample requests from the dataset.
         """
@@ -216,7 +216,6 @@ class RandomDataset(BenchmarkDataset):
     DEFAULT_RANGE_RATIO = 1.0
     DEFAULT_INPUT_LEN = 1024
     DEFAULT_OUTPUT_LEN = 128
-    DEFAULT_NUM_REQUESTS = 1000
 
     def __init__(
         self,
@@ -226,22 +225,12 @@ class RandomDataset(BenchmarkDataset):
 
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
+               num_requests: int,
                prefix_len: int = DEFAULT_PREFIX_LEN,
                range_ratio: float = DEFAULT_RANGE_RATIO,
                input_len: int = DEFAULT_INPUT_LEN,
                output_len: int = DEFAULT_OUTPUT_LEN,
-               num_requests: int = DEFAULT_NUM_REQUESTS,
                **kwargs) -> list[SampleRequest]:
-        prefix_len = (prefix_len
-                      if prefix_len is not None else self.DEFAULT_PREFIX_LEN)
-        range_ratio = (range_ratio if range_ratio is not None else
-                       self.DEFAULT_RANGE_RATIO)
-        input_len = (input_len
-                     if input_len is not None else self.DEFAULT_INPUT_LEN)
-        output_len = (output_len
-                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
-        num_requests = (num_requests if num_requests is not None else
-                        self.DEFAULT_NUM_REQUESTS)
 
         vocab_size = tokenizer.vocab_size
 
@@ -285,7 +274,6 @@ class ShareGPTDataset(BenchmarkDataset):
     Implements the ShareGPT dataset.  Loads data from a JSON file and generates
     sample requests based on conversation turns.
     """
-    DEFAULT_NUM_REQUESTS = 1000
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -306,9 +294,9 @@ class ShareGPTDataset(BenchmarkDataset):
 
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
+               num_requests: int,
                lora_path: Optional[str] = None,
                max_loras: Optional[int] = None,
-               num_requests: int = DEFAULT_NUM_REQUESTS,
                output_len: Optional[int] = None,
                **kwargs) -> list:
         samples: list = []
@@ -357,7 +345,6 @@ class SonnetDataset(BenchmarkDataset):
     DEFAULT_PREFIX_LEN = 200
     DEFAULT_INPUT_LEN = 550
     DEFAULT_OUTPUT_LEN = 150
-    DEFAULT_NUM_REQUESTS = 1000
 
     def __init__(
         self,
@@ -374,20 +361,13 @@ class SonnetDataset(BenchmarkDataset):
 
     def sample(self,
                tokenizer,
+               num_requests: int,
                prefix_len: int = DEFAULT_PREFIX_LEN,
                input_len: int = DEFAULT_INPUT_LEN,
                output_len: int = DEFAULT_OUTPUT_LEN,
-               num_requests: int = DEFAULT_NUM_REQUESTS,
                return_prompt_formatted: bool = False,
                **kwargs) -> list:
         # Calculate average token length for a poem line.
-        prefix_len = (self.DEFAULT_PREFIX_LEN
-                      if prefix_len is None else prefix_len)
-        input_len = (self.DEFAULT_INPUT_LEN
-                     if input_len is None else input_len)
-        output_len = (self.DEFAULT_OUTPUT_LEN
-                      if output_len is None else output_len)
-
         tokenized_lines = [tokenizer(line).input_ids for line in self.data]
         avg_len = sum(len(tokens)
                       for tokens in \
@@ -440,7 +420,6 @@ class BurstGPTDataset(BenchmarkDataset):
     sample requests based on synthetic prompt generation. Only rows with Model
     "GPT-4" and positive response tokens are used.
     """
-    DEFAULT_NUM_REQUESTS = 1000
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -458,7 +437,7 @@ class BurstGPTDataset(BenchmarkDataset):
         # Sample the desired number of rows.
         self.data = gpt4_df
 
-    def _sample_loaded_data(self, num_requests: int = DEFAULT_NUM_REQUESTS):
+    def _sample_loaded_data(self, num_requests: int) -> list:
         if num_requests <= len(self.data):
             data = self.data.sample(n=num_requests,
                                     random_state=self.random_seed)
@@ -473,7 +452,7 @@ class BurstGPTDataset(BenchmarkDataset):
 
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
-               num_requests: int = DEFAULT_NUM_REQUESTS,
+               num_requests: int,
                max_loras: Optional[int] = None,
                lora_path: Optional[str] = None,
                **kwargs) -> list[SampleRequest]:
@@ -543,7 +522,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
-               num_requests: int = DEFAULT_NUM_REQUESTS,
+               num_requests: int,
                lora_path: Optional[str] = None,
                max_loras: Optional[int] = None,
                output_len: Optional[int] = None,
@@ -626,8 +605,8 @@ class VisionArenaDataset(BenchmarkDataset):
 
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
+               num_requests: int,
                output_len: int = DEFAULT_OUTPUT_LEN,
-               num_requests: int = DEFAULT_NUM_REQUESTS,
                **kwargs) -> list:
         # TODO (jenniferzhao): Add support for offline benchmark sampling
         output_len = (output_len
