@@ -11,10 +11,8 @@ from typing import Any, Optional, Union
 
 import torch
 import uvloop
-from benchmark_dataset import (VISION_ARENA_DATASET_PATH, BurstGPTDataset,
-                               HuggingFaceDataset, RandomDataset,
-                               SampleRequest, ShareGPTDataset, SonnetDataset,
-                               VisionArenaDataset)
+from benchmark_dataset import (BurstGPTDataset, RandomDataset, SampleRequest,
+                               ShareGPTDataset, SonnetDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -274,14 +272,6 @@ def get_requests(args, tokenizer):
         sample_kwargs["return_prompt_formatted"] = True
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
-    elif args.dataset_name == "hf":
-        if args.dataset_path == \
-            VISION_ARENA_DATASET_PATH and args.hf_subset is None:
-            dataset_cls = VisionArenaDataset
-        else:
-            dataset_cls = HuggingFaceDataset
-        common_kwargs["dataset_split"] = args.hf_split
-        common_kwargs["dataset_subset"] = args.hf_subset
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
     # Remove None values

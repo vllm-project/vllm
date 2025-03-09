@@ -576,6 +576,7 @@ class VisionArenaDataset(BenchmarkDataset):
 
     DEFAULT_OUTPUT_LEN = 128
     DEFAULT_NUM_REQUESTS = 1000
+    VISION_ARENA_DATASET_PATH = "lmarena-ai/vision-arena-bench-v0.1"
 
     def __init__(
         self,
@@ -587,7 +588,7 @@ class VisionArenaDataset(BenchmarkDataset):
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
 
-        if self.dataset_path != VISION_ARENA_DATASET_PATH:
+        if self.dataset_path != self.VISION_ARENA_DATASET_PATH:
             raise ValueError(f"Only support Vision Arena dataset.\
                     This data path {self.dataset_path} is not valid.")
         if self.dataset_subset is None and self.dataset_split != "train":
