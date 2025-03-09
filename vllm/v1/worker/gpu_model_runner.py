@@ -1268,6 +1268,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             min_tokens={},
             logit_bias=[None for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
+            bad_words_token_ids={},
         )
         sampler_output = self.model.sample(logits=logits,
                                            sampling_metadata=dummy_metadata)
