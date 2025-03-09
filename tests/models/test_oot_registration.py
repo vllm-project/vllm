@@ -53,7 +53,10 @@ image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
 
 @fork_new_process_for_each_test
-def test_oot_registration_multimodal(dummy_llava_path):
+def test_oot_registration_multimodal(dummy_llava_path, monkeypatch):
+    # V1: llava-hf/llava-1.5-7b-hf is broken on main for V1.
+    # https://github.com/vllm-project/vllm/issues/14523
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     os.environ["VLLM_PLUGINS"] = "register_dummy_model"
     prompts = [{
         "prompt": "What's in the image?<image>",
