@@ -23,7 +23,7 @@
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.
 
-Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evloved into a community-driven project with contributions from both academia and industry.
+Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evolved into a community-driven project with contributions from both academia and industry.
 
 vLLM is fast with:
 
@@ -101,6 +101,15 @@ features/compatibility_matrix
 % Details about running vLLM
 
 :::{toctree}
+:caption: Training
+:maxdepth: 1
+
+training/trl.md
+training/rlhf.md
+
+:::
+
+:::{toctree}
 :caption: Inference and Serving
 :maxdepth: 1
 
@@ -157,7 +166,9 @@ design/multiprocessing
 :caption: V1 Design Documents
 :maxdepth: 2
 
+design/v1/torch_compile
 design/v1/prefix_caching
+design/v1/metrics
 :::
 
 % How to contribute to the vLLM project

@@ -17,7 +17,6 @@ from transformers.models.pixtral.modeling_pixtral import (
     PixtralRotaryEmbedding, apply_rotary_pos_emb, position_ids_in_meshgrid)
 
 from vllm import envs
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
@@ -41,10 +40,10 @@ from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
-from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges)
+from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import IntermediateTensors, SequenceData
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               cached_tokenizer_from_config)
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (init_vllm_registered_model, maybe_prefix,
@@ -61,9 +60,7 @@ PIXTRAL_IMAGE_TOKEN = "[IMG]"
 
 
 def get_max_pixtral_image_tokens(ctx: InputContext):
-    tokenizer = cached_get_tokenizer(
-        ctx.model_config.tokenizer,
-        tokenizer_mode=ctx.model_config.tokenizer_mode)
+    tokenizer = cached_tokenizer_from_config(ctx.model_config)
     mm_encoder = tokenizer.instruct.mm_encoder
 
     image_config = mm_encoder.mm_config if hasattr(
@@ -77,15 +74,13 @@ def get_max_pixtral_image_tokens(ctx: InputContext):
 
 def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
                            mm_counts: Mapping[str, int]):
-    tokenizer = cached_get_tokenizer(
-        ctx.model_config.tokenizer,
-        tokenizer_mode=ctx.model_config.tokenizer_mode)
+    tokenizer = cached_tokenizer_from_config(ctx.model_config)
 
     mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
     image_token_id = mm_encoder.special_ids.img
 
     mm_config = ctx.get_mm_config()
-    num_images = mm_config.limit_per_prompt.get("image", 1)
+    num_images = mm_config.get_limit_per_prompt("image")
 
     # dummy size
     size = 256
@@ -121,9 +116,7 @@ def input_mapper_for_pixtral(ctx: InputContext,
         MultiModalKwargs containing the stacked normalized images tensor or
         image embeddings.
     """
-    model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(
-        model_config.tokenizer, tokenizer_mode=model_config.tokenizer_mode)
+    tokenizer = cached_tokenizer_from_config(ctx.model_config)
 
     data_list = data if isinstance(data, list) else [data]
 
@@ -150,9 +143,7 @@ def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
 
     prompt_token_ids = inputs.get("prompt_token_ids")
     prompt = inputs.get("prompt")
-    tokenizer = cached_get_tokenizer(
-        ctx.model_config.tokenizer,
-        tokenizer_mode=ctx.model_config.tokenizer_mode)
+    tokenizer = cached_tokenizer_from_config(ctx.model_config)
 
     mm_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
     image_token_id = mm_encoder.special_ids.img
@@ -193,9 +184,7 @@ def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
 class PixtralProcessingInfo(BaseProcessingInfo):
 
     def get_tokenizer(self) -> AnyTokenizer:
-        return cached_get_tokenizer(
-            self.ctx.model_config.tokenizer,
-            tokenizer_mode=self.ctx.model_config.tokenizer_mode)
+        return cached_tokenizer_from_config(self.ctx.model_config)
 
     def get_hf_processor(self):
         raise ValueError(
@@ -443,7 +432,9 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return get_sampler()
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input, image_tokens = self._parse_and_validate_image_input(
             **kwargs)
         if image_input is None:
@@ -492,8 +483,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -513,8 +502,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 
@@ -1183,7 +1170,7 @@ class PixtralHFTransformer(nn.Module):
         position_embeddings: torch.Tensor,
         return_all_hidden_states: bool,
     ) -> torch.Tensor:
-        hidden_states_pool = []
+        hidden_states_pool = [x]
 
         for layer in self.layers:
             x = layer(x, attention_mask, position_embeddings)
@@ -1267,9 +1254,13 @@ class PixtralHFVisionModel(nn.Module):
             for img in pixel_values
         ]
 
+        patch_embeds = [
+            p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list
+        ]
+        embed_sizes = [p.shape[1] for p in patch_embeds]
+
         # flatten to a single sequence
-        patch_embeds = torch.cat(
-            [p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list], dim=1)
+        patch_embeds = torch.cat(patch_embeds, dim=1)
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
@@ -1300,6 +1291,8 @@ class PixtralHFVisionModel(nn.Module):
         out = resolve_visual_encoder_outputs(out, feature_sample_layers, None,
                                              self.config.num_hidden_layers)
 
+        # squeeze dim 0 and split into separate tensors for each image
+        out = torch.split(torch.squeeze(out), embed_sizes)
         return out
 
     # (TODO) Add prefix argument for filtering out weights to be loaded

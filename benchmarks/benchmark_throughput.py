@@ -3,13 +3,15 @@
 import argparse
 import dataclasses
 import json
+import os
 import random
 import time
 from functools import cache
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Optional, Union
 
 import torch
 import uvloop
+from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from PIL import Image
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -18,7 +20,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args)
-from vllm.inputs import TextPrompt
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
@@ -72,12 +74,12 @@ def lora_path_on_disk(lora_path: str) -> str:
     return get_adapter_absolute_path(lora_path)
 
 
-lora_tokenizer_cache: Dict[int, AnyTokenizer] = {}
+lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
 
 
 def get_random_lora_request(
         args: argparse.Namespace
-) -> Tuple[LoRARequest, Optional[AnyTokenizer]]:
+) -> tuple[LoRARequest, Optional[AnyTokenizer]]:
     global lora_tokenizer_cache
     lora_id = random.randint(1, args.max_loras)
     lora_request = LoRARequest(lora_name=str(lora_id),
@@ -89,7 +91,7 @@ def get_random_lora_request(
 
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
-                    args: argparse.Namespace) -> List[SampleRequest]:
+                    args: argparse.Namespace) -> list[SampleRequest]:
 
     dataset_path: str = args.dataset
     num_requests: int = args.num_prompts
@@ -107,7 +109,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
     random.shuffle(dataset)
 
     # Filter out sequences that are too long or too short
-    filtered_dataset: List[SampleRequest] = []
+    filtered_dataset: list[SampleRequest] = []
     for data in tqdm(dataset,
                      total=len(filtered_dataset),
                      desc="sampling requests"):
@@ -163,18 +165,27 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
 
 
 def run_vllm(
-    requests: List[SampleRequest],
+    requests: list[SampleRequest],
     n: int,
     engine_args: EngineArgs,
+    disable_detokenize: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
-
+    assert all(
+        llm.llm_engine.model_config.max_model_len >= (
+            request.prompt_len + request.expected_output_len)
+        for request in requests), (
+            "Please ensure that max_model_len is greater than the sum of"
+            " prompt_len and expected_output_len for all requests.")
     # Add the requests to the engine.
-    prompts: List[TextPrompt] = []
-    sampling_params: List[SamplingParams] = []
+    prompts: list[Union[TextPrompt, TokensPrompt]] = []
+    sampling_params: list[SamplingParams] = []
     for request in requests:
         prompts.append(
+            TokensPrompt(prompt_token_ids=request.prompt["prompt_token_ids"],
+                       multi_modal_data=request.multi_modal_data)
+            if "prompt_token_ids" in request.prompt else \
             TextPrompt(prompt=request.prompt,
                        multi_modal_data=request.multi_modal_data))
         sampling_params.append(
@@ -184,8 +195,9 @@ def run_vllm(
                 top_p=1.0,
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
+                detokenize=not disable_detokenize,
             ))
-    lora_requests: Optional[List[LoRARequest]] = None
+    lora_requests: Optional[list[LoRARequest]] = None
     if engine_args.enable_lora:
         lora_requests = [request.lora_request for request in requests]
 
@@ -218,22 +230,32 @@ def run_vllm(
 
 
 async def run_vllm_async(
-    requests: List[SampleRequest],
+    requests: list[SampleRequest],
     n: int,
     engine_args: AsyncEngineArgs,
     disable_frontend_multiprocessing: bool = False,
+    disable_detokenize: bool = False,
 ) -> float:
     from vllm import SamplingParams
 
     async with build_async_engine_client_from_engine_args(
             engine_args, disable_frontend_multiprocessing) as llm:
+        assert all(
+            llm.model_config.max_model_len >= (request.prompt_len +
+                                               request.expected_output_len)
+            for request in requests), (
+                "Please ensure that max_model_len is greater than the sum of"
+                " prompt_len and expected_output_len for all requests.")
 
         # Add the requests to the engine.
-        prompts: List[TextPrompt] = []
-        sampling_params: List[SamplingParams] = []
-        lora_requests: List[Optional[LoRARequest]] = []
+        prompts: list[Union[TextPrompt, TokensPrompt]] = []
+        sampling_params: list[SamplingParams] = []
+        lora_requests: list[Optional[LoRARequest]] = []
         for request in requests:
             prompts.append(
+                TokensPrompt(prompt_token_ids=request.prompt["prompt_token_ids"],
+                        multi_modal_data=request.multi_modal_data)
+                if "prompt_token_ids" in request.prompt else \
                 TextPrompt(prompt=request.prompt,
                            multi_modal_data=request.multi_modal_data))
             sampling_params.append(
@@ -243,6 +265,7 @@ async def run_vllm_async(
                     top_p=1.0,
                     ignore_eos=True,
                     max_tokens=request.expected_output_len,
+                    detokenize=not disable_detokenize,
                 ))
             lora_requests.append(request.lora_request)
 
@@ -263,12 +286,13 @@ async def run_vllm_async(
 
 
 def run_hf(
-    requests: List[SampleRequest],
+    requests: list[SampleRequest],
     model: str,
     tokenizer: PreTrainedTokenizerBase,
     n: int,
     max_batch_size: int,
     trust_remote_code: bool,
+    disable_detokenize: bool = False,
 ) -> float:
     llm = AutoModelForCausalLM.from_pretrained(
         model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
@@ -279,7 +303,7 @@ def run_hf(
 
     pbar = tqdm(total=len(requests))
     start = time.perf_counter()
-    batch: List[str] = []
+    batch: list[str] = []
     max_prompt_len = 0
     max_output_len = 0
     for i in range(len(requests)):
@@ -308,8 +332,9 @@ def run_hf(
             use_cache=True,
             max_new_tokens=max_output_len,
         )
-        # Include the decoding time.
-        tokenizer.batch_decode(llm_outputs, skip_special_tokens=True)
+        if not disable_detokenize:
+            # Include the decoding time.
+            tokenizer.batch_decode(llm_outputs, skip_special_tokens=True)
         pbar.update(len(batch))
 
         # Clear the batch.
@@ -321,7 +346,7 @@ def run_hf(
 
 
 def run_mii(
-    requests: List[SampleRequest],
+    requests: list[SampleRequest],
     model: str,
     tensor_parallel_size: int,
     output_len: int,
@@ -336,6 +361,24 @@ def run_mii(
     client = client(model)
     client.terminate_server()
     return end - start
+
+
+def save_to_pytorch_benchmark_format(args: argparse.Namespace,
+                                     results: dict[str, Any]) -> None:
+    pt_records = convert_to_pytorch_benchmark_format(
+        args=args,
+        metrics={
+            "requests_per_second": [results["requests_per_second"]],
+            "tokens_per_second": [results["tokens_per_second"]],
+        },
+        extra_info={
+            k: results[k]
+            for k in ["elapsed_time", "num_requests", "total_num_tokens"]
+        })
+    if pt_records:
+        # Don't use json suffix here as we don't want CI to pick it up
+        pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch.json"
+        write_to_json(pt_file, pt_records)
 
 
 def main(args: argparse.Namespace):
@@ -362,24 +405,29 @@ def main(args: argparse.Namespace):
                 random.randint(0, vocab_size - 1)
                 for _ in range(args.input_len)
             ]
-            # As tokenizer may add additional tokens like BOS, we need to try
-            # different lengths to get the desired input length.
-            for _ in range(5):  # Max attempts to correct
-                candidate_prompt = request_tokenizer.decode(candidate_ids)
-                tokenized_len = len(request_tokenizer.encode(candidate_prompt))
 
-                if tokenized_len == args.input_len:
-                    break
+            candidate_prompt = {"prompt_token_ids": candidate_ids}
 
-                # Adjust length based on difference
-                diff = args.input_len - tokenized_len
-                if diff > 0:
-                    candidate_ids.extend([
-                        random.randint(100, vocab_size - 100)
-                        for _ in range(diff)
-                    ])
-                else:
-                    candidate_ids = candidate_ids[:diff]
+            if not args.skip_tokenizer_init:
+                # As tokenizer may add additional tokens like BOS, we need
+                # to try different lengths to get the desired input length.
+                for _ in range(5):  # Max attempts to correct
+                    candidate_prompt = request_tokenizer.decode(candidate_ids)
+                    tokenized_len = len(
+                        request_tokenizer.encode(candidate_prompt))
+
+                    if tokenized_len == args.input_len:
+                        break
+
+                    # Adjust length based on difference
+                    diff = args.input_len - tokenized_len
+                    if diff > 0:
+                        candidate_ids.extend([
+                            random.randint(100, vocab_size - 100)
+                            for _ in range(diff)
+                        ])
+                    else:
+                        candidate_ids = candidate_ids[:diff]
             requests.append(
                 SampleRequest(prompt=candidate_prompt,
                               prompt_len=args.input_len,
@@ -398,14 +446,17 @@ def main(args: argparse.Namespace):
                     args.n,
                     AsyncEngineArgs.from_cli_args(args),
                     args.disable_frontend_multiprocessing,
+                    args.disable_detokenize,
                 ))
         else:
             elapsed_time = run_vllm(requests, args.n,
-                                    EngineArgs.from_cli_args(args))
+                                    EngineArgs.from_cli_args(args),
+                                    args.disable_detokenize)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
-                              args.hf_max_batch_size, args.trust_remote_code)
+                              args.hf_max_batch_size, args.trust_remote_code,
+                              args.disable_detokenize)
     elif args.backend == "mii":
         elapsed_time = run_mii(requests, args.model, args.tensor_parallel_size,
                                args.output_len)
@@ -435,6 +486,7 @@ def main(args: argparse.Namespace):
         }
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
+        save_to_pytorch_benchmark_format(args, results)
 
 
 if __name__ == "__main__":
@@ -447,8 +499,8 @@ if __name__ == "__main__":
                         type=str,
                         default=None,
                         help="Path to the dataset. The dataset is expected to "
-                        "be a json in form of List[Dict[..., conversations: "
-                        "List[Dict[..., value: <prompt_or_response>]]]]")
+                        "be a json in form of list[dict[..., conversations: "
+                        "list[dict[..., value: <prompt_or_response>]]]]")
     parser.add_argument("--input-len",
                         type=int,
                         default=None,
@@ -483,6 +535,11 @@ if __name__ == "__main__":
                         action='store_true',
                         default=False,
                         help="Disable decoupled async engine frontend.")
+    parser.add_argument(
+        "--disable-detokenize",
+        action="store_true",
+        help=("Do not detokenize the response (i.e. do not include "
+              "detokenization time in the measurement)"))
     # LoRA
     parser.add_argument(
         "--lora-path",
