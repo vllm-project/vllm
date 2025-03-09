@@ -267,3 +267,4 @@ def test_guided_choice_completion(monkeypatch, sample_guided_choice,
         assert generated_text is not None
         assert generated_text in sample_guided_choice
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
