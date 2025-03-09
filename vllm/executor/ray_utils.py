@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
+import vllm.envs as envs
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
@@ -342,7 +343,7 @@ def initialize_ray_cluster(
                 device_str)
         # Create a new placement group
         placement_group_specs: List[Dict[str, float]] = ([{
-            device_str: 1.0
+            device_str: envs.VLLM_RAY_PER_WORKER_GPUS if device_str == "GPU" else 1.0
         } for _ in range(parallel_config.world_size)])
 
         # vLLM engine is also a worker to execute model with an accelerator,
