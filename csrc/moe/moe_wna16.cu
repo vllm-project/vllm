@@ -41,14 +41,6 @@ __global__ void moe_wna16_gemm_kernel(
     const int32_t offset_k = blockIdx.z * BLOCK_SIZE_K;
 
     const int32_t expert_id = expert_ids[blockIdx.x];
-    const int8_t pack_factor = 32 / bit;
-
-    // note that (size_n * size_k * expert_id) may greater than 2 ** 31
-    const uint64_t expert_offset = ((uint64_t)size_n) * size_k * expert_id;
-    const uint32_t* expert_qweight = qweight + expert_offset / pack_factor;
-    const scalar_t* expert_scales = scales + expert_offset / group_size;
-    const uint32_t* expert_qzeros =
-        qzeros + expert_offset / group_size / pack_factor;
 
     int32_t num_valid_tokens = 0;
     extern __shared__ uint16_t block_input_tmp[];
@@ -65,30 +57,33 @@ __global__ void moe_wna16_gemm_kernel(
       if (blockIdx.z == 0 && offset_n < size_n)
         output[token_index * size_n + offset_n] = Dtype::int2num(0);
 
-      int k_per_thread = DIVIDE(BLOCK_SIZE_K, BLOCK_SIZE_N);
-      for (int i = 0; i < k_per_thread; i++) {
-        int k = BLOCK_SIZE_N * i + threadIdx.x;
-        if (k >= BLOCK_SIZE_K) break;
-        if (offset_k + k >= size_k) break;
+      if (expert_id != -1) {
+        int k_per_thread = DIVIDE(BLOCK_SIZE_K, BLOCK_SIZE_N);
+        for (int i = 0; i < k_per_thread; i++) {
+          int k = BLOCK_SIZE_N * i + threadIdx.x;
+          if (k >= BLOCK_SIZE_K) break;
+          if (offset_k + k >= size_k) break;
 
-        // load input to shared memory
-        // use a special layout to fit the layout of dequanted-weight
-        int origin_k;
-        if constexpr (bit == 4) {
-          // [0, 4, 1, 5, 2, 6, 3, 7]
-          int8_t order = (threadIdx.x % 2) * 4 + ((threadIdx.x % 8) / 2);
-          origin_k = BLOCK_SIZE_N * i + threadIdx.x / 8 * 8 + order;
-        } else {
-          // [0, 2, 1, 3]
-          int8_t order = (threadIdx.x % 2) * 2 + ((threadIdx.x % 4) / 2);
-          origin_k = BLOCK_SIZE_N * i + threadIdx.x / 4 * 4 + order;
+          // load input to shared memory
+          // use a special layout to fit the layout of dequanted-weight
+          int origin_k;
+          if constexpr (bit == 4) {
+            // [0, 4, 1, 5, 2, 6, 3, 7]
+            int8_t order = (threadIdx.x % 2) * 4 + ((threadIdx.x % 8) / 2);
+            origin_k = BLOCK_SIZE_N * i + threadIdx.x / 8 * 8 + order;
+          } else {
+            // [0, 2, 1, 3]
+            int8_t order = (threadIdx.x % 2) * 2 + ((threadIdx.x % 4) / 2);
+            origin_k = BLOCK_SIZE_N * i + threadIdx.x / 4 * 4 + order;
+          }
+
+          origin_k += token_index / top_k * size_k + blockIdx.z * BLOCK_SIZE_K;
+          block_input[m * BLOCK_SIZE_K + k] = input[origin_k];
         }
-
-        origin_k += token_index / top_k * size_k + blockIdx.z * BLOCK_SIZE_K;
-        block_input[m * BLOCK_SIZE_K + k] = input[origin_k];
       }
     }
 
+    if (expert_id == -1) return;
     __syncthreads();
     if (threadIdx.x >= BLOCK_SIZE_N || offset_n >= size_n) return;
 
@@ -96,6 +91,14 @@ __global__ void moe_wna16_gemm_kernel(
     scalar_t2 res2;
     scalar_t2 scale_f2;
     scalar_t2 qzero_f2;
+
+    // note that (size_n * size_k * expert_id) may greater than 2 ** 31
+    constexpr int8_t pack_factor = 32 / bit;
+    const uint64_t expert_offset = ((uint64_t)size_n) * size_k * expert_id;
+    const uint32_t* expert_qweight = qweight + expert_offset / pack_factor;
+    const scalar_t* expert_scales = scales + expert_offset / group_size;
+    const uint32_t* expert_qzeros =
+        qzeros + expert_offset / group_size / pack_factor;
 
     // load 4*int32 one time: 4 int32 = 128 bit = 1 float4
     // weight would be loaded in loop
