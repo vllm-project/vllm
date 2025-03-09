@@ -48,7 +48,7 @@ class PunicaWrapperABC(ABC):
         lora_a_stacked: Tuple[torch.Tensor, ...],
         scale: float,
         **kwargs,
-    ) -> None:
+    ) -> Optional[torch.Tensor]:
         """
         Performs GEMM  for multiple slices of lora_a.
         """
@@ -66,7 +66,7 @@ class PunicaWrapperABC(ABC):
         offset_start: int = 0,
         add_inputs=True,
         **kwargs,
-    ) -> None:
+    ) -> Optional[torch.Tensor]:
         """
         Performs GEMM and bias addition for multiple slices of lora_b.
         """
@@ -80,7 +80,7 @@ class PunicaWrapperABC(ABC):
         lora_b_stacked: torch.Tensor,
         add_inputs: bool = True,
         **kwargs,
-    ) -> None:
+    ) -> Optional[torch.Tensor]:
         """
         Applies lora  specifically for VocabParallelEmbeddingWithLoRA, 
         and this layer only requires the expand operation.
@@ -98,7 +98,7 @@ class PunicaWrapperABC(ABC):
                         output_slices: Tuple[int, ...],
                         *,
                         buffer: Optional[Tuple[torch.Tensor, ...]] = None,
-                        **kwargs) -> None:
+                        **kwargs) -> Optional[torch.Tensor]:
         """
         Applicable to linear-related lora. 
         """
@@ -114,7 +114,7 @@ class PunicaWrapperABC(ABC):
                         scale,
                         *,
                         buffer: Optional[torch.Tensor] = None,
-                        **kwargs) -> None:
+                        **kwargs) -> Optional[torch.Tensor]:
         """
         Applies lora  specifically for LogitsProcessorWithLoRA.
         """
