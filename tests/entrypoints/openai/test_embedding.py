@@ -13,7 +13,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
+MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 
 
@@ -27,7 +27,7 @@ def server():
         "bfloat16",
         "--enforce-eager",
         "--max-model-len",
-        "8192",
+        "512",
         "--chat-template",
         DUMMY_CHAT_TEMPLATE,
     ]
@@ -60,10 +60,10 @@ async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
-    assert embeddings.usage.prompt_tokens == 9
-    assert embeddings.usage.total_tokens == 9
+    assert embeddings.usage.prompt_tokens == 11
+    assert embeddings.usage.total_tokens == 11
 
     # test using token IDs
     input_tokens = [1, 1, 1, 1, 1]
@@ -77,7 +77,7 @@ async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 5
     assert embeddings.usage.total_tokens == 5
@@ -86,7 +86,7 @@ async def test_single_embedding(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
-    # test List[str]
+    # test list[str]
     input_texts = [
         "The cat sat on the mat.", "A feline was resting on a rug.",
         "Stars twinkle brightly in the night sky."
@@ -101,12 +101,12 @@ async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 3
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
-    assert embeddings.usage.prompt_tokens == 32
-    assert embeddings.usage.total_tokens == 32
+    assert embeddings.usage.prompt_tokens == 33
+    assert embeddings.usage.total_tokens == 33
 
-    # test List[List[int]]
+    # test list[list[int]]
     input_tokens = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
                     [25, 32, 64, 77]]
     embedding_response = await client.embeddings.create(
@@ -119,7 +119,7 @@ async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 4
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 17
     assert embeddings.usage.total_tokens == 17
@@ -234,7 +234,7 @@ async def test_single_embedding_truncation(client: openai.AsyncOpenAI,
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 10
     assert embeddings.usage.total_tokens == 10
@@ -252,7 +252,7 @@ async def test_single_embedding_truncation(client: openai.AsyncOpenAI,
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1
-    assert len(embeddings.data[0].embedding) == 4096
+    assert len(embeddings.data[0].embedding) == 384
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 10
     assert embeddings.usage.total_tokens == 10
