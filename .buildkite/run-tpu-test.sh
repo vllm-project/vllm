@@ -18,7 +18,7 @@ docker run --privileged --net host --shm-size=16G -it \
     -e "HF_TOKEN=$HF_TOKEN" --name tpu-test \
     vllm-tpu /bin/bash -c "python3 -m pip install git+https://github.com/thuml/depyf.git \
     && python3 -m pip install pytest \
-    && python3 -m pip install lm_eval[api]==0.4.4 \
+    && python3 -m pip install lm_eval[api]==0.4.8 \
     && pytest -v -s /workspace/vllm/tests/entrypoints/openai/correctness/test_lmeval.py \
     && pytest -v -s /workspace/vllm/tests/tpu/test_custom_dispatcher.py \
     && python3 /workspace/vllm/tests/tpu/test_compilation.py \
