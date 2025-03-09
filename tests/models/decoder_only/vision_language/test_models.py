@@ -676,9 +676,9 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    vllm_runner: type[VllmRunner],
                                    image_assets: _ImageAssets, monkeypatch):
 
-    # V1 Test: llava-hf/llava-1.5-7b-hf is broken on V1.
-    print(f"{model_type=}")
-    if model_type == "llava":
+    # V1 Test: llava-hf/llava-1.5-7b-hf is broken on V1
+    # https://github.com/vllm-project/vllm/issues/14523
+    if model_type == "llava-broadcast" or model_type == "llava":
         monkeypatch.setenv("VLLM_USE_V1", "0")
 
     model_test_info = VLM_TEST_SETTINGS[model_type]
