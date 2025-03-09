@@ -1649,3 +1649,19 @@ class TranscriptionResponseVerbose(OpenAIBaseModel):
 
     words: Optional[list[TranscriptionWord]] = None
     """Extracted words and their corresponding timestamps."""
+
+
+class ZmqMsgRequest(BaseModel):
+    request_id: str
+    type: str
+    body: Union[CompletionRequest]
+
+
+class ZmqMsgResponse(BaseModel):
+    request_id: str
+    type: str
+    stop: bool = True
+    body_type: Literal["str", "response"] = "str"
+    body: Union[dict, str] = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)

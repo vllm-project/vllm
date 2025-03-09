@@ -1,22 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
 import os
 import signal
 import traceback
 from argparse import Namespace
+from http import HTTPStatus
 
 import zmq
 import zmq.asyncio
-from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.api_server import build_async_engine_client
 from vllm.entrypoints.openai.protocol import (CompletionRequest,
                                               CompletionResponse,
-                                              ErrorResponse)
+                                              ErrorResponse, ZmqMsgRequest,
+                                              ZmqMsgResponse)
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
@@ -25,10 +25,6 @@ from vllm.utils import set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger('vllm.entrypoints.openai.zmq_server')
-
-CONTENT_TYPE_JSON = "application/json"
-CONTENT_TYPE_ERROR = "error"
-CONTENT_TYPE_STREAM = "text/event-stream"
 
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_models: OpenAIServingModels
@@ -72,16 +68,22 @@ async def serve_zmq(arg) -> None:
             try:
                 logger.debug("zmq Server waiting for request")
                 # get new request from the client
-                identity, request_id, body = await socket.recv_multipart()
+                message_parts = await socket.recv_multipart()
+                logger.debug("received request: %s", message_parts)
+                logger.debug("received len: %d", len(message_parts))
+                identity, body = message_parts[0], message_parts[1]
+                zmq_msg_request = ZmqMsgRequest.model_validate_json(body)
                 # launch request handler coroutine
                 task = asyncio.create_task(
-                    worker_routine(identity, request_id, body, socket))
+                    worker_routine(identity, zmq_msg_request, socket))
                 running_requests.add(task)
                 task.add_done_callback(running_requests.discard)
             except zmq.ZMQError as e:
+                logger.error(traceback.format_exc())
                 logger.error("ZMQError: %s", e)
                 break
             except Exception as e:
+                logger.error(traceback.format_exc())
                 logger.error("Unexpected error: %s", e)
                 break
     except KeyboardInterrupt:
@@ -153,59 +155,68 @@ async def init_state(
     )
 
 
-async def worker_routine(identity: bytes, request_id: bytes, body: bytes,
+async def worker_routine(identity: bytes, zmq_msg_request: ZmqMsgRequest,
                          socket: zmq.asyncio.Socket):
     """Worker routine"""
     try:
-        body_json = json.loads(body.decode())
-        request_id_str = request_id.decode()
-        logger.debug("receive request: %s from %s, request_id: %s", body_json,
-                     identity.decode(), request_id_str)
-
-        completionRequest = CompletionRequest(**body_json)
-        generator = await create_completion(completionRequest, None)
-        content_type_json = CONTENT_TYPE_JSON.encode('utf-8')
-        content_type_stream = CONTENT_TYPE_STREAM.encode('utf-8')
-        if isinstance(generator, ErrorResponse):
-            content = json.loads(generator.model_dump_json())
-            content.update({"status_code": generator.code})
-            logger.debug("send ErrorResponse %s", json.dumps(content))
-            await socket.send_multipart([
-                identity, request_id, content_type_json,
-                json.dumps(content).encode('utf-8')
-            ])
-        elif isinstance(generator, CompletionResponse):
-            logger.debug("send CompletionResponse %s",
-                         json.dumps(generator.model_dump()))
-            await socket.send_multipart([
-                identity, request_id, content_type_json,
-                json.dumps(generator.model_dump()).encode('utf-8')
-            ])
+        request_id = zmq_msg_request.request_id
+        logger.debug("receive request: %s from %s, request_id: %s",
+                     zmq_msg_request.model_dump_json(), identity.decode(),
+                     request_id)
+        if isinstance(zmq_msg_request.body, CompletionRequest):
+            await create_completion(identity, zmq_msg_request, socket)
         else:
-            async for chunk in generator:
-                logger.debug(
-                    "send chunk identity: %s, request_id: %s, chunk: %s",
-                    identity.decode(), request_id.decode(), chunk)
-                await socket.send_multipart([
-                    identity, request_id, content_type_stream,
-                    chunk.encode('utf-8')
-                ])
+            logger.error("Error in worker routine: %s request_id: %s",
+                         "unsupported request type", request_id)
+            raise Exception("unsupported request type")
+
     except Exception as e:
         logger.error("Error in worker routine: %s request_id: %s", e,
-                     request_id_str)
+                     request_id)
         logger.error(traceback.format_exc())
-        content_type_stream = CONTENT_TYPE_STREAM.encode('utf-8')
         logger.debug("send ErrorResponse %s", str(e))
         await socket.send_multipart([
-            identity, request_id,
-            CONTENT_TYPE_ERROR.encode('utf-8'),
-            str(e).encode('utf-8')
+            identity,
+            ZmqMsgResponse(request_id=request_id,
+                           type=zmq_msg_request.type,
+                           body={
+                               "content": "unsupported request type",
+                               "status_code": HTTPStatus.INTERNAL_SERVER_ERROR
+                           }).model_dump_json().encode(),
         ])
 
 
-async def create_completion(request: CompletionRequest, raw_request: Request):
-    logger.debug("zmq request post: %s", request)
-    generator = await openai_serving_completion.create_completion(
-        request, raw_request)
+async def create_completion(identity: bytes, zmq_msg_request: ZmqMsgRequest,
+                            socket: zmq.asyncio.Socket):
+    request: CompletionRequest = zmq_msg_request.body
+    logger.debug("zmq request post: %s", request.model_dump_json())
+    generator = await openai_serving_completion.create_completion(request)
     logger.debug("zmq request end post")
-    return generator
+    request_id = zmq_msg_request.request_id
+    if isinstance(generator, (ErrorResponse, CompletionResponse)):
+        logger.debug("send response %s", generator.model_dump_json())
+        zmq_msg_response = ZmqMsgResponse(request_id=request_id,
+                                          type=zmq_msg_request.type,
+                                          body_type="response")
+        if isinstance(generator, ErrorResponse):
+            zmq_msg_response.body = {
+                "content": generator.model_dump(),
+                "status_code": generator.code
+            }
+        elif isinstance(generator, CompletionResponse):
+            zmq_msg_response.body = {"content": generator.model_dump()}
+
+        await socket.send_multipart(
+            [identity, zmq_msg_response.model_dump_json().encode()])
+    else:
+        async for chunk in generator:
+            zmq_msg_response = ZmqMsgResponse(request_id=request_id,
+                                              type=zmq_msg_request.type,
+                                              body=chunk)
+            if "data: [DONE]" not in chunk:
+                zmq_msg_response.stop = False
+            logger.debug("send chunk identity: %s, request_id: %s, chunk: %s",
+                         identity.decode(), request_id, chunk)
+            await socket.send_multipart(
+                [identity,
+                 zmq_msg_response.model_dump_json().encode()])
