@@ -23,8 +23,8 @@ for i, v in enumerate(test_sizes):
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
-    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+def graph_allreduce(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,
@@ -79,8 +79,8 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def eager_allreduce(tp_size, pp_size, rank, distributed_init_port):
-    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+def eager_allreduce(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     init_test_distributed_environment(tp_size, pp_size, rank,

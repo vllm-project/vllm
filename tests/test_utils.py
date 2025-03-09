@@ -112,8 +112,8 @@ def test_deprecate_kwargs_additional_message():
         dummy(old_arg=1)
 
 
-def test_get_open_port():
-    os.environ["VLLM_PORT"] = "5678"
+def test_get_open_port(monkeypatch):
+    monkeypatch.setenv("VLLM_PORT", "5678")
     # make sure we can get multiple ports, even if the env var is set
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:
         s1.bind(("localhost", get_open_port()))
@@ -121,7 +121,7 @@ def test_get_open_port():
             s2.bind(("localhost", get_open_port()))
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
                 s3.bind(("localhost", get_open_port()))
-    os.environ.pop("VLLM_PORT")
+    monkeypatch.delenv("VLLM_PORT")
 
 
 # Tests for FlexibleArgumentParser

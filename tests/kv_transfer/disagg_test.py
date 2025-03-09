@@ -13,14 +13,15 @@ import torch
 
 # Fixture to set up environment variables and teardown servers after tests
 @pytest.fixture(scope="module", autouse=True)
-def setup_servers():
+def setup_servers(monkeypatch):
     if torch.cuda.device_count() < 4:
         pytest.skip("Skipping test: fewer than 4 GPUs available")
 
     # Set up environment variables
     VLLM_HOST_IP = subprocess.check_output("hostname -I | awk '{print $1}'",
                                            shell=True).decode().strip()
-    os.environ["VLLM_HOST_IP"] = VLLM_HOST_IP
+    monkeypatch.setenv("VLLM_HOST_IP", VLLM_HOST_IP)
+
 
     # Start prefill instance
     prefill_cmd = [

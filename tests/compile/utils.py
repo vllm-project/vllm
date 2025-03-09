@@ -61,12 +61,13 @@ if not current_platform.is_rocm() and is_quant_method_supported("awq"):
     }))
 
 
-def check_full_graph_support(model,
+def check_full_graph_support(monkeypatch,
+                             model,
                              model_kwargs,
                              optimization_level,
                              tp_size=1):
     # make sure these models can be captured in full graph mode
-    os.environ["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "1"
+    monkeypatch.setenv("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1")
 
     print(f"MODEL={model}")
 

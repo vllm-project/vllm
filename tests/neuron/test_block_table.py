@@ -99,6 +99,7 @@ def ref_block_tables_transform(
 )
 @torch.inference_mode()
 def test_load_and_transform_block_tables(
+    monkeypatch,
     num_tiles,
     num_blocks_per_tile,
     q_head_per_kv_head,
@@ -113,7 +114,7 @@ def test_load_and_transform_block_tables(
         "--retry_failed_compilation",
     ]
     compiler_flags_str = " ".join(compiler_flags)
-    os.environ["NEURON_CC_FLAGS"] = compiler_flags_str
+    monkeypatch.setenv("NEURON_CC_FLAGS", compiler_flags_str)
 
     torch.manual_seed(10000)
     torch.set_printoptions(sci_mode=False)
