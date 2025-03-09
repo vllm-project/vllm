@@ -199,7 +199,7 @@ def run_idefics3(questions: list[str], modality: str):
 def run_internvl(questions: list[str], modality: str):
     assert modality == "image"
 
-    model_name = "OpenGVLab/InternVL2-2B"
+    model_name = "OpenGVLab/InternVL2-2B-AWQ"
 
     llm = LLM(
         model=model_name,

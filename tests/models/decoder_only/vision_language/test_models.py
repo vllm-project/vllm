@@ -677,6 +677,7 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    image_assets: _ImageAssets, monkeypatch):
 
     # V1 Test: llava-hf/llava-1.5-7b-hf is broken on V1.
+    print(f"{model_type=}")
     if model_type == "llava":
         monkeypatch.setenv("VLLM_USE_V1", "0")
 
