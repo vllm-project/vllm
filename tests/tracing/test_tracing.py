@@ -70,8 +70,8 @@ def trace_service():
     server.stop(None)
 
 
-def test_traces(trace_service):
-    os.environ[OTEL_EXPORTER_OTLP_TRACES_INSECURE] = "true"
+def test_traces(monkeypatch, trace_service):
+    monkeypatch.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
 
     sampling_params = SamplingParams(temperature=0.01,
                                      top_p=0.1,
@@ -135,8 +135,8 @@ def test_traces(trace_service):
     assert metrics.model_execute_time is None
 
 
-def test_traces_with_detailed_steps(trace_service):
-    os.environ[OTEL_EXPORTER_OTLP_TRACES_INSECURE] = "true"
+def test_traces_with_detailed_steps(monkeypatch, trace_service):
+    monkeypatch.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
 
     sampling_params = SamplingParams(temperature=0.01,
                                      top_p=0.1,

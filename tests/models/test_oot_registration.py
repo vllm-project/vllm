@@ -11,8 +11,8 @@ from ..utils import fork_new_process_for_each_test
 
 
 @fork_new_process_for_each_test
-def test_plugin(dummy_opt_path):
-    os.environ["VLLM_PLUGINS"] = ""
+def test_plugin(monkeypatch, dummy_opt_path):
+    monkeypatch.setenv("VLLM_PLUGINS", "")
     with pytest.raises(Exception) as excinfo:
         LLM(model=dummy_opt_path, load_format="dummy")
     error_msg = "has no vLLM implementation and " \
@@ -21,8 +21,8 @@ def test_plugin(dummy_opt_path):
 
 
 @fork_new_process_for_each_test
-def test_oot_registration_text_generation(dummy_opt_path):
-    os.environ["VLLM_PLUGINS"] = "register_dummy_model"
+def test_oot_registration_text_generation(monkeypatch, dummy_opt_path):
+    monkeypatch.setenv("VLLM_PLUGINS", "register_dummy_model")
     prompts = ["Hello, my name is", "The text does not matter"]
     sampling_params = SamplingParams(temperature=0)
     llm = LLM(model=dummy_opt_path, load_format="dummy")
@@ -37,8 +37,8 @@ def test_oot_registration_text_generation(dummy_opt_path):
 
 
 @fork_new_process_for_each_test
-def test_oot_registration_embedding(dummy_gemma2_embedding_path):
-    os.environ["VLLM_PLUGINS"] = "register_dummy_model"
+def test_oot_registration_embedding(monkeypatch, dummy_gemma2_embedding_path):
+    monkeypatch.setenv("VLLM_PLUGINS", "register_dummy_model")
     prompts = ["Hello, my name is", "The text does not matter"]
     llm = LLM(model=dummy_gemma2_embedding_path, load_format="dummy")
     outputs = llm.embed(prompts)
@@ -51,8 +51,8 @@ image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
 
 @fork_new_process_for_each_test
-def test_oot_registration_multimodal(dummy_llava_path):
-    os.environ["VLLM_PLUGINS"] = "register_dummy_model"
+def test_oot_registration_multimodal(monkeypatch, dummy_llava_path):
+    monkeypatch.setenv("VLLM_PLUGINS", "register_dummy_model")
     prompts = [{
         "prompt": "What's in the image?<image>",
         "multi_modal_data": {
