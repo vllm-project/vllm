@@ -10,9 +10,8 @@ generation. Supported dataset types include:
   - HuggingFace
   - VisionArena
 
-TODO: Implement CustomDataset to parse a JSON file and convert its 
-contents into  SampleRequest instances, similar to the approach used
-in ShareGPT.
+TODO: Implement CustomDataset to parse a JSON file and convert its contents into
+SampleRequest instances, similar to the approach used in ShareGPT.
 """
 
 import base64
@@ -60,7 +59,6 @@ class SampleRequest:
 
 
 class BenchmarkDataset(ABC):
-    DEFAULT_NUM_REQUESTS = 1000
     DEFAULT_SEED = 0
 
     # num_requests has default 1000 in both the benchmark_serving.py and
@@ -71,7 +69,17 @@ class BenchmarkDataset(ABC):
         dataset_path: Optional[str] = None,
         random_seed: int = DEFAULT_SEED,
     ) -> None:
+        """
+        Initialize the BenchmarkDataset with an optional dataset path and random
+        seed.  Args:
+            dataset_path (Optional[str]): Path to the dataset. If None, it
+            indicates that a default or random dataset might be used.
+            random_seed (int): Seed value for reproducible shuffling or
+            sampling. Defaults to DEFAULT_SEED.
+        """
         self.dataset_path = dataset_path
+        # Set the random seed, ensuring that a None value is replaced with the
+        # default seed.
         self.random_seed = (random_seed
                             if random_seed is not None else self.DEFAULT_SEED)
         self.data = None
@@ -79,8 +87,12 @@ class BenchmarkDataset(ABC):
     def load_data(self) -> None:
         """
         Load data from the dataset path into self.data.
-        Subclasses must override this method; otherwise,
-        NotImplementedError is raised.
+        
+        This method must be overridden by subclasses since the method to load
+        data will vary depending on the dataset format and source.
+        
+        Raises:
+            NotImplementedError: If a subclass does not implement this method.
         """
         raise NotImplementedError(
             "load_data must be implemented in subclasses.")
@@ -92,10 +104,25 @@ class BenchmarkDataset(ABC):
         lora_path: Optional[str] = None,
     ) -> tuple[Optional[LoRARequest], AnyTokenizer]:
         """
-        Returns a tuple (lora_request, tokenizer).
-        If LoRA parameters are provided,
-        it randomly selects a LoRA and returns its tokenizer (if available);
-        otherwise, it returns the base tokenizer.
+        Optionally select a random LoRA request and return its associated
+        tokenizer.
+        
+        This method is used when LoRA parameters are provided.  It randomly
+        selects a LoRA based on max_loras and retrieves a cached tokenizer for
+        that LoRA if available. Otherwise, it returns the base tokenizer.
+        
+        Args:
+            tokenizer (PreTrainedTokenizerBase): The base tokenizer to use if no
+            LoRA is selected.  max_loras (Optional[int]): The maximum number of
+            LoRAs available. If None, LoRA is not used.  lora_path
+            (Optional[str]): Path to the LoRA parameters on disk. If None, LoRA
+            is not used.
+        
+        Returns:
+            tuple[Optional[LoRARequest], AnyTokenizer]: A tuple where the first
+            element is a LoRARequest (or None if not applicable) and the second
+            element is the tokenizer associated with the LoRA request (or the
+            base tokenizer).
         """
         if max_loras is None or lora_path is None:
             return None, tokenizer
@@ -109,15 +136,27 @@ class BenchmarkDataset(ABC):
         )
         if lora_id not in lora_tokenizer_cache:
             lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
-        # Return lora_request and the cached tokenizer if available;
-        # otherwise, return the base tokenizer
+        # Return lora_request and the cached tokenizer if available; otherwise,
+        # return the base tokenizer
         return lora_request, lora_tokenizer_cache[lora_id] or tokenizer
 
     @abstractmethod
     def sample(self, tokenizer: PreTrainedTokenizerBase,
                num_requests: int) -> list[SampleRequest]:
         """
-        Generate sample requests from the dataset.
+        Abstract method to generate sample requests from the dataset.
+        
+        Subclasses must override this method to implement dataset-specific logic
+        for generating a list of SampleRequest objects.
+        
+        Args:
+            tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
+             for processing the dataset's text.
+            num_requests (int): The number of sample requests to generate.
+        
+        Returns:
+            list[SampleRequest]: A list of sample requests generated from the
+            dataset.
         """
         raise NotImplementedError("sample must be implemented in subclasses.")
 
@@ -165,7 +204,7 @@ def lora_path_on_disk(lora_path: str) -> str:
 lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
 
 
-def process_image(image: Any, ) -> Mapping[str, Any]:
+def process_image(image: Any) -> Mapping[str, Any]:
     """
     Process a single image input and return a multimedia content dictionary.
 
@@ -177,7 +216,8 @@ def process_image(image: Any, ) -> Mapping[str, Any]:
 
     For a string input:
       - Treats the string as a URL or file path.
-      - Prepends "file://" if the string doesn't start with "http://" or "file://".
+      - Prepends "file://" if the string doesn't start with "http://" or
+        "file://".
       - Returns a dictionary with the image URL.
 
     Raises:
