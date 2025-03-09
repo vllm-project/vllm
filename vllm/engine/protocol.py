@@ -289,6 +289,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def is_sleeping(self) -> bool:
+        """Check whether the engine is sleeping"""
+        ...
+
+    @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
         ...
