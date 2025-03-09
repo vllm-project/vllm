@@ -1662,6 +1662,6 @@ class ZmqMsgResponse(BaseModel):
     type: str
     stop: bool = True
     body_type: Literal["str", "response"] = "str"
-    body: Union[dict, str] = None
+    body: str
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
