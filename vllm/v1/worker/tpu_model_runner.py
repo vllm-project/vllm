@@ -442,7 +442,8 @@ class TPUModelRunner:
         # partial request, we do so for simplicity. We will ignore the sampled
         # token from the partial request.
         # TODO: Support prompt logprobs.
-        padded_num_reqs = _get_padded_num_reqs(self.max_num_reqs, num_reqs)
+        padded_num_reqs = _get_padded_num_reqs_with_upper_limit(
+            num_reqs, self.max_num_reqs)
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
         return attn_metadata, logits_indices
@@ -732,7 +733,8 @@ class TPUModelRunner:
                 kv_caches=kv_caches,
                 inputs_embeds=inputs_embeds,
             )
-            num_reqs = _get_padded_num_reqs(self.max_num_reqs)
+            num_reqs = _get_padded_num_reqs_with_upper_limit(
+                64, self.max_num_reqs)
             # NOTE(chengjiyao): In total, the compute_logits function utilizes a
             # compilation cache size of token_bucket_num multiplied by
             # req_bucket_num. This is acceptable, given the graph's relatively
@@ -748,8 +750,8 @@ class TPUModelRunner:
                 self.model.compute_logits(hidden_states, logits_indices, None)
                 if num_reqs >= self.max_num_reqs:
                     break
-                num_reqs = _get_padded_num_reqs(self.max_num_reqs,
-                                                num_reqs + 1)
+                num_reqs = _get_padded_num_reqs_with_upper_limit(
+                    num_reqs + 1, self.max_num_reqs)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -870,9 +872,6 @@ def _get_padded_token_len(x: int) -> int:
     return 1 << (x - 1).bit_length()
 
 
-def _get_padded_num_reqs(max_num_reqs, x: int = 1) -> int:
-    if x > max_num_reqs:
-        return max_num_reqs
-    if x <= 64:
-        return 64
-    return 1 << (x - 1).bit_length()
+def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
+    res = 64 if x <= 64 else 1 << (x - 1).bit_length()
+    return min(res, upper_limit)
