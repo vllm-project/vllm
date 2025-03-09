@@ -352,11 +352,12 @@ def initialize_ray_cluster(
         current_ip = get_ip()
         current_node_id = ray.get_runtime_context().get_node_id()
         current_node_resource = available_resources_per_node()[current_node_id]
-        if current_node_resource.get(device_str, 0) < 1:
+        device_resource_threshold = envs.VLLM_RAY_PER_WORKER_GPUS if device_str == "GPU" else 1.0
+        if current_node_resource.get(device_str, 0) <= device_resource_threshold:
             raise ValueError(
                 f"Current node has no {device_str} available. "
                 f"{current_node_resource=}. vLLM engine cannot start without "
-                f"{device_str}. Make sure you have at least 1 {device_str} "
+                f"{device_str}. Make sure you have at least {device_resource_threshold} {device_str} "
                 f"available in a node {current_node_id=} {current_ip=}.")
         # This way, at least bundle is required to be created in a current
         # node.
