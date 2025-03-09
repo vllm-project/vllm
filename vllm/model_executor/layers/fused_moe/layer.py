@@ -292,6 +292,31 @@ def determine_expert_map(
             torch.arange(0, local_num_experts, dtype=torch.int32)
     return (local_num_experts, expert_map)
 
+def get_expert_map(
+        ep_size: int, 
+        ep_rank: int,
+        global_num_experts: int,
+        layer_prior_expert_map: Optional[torch.Tensor]) -> Tuple[int, Optional[torch.Tensor]]:
+    """Get the expert map for the current rank.
+
+    Args:
+        ep_rank: The rank of the current process.
+        layer_prior_expert_map: The expert map from the prior knowledge.
+
+    Returns:
+        A tuple containing the local number of experts and the expert map.
+    """
+    if layer_prior_expert_map is not None:
+        # If a prior expert map is provided, use it.
+        ranks, expert_nums = layer_prior_expert_map.shape
+        assert ep_size == ranks, "The size of the expert map does not match the number of experts."
+        assert global_num_experts == expert_nums, "The size of the expert map does not match the number of experts."
+        expert_map = layer_prior_expert_map[ep_rank]
+        local_num_experts = torch.sum(torch.ne(expert_map, -1)).item()
+        return (local_num_experts, expert_map)
+    else:
+        return determine_expert_map(ep_size, ep_rank, global_num_experts)
+
 
 class FusedMoE(torch.nn.Module):
     """FusedMoE layer for MoE models.
@@ -335,6 +360,7 @@ class FusedMoE(torch.nn.Module):
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
         activation: str = "silu",
+        layer_prior_expert_map: Optional[torch.Tensor] = None,
     ):
         super().__init__()
 
@@ -374,10 +400,11 @@ class FusedMoE(torch.nn.Module):
             self.ep_size = self.tp_size * self.dp_size
             self.tp_size = 1
 
-            self.local_num_experts, self.expert_map = determine_expert_map(
+            self.local_num_experts, self.expert_map = get_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts)
+                global_num_experts=self.global_num_experts,
+                layer_prior_expert_map=layer_prior_expert_map)
         else:
             # Adjust TP size for DP attention
             self.tp_rank = tp_rank + self.tp_size * self.dp_rank

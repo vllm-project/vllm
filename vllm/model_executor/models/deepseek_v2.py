@@ -100,6 +100,7 @@ class DeepseekV2MoE(nn.Module):
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        layer_prior_expert_map: Optional[torch.Tensor] = None,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -134,7 +135,8 @@ class DeepseekV2MoE(nn.Module):
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias)
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            layer_prior_expert_map=layer_prior_expert_map)
 
         if config.n_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
@@ -479,6 +481,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prior_expert_map: Optional[Dict[int, torch.Tensor]] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -518,6 +521,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                layer_prior_expert_map=prior_expert_map[layer_idx],
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -562,7 +566,8 @@ class DeepseekV2Model(nn.Module):
 
     fall_back_to_pt_during_load = False
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", 
+                 prior_expert_map: Optional[Dict[int, torch.Tensor]] = None):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -589,6 +594,7 @@ class DeepseekV2Model(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                prior_expert_map=prior_expert_map
             ),
             prefix=f"{prefix}.layers")
 
@@ -642,8 +648,11 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+
+        prior_expert_map = torch.load("/data/zzd/EPLB/expert_weight_r1_en.pth")
         self.model = DeepseekV2Model(vllm_config=vllm_config,
-                                     prefix=maybe_prefix(prefix, "model"))
+                                     prefix=maybe_prefix(prefix, "model"),
+                                     prior_expert_map=prior_expert_map)
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size,
