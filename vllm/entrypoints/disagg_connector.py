@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
 import signal
 import sys
 import traceback
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from http import HTTPStatus
 from typing import Union
 
 import uvicorn
@@ -17,9 +17,8 @@ import zmq.asyncio
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from vllm.entrypoints.openai.zmq_server import (CONTENT_TYPE_ERROR,
-                                                CONTENT_TYPE_JSON,
-                                                CONTENT_TYPE_STREAM)
+from vllm.entrypoints.openai.protocol import (CompletionRequest, ZmqMsgRequest,
+                                              ZmqMsgResponse)
 from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
 
@@ -28,6 +27,7 @@ logger = init_logger('vllm.entrypoints.disagg_connector')
 
 TIME_OUT = 5
 X_REQUEST_ID_KEY = "X-Request-Id"
+CONTENT_TYPE_STREAM = "text/event-stream"
 
 # communication between output handlers and execute_task_async
 request_queues: dict[str, asyncio.Queue]
@@ -77,40 +77,44 @@ app = FastAPI(lifespan=lifespan)
 
 
 @app.post('/v1/completions')
-async def completions(request: Request, background_tasks: BackgroundTasks):
+async def completions(request: CompletionRequest, raw_request: Request,
+                      background_tasks: BackgroundTasks):
     try:
         # Add the X-Request-Id header to the raw headers list
-        header = dict(request.headers)
+        header = dict(raw_request.headers)
         request_id = header.get(X_REQUEST_ID_KEY)
-        queue = asyncio.Queue()
+        queue: asyncio.Queue[ZmqMsgResponse] = asyncio.Queue()
         if request_id is None:
             request_id = str(uuid.uuid4())
             logger.debug("add X-Request-Id: %s", request_id)
-            header[X_REQUEST_ID_KEY] = request_id
         logger.debug("X-Request-Id is: %s", request_id)
         request_queues[request_id] = queue
-        request_data = await request.json()
+        zmq_msg_request = ZmqMsgRequest(request_id=request_id,
+                                        type="completions",
+                                        body=request)
         logger.info("Received request_id: %s, request: %s, header: %s",
-                    request_id, request_data, header)
-        original_max_tokens = request_data['max_tokens']
+                    request_id, zmq_msg_request.model_dump_json(), header)
+        original_max_tokens = request.max_tokens
         # change max_tokens = 1 to let it only do prefill
-        request_data['max_tokens'] = 1
+        request.max_tokens = 1
         # finish prefill
         try:
-            prefill_response = await prefill(header, request_data)
-            if isinstance(prefill_response, JSONResponse):
+            prefill_response = await prefill(zmq_msg_request)
+            if isinstance(prefill_response, JSONResponse
+                          ) and prefill_response.status_code != HTTPStatus.OK:
                 return prefill_response
             logger.debug("finish prefill start decode")
-            request_data['max_tokens'] = original_max_tokens
-            response = await decode(header, request_data)
+            request.max_tokens = original_max_tokens
+            response = await decode(zmq_msg_request)
             logger.debug("finish decode")
         except Exception as e:
             logger.error("Error occurred in disagg prefill proxy server, %s",
                          e)
-            response = JSONResponse({"error": {
-                "message": str(e)
-            }},
-                                    status_code=500)
+            response = JSONResponse(
+                {"error": {
+                    "message": str(e)
+                }},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
         return response
 
     except Exception as e:
@@ -120,37 +124,27 @@ async def completions(request: Request, background_tasks: BackgroundTasks):
         logger.error("".join(traceback.format_exception(*exc_info)))
         response = JSONResponse({"error": {
             "message": str(e)
-        }},
-                                status_code=500)
+        }}, HTTPStatus.INTERNAL_SERVER_ERROR)
         return response
     finally:
-        background_tasks.add_task(cleanup_request_id, request_id)
+        if request_id is not None:
+            background_tasks.add_task(cleanup_request_id, request_id)
 
 
 async def socket_recv_handler(socket: zmq.asyncio.Socket, scene: str):
     while True:
         try:
-            [request_id, contentType, reply] = await socket.recv_multipart()
-            contentType_str = contentType.decode()
-            reply_str = reply.decode()
-            request_id_str = request_id.decode()
-            logger.debug(
-                "%s socket received result contentType: %s, "
-                "request_id: %s, reply: %s", scene, contentType_str,
-                request_id_str, reply_str)
-            if request_id_str in request_queues:
-                request_queues[request_id_str].put_nowait(
-                    (contentType_str, reply_str))
-                if "[DONE]" in reply_str:
-                    logger.debug(
-                        "%s socket received stop signal request_id: %s", scene,
-                        request_id_str)
-                    request_queues[request_id_str].put_nowait(
-                        (contentType_str, None))
+            [body] = await socket.recv_multipart()
+            response = ZmqMsgResponse.model_validate_json(body)
+            request_id = response.request_id
+            logger.debug("%s socket received result: %s", scene,
+                         response.model_dump_json())
+            if request_id in request_queues:
+                request_queues[request_id].put_nowait(response)
             else:
                 logger.debug(
                     "%s socket received but request_id not found discard: %s",
-                    scene, request_id_str)
+                    scene, request_id)
         except Exception as e:
             logger.error(traceback.format_exc())
             logger.error("%s handler error: %s", scene, e)
@@ -167,77 +161,69 @@ async def decode_handler(decode_socket: zmq.asyncio.Socket):
 
 
 # select a socket and execute task
-async def execute_task_async(headers: dict, request: dict,
+async def execute_task_async(zmq_msg_request: ZmqMsgRequest,
                              socket: zmq.asyncio.Socket):
     try:
-        request_id = headers.get(X_REQUEST_ID_KEY)
-        requestBody = json.dumps(request)
-        logger.info("Sending requestBody: %s", requestBody)
-        socket.send_multipart([request_id.encode(), requestBody.encode()])
+        request_id = zmq_msg_request.request_id
+        requestBody = zmq_msg_request.model_dump_json()
+        logger.debug("Sending requestBody: %s", requestBody)
+        socket.send_multipart([requestBody.encode()])
         logger.debug("Sent end")
         queue = request_queues[request_id]
         while True:
             logger.debug("Waiting for reply")
-            (contentType,
-             reply) = await asyncio.wait_for(queue.get(), TIME_OUT)
-            logger.debug("Received result: %s, %s", contentType, reply)
-            if reply is None:
-                logger.debug("Received stop signal, request_id: %s",
-                             request_id)
+            zmq_msg_response: ZmqMsgResponse = await asyncio.wait_for(
+                queue.get(), TIME_OUT)
+            logger.debug("Received result: %s",
+                         zmq_msg_response.model_dump_json())
+            yield zmq_msg_response
+            if zmq_msg_response.stop:
+                logger.debug("Received stop: %s", zmq_msg_response.stop)
                 break
-            yield (contentType, reply)
-            if contentType == CONTENT_TYPE_JSON:
-                logger.debug("Received %s message, request_id: %s",
-                             contentType, request_id)
-                break
-
     except asyncio.TimeoutError:
         logger.error(traceback.format_exc())
-        yield (CONTENT_TYPE_ERROR, "System Error")
+        yield JSONResponse("timeout", HTTPStatus.REQUEST_TIMEOUT)
     finally:
         logger.debug("request_id: %s, execute_task_async end", request_id)
 
 
-async def prefill(header: dict,
-                  original_request_data: dict) -> Union[JSONResponse, bool]:
+async def prefill(zmq_msg_request: ZmqMsgRequest) -> Union[JSONResponse, bool]:
     logger.debug("start prefill")
-    generator = execute_task_async(header, original_request_data,
-                                   app.state.prefill_socket)
-    async for contentType, reply in generator:
-        logger.debug("contentType: %s, reply: %s", contentType, reply)
-        if contentType == CONTENT_TYPE_ERROR:
-            response = JSONResponse({"error": reply})
-            response.status_code = 500
-            return response
+    generator = execute_task_async(zmq_msg_request, app.state.prefill_socket)
+    async for res in generator:
+        logger.debug("res: %s", res)
+        if res.body_type == "response":
+            return JSONResponse(res.body)
     return True
 
 
-async def generate_stream_response(fisrt_reply: str,
-                                   generator: AsyncGenerator):
+async def generate_stream_response(
+        fisrt_reply: str, generator: AsyncGenerator[ZmqMsgResponse]
+) -> AsyncGenerator[dict, str]:
     yield fisrt_reply
-    async for _, reply in generator:
-        yield reply
+    async for reply in generator:
+        yield reply.body
 
 
 async def decode(
-        header: dict,
-        original_request_data: dict) -> Union[JSONResponse, StreamingResponse]:
-    logger.info("start decode")
-    generator = execute_task_async(header, original_request_data,
-                                   app.state.decode_socket)
+        zmq_msg_request: ZmqMsgRequest
+) -> Union[JSONResponse, StreamingResponse]:
+    logger.debug("start decode")
+    generator = execute_task_async(zmq_msg_request, app.state.decode_socket)
 
-    async for contentType, reply in generator:
-        logger.debug("contentType: %s, reply: %s", contentType, reply)
-        if contentType == CONTENT_TYPE_ERROR:
-            response = JSONResponse({"error": reply})
-            response.status_code = 500
-            return response
-        elif contentType == CONTENT_TYPE_JSON:
-            return JSONResponse(reply)
+    async for res in generator:
+        logger.debug("res: %s", res)
+        if res.body_type == "response":
+            return JSONResponse(res.body)
         else:
             return StreamingResponse(generate_stream_response(
-                reply, generator),
+                res.body, generator),
                                      media_type=CONTENT_TYPE_STREAM)
+
+    # If the generator is empty, return a default error response
+    logger.error("No response received from generator")
+    return JSONResponse({"error": "No response received from generator"},
+                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
 def cleanup_request_id(request_id: str):
