@@ -68,7 +68,6 @@ class LMCacheConnector(KVConnectorBase):
                "ModelInputForGPUWithSamplingMetadata"]:
 
         retrieve_status = self.lmcache_should_retrieve(model_input)
-        print("retrieve_status", retrieve_status)
         model_input, bypass_model_exec, hidden_or_intermediate_states =\
             self.lmcache_retrieve_kv(
                 model_executable, model_input, self.cache_config, kv_caches,
@@ -83,16 +82,8 @@ class LMCacheConnector(KVConnectorBase):
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
-        num_reqs = 0
-        seq_group_list = model_input.sampling_metadata.seq_groups
-        assert seq_group_list is not None
-        for seq_group in seq_group_list:
-            seq_ids = seq_group.seq_ids
-            for seq_id in seq_ids:
-                num_reqs += 1
 
         store_status = self.lmcache_should_store(model_input)
-        print("store_status", store_status)
         self.lmcache_store_kv(
             self.model_config,
             self.parallel_config,
