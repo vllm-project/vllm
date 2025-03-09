@@ -250,10 +250,19 @@ def fused_marlin_moe(
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
+    intermediate_cache13 = torch.empty(
+        (M * topk_ids.shape[1] * max(2 * N, K),),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
+    intermediate_cache1 = intermediate_cache13[:M * topk_ids.shape[1] * 2 * N]
+    intermediate_cache1 = intermediate_cache1.view(-1, 2 * N)
+    intermediate_cache3 = intermediate_cache13[:M * topk_ids.shape[1] * K]
+    intermediate_cache3 = intermediate_cache3.view(-1, K)
 
     intermediate_cache1 = ops.moe_wna16_marlin_gemm(
         hidden_states,
-        None,
+        intermediate_cache1,
         w1,
         w1_scale,
         w1_zeros,
@@ -272,7 +281,7 @@ def fused_marlin_moe(
         size_n=2 * N,
         size_k=K,
         is_k_full=is_k_full,
-        use_atomic_add=False,
+        use_atomic_add=True,
         use_fp32_reduce=True,
         is_zp_float=False)
 
@@ -281,7 +290,7 @@ def fused_marlin_moe(
 
     intermediate_cache3 = ops.moe_wna16_marlin_gemm(
         intermediate_cache2,
-        None,
+        intermediate_cache3,
         w2,
         w2_scale,
         w2_zeros,
@@ -300,12 +309,12 @@ def fused_marlin_moe(
         size_n=K,
         size_k=N,
         is_k_full=is_k_full,
-        use_atomic_add=False,
+        use_atomic_add=True,
         use_fp32_reduce=True,
         is_zp_float=False).view(-1, topk, K)
 
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                     dim=1)
+                     dim=1, out=hidden_states)
 
 
 def fused_marlin_moe_fake(

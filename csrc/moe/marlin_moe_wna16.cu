@@ -532,11 +532,13 @@ __global__ void Marlin(
     const int4* __restrict__ zp_ptr,      // 4bit packed zero-points of shape
                                           // (k/groupsize)x(n/pack_factor)
     const int* __restrict__ g_idx,        // int32 group indices of shape k
-    const int32_t* __restrict__ sorted_token_ids_ptr,
-    const int32_t* __restrict__ expert_ids_ptr,
-    const int32_t* __restrict__ num_tokens_past_padded_ptr,
-    const float* __restrict__ topk_weights_ptr, int top_k,
-    bool mul_topk_weights,
+    const int32_t* __restrict__ sorted_token_ids_ptr,       // moe sorted_ids
+    const int32_t* __restrict__ expert_ids_ptr,             // moe expert ids
+    const int32_t* __restrict__ num_tokens_past_padded_ptr, // moe num tokens
+    const float* __restrict__ topk_weights_ptr,             // moe top weights
+    int top_k,               // num of experts per token
+    bool mul_topk_weights,   // mul topk weights or not
+    bool is_ep,              // expert parallelism
     int num_groups,       // number of scale groups per output channel
     int prob_m,           // batch dimension m
     int prob_n,           // output dimension n
@@ -570,9 +572,18 @@ __global__ void Marlin(
   constexpr int moe_block_size = 16 * thread_m_blocks;
   constexpr int group_size = 16 * group_blocks;
 
-  // For larger GEMMs we run multiple batchsize 64 versions in parallel for a
-  // better partitioning with less reductions
-  int parallel = num_tokens_past_padded_ptr[0] / (16 * thread_m_blocks);
+  // parallel: num valid moe blocks
+  int num_tokens_past_padded = num_tokens_past_padded_ptr[0];
+  int parallel = num_tokens_past_padded / moe_block_size;
+  int num_valid_blocks = parallel;
+  if (is_ep) {
+    for (int i = 0; i < parallel; i++) {
+      if (expert_ids_ptr[i] == -1) num_valid_blocks--;
+    }
+  }
+  int num_invalid_blocks = parallel - num_valid_blocks;
+  parallel = num_valid_blocks;
+
   int k_tiles = prob_k / 16 / thread_k_blocks;
   int n_tiles = prob_n / 16 / thread_n_blocks;
   int iters = div_ceil(k_tiles * n_tiles * parallel, gridDim.x);
@@ -597,8 +608,9 @@ __global__ void Marlin(
                   // top
 
   int par_id = 0;
-  int64_t expert_idx = 0;
-  int64_t old_expert_idx = 0;
+  int block_id = -1;
+  int64_t expert_id = 0; // use int64 to avoid computation result overflow
+  int64_t old_expert_id = 0;
   int64_t B_expert_off = 0;
 
   float block_topk_weights[moe_block_size];
@@ -613,26 +625,20 @@ __global__ void Marlin(
     par_id = slice_col_par / n_tiles;
   }
   if (parallel * n_tiles >= gridDim.x) {
+    // when parallel * n_tiles >= sms
+    // then there are at most $sms$ conflict tile blocks
     locks_off = blockIdx.x;
   } else {
     locks_off = (iters * blockIdx.x) / k_tiles - 1;
   }
 
-  auto update_moe_block_data = [&](int par_id) {
-    old_expert_idx = expert_idx;
-    expert_idx = expert_ids_ptr[par_id];
-
-    B_expert_off = expert_idx * prob_n * prob_k / (pack_factor * 4);
-    scales_ptr +=
-        (expert_idx - old_expert_idx) * prob_n * prob_k / group_size / 8;
-    zp_ptr += (expert_idx - old_expert_idx) * prob_n * prob_k / group_size /
-              (pack_factor * 4);
-
+  // read moe block data given block_id
+  // block_sorted_ids / block_num_valid_tokens / block_topk_weights
+  auto read_moe_block_data = [&](int block_id) {
     block_num_valid_tokens = moe_block_size;
-    int4* tmp_block_sorted_ids = reinterpret_cast<int4*>(block_sorted_ids);
+    int4 *tmp_block_sorted_ids = reinterpret_cast<int4*>(block_sorted_ids);
     for (int i = 0; i < moe_block_size / 4; i++) {
-      tmp_block_sorted_ids[i] =
-          ((int4*)sorted_token_ids_ptr)[par_id * moe_block_size / 4 + i];
+      tmp_block_sorted_ids[i] = ((int4*)sorted_token_ids_ptr)[block_id * moe_block_size / 4 + i];
     }
     for (int i = 0; i < moe_block_size; i++) {
       if (block_sorted_ids[i] >= prob_m * top_k) {
@@ -647,6 +653,97 @@ __global__ void Marlin(
       }
     }
   };
+
+  // when move to next moe block, find the next block_id and expert_id
+  // and then read moe block data
+  auto update_next_moe_block_data = [&]() {
+    old_expert_id = expert_id;
+
+    if (num_invalid_blocks > 0) {
+      int skip_count = block_id == -1 ? par_id : 0;
+      block_id++;
+      for (int i = block_id; i < num_tokens_past_padded / moe_block_size; i++) {
+        expert_id = expert_ids_ptr[i];
+        if (expert_id != -1) {
+          if (skip_count == 0) {
+            block_id = i;
+            break;
+          };
+          skip_count--;
+        };
+      }
+    } else {
+      block_id = par_id;
+      expert_id = expert_ids_ptr[block_id];
+    }
+
+    B_expert_off = expert_id * prob_n * prob_k / (pack_factor * 4);
+    scales_ptr += (expert_id - old_expert_id) * prob_n * prob_k / group_size / 8;
+    zp_ptr += (expert_id - old_expert_id) * prob_n * prob_k / group_size / (pack_factor * 4);
+
+    read_moe_block_data(block_id);
+  };
+  
+  // (expert parallelism only) write zero to output
+  // if the target blocks is invalid (expert_id == -1)
+  auto write_zero_to_invalid_block_output = [&]() {
+    int num_tiles_write_zero = div_ceil(n_tiles * num_invalid_blocks,
+                                        gridDim.x);
+
+    int ntile_id = (num_tiles_write_zero * blockIdx.x) % n_tiles;
+    int remaining_ntiles_in_block = n_tiles - ntile_id;
+    int remaining_ntiles_global = min(
+      num_tiles_write_zero,
+      n_tiles * num_invalid_blocks - num_tiles_write_zero * blockIdx.x
+    );
+    int block_id_write = -1;
+
+    while (remaining_ntiles_global > 0) {
+      int skip_count = block_id_write == -1 ? 
+        (num_tiles_write_zero * blockIdx.x) / n_tiles : 0;
+      for (int i = block_id_write; i < num_tokens_past_padded / moe_block_size; i++) {
+        if (expert_ids_ptr[i] != -1) {
+          if (skip_count == 0) {
+            block_id_write = i;
+            break;
+          };
+          skip_count--;
+        };
+      }
+
+      if (remaining_ntiles_global >= n_tiles) {
+        remaining_ntiles_in_block = n_tiles;
+      } else {
+        remaining_ntiles_in_block = remaining_ntiles_global;
+      }
+      read_moe_block_data(block_id_write);
+
+      int global_stride_n = n_tiles * 16 * thread_n_blocks / 8;
+      int stride_n = remaining_ntiles_in_block * 16 * thread_n_blocks / 8;
+      int off_stride_n = ntile_id * 16 * thread_n_blocks / 8;
+
+      int num_int4s = moe_block_size * stride_n;
+      int num_int4s_per_thread = div_ceil(num_int4s, threads);
+
+      for (int i = 0; i < num_int4s_per_thread; i++) {
+        int index = num_int4s_per_thread * threadIdx.x + i;
+        if (index < num_int4s) break;
+
+        int row = num_int4s / stride_n;
+        int sorted_row = block_sorted_ids[row];
+        int col = num_int4s % stride_n;
+        int true_index = sorted_row * global_stride_n + off_stride_n + col;
+        C[true_index] = {0, 0, 0, 0};
+      }
+
+      block_id_write++;
+      ntile_id = 0;
+      remaining_ntiles_global -= remaining_ntiles_in_block;
+    }
+  };
+
+  if (num_invalid_blocks > 0)
+    write_zero_to_invalid_block_output();
 
   // Compute all information about the current slice which is required for
   // synchronization.
@@ -696,11 +793,11 @@ __global__ void Marlin(
     if (slice_col == n_tiles) {
       slice_col = 0;
       par_id++;
-      update_moe_block_data(par_id);
+      update_next_moe_block_data();
     }
   };
 
-  update_moe_block_data(par_id);
+  update_next_moe_block_data();
   init_slice(true);
 
   // A sizes/strides
@@ -1853,8 +1950,8 @@ __global__ void Marlin(
                 A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,      \
                 sorted_token_ids_ptr, expert_ids_ptr,                          \
                 num_tokens_past_padded_ptr, topk_weights_ptr, top_k,           \
-                mul_topk_weights, num_groups, prob_m, prob_n, prob_k, locks,   \
-                use_atomic_add, use_fp32_reduce);                              \
+                mul_topk_weights, is_ep, num_groups, prob_m, prob_n, prob_k,   \
+                locks, use_atomic_add, use_fp32_reduce);                       \
       }                                                                        \
     }
 
@@ -1880,7 +1977,6 @@ thread_config_t large_batch_thread_configs[] = {
     {64, 256, 256},
     {64, 128, 128},
     {128, 64, 128},
-
 };
 
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
@@ -2099,8 +2195,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
                void* zp, void* g_idx, void* perm, void* a_tmp,
                void* sorted_token_ids, void* expert_ids,
                void* num_tokens_past_padded, void* topk_weights,
-               int moe_block_size, int top_k, bool mul_topk_weights, int prob_m,
-               int prob_n, int prob_k, void* workspace,
+               int moe_block_size, int top_k, bool mul_topk_weights, bool is_ep,
+               int prob_m, int prob_n, int prob_k, void* workspace,
                vllm::ScalarType const& q_type, bool has_act_order,
                bool is_k_full, bool has_zp, int num_groups, int group_size,
                int dev, cudaStream_t stream, int thread_k, int thread_n,
@@ -2224,28 +2320,28 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 
   if (false) {
   }
-  GPTQ_CALL_IF(vllm::kU4B8, 16, 4, 256)
-  GPTQ_CALL_IF(vllm::kU4B8, 8, 8, 256)
-  GPTQ_CALL_IF(vllm::kU4B8, 8, 4, 128)
-  GPTQ_CALL_IF(vllm::kU4B8, 4, 8, 128)
-  GPTQ_CALL_IF(vllm::kU8B128, 16, 4, 256)
-  GPTQ_CALL_IF(vllm::kU8B128, 8, 8, 256)
-  GPTQ_CALL_IF(vllm::kU8B128, 8, 4, 128)
-  GPTQ_CALL_IF(vllm::kU8B128, 4, 8, 128)
+  // GPTQ_CALL_IF(vllm::kU4B8, 16, 4, 256)
+  // GPTQ_CALL_IF(vllm::kU4B8, 8, 8, 256)
+  // GPTQ_CALL_IF(vllm::kU4B8, 8, 4, 128)
+  // GPTQ_CALL_IF(vllm::kU4B8, 4, 8, 128)
+  // GPTQ_CALL_IF(vllm::kU8B128, 16, 4, 256)
+  // GPTQ_CALL_IF(vllm::kU8B128, 8, 8, 256)
+  // GPTQ_CALL_IF(vllm::kU8B128, 8, 4, 128)
+  // GPTQ_CALL_IF(vllm::kU8B128, 4, 8, 128)
 
   AWQ_CALL_IF(vllm::kU4, 16, 4, 256)
   AWQ_CALL_IF(vllm::kU4, 8, 8, 256)
   AWQ_CALL_IF(vllm::kU4, 8, 4, 128)
   AWQ_CALL_IF(vllm::kU4, 4, 8, 128)
-  AWQ_CALL_IF(vllm::kU8, 16, 4, 256)
-  AWQ_CALL_IF(vllm::kU8, 8, 8, 256)
-  AWQ_CALL_IF(vllm::kU8, 8, 4, 128)
-  AWQ_CALL_IF(vllm::kU8, 4, 8, 128)
+  // AWQ_CALL_IF(vllm::kU8, 16, 4, 256)
+  // AWQ_CALL_IF(vllm::kU8, 8, 8, 256)
+  // AWQ_CALL_IF(vllm::kU8, 8, 4, 128)
+  // AWQ_CALL_IF(vllm::kU8, 4, 8, 128)
 
-  HQQ_CALL_IF(vllm::kU4, 16, 4, 256)
-  HQQ_CALL_IF(vllm::kU4, 8, 8, 256)
-  HQQ_CALL_IF(vllm::kU4, 8, 4, 128)
-  HQQ_CALL_IF(vllm::kU4, 4, 8, 128)
+  // HQQ_CALL_IF(vllm::kU4, 16, 4, 256)
+  // HQQ_CALL_IF(vllm::kU4, 8, 8, 256)
+  // HQQ_CALL_IF(vllm::kU4, 8, 4, 128)
+  // HQQ_CALL_IF(vllm::kU4, 4, 8, 128)
   else {
     TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
                 ", ", prob_k, "]", ", has_act_order = ", has_act_order,
@@ -2267,7 +2363,7 @@ torch::Tensor moe_wna16_marlin_gemm(
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
     torch::Tensor& sorted_token_ids, torch::Tensor& expert_ids,
     torch::Tensor& num_tokens_past_padded, torch::Tensor& topk_weights,
-    int64_t moe_block_size, int64_t top_k, bool mul_topk_weights,
+    int64_t moe_block_size, int64_t top_k, bool mul_topk_weights, bool is_ep,
     vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
     bool is_zp_float) {
@@ -2476,23 +2572,23 @@ torch::Tensor moe_wna16_marlin_gemm(
         b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
         a_tmp.data_ptr<at::Half>(), sorted_token_ids.data_ptr(),
         expert_ids.data_ptr(), num_tokens_past_padded.data_ptr(),
-        topk_weights.data_ptr(), moe_block_size, top_k, mul_topk_weights,
+        topk_weights.data_ptr(), moe_block_size, top_k, mul_topk_weights, is_ep,
         size_m, size_n, size_k, workspace.data_ptr(), b_q_type, has_act_order,
         is_k_full, has_zp, num_groups, group_size, dev,
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
-  } else if (a.scalar_type() == at::ScalarType::BFloat16) {
-    MARLIN_NAMESPACE_NAME::marlin_mm<nv_bfloat16>(
-        a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
-        b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
-        perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
-        sorted_token_ids.data_ptr(), expert_ids.data_ptr(),
-        num_tokens_past_padded.data_ptr(), topk_weights.data_ptr(),
-        moe_block_size, top_k, mul_topk_weights, size_m, size_n, size_k,
-        workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
-        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-        thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float);
+  // } else if (a.scalar_type() == at::ScalarType::BFloat16) {
+  //   MARLIN_NAMESPACE_NAME::marlin_mm<nv_bfloat16>(
+  //       a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
+  //       c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
+  //       b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
+  //       perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
+  //       sorted_token_ids.data_ptr(), expert_ids.data_ptr(),
+  //       num_tokens_past_padded.data_ptr(), topk_weights.data_ptr(),
+  //       moe_block_size, top_k, mul_topk_weights, size_m, size_n, size_k,
+  //       workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
+  //       num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
+  //       thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float);
   } else {
     TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
   }
