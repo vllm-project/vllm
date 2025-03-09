@@ -2255,9 +2255,8 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        num_spec_tokens = self.num_speculative_tokens
         return (f"SpeculativeConfig({self.speculative_model=}, "
-                f"{num_spec_tokens=})")
+                f"{self.num_speculative_tokens=})")
 
 
 @dataclass
