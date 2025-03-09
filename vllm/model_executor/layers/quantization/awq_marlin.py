@@ -473,10 +473,6 @@ class AWQMoEMethod(FusedMoEMethodBase):
         activation: str = "silu",
     ) -> torch.Tensor:
         assert activation == "silu", "Only SiLU activation is supported."
-        if expert_map is not None:
-            raise NotImplementedError(
-                "Expert Parallelism is not supported for "
-                "fused Marlin MoE method.")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -499,6 +495,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             router_logits,
             topk_weights,
             topk_ids,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             w1_zeros=layer.w13_qzeros,
             w2_zeros=layer.w2_qzeros,
             workspace=layer.workspace,

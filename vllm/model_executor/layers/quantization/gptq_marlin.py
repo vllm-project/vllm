@@ -622,6 +622,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             router_logits,
             topk_weights,
             topk_ids,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             g_idx1=layer.w13_g_idx,
             g_idx2=layer.w2_g_idx,
             sort_indices1=layer.w13_g_idx_sort_indices,

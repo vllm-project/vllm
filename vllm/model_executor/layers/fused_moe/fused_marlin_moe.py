@@ -160,6 +160,8 @@ def fused_marlin_moe(
     gating_output: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
     g_idx1: Optional[torch.Tensor] = None,
     g_idx2: Optional[torch.Tensor] = None,
     sort_indices1: Optional[torch.Tensor] = None,
@@ -228,8 +230,11 @@ def fused_marlin_moe(
 
     block_size_m = config["BLOCK_SIZE_M"]
 
+    if global_num_experts == -1:
+        global_num_experts = E
     sorted_token_ids, expert_ids, num_tokens_post_padded = \
-        moe_align_block_size(topk_ids, block_size_m, E)
+        moe_align_block_size(topk_ids, block_size_m, global_num_experts,
+                             expert_map)
 
     if workspace is None:
         max_workspace_size = (max(2 * N, K) // 64) * \
@@ -276,6 +281,7 @@ def fused_marlin_moe(
         moe_block_size=block_size_m,
         top_k=topk,
         mul_topk_weights=False,
+        is_ep=expert_map is not None,
         b_q_type=scalar_type1,
         size_m=M,
         size_n=2 * N,
@@ -304,6 +310,7 @@ def fused_marlin_moe(
         moe_block_size=block_size_m,
         top_k=1,
         mul_topk_weights=True,
+        is_ep=expert_map is not None,
         b_q_type=scalar_type2,
         size_m=M * topk,
         size_n=K,
