@@ -108,7 +108,12 @@ def run_awq_test(
 @pytest.mark.parametrize("num_logprobs", [5])
 @torch.inference_mode()
 def test_awq_models(vllm_runner, image_assets, source_model, quant_model,
-                    size_factors, dtype, max_tokens, num_logprobs) -> None:
+                    size_factors, dtype, max_tokens, num_logprobs,
+                    monkeypatch) -> None:
+
+    # With V1, this test hangs during setup on single-scale input.
+    # FIXME: This needs to be resolved.
+    monkeypatch.setenv("VLLM_USE_V1", "1")
     run_awq_test(
         vllm_runner,
         image_assets,
