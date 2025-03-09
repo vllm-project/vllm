@@ -7,6 +7,11 @@ import pytest
 
 from ...utils import check_logprobs_close
 
+# These have unsupported head_dim for FA. Unfortunately, we do
+# not have a clean way to fall back when this happens, so we
+# fail with a clear message when it occurs.
+REQUIRES_V0 = ["microsoft/phi-2"]
+
 
 @pytest.mark.parametrize(
     "model",
@@ -71,7 +76,10 @@ def test_models(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
+    monkeypatch,
 ) -> None:
+    if model in REQUIRES_V0:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
 
     with hf_runner(model, dtype=dtype) as hf_model:
         if model.startswith("THUDM/chatglm3"):
