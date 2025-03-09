@@ -1478,15 +1478,15 @@ class AsyncEngineArgs(EngineArgs):
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser,
                      async_args_only: bool = False) -> FlexibleArgumentParser:
+        # Initialize plugin to update the parser, for example, The plugin may
+        # adding a new kind of quantization method to --quantization argument or
+        # a new device to --device argument.
+        load_general_plugins()
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
-        # Initialize plugin to update the parser, for example, The plugin may
-        # adding a new kind of quantization method to --quantization argument or
-        # a new device to --device argument.
-        load_general_plugins()
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update(parser)
         return parser
