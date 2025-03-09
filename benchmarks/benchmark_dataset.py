@@ -92,9 +92,10 @@ class BenchmarkDataset(ABC):
         lora_path: Optional[str] = None,
     ) -> tuple[Optional[LoRARequest], AnyTokenizer]:
         """
-        Return a tuple (lora_request, tokenizer) for tokenizing requests.  If
-        LoRA is enabled, returns the LoRA-specific tokenizer; otherwise, the
-        base tokenizer.
+        Returns a tuple (lora_request, tokenizer).
+        If LoRA parameters are provided,
+        it randomly selects a LoRA and returns its tokenizer (if available);
+        otherwise, it returns the base tokenizer.
         """
         if max_loras is None or lora_path is None:
             return None, tokenizer
@@ -108,7 +109,9 @@ class BenchmarkDataset(ABC):
         )
         if lora_id not in lora_tokenizer_cache:
             lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
-        return lora_request, lora_tokenizer_cache[lora_id]
+        # Return lora_request and the cached tokenizer if available;
+        # otherwise, return the base tokenizer
+        return lora_request, lora_tokenizer_cache[lora_id] or tokenizer
 
     @abstractmethod
     def sample(self,
@@ -265,9 +268,9 @@ class RandomDataset(BenchmarkDataset):
             total_input_len = prefix_len + int(input_lens[i])
             requests.append(
                 SampleRequest(
-                    prompt,
-                    total_input_len,
-                    int(output_lens[i]),
+                    prompt=prompt,
+                    prompt_len=total_input_len,
+                    expected_output_len=int(output_lens[i]),
                 ))
         return requests
 
@@ -331,10 +334,10 @@ class ShareGPTDataset(BenchmarkDataset):
                 continue
             samples.append(
                 SampleRequest(
-                    prompt,
-                    prompt_len,
-                    output_len,
-                    lora_request,
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    lora_request=lora_request,
                 ))
         return samples
 
@@ -418,9 +421,10 @@ class SonnetDataset(BenchmarkDataset):
             prompt_len = len(tokenizer(prompt_formatted).input_ids)
             samples.append(
                 SampleRequest(
-                    prompt_formatted if return_prompt_formatted else prompt,
-                    prompt_len,
-                    output_len,
+                    prompt=prompt_formatted
+                    if return_prompt_formatted else prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
                 ))
         return samples
 
@@ -487,9 +491,9 @@ class BurstGPTDataset(BenchmarkDataset):
             prompt = tokenizer.decode(token_ids)
             samples.append(
                 SampleRequest(
-                    prompt,
-                    input_len,
-                    output_len,
+                    prompt=prompt,
+                    prompt_len=input_len,
+                    expected_output_len=output_len,
                     lora_request=lora_req,
                 ))
         return samples
@@ -571,10 +575,10 @@ class HuggingFaceDataset(BenchmarkDataset):
                 item["image"]) if "image" in item else None
             sampled_requests.append(
                 SampleRequest(
-                    prompt,
-                    prompt_len,
-                    output_len,
-                    mm_content,
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
                     lora_request=lora_request,
                 ))
         return sampled_requests
@@ -637,9 +641,9 @@ class VisionArenaDataset(BenchmarkDataset):
             mm_content = process_image(item["images"][0])
             sampled_requests.append(
                 SampleRequest(
-                    prompt,
-                    prompt_len,
-                    output_len,
-                    mm_content,
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
                 ))
         return sampled_requests

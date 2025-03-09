@@ -7,7 +7,6 @@ import os
 import random
 import time
 import warnings
-from functools import cache
 from typing import Any, Optional, Union
 
 import torch
@@ -17,7 +16,6 @@ from benchmark_dataset import (VISION_ARENA_DATASET_PATH, BurstGPTDataset,
                                SampleRequest, ShareGPTDataset, SonnetDataset,
                                VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
-from PIL import Image
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
@@ -27,127 +25,8 @@ from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args)
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_adapter_absolute_path
-from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import BeamSearchParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
-
-
-def _get_prompt_for_image_model(question: str, *, model: str) -> str:
-    """Prepend and append special tokens around the question to form a prompt.
-
-    Args:
-        question: The input question text to wrap with special tokens
-        model: The name of the model being used, to determine which special
-            tokens to add
-
-    Returns:
-        The formatted prompt string with appropriate special tokens for the
-            model
-
-    Raises:
-        ValueError: If an unsupported model name is provided
-    """
-    model = model.lower()
-    if "pixtral" in model:
-        return f"<s>[INST]{question}\n[IMG][/INST]"
-    raise ValueError(f"Unsupported model {model}")
-
-
-@cache
-def lora_path_on_disk(lora_path: str) -> str:
-    return get_adapter_absolute_path(lora_path)
-
-
-lora_tokenizer_cache: dict[int, AnyTokenizer] = {}
-
-
-def get_random_lora_request(
-        args: argparse.Namespace
-) -> tuple[LoRARequest, Optional[AnyTokenizer]]:
-    global lora_tokenizer_cache
-    lora_id = random.randint(1, args.max_loras)
-    lora_request = LoRARequest(lora_name=str(lora_id),
-                               lora_int_id=lora_id,
-                               lora_path=lora_path_on_disk(args.lora_path))
-    if lora_id not in lora_tokenizer_cache:
-        lora_tokenizer_cache[lora_id] = get_lora_tokenizer(lora_request)
-    return lora_request, lora_tokenizer_cache[lora_id]
-
-
-def sample_requests(tokenizer: PreTrainedTokenizerBase,
-                    args: argparse.Namespace) -> list[SampleRequest]:
-
-    dataset_path: str = args.dataset_path
-    num_requests: int = args.num_prompts
-    fixed_output_len: Optional[int] = args.output_len
-    model: str = args.model
-    if fixed_output_len is not None and fixed_output_len < 4:
-        raise ValueError("output_len too small")
-
-    # Load the dataset.
-    with open(dataset_path) as f:
-        dataset = json.load(f)
-    # Filter out the conversations with less than 2 turns.
-    dataset = [data for data in dataset if len(data["conversations"]) >= 2]
-    # Shuffle the dataset.
-    random.shuffle(dataset)
-
-    # Filter out sequences that are too long or too short
-    filtered_dataset: list[SampleRequest] = []
-    for data in tqdm(dataset,
-                     total=len(filtered_dataset),
-                     desc="sampling requests"):
-        if len(filtered_dataset) == num_requests:
-            break
-
-        # Only keep the first two turns of each conversation.
-        prompt = data["conversations"][0]["value"]
-        completion = data["conversations"][1]["value"]
-
-        multi_modal_data: Optional[MultiModalDataDict] = None
-        if "image" in data:
-            multi_modal_data = multi_modal_data or {}
-            image_path = data["image"]
-            # TODO(vllm-project/vllm/issues/9778): Support multiple images.
-            assert isinstance(image_path,
-                              str), "Only support single image input"
-            try:
-                multi_modal_data["image"] = Image.open(image_path).convert(
-                    "RGB")
-            except FileNotFoundError:
-                # Ignore datapoint where asset is missing
-                continue
-            prompt = _get_prompt_for_image_model(question=prompt, model=model)
-
-        request_tokenizer = tokenizer
-        lora_request: Optional[LoRARequest] = None
-        if args.enable_lora:
-            lora_request, lora_tokenizer = get_random_lora_request(args)
-            if lora_tokenizer:
-                request_tokenizer = lora_tokenizer
-
-        # Tokenize the prompts and completions.
-        prompt_token_ids = request_tokenizer(prompt).input_ids
-        completion_token_ids = request_tokenizer(completion).input_ids
-        prompt_len = len(prompt_token_ids)
-        output_len = len(completion_token_ids
-                         ) if fixed_output_len is None else fixed_output_len
-        if prompt_len < 4 or output_len < 4:
-            # Prune too short sequences.
-            continue
-        if prompt_len > 1024 or prompt_len + output_len > 2048:
-            # Prune too long sequences.
-            continue
-        filtered_dataset.append(
-            SampleRequest(prompt=prompt,
-                          prompt_len=prompt_len,
-                          expected_output_len=output_len,
-                          multi_modal_data=multi_modal_data,
-                          lora_request=lora_request))
-
-    return filtered_dataset
 
 
 def run_vllm(
@@ -410,7 +289,6 @@ def get_requests(args, tokenizer):
 
 
 def main(args: argparse.Namespace):
-    print(args)
     random.seed(args.seed)
 
     # Sample the requests.
