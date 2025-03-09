@@ -135,6 +135,11 @@ class Metrics:
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames)
+        self.counter_total_evicted_tokens = self._counter_cls(
+            name="vllm:total_evicted_tokens_total",
+            documentation="Total number of tokens evicted from KV cache",
+            labelnames=labelnames)
+
         buckets = [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
         if not vllm_config.model_config.enforce_eager:
             buckets = vllm_config.compilation_config.\
@@ -191,6 +196,14 @@ class Metrics:
             "Histogram of time spent in PREFILL phase for request.",
             labelnames=labelnames,
             buckets=request_latency_buckets)
+        self.histogram_time_per_prefill_token_request = self._histogram_cls(
+            name="vllm:time_per_prefill_token_request_seconds",
+            documentation=
+            "Time spent per token during prefill phase in seconds",
+            labelnames=labelnames,
+            buckets=[
+                0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0
+            ])
         self.histogram_decode_time_request = self._histogram_cls(
             name="vllm:request_decode_time_seconds",
             documentation=
@@ -258,6 +271,17 @@ class Metrics:
             labelnames=labelnames,
             buckets=build_1_2_5_buckets(max_model_len),
         )
+        self.gauge_max_token_capacity_per_batch = self._gauge_cls(
+            name="vllm:max_token_capacity_per_batch",
+            documentation=
+            "Maximum tokens processed by the model server at max batch size",
+            labelnames=labelnames,
+            multiprocess_mode="livemostrecent")
+        self.gauge_total_tokens_in_queue = self._gauge_cls(
+            name="vllm:total_tokens_in_queue",
+            documentation="Total number of tokens in queue (prefill + decode).",
+            labelnames=labelnames,
+            multiprocess_mode="sum")
         self.counter_request_success = self._counter_cls(
             name="vllm:request_success_total",
             documentation="Count of successfully processed requests.",
@@ -548,6 +572,13 @@ class PrometheusStatLogger(StatLoggerBase):
         self.show_hidden_metrics = \
             vllm_config.observability_config.show_hidden_metrics
 
+        max_token_capacity = min(
+            vllm_config.model_config.max_model_len *
+            vllm_config.scheduler_config.max_num_seqs,
+            vllm_config.scheduler_config.max_num_batched_tokens)
+        self._log_gauge(self.metrics.gauge_max_token_capacity_per_batch,
+                        max_token_capacity)
+
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
@@ -627,6 +658,9 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.time_inference_requests)
         self._log_histogram(self.metrics.histogram_prefill_time_request,
                             stats.time_prefill_requests)
+        self._log_histogram(
+            self.metrics.histogram_time_per_prefill_token_request,
+            stats.time_per_prefill_token_requests)
         self._log_histogram(self.metrics.histogram_decode_time_request,
                             stats.time_decode_requests)
         self._log_histogram(self.metrics.histogram_time_in_queue_request,
@@ -635,6 +669,14 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.model_forward_time_requests)
         self._log_histogram(self.metrics.histogram_model_execute_time_request,
                             stats.model_execute_time_requests)
+        self._log_gauge(self.metrics.gauge_total_tokens_in_queue,
+                        stats.total_tokens_in_queue)
+
+        total_evicted = sum(stats.total_evicted_tokens_requests
+                            ) if stats.total_evicted_tokens_requests else 0
+        self._log_counter(self.metrics.counter_total_evicted_tokens,
+                          total_evicted)
+
         # Metadata
         finished_reason_counter = CollectionsCounter(
             stats.finished_reason_requests)
