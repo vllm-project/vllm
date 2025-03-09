@@ -7,7 +7,7 @@ from typing import Optional, Union
 from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
-from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
+from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalHasher,
@@ -135,23 +135,6 @@ class Processor:
                              "speculative decoding.")
         validate_structured_output_request(params)
 
-    def _validate_prompt(self, prompt: PromptType,
-                         lora_request: Optional[LoRARequest]):
-        tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
-        if is_token_prompt(prompt):
-            prompt_ids = prompt["prompt_token_ids"]
-            if len(prompt_ids) == 0:
-                raise ValueError(
-                    "Length of the prompt must be greater than 0.")
-            max_input_id = max(prompt_ids)
-            if max_input_id > tokenizer.max_token_id:
-                raise ValueError(
-                    "Token id {} is out of vocabulary".format(max_input_id))
-        else:
-            # TODO: add more validation for other prompt types.
-            # https://github.com/vllm-project/vllm/issues/14525
-            pass
-
     def process_inputs(
         self,
         request_id: str,
@@ -167,7 +150,6 @@ class Processor:
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
-        self._validate_prompt(prompt, lora_request)
         self._validate_lora(lora_request)
         self._validate_params(params)
         if priority != 0:
@@ -198,7 +180,7 @@ class Processor:
         # Only applicable to multimodal models with legacy input processor.
         processed_inputs = self.input_processor(preprocessed_inputs)
 
-        self._validate_model_inputs(processed_inputs)
+        self._validate_model_inputs(processed_inputs, lora_request)
 
         if is_encoder_decoder_inputs(processed_inputs):
             decoder_inputs = SingletonInputsAdapter(
@@ -314,7 +296,9 @@ class Processor:
             lora_request=lora_request,
         )
 
-    def _validate_model_inputs(self, inputs: ProcessorInputs):
+    def _validate_model_inputs(self,
+                               inputs: ProcessorInputs,
+                               lora_request: Optional[LoRARequest] = None):
         if is_encoder_decoder_inputs(inputs):
             # For encoder-decoder multimodal models, the max_prompt_len
             # restricts the decoder prompt length
@@ -327,6 +311,13 @@ class Processor:
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
+
+        max_input_id = max(prompt_ids)
+        max_allowed = self.tokenizer.get_lora_tokenizer(
+            lora_request).max_token_id
+        if max_input_id > max_allowed:
+            raise ValueError(
+                "Token id {} is out of vocabulary".format(max_input_id))
 
         if len(prompt_ids) >= self.model_config.max_model_len:
             raise ValueError(
