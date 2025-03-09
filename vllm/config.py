@@ -2029,6 +2029,7 @@ class SpeculativeConfig:
             disable_logprobs = True
 
         return SpeculativeConfig(
+            speculative_model,
             draft_model_config,
             draft_parallel_config,
             num_speculative_tokens,
@@ -2139,6 +2140,7 @@ class SpeculativeConfig:
 
     def __init__(
         self,
+        speculative_model: str,
         draft_model_config: ModelConfig,
         draft_parallel_config: ParallelConfig,
         num_speculative_tokens: int,
@@ -2155,6 +2157,9 @@ class SpeculativeConfig:
         """Create a SpeculativeConfig object.
 
         Args:
+            speculative_model: The name of the speculative model.
+                Can be [ngram] for ngram draft model, otherwise the
+                name of the draft model.
             draft_model_config: ModelConfig for the draft model.
             draft_parallel_config: ParallelConfig for the draft model.
             num_speculative_tokens: The number of tokens to sample from the
@@ -2186,6 +2191,7 @@ class SpeculativeConfig:
             disable_log_stats: Whether to disable periodic printing of stage
                 times in speculative decoding.
         """
+        self.speculative_model = speculative_model
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
         self.num_speculative_tokens = num_speculative_tokens
@@ -2249,12 +2255,8 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        if self.ngram_prompt_lookup_max > 0:
-            draft_model = "[ngram]"
-        else:
-            draft_model = self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
-        return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
+        return f"SpeculativeConfig({self.speculative_model=}, {num_spec_tokens=})"
 
 
 @dataclass

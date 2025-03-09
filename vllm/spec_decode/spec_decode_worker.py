@@ -98,6 +98,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
 
     spec_decode_worker = SpecDecodeWorker.create_worker(
         scorer_worker=target_worker,
+        speculative_model=speculative_config.speculative_model,
         draft_worker_kwargs=draft_worker_kwargs,
         disable_mqa_scorer=speculative_config.speculative_disable_mqa_scorer,
         disable_by_batch_size=speculative_config.
@@ -148,6 +149,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     def create_worker(
         cls,
         scorer_worker: WorkerBase,
+        speculative_model: str,
         draft_worker_kwargs: Dict[str, Any],
         disable_mqa_scorer: bool,
         disable_by_batch_size: Optional[int],
@@ -169,7 +171,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         draft_model_config = draft_worker_kwargs["vllm_config"].model_config
         draft_parallel_config: ParallelConfig = draft_worker_kwargs[
             'vllm_config'].parallel_config
-        if ngram_prompt_lookup_max > 0:
+        if speculative_model == "[ngram]":
             draft_worker_kwargs[
                 "device_type"] = scorer_worker.device_config.device.type
             proposer_worker = NGramWorker(**draft_worker_kwargs)

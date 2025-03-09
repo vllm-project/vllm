@@ -152,7 +152,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.use_spec_decode = True
             self.rejection_sampler = RejectionSampler()
             # TODO: find a better way to check if we are using ngram.
-            assert self.speculative_config.ngram_prompt_lookup_min, \
+            assert self.speculative_config.speculative_model == "[ngram]", \
                     "Currently, only ngram spec decode is supported in V1."
             if get_pp_group().is_last_rank:
                 self.drafter = NgramProposer()
