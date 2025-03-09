@@ -1394,7 +1394,9 @@ class LLM:
                             pbar.postfix = (
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
-                        pbar.update(1)
+                            pbar.update(len(output.outputs))
+                        else:
+                            pbar.update(1)
 
         if use_tqdm:
             pbar.close()
