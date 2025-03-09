@@ -1319,7 +1319,7 @@ class QKVCrossParallelLinear(LinearBase):
         src_param: torch.nn.Parameter,
         map_param: torch.nn.Parameter,
     ):
-        key_to_ignore = ["weight_loader"]
+        key_to_ignore = ["weight_loader", "_weight_loader"]
         has_same_type_name = type(src_param) is type(map_param)
         src_param_attrs = {
             k: v
