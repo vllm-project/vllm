@@ -121,7 +121,7 @@ def test_get_open_port(monkeypatch):
             s2.bind(("localhost", get_open_port()))
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
                 s3.bind(("localhost", get_open_port()))
-    monkeypatch.delenv("VLLM_PORT")
+    monkeypatch.delenv("VLLM_PORT", raising=True)
 
 
 # Tests for FlexibleArgumentParser
