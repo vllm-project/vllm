@@ -650,7 +650,7 @@ __global__ void Marlin(
 
   // Compute all information about the current slice which is required for
   // synchronization.
-  auto init_slice = [&]() {
+  auto init_slice = [&](bool first_init = false) {
     slice_iters =
         iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
     if (slice_iters < 0 || slice_col_par >= n_tiles * parallel) slice_iters = 0;
@@ -679,6 +679,20 @@ __global__ void Marlin(
       locks_off++;
     }
 
+    if (first_init && use_atomic_add && slice_count > 0) {
+      constexpr int threads_per_m = 16 * thread_n_blocks / 8;
+      int m_per_thread = div_ceil(block_num_valid_tokens, threads / threads_per_m);
+      for (int i = 0; i < m_per_thread; i++) {
+        int row = threads / threads_per_m * i + threadIdx.x / threads_per_m;
+        if (row < block_num_valid_tokens) {
+          int sorted_row = block_sorted_ids[row];
+          int col = slice_col * 16 * thread_n_blocks / 8 + \
+            threadIdx.x % threads_per_m;
+          C[sorted_row * prob_n / 8 + col] = {0, 0, 0, 0};
+        }
+      }
+    }
+
     if (slice_col == n_tiles) {
       slice_col = 0;
       par_id++;
@@ -687,7 +701,7 @@ __global__ void Marlin(
   };
 
   update_moe_block_data(par_id);
-  init_slice();
+  init_slice(true);
 
   // A sizes/strides
 
@@ -2316,9 +2330,6 @@ torch::Tensor moe_wna16_marlin_gemm(
                 ", size_m * topk = ", size_m * top_k);
     TORCH_CHECK(c.size(1) == size_n, "Shape mismatch: c.size(1) = ", c.size(1),
                 ", size_n = ", size_n);
-    if (use_atomic_add) c.zero_();
-  } else if (use_atomic_add) {
-    c = torch::zeros({size_m * top_k, size_n}, options);
   } else {
     c = torch::empty({size_m * top_k, size_n}, options);
   }
