@@ -1527,11 +1527,6 @@ class EngineArgs:
                 recommend_to_remove=False)
             return False
 
-        # No CPU Offloading so far.
-        if self.cpu_offload_gb != EngineArgs.cpu_offload_gb:
-            _raise_or_fallback("--cpu-offload-gb", recommend_to_remove=False)
-            return False
-
         # No Concurrent Partial Prefills so far.
         if (self.max_num_partial_prefills
                 != EngineArgs.max_num_partial_prefills
