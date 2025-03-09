@@ -16,7 +16,7 @@ def main(args):
     llm = LLM(
         model=args.model,
         enforce_eager=True,
-        enable_prefix_caching=True,
+        enable_prefix_caching=args.enable_prefix_caching,
         tensor_parallel_size=args.tensor_parallel_size,
     )
 
