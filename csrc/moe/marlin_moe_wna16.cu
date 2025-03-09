@@ -2314,9 +2314,9 @@ torch::Tensor moe_wna16_marlin_gemm(
     TORCH_CHECK(c.size(0) == size_m * top_k,
                 "Shape mismatch: c.size(0) = ", c.size(0),
                 ", size_m * topk = ", size_m * top_k);
-    TORCH_CHECK(c.size(1) == size_n, "Shape mismatch: c.size(1) = ", a.size(1),
-                ", size_k = ", size_k);
-    c.zero_();
+    TORCH_CHECK(c.size(1) == size_n, "Shape mismatch: c.size(1) = ", c.size(1),
+                ", size_n = ", size_n);
+    if (use_atomic_add) c.zero_();
   } else if (use_atomic_add) {
     c = torch::zeros({size_m * top_k, size_n}, options);
   } else {
