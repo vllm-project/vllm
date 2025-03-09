@@ -75,7 +75,7 @@ def resolve_transformers_fallback(model_config: ModelConfig,
                 raise ValueError(
                     f"{arch} has no vLLM implementation and the Transformers "
                     "implementation is not compatible with vLLM. Try setting "
-                    "VLLM_USE_V1=0!")
+                    "VLLM_USE_V1=0.")
             logger.warning(
                 "%s has no vLLM implementation, falling back to Transformers "
                 "implementation. Some features may not be supported and "
