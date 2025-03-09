@@ -9,7 +9,6 @@ from vllm.model_executor.guided_decoding.reasoner import get_reasoner
 from vllm.model_executor.guided_decoding.utils import (
     convert_lark_to_gbnf, grammar_is_likely_lark,
     has_lmf_unsupported_json_features, has_xgrammar_unsupported_json_features)
-from vllm.platforms import CpuArchEnum
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
