@@ -20,6 +20,7 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          TokenizerPoolConfig, VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
@@ -238,20 +239,6 @@ class EngineArgs:
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
-
-        # Check Quantization, load all methods after plugins are loaded
-        from vllm.model_executor.layers.quantization import (
-            QUANTIZATION_METHODS)
-
-        available_quantization = [*QUANTIZATION_METHODS, None]
-        if self.quantization not in available_quantization:
-            raise ValueError(
-                f"Invalid quantization method: {self.quantization}. "
-                f"Valid options are: {available_quantization}")
-        if self.speculative_model_quantization not in available_quantization:
-            raise ValueError(f"Invalid quantization method: "
-                             f"{self.speculative_model_quantization}. "
-                             f"Valid options are: {available_quantization}")
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -589,6 +576,7 @@ class EngineArgs:
         # Quantization settings.
         parser.add_argument('--quantization',
                             '-q',
+                            choices=[*QUANTIZATION_METHODS, None],
                             type=nullable_str,
                             default=EngineArgs.quantization,
                             help='Method used to quantize the weights. If '
@@ -788,6 +776,7 @@ class EngineArgs:
         parser.add_argument(
             '--speculative-model-quantization',
             type=nullable_str,
+            choices=[*QUANTIZATION_METHODS, None],
             default=EngineArgs.speculative_model_quantization,
             help='Method used to quantize the weights of speculative model. '
             'If None, we first check the `quantization_config` '
@@ -1461,15 +1450,15 @@ class AsyncEngineArgs(EngineArgs):
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser,
                      async_args_only: bool = False) -> FlexibleArgumentParser:
+        # Initialize plugin to update the parser, for example, The plugin may
+        # adding a new kind of quantization method to --quantization argument or
+        # a new device to --device argument.
+        load_general_plugins()
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
-        # Initialize plugin to update the parser, for example, The plugin may
-        # adding a new kind of quantization method to --quantization argument or
-        # a new device to --device argument.
-        load_general_plugins()
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update(parser)
         return parser
