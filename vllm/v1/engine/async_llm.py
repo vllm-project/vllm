@@ -105,11 +105,22 @@ class AsyncLLM(EngineClient):
         vllm_config: VllmConfig,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
         disable_log_requests: bool = False,
         disable_log_stats: bool = False,
     ) -> "AsyncLLM":
         if not envs.VLLM_USE_V1:
-            raise ValueError("Using V1 Engine but VllmConfig.use_v1 is False.")
+            raise ValueError(
+                "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
+                "This should not happen. As a workaround, try using "
+                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
+                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+
+        # FIXME(rob): refactor VllmConfig to include the StatLoggers
+        # include StatLogger in the Oracle decision.
+        if stat_loggers is not None:
+            raise ValueError("Custom StatLoggers are not yet supported on V1. "
+                             "Explicitly set VLLM_USE_V1=0 to disable V1.")
 
         # Create the LLMEngine.
         return cls(
