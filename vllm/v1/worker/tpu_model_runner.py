@@ -554,7 +554,6 @@ class TPUModelRunner:
 
         # Prepare inputs
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
