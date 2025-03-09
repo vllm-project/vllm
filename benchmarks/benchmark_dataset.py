@@ -330,6 +330,7 @@ class ShareGPTDataset(BenchmarkDataset):
             entry for entry in self.data
             if "conversations" in entry and len(entry["conversations"]) >= 2
         ]
+        random.seed(self.random_seed)
         random.shuffle(self.data)
 
     def sample(self,
