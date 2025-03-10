@@ -43,7 +43,7 @@ class BaseLogitsProcessor:
 
     def __init__(self, guide: Guide, reasoner: Optional[Reasoner]):
         self._guide: Guide = guide
-        self._reasoner = reasoner
+        self._reasoner: Optional[Reasoner] = reasoner
         # CFGState is used for the FSM state for CFGGuide
         self._fsm_state: DefaultDict[int, Union[int,
                                                 CFGState]] = defaultdict(int)
@@ -54,10 +54,14 @@ class BaseLogitsProcessor:
 
         # Skip the structured logits processing if reasoning is not finished.
         # reasoner is not None only when `--enable-reasoning` is set.
-        if self._reasoner is not None and \
-        not self._reasoner.is_reasoning_end(
-                input_ids):
-            return scores
+        if self._reasoner is not None:
+            if not self._reasoner.is_reasoning_end(input_ids):
+                return scores
+            else:
+                # Remove the reasoning tokens from the input_ids
+                # We need this because our implementation relies on the
+                # hash of the input_ids to store the FSM state.
+                input_ids = self._reasoner.extract_content(input_ids)
 
         seq_id = hash(tuple(input_ids))
 

@@ -5,8 +5,10 @@
 
 /*
    This file defines quantized GEMM operations using the CUTLASS 3.x API, for
-   NVIDIA GPUs with sm90a (Hopper) or later.
+   NVIDIA GPUs with sm90a (Hopper).
 */
+
+#if defined ENABLE_SCALED_MM_SM90 && ENABLE_SCALED_MM_SM90
 
 void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b,
@@ -71,3 +73,5 @@ void cutlass_scaled_mm_azp_sm90(torch::Tensor& out, torch::Tensor const& a,
   vllm::cutlass_scaled_mm_azp_sm90_int8(out, a, b, a_scales, b_scales, azp_adj,
                                         azp, bias);
 }
+
+#endif
