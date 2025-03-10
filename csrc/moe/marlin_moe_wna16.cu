@@ -610,11 +610,11 @@ __global__ void Marlin(
 
   constexpr int pack_factor = 32 / w_type.size_bits();
   constexpr int moe_block_size = 16 * thread_m_blocks;
-  const int group_size =
-      (!has_act_order && group_blocks == -1) ? prob_k : 16 * group_blocks;
-  const int zp_row_stride = is_zp_float
-                                ? prob_k / group_size / 8
-                                : prob_k / group_size / (pack_factor * 4);
+  const int group_size = (!has_act_order && group_blocks == -1) ? 
+    prob_k : 16 * group_blocks;
+  const int scales_expert_stride = prob_n * prob_k / group_size / 8;
+  const int zp_expert_stride = is_zp_float ? 
+    prob_n * prob_k / group_size / 8 : prob_n * prob_k / group_size / (pack_factor * 4);
 
   // parallel: num valid moe blocks
   int num_tokens_past_padded = num_tokens_past_padded_ptr[0];
@@ -724,10 +724,9 @@ __global__ void Marlin(
     }
 
     B_expert_off = expert_id * prob_n * prob_k / (pack_factor * 4);
-    scales_ptr +=
-        (expert_id - old_expert_id) * prob_n * prob_k / group_size / 8;
+    scales_ptr += (expert_id - old_expert_id) * scales_expert_stride;
     if constexpr (has_zp) {
-      zp_ptr += (expert_id - old_expert_id) * prob_n * zp_row_stride;
+      zp_ptr += (expert_id - old_expert_id) * zp_expert_stride;
     }
 
     read_moe_block_data(block_id);
