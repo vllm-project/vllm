@@ -15,7 +15,7 @@ gpu_utils=0.92
 bs=448
 num_prompts=448
 request_rate=inf
-log_name="[dynamicfp8-dmoe-fp8kv]static-online-gaudi3-${gpu_utils}util-TPparallel${tp_parrallel}-EP${ep_size}-loop${moe_n_slice}moegroups-multistep${multi_step}_nprompt${num_prompts}_rrate${request_rate}_bs${bs}_i${in_len}_o${out_len}_mdllen${total_len}"
+log_name="[dynamicfp8-dmoe-fp8kv-delayedsampling]static-online-gaudi3-${gpu_utils}util-TPparallel${tp_parrallel}-EP${ep_size}-loop${moe_n_slice}moegroups-multistep${multi_step}_nprompt${num_prompts}_rrate${request_rate}_bs${bs}_i${in_len}_o${out_len}_mdllen${total_len}"
 
 VLLM_DECODE_BLOCK_BUCKET_MIN=$((in_len * bs / 128))
 VLLM_DECODE_BLOCK_BUCKET_MAX=$((total_len * bs / 128 + 128))
@@ -25,7 +25,8 @@ tokenizer="/data/models/DeepSeek-R1-dynamic/"
 # tokenizer="/data/models/DeepSeek-R1-static/"
 model_name="DeepSeek-R1"
 
-#VLLM_DMOE_DYNAMIC_SCALE=1 \
+VLLM_DELAYED_SAMPLING=true \
+VLLM_DMOE_DYNAMIC_SCALE=1 \
 HABANA_VISIBLE_DEVICES="ALL" \
 VLLM_MOE_N_SLICE=${moe_n_slice} \
 VLLM_EP_SIZE=${ep_size} \
