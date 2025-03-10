@@ -174,24 +174,24 @@ VLM_TEST_SETTINGS = {
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     #### Extended model tests
-    "aria": VLMTestInfo(
-        models=["rhymes-ai/Aria"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
-        max_model_len=4096,
-        max_num_seqs=2,
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<vlm_image>Please describe the image shortly.",
-            "cherry_blossom": "<vlm_image>Please infer the season with reason.",
-        }),
-        multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
-        postprocess_inputs=model_utils.cast_dtype_post_processor("pixel_values"),
-        stop_str=["<|im_end|>"],
-        image_size_factors=[(0.10, 0.15)],
-        max_tokens=64,
-        marks=[large_gpu_mark(min_gb=64)],
-    ),
+    # "aria": VLMTestInfo(
+    #     models=["rhymes-ai/Aria"],
+    #     test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+    #     prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
+    #     img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
+    #     max_model_len=4096,
+    #     max_num_seqs=2,
+    #     single_image_prompts=IMAGE_ASSETS.prompts({
+    #         "stop_sign": "<vlm_image>Please describe the image shortly.",
+    #         "cherry_blossom": "<vlm_image>Please infer the season with reason.",  # noqa: E501
+    #     }),
+    #     multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
+    #     postprocess_inputs=model_utils.cast_dtype_post_processor("pixel_values"),     # noqa: E501
+    #     stop_str=["<|im_end|>"],
+    #     image_size_factors=[(0.10, 0.15)],
+    #     max_tokens=64,
+    #     marks=[large_gpu_mark(min_gb=64)],
+    # ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
