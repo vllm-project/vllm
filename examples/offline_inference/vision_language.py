@@ -132,7 +132,7 @@ def run_glm4v(questions: list[str], modality: str):
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
 
     prompts = [
-        f"[gMASK]<sop><|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>\
+        f"<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>\
         {question}<|assistant|>" for question in questions
     ]
 
