@@ -13,11 +13,8 @@ vLLM currently supports the following reasoning models:
 | Model Series | Parser Name | Structured Output Support |
 |--------------|-------------|------------------|
 | [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `guided_json`, `guided_regex` |
-<<<<<<< HEAD
 | [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` |
-=======
 | [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a)* | `granite` |  |
->>>>>>> 4ecb1695 (Fix granite reasoning parser doc formatting)
 
 * IBM Granite 3.2 reasoning is disabled by response; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
 
@@ -104,6 +101,7 @@ models = client.models.list()
 model = models.data[0].id
 
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
+# For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
 stream = client.chat.completions.create(model=model,
                                         messages=messages,
                                         stream=True)
