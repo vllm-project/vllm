@@ -228,7 +228,9 @@ steps:
     - python3 offline_inference/basic/chat.py
     - python3 offline_inference/prefix_caching.py
     - python3 offline_inference/llm_engine_example.py
-    - python3 offline_inference/vision_language.py
+    # llava-hf/llava-1.5-7b-hf currently broken on V1
+    # https://github.com/vllm-project/vllm/issues/14523
+    - python3 offline_inference/vision_language.py --model qwen2_vl
     - python3 offline_inference/vision_language_multi_image.py
     - python3 other/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 other/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference/encoder_decoder.py
