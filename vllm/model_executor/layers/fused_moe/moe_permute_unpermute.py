@@ -1,7 +1,6 @@
 import torch
-from typing import List
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+
 
 
 def moe_permute(
@@ -11,7 +10,23 @@ def moe_permute(
     token_expert_indices: torch.Tensor,
     topk: int,
     n_expert: int,
-) -> List[torch.Tensor]:
+) -> list[torch.Tensor]:
+    """
+    This function expands and permutes activation to gather uncontinuous tokens 
+      for each expert.
+    Parameters:
+    - hidden_states (torch.Tensor): The input tensor to the MoE layer.    
+    - topk_weights (torch.Tensor): topk expert route weight for each token.
+    - topk_ids (torch.Tensor): topk expert route id for each token.
+    - token_expert_indices (torch.Tensor): indice for expanded hidden.
+    - topk (int): The number of top-k experts to select.
+    - n_expert (int): The number of expert.
+    Returns:
+    - permuted_hidden_states (torch.Tensor): permuted activation.
+    - expert_first_token_offset (torch.Tensor): offset of the first token
+       of each expert for grouped gemm.
+    - src_row_id2dst_row_id_map (torch.Tensor): idx map for moe_unpermute.
+    """
     n_token, n_hidden = hidden_states.shape
     permuted_hidden_states = torch.empty(
         (n_token * topk, n_hidden),
@@ -45,11 +60,22 @@ def moe_permute(
 def moe_unpermute(permuted_hidden_states: torch.Tensor,
                   topk_weights: torch.Tensor,
                   topk_ids: torch.Tensor,
-                  token_expert_indices: torch.Tensor,
                   src_row_id2dst_row_id_map: torch.Tensor,
                   topk: int,
                   n_expert: int 
 ) -> torch.Tensor:
+    """
+    This function expands and permutes activation to gathering uncontinuous tokens
+      for each expert.
+    Parameters:
+    - permuted_hidden_states (torch.Tensor): permuted activation.
+    - topk_weights (torch.Tensor): topk expert route weight for each token.
+    - topk_ids (torch.Tensor): topk expert route id for each token.
+    - topk (int): The number of top-k experts to select.
+    - n_expert (int): The number of expert.
+    Returns:
+    - hidden_states (torch.Tensor): The reduced and unpermuted activation tensor.  
+    """   
     n_token, n_hidden = topk_weights.shape[0], permuted_hidden_states.shape[-1]
     hidden_states = torch.empty((n_token, n_hidden), dtype=permuted_hidden_states.dtype, 
                                 device=permuted_hidden_states.device)
