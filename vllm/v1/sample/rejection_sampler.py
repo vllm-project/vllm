@@ -77,18 +77,18 @@ class RejectionSampler(nn.Module):
         draft_token_ids = [
             torch.tensor(x, dtype=int, device='cpu') for x in draft_token_ids
         ]
+        vocab_size = target_probs.size(-1) + 1
         draft_token_ids_tensor = pad_sequence(draft_token_ids,
                                               batch_first=True,
-                                              padding_value=INVALID_TOKEN_ID)
+                                              padding_value=vocab_size - 1)
 
         if sampling_metadata.all_greedy:
             target_token_ids = target_probs.argmax(dim=-1).view(-1)
             target_token_ids = target_token_ids.split(sample_lens)
             target_token_ids = pad_sequence(target_token_ids,
                                             batch_first=True,
-                                            padding_value=INVALID_TOKEN_ID)
+                                            padding_value=vocab_size - 1)
 
-            vocab_size = target_probs.size(-1)
             # NOTE: CPU <-> GPU synchronization happens here.
             draft_token_ids_tensor = draft_token_ids_tensor.to(
                 target_probs.device)
