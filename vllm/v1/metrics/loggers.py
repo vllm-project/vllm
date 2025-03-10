@@ -22,7 +22,7 @@ class StatLoggerBase(ABC):
 
     @abstractmethod
     def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: IterationStats):
+               iteration_stats: Optional[IterationStats]):
         ...
 
     def log(self):  # noqa
@@ -34,6 +34,9 @@ class LoggingStatLogger(StatLoggerBase):
     def __init__(self):
         self._reset(time.monotonic())
         self.last_scheduler_stats = SchedulerStats()
+        # Prefix cache metrics. This cannot be reset.
+        # TODO: Make the interval configurable.
+        self.prefix_caching_metrics = PrefixCachingMetrics()
 
     def _reset(self, now):
         self.last_log_time = now
@@ -41,9 +44,6 @@ class LoggingStatLogger(StatLoggerBase):
         # Tracked stats over current local logging interval.
         self.num_prompt_tokens: list[int] = []
         self.num_generation_tokens: list[int] = []
-
-        # Prefix cache metrics. TODO: Make the interval configurable.
-        self.prefix_caching_metrics = PrefixCachingMetrics()
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
@@ -56,10 +56,11 @@ class LoggingStatLogger(StatLoggerBase):
         return float(np.sum(tracked_stats) / (now - self.last_log_time))
 
     def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: IterationStats):
+               iteration_stats: Optional[IterationStats]):
         """Log Stats to standard output."""
 
-        self._track_iteration_stats(iteration_stats)
+        if iteration_stats:
+            self._track_iteration_stats(iteration_stats)
 
         self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
@@ -319,7 +320,7 @@ class PrometheusStatLogger(StatLoggerBase):
         info_gauge.set(1)
 
     def record(self, scheduler_stats: SchedulerStats,
-               iteration_stats: IterationStats):
+               iteration_stats: Optional[IterationStats]):
         """Log to prometheus."""
         self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)
         self.gauge_scheduler_waiting.set(scheduler_stats.num_waiting_reqs)
@@ -330,6 +331,9 @@ class PrometheusStatLogger(StatLoggerBase):
             scheduler_stats.prefix_cache_stats.queries)
         self.counter_gpu_prefix_cache_hits.inc(
             scheduler_stats.prefix_cache_stats.hits)
+
+        if iteration_stats is None:
+            return
 
         self.counter_num_preempted_reqs.inc(iteration_stats.num_preempted_reqs)
         self.counter_prompt_tokens.inc(iteration_stats.num_prompt_tokens)

@@ -6,13 +6,16 @@ the correct prompt format on vision language models for text generation.
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
+import os
 import random
 
+from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
+from vllm.lora.request import LoRARequest
 from vllm.utils import FlexibleArgumentParser
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -152,15 +155,13 @@ def run_h2ovl(questions: list[str], modality: str):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
-    prompts = [
-        tokenizer.apply_chat_template([{
-            'role': 'user',
-            'content': f"<image>\n{question}"
-        }],
-                                      tokenize=False,
-                                      add_generation_prompt=True)
-        for question in questions
-    ]
+    messages = [[{
+        'role': 'user',
+        'content': f"<image>\n{question}"
+    }] for question in questions]
+    prompts = tokenizer.apply_chat_template(messages,
+                                            tokenize=False,
+                                            add_generation_prompt=True)
 
     # Stop tokens for H2OVL-Mississippi
     # https://huggingface.co/h2oai/h2ovl-mississippi-800m
@@ -209,15 +210,13 @@ def run_internvl(questions: list[str], modality: str):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
-    prompts = [
-        tokenizer.apply_chat_template([{
-            'role': 'user',
-            'content': f"<image>\n{question}"
-        }],
-                                      tokenize=False,
-                                      add_generation_prompt=True)
-        for question in questions
-    ]
+    messages = [[{
+        'role': 'user',
+        'content': f"<image>\n{question}"
+    }] for question in questions]
+    prompts = tokenizer.apply_chat_template(messages,
+                                            tokenize=False,
+                                            add_generation_prompt=True)
 
     # Stop tokens for InternVL
     # models variants may have different stop tokens
@@ -399,7 +398,7 @@ def run_mllama(questions: list[str], modality: str):
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    messages = [{
+    messages = [[{
         "role":
         "user",
         "content": [{
@@ -408,7 +407,7 @@ def run_mllama(questions: list[str], modality: str):
             "type": "text",
             "text": f"{question}"
         }]
-    } for question in questions]
+    }] for question in questions]
     prompts = tokenizer.apply_chat_template(messages,
                                             add_generation_prompt=True,
                                             tokenize=False)
@@ -454,10 +453,10 @@ def run_nvlm_d(questions: list[str], modality: str):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
-    messages = [{
+    messages = [[{
         'role': 'user',
         'content': f"<image>\n{question}"
-    } for question in questions]
+    }] for question in questions]
     prompts = tokenizer.apply_chat_template(messages,
                                             tokenize=False,
                                             add_generation_prompt=True)
@@ -519,6 +518,40 @@ def run_phi3v(questions: list[str], modality: str):
         mm_processor_kwargs={"num_crops": 16},
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
+    stop_token_ids = None
+    return llm, prompts, stop_token_ids
+
+
+# Phi-4-multimodal-instruct
+def run_phi4mm(questions: list[str], modality: str):
+    """
+    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    show how to process image inputs.
+    """
+    assert modality == "image"
+    model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
+    # Since the vision-lora and speech-lora co-exist with the base model,
+    # we have to manually specify the path of the lora weights.
+    vision_lora_path = os.path.join(model_path, "vision-lora")
+    prompts = [
+        f"<|user|><|image_1|>{question}<|end|><|assistant|>"
+        for question in questions
+    ]
+    llm = LLM(
+        model=model_path,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=2,
+        enable_lora=True,
+        max_lora_rank=320,
+        lora_extra_vocab_size=0,
+    )
+    lora_request = LoRARequest("vision", 1, vision_lora_path)
+    # To maintain code compatibility in this script, we add LoRA here.
+    llm.llm_engine.add_lora(lora_request=lora_request)
+    # You can also add LoRA using:
+    # llm.generate(prompts, lora_request=lora_request,...)
+
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -648,6 +681,7 @@ model_example_map = {
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
+    "phi4_mm": run_phi4mm,
     "pixtral_hf": run_pixtral_hf,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
