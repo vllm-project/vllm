@@ -59,6 +59,10 @@ llm.apply_model(lambda model: print(type(model)))
 
 If it is `TransformersModel` then it means it's based on Transformers!
 
+:::{tip}
+You can force the use of `TransformersModel` by setting `model_impl="transformers"` for <project:#offline-inference> or `--model-impl transformers` for the <project:#openai-compatible-server>.
+:::
+
 :::{note}
 vLLM may not fully optimise the Transformers implementation so you may see degraded performance if comparing a native model to a Transformers model in vLLM.
 :::
