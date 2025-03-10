@@ -17,6 +17,7 @@ from zmq.asyncio import Socket
 
 from vllm import PoolingParams
 from vllm.config import DecodingConfig, ModelConfig, VllmConfig
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
@@ -442,6 +443,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         ...
@@ -457,6 +459,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         ...
@@ -473,6 +476,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
         priority: int = 0,
         *,
         inputs: Optional[PromptType] = None  # DEPRECATED
@@ -717,3 +721,8 @@ class MQLLMEngineClient(EngineClient):
         # Raise on error, otherwise happily return None
         if isinstance(request_output, BaseException):
             raise request_output
+
+    async def add_control_vector(self,
+                                 cv_request: ControlVectorRequest) -> None:
+        """Load a new control vector into the engine for future requests."""
+        pass

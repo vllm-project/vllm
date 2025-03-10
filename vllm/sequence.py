@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional, Union
 import msgspec
 import torch
 
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.inputs import SingletonInputs, SingletonInputsAdapter
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
@@ -653,6 +654,7 @@ class SequenceGroup:
         encoder_seq: Optional[Sequence] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        control_vector_request: Optional[ControlVectorRequest] = None,
         priority: int = 0,
     ) -> None:
         self.request_id = request_id
@@ -675,6 +677,7 @@ class SequenceGroup:
         self.pooling_params = pooling_params
         self.pooled_data = pooled_data
         self.prompt_adapter_request = prompt_adapter_request
+        self.control_vector_request = control_vector_request
         self.encoder_seq = encoder_seq
         self.trace_headers = trace_headers
         self.priority = priority
@@ -943,6 +946,7 @@ class SequenceGroupMetadata(
                            unless you are working with an encoder/decoder
                            model.
         prompt_adapter_request: Prompt Adapter request.
+        control_vector_request: Contorol Vector request.
     """
 
     request_id: str
@@ -965,6 +969,7 @@ class SequenceGroupMetadata(
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[list[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
+    control_vector_request: Optional[ControlVectorRequest] = None
     token_chunk_size: Optional[int] = None
 
     ### Stateful fields that are lazily defined. ###
@@ -995,6 +1000,11 @@ class SequenceGroupMetadata(
     def prompt_adapter_num_virtual_tokens(self) -> int:
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens \
                         if self.prompt_adapter_request else 0
+
+    @property
+    def control_vector_id(self) -> int:
+        return self.control_vector_request.adapter_id \
+            if self.control_vector_request else 0
 
     # Multi-Step Chunked-Prefill property
     @property
@@ -1286,6 +1296,7 @@ class ExecuteModelRequest(
         omit_defaults=True):  # type: ignore[call-arg]
     """The model execution request, containing CPU metadata only. The LLM
     engine should create an instance of this class for each request batch."""
+
     # The sequence group metadata list.
     seq_group_metadata_list: list[Union[SequenceGroupMetadata,
                                         SequenceGroupMetadataDelta]]
@@ -1442,6 +1453,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             encoder_seq=seq_group.encoder_seq,
             trace_headers=seq_group.trace_headers,
             prompt_adapter_request=seq_group.prompt_adapter_request,
+            control_vector_request=seq_group.control_vector_request,
             priority=seq_group.priority,
         )
 
