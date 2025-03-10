@@ -11,6 +11,7 @@ import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -106,10 +107,15 @@ try:
             # on a background thread, so we need to reset torch's current
             # device.
             # We can remove this API after it is fixed in compiled graph.
-            import torch
             assert self.worker is not None, "Worker is not initialized"
             if not self.compiled_dag_cuda_device_set:
-                torch.cuda.set_device(self.worker.device)
+                if current_platform.is_tpu():
+                    # Not needed
+                    pass
+                else:
+                    import torch
+                    torch.cuda.set_device(self.worker.device)
+
                 self.compiled_dag_cuda_device_set = True
 
         def execute_model_ray(
@@ -184,8 +190,9 @@ def _verify_bundles(placement_group: "PlacementGroup",
             f"group {placement_group.id}. Node id -> bundles "
             f"{node_id_to_bundle}. "
             "You don't have enough GPUs available in a current node. Check "
-            "`ray status` to see if you have available GPUs in a node "
-            f"{driver_node_id} before starting an vLLM engine.")
+            "`ray status` and `ray list nodes` to see if you have available "
+            "GPUs in a node `{driver_node_id}` before starting an vLLM engine."
+        )
 
     for node_id, bundles in node_id_to_bundle.items():
         if len(bundles) < parallel_config.tensor_parallel_size:
@@ -225,8 +232,8 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
         wait_interval *= 2
         logger.info(
             "Waiting for creating a placement group of specs for "
-            "%d seconds. specs=%s. Check "
-            "`ray status` to see if you have enough resources,"
+            "%d seconds. specs=%s. Check `ray status` and "
+            "`ray list nodes` to see if you have enough resources,"
             " and make sure the IP addresses used by ray cluster"
             " are the same as VLLM_HOST_IP environment variable"
             " specified in each node if you are running on a multi-node.",
@@ -238,8 +245,8 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
         raise ValueError(
             "Cannot provide a placement group of "
             f"{placement_group_specs=} within {PG_WAIT_TIMEOUT} seconds. See "
-            "`ray status` to make sure the cluster has enough resources."
-        ) from None
+            "`ray status` and `ray list nodes` to make sure the cluster has "
+            "enough resources.") from None
 
 
 def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
