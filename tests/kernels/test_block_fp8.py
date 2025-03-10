@@ -516,6 +516,7 @@ def iota(shape: Tuple[int, ...], dim: int = 0, **kwargs) -> torch.Tensor:
     #itertools.product([512], [128], [256], [2], [2], BLOCK_SIZE, DTYPES, SEEDS))
     #itertools.product([128], [128], [256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS))
     #itertools.product([128], [128], [256], [2], [2], BLOCK_SIZE, DTYPES, SEEDS))
+    #itertools.product([512], [128], [256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed):
@@ -576,7 +577,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
     w2_s = w2_sa
 
     with set_current_vllm_config(vllm_config):
-        if False:
+        if True:
             ref_out = torch_w8a8_block_fp8_moe(
                 a, w1, w2, w1_s, w2_s, score, topk, block_size)
 
