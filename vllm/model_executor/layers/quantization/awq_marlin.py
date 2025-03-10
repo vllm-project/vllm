@@ -469,7 +469,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
     ) -> torch.Tensor:
+        assert activation == "silu", "Only SiLU activation is supported."
         if expert_map is not None:
             raise NotImplementedError(
                 "Expert Parallelism is not supported for "

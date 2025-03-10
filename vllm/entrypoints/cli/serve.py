@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-from typing import List
 
 import uvloop
 
@@ -59,5 +58,5 @@ class ServeSubcommand(CLISubcommand):
         return make_arg_parser(serve_parser)
 
 
-def cmd_init() -> List[CLISubcommand]:
+def cmd_init() -> list[CLISubcommand]:
     return [ServeSubcommand()]
