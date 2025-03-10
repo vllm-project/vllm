@@ -1437,6 +1437,11 @@ class EngineArgs:
 
         # V1 always uses chunked prefills.
         self.enable_chunked_prefill = True
+        # V1 should use the new scheduler by default.
+        # Swap it only if this arg is set to the original V0 default
+        if self.scheduler_cls == EngineArgs.scheduler_cls:
+            self.scheduler_cls = "vllm.v1.core.scheduler.Scheduler"
+
         # When no user override, set the default values based on the usage
         # context.
         # Use different default values for different hardware.
