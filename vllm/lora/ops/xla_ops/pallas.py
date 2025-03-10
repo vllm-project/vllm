@@ -110,8 +110,10 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
     if TOKENS_BLOCK > T or T % TOKENS_BLOCK != 0:
         T1 = (T // TOKENS_BLOCK + 1) * TOKENS_BLOCK
 
-    loras = torch.nn.functional.pad(loras, (0, D1 - D, 0, L1 - L, 0, 0))
-    inputs = torch.nn.functional.pad(inputs, (0, D1 - D, 0, T1 - T))
+    if D1 != D or L1 != L:
+        loras = torch.nn.functional.pad(loras, (0, D1 - D, 0, L1 - L, 0, 0))
+    if D1 != D or T1 != T:
+        inputs = torch.nn.functional.pad(inputs, (0, D1 - D, 0, T1 - T))
 
     return kernel(idxs, inputs, loras)[:T, :L]
 
@@ -120,6 +122,10 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
 def bgmv_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
                  idxs: torch.IntTensor):
     T, _ = inputs.shape
-    _, _, L, _ = loras.shape
+    
+    if len(loras.shape) == 4:
+        loras = loras.squeeze(axis=1)
+    
+    _, L, _ = loras.shape
 
     return torch.empty((T, L), device=inputs.device)
