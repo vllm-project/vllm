@@ -99,11 +99,9 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     spec_decode_worker = SpecDecodeWorker.create_worker(
         scorer_worker=target_worker,
         draft_worker_kwargs=draft_worker_kwargs,
-        disable_mqa_scorer=speculative_config.speculative_disable_mqa_scorer,
-        disable_by_batch_size=speculative_config.
-        speculative_disable_by_batch_size,
-        draft_token_acceptance_method=speculative_config.
-        draft_token_acceptance_method,
+        disable_mqa_scorer=speculative_config.disable_mqa_scorer,
+        disable_by_batch_size=speculative_config.disable_by_batch_size,
+        draft_token_acceptance_method=speculative_config.acceptance_method,
         typical_acceptance_sampler_posterior_threshold=speculative_config.
         typical_acceptance_sampler_posterior_threshold,
         typical_acceptance_sampler_posterior_alpha=speculative_config.
