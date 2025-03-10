@@ -67,12 +67,18 @@ def run_vllm(
     use_beam_search = False
 
     if not use_beam_search:
+        from torch.profiler import ProfilerActivity, profile
+        activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
         start = time.perf_counter()
-        llm.generate(prompts,
-                     sampling_params,
-                     lora_request=lora_requests,
-                     use_tqdm=True)
+        with profile(activities=activities) as prof:
+            llm.generate(prompts,
+                         sampling_params,
+                         lora_request=lora_requests,
+                         use_tqdm=True)
         end = time.perf_counter()
+        import uuid
+        file_name = "pt-trace-" + str(uuid.uuid4()) + ".json"
+        prof.export_chrome_trace(file_name)
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
         prompts = [request.prompt for request in requests]
