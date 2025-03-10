@@ -17,7 +17,6 @@ from transformers.models.pixtral.image_processing_pixtral import (
 from transformers.models.pixtral.modeling_pixtral import (
     PixtralRotaryEmbedding, apply_rotary_pos_emb, position_ids_in_meshgrid)
 
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -124,6 +123,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         tokenizer = self.info.get_tokenizer()
         image_encoder = tokenizer.mistral.instruct_tokenizer.mm_encoder
@@ -149,7 +149,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
                     " For more info, see: "
                     "https://github.com/vllm-project/vllm/issues/8411.")
 
-        if envs.VLLM_USE_V1:
+        if return_mm_hashes:
             model_id = self.info.model_id
             mm_hashes = {
                 modality: [
@@ -310,13 +310,13 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         mm_kwargs = MultiModalKwargs.from_items(merged_kw_items)
         return mm_kwargs
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> list[PromptReplacement]:
-        raise NotImplementedError
+        raise AssertionError("Should not be called")
 
     def _get_mm_fields_config(
         self,
