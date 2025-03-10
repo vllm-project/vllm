@@ -611,7 +611,7 @@ __global__ void Marlin(
   constexpr int pack_factor = 32 / w_type.size_bits();
   constexpr int moe_block_size = 16 * thread_m_blocks;
   const int group_size =
-      (!has_act_order && group_blocks == -1) ? prob_k : 16 * group_blocks;
+      (!has_act_order && group_blocks == -1) ? prob_k : prob_k / num_groups;
   const int scales_expert_stride = prob_n * prob_k / group_size / 8;
   const int zp_expert_stride =
       is_zp_float ? prob_n * prob_k / group_size / 8
@@ -2327,7 +2327,6 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
       TORCH_CHECK(group_size == 0);
       group_blocks = 0;
     }
-
   } else {
     if (group_size == -1) {
       group_blocks = -1;
