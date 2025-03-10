@@ -783,7 +783,9 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         if image_input is None:
             return None
         vision_embeddings = self._process_image_input(image_input)
-        if kwargs.get("v0_path", False):
+        if kwargs.get("v0_path", False) or \
+            image_input.get("feat_is_patch") is None or \
+                image_input.get("embed_is_patch") is None:
             return vision_embeddings
         else:
             nested_emb = [
