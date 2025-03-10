@@ -21,6 +21,7 @@ ai_accelerator/index
   - Intel/AMD x86
   - ARM AArch64
   - Apple silicon
+  - IBM Z (s390x)
 - <project:ai_accelerator/index.md>
   - Google TPU
   - Intel Gaudi
