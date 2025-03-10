@@ -9,6 +9,7 @@ setuptools-scm>=8
 setuptools>=75.8.0
 wheel
 jinja2
+datasets # for benchmark scripts
 
 # please try install torch with `python -m pip install torch torchvision torchaudio pytorch-triton-xpu --index-url https://download.pytorch.org/whl/xpu` first.
 pytorch-triton-xpu
