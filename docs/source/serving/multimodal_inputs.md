@@ -462,4 +462,69 @@ export VLLM_AUDIO_FETCH_TIMEOUT=<timeout>
 
 ### Embedding Inputs
 
-TBD
+To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
+pass a tensor of shape to the corresponding field of the multi-modal dictionary.
+#### Image Embedding Inputs
+For image embeddings, you can pass the base64-encoded tensor to the `image_embeds` field.
+The following example demonstrates how to pass image embeddings to the OpenAI server:
+
+```python
+image_embedding = torch.load(...)
+grid_thw = torch.load(...) # Required by Qwen/Qwen2-VL-2B-Instruct
+
+buffer = io.BytesIO()
+torch.save(image_embedding, buffer)
+buffer.seek(0)
+binary_data = buffer.read()
+base64_image_embedding = base64.b64encode(binary_data).decode('utf-8')
+
+client = OpenAI(
+    # defaults to os.environ.get("OPENAI_API_KEY")
+    api_key=openai_api_key,
+    base_url=openai_api_base,
+)
+
+# Basic usage - this is equivalent to the LLaVA example for offline inference
+model = "llava-hf/llava-1.5-7b-hf"
+embeds =  {
+    "type": "image_embeds",
+    "image_embeds": f"{base64_image_embedding}" 
+}
+
+# Pass additional parameters (available to Qwen2-VL and MiniCPM-V)
+model = "Qwen/Qwen2-VL-2B-Instruct"
+embeds =  {
+    "type": "image_embeds",
+    "image_embeds": {
+        "image_embeds": f"{base64_image_embedding}" , # Required
+        "image_grid_thw": f"{base64_image_grid_thw}"  # Required by Qwen/Qwen2-VL-2B-Instruct
+    },
+}
+model = "openbmb/MiniCPM-V-2_6"
+embeds =  {
+    "type": "image_embeds",
+    "image_embeds": {
+        "image_embeds": f"{base64_image_embedding}" , # Required
+        "image_sizes": f"{base64_image_sizes}"  # Required by openbmb/MiniCPM-V-2_6
+    },
+}
+chat_completion = client.chat.completions.create(
+    messages=[
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": [
+        {
+            "type": "text",
+            "text": "What's in this image?",
+        },
+        embeds,
+        ],
+    },
+],
+    model=model,
+)
+```
+
+:::{note}
+Only one message can contain `{"type": "image_embeds"}`.
+If used with a model that requires additional parameters, you must also provide a tensor for each of them, e.g. `image_grid_thw`, `image_sizes`, etc.
+:::
