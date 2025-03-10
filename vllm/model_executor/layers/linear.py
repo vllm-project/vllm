@@ -1409,7 +1409,7 @@ class QKVCrossParallelLinear(LinearBase):
         has_same_attrs = src_param_attrs == map_param_attrs
         return has_same_type_name and has_same_attrs
 
-    def selet_proj_params(
+    def select_proj_params(
         self,
         layer: nn.Module,
         param: nn.Parameter,
@@ -1449,6 +1449,6 @@ class QKVCrossParallelLinear(LinearBase):
                       loaded_shard_id: Optional[str] = None):
         layer = (self.q_proj_decoder
                  if loaded_shard_id == "q" else self.kv_proj_encoder)
-        target_param = self.selet_proj_params(layer, param)
+        target_param = self.select_proj_params(layer, param)
         shard_id_args = (loaded_shard_id, ) if loaded_shard_id != "q" else ()
         layer.weight_loader(target_param, loaded_weight, *shard_id_args)
