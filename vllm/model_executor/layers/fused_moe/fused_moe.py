@@ -873,6 +873,18 @@ def get_default_config(
             "num_warps": 4,
             "num_stages": 3,
         }
+    elif is_marlin:
+        for block_size_m in [16, 32, 48, 64]:
+            if M * topk / E / block_size_m < 0.9:
+                break
+        return {"BLOCK_SIZE_M": block_size_m}
+    elif M <= E:
+        config = {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 1,
+        }
     else:
         config = {
             "BLOCK_SIZE_M": 64,
@@ -880,14 +892,6 @@ def get_default_config(
             "BLOCK_SIZE_K": 32,
             "GROUP_SIZE_M": 8,
         }
-        # A heuristic: fused marlin works faster with this config for small M
-        if M <= E or (is_marlin and M <= 32):
-            config = {
-                "BLOCK_SIZE_M": 16,
-                "BLOCK_SIZE_N": 32,
-                "BLOCK_SIZE_K": 64,
-                "GROUP_SIZE_M": 1,
-            }
     return config
 
 
