@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List
 
 import torch
 
@@ -24,9 +23,9 @@ class KVCacheSpecBase:
     def type_id(self) -> str:
         """
         The type identifier of this KV cache.
-        Return different strings for layers with different KV cache type (e.g., 
-        different number of tokens like full attention vs sliding window 
-        attention, different KV cache size per token like layers with different 
+        Return different strings for layers with different KV cache type (e.g.,
+        different number of tokens like full attention vs sliding window
+        attention, different KV cache size per token like layers with different
         number of heads)
 
         Returns:
@@ -60,6 +59,7 @@ class FullAttentionSpec(KVCacheSpecBase):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
+    use_mla: bool
 
     @property
     def type_id(self) -> str:
@@ -67,14 +67,16 @@ class FullAttentionSpec(KVCacheSpecBase):
 
     @property
     def page_size_bytes(self) -> int:
-        return  2 * self.block_size * self.num_kv_heads * self.head_size \
+        # For MLA we only store a single latent vector
+        coef = 1 if self.use_mla else 2
+        return coef * self.block_size * self.num_kv_heads * self.head_size \
                 * get_dtype_size(self.dtype)
 
     def bytes_for_tokens(self, num_tokens: int) -> int:
         return cdiv(num_tokens, self.block_size) * self.page_size_bytes
 
 
-KVCacheSpec = Dict[str, KVCacheSpecBase]
+KVCacheSpec = dict[str, KVCacheSpecBase]
 
 
 @dataclass
@@ -95,7 +97,7 @@ class KVCacheConfig:
     """The number of KV cache blocks"""
     num_blocks: int
     """layer_name -> how to initialize KV cache for that layer"""
-    tensors: Dict[str, KVCacheTensor]
+    tensors: dict[str, KVCacheTensor]
     """
     A list of kv-cache groups. Each group includes a set of layers with
     the same kv-cache spec, and the total page_size of layers inside a group
@@ -105,9 +107,9 @@ class KVCacheConfig:
     2. (not implemented yet) A model with the same number of full attention
     layers and sliding window attention layers: two groups, one for full
     attention layers and one for sliding window attention layers.
-    3. (not implemented yet) A model with 2 full attention layers and 4 sliding 
+    3. (not implemented yet) A model with 2 full attention layers and 4 sliding
     window attention layers: three groups, (full * 2), (sw * 2), (sw * 2).
     """
-    groups: List[List[str]]
+    groups: list[list[str]]
     """the KVCacheSpec of the model"""
     kv_cache_spec: KVCacheSpec

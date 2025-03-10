@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from collections import OrderedDict
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, OrderedDict,
-                    Set, Tuple, TypedDict, Union)
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -24,12 +25,12 @@ from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataDict, MultiModalDataItems
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
-                                        PromptReplacement,
-                                        PromptReplacementDetails)
+                                        PromptIndexTargets, PromptInsertion,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsV0Only
 from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
 
 
@@ -591,7 +592,6 @@ class Florence2LanguageModel(nn.Module):
 
         self.config = config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.shared = BartScaledWordEmbedding(self.vocab_size, config.d_model)
@@ -651,7 +651,7 @@ class Florence2LanguageModel(nn.Module):
         return decoder_outputs
 
 
-class Florence2LanguageForConditionalGeneration(nn.Module):
+class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -803,7 +803,7 @@ class Florence2DummyInputsBuilder(
 class Florence2MultiModalProcessor(
         EncDecMultiModalProcessor[Florence2ProcessingInfo]):
 
-    def _hf_processor_applies_repl(
+    def _hf_processor_applies_updates(
         self,
         prompt_text: str,
         mm_items: MultiModalDataItems,
@@ -850,26 +850,22 @@ class Florence2MultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(pixel_values=MultiModalFieldConfig.batched("image"))
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         pad_token_id = hf_config.pad_token_id
-        bos_token_id = hf_config.bos_token_id
         num_image_tokens = self.info.get_max_image_tokens()
         image_tokens = [pad_token_id] * num_image_tokens
 
         return [
-            PromptReplacement(
+            PromptInsertion(
                 modality="image",
-                target=[bos_token_id],
-                replacement=PromptReplacementDetails(
-                    full=image_tokens + [bos_token_id],
-                    features=image_tokens,
-                ),
+                target=PromptIndexTargets.start(),
+                insertion=image_tokens,
             )
         ]
 
@@ -1040,7 +1036,9 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         pixel_values = image_input["data"]
         return self._encode_image(pixel_values)
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> torch.Tensor:
+    def get_multimodal_embeddings(
+        self, **kwargs: object
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
