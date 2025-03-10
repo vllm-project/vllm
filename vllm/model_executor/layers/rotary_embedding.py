@@ -1006,7 +1006,7 @@ class MRotaryEmbedding(RotaryEmbedding):
                     video_grid_thw[video_index][2],
                 )
                 video_second_per_grid_t = 1.0
-                if not second_per_grid_ts:
+                if second_per_grid_ts:
                     video_second_per_grid_t = second_per_grid_ts[video_index]
                 video_index += 1
                 remain_videos -= 1
