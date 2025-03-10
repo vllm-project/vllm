@@ -2754,7 +2754,7 @@ class DecodingConfig:
         valid_guided_backends = ['outlines', 'lm-format-enforcer', 'xgrammar']
 
         backend = GuidedDecodingParams(
-            backend=self.guided_decoding_backend).backend_name
+            backend=self.guided_decoding_backend).backend_name()
         if backend not in valid_guided_backends:
             raise ValueError(f"Invalid guided_decoding_backend '{backend},"
                              f" must be one of {valid_guided_backends}")
