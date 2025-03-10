@@ -1206,6 +1206,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
+        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
         num_reqs = max_num_reqs if num_tokens >= max_num_reqs else num_tokens
         min_tokens_per_req = num_tokens // num_reqs
