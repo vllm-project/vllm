@@ -40,6 +40,7 @@ def p(s, t):
     #print(f"{s}: {t.shape}\n{t}")
     pass
 
+
 def pp(x):
     #print(x)
     pass
@@ -819,10 +820,15 @@ def get_default_config(
     else:
         dg_config = use_deep_gemm and dtype == "fp8_w8a8"
         config = {
-            "BLOCK_SIZE_M": 64 if not dg_config else dg.get_m_alignment_for_contiguous_layout(),
-            "BLOCK_SIZE_N": 64 if not dg_config else 128,
-            "BLOCK_SIZE_K": 32 if not dg_config else 128,
-            "GROUP_SIZE_M": 8,
+            "BLOCK_SIZE_M":
+            64
+            if not dg_config else dg.get_m_alignment_for_contiguous_layout(),
+            "BLOCK_SIZE_N":
+            64 if not dg_config else 128,
+            "BLOCK_SIZE_K":
+            32 if not dg_config else 128,
+            "GROUP_SIZE_M":
+            8,
         }
     return config
 
@@ -1326,14 +1332,15 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2, config, use_fp8_w8a8)
+    use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2, config,
+                                                 use_fp8_w8a8)
 
     block_m = config['BLOCK_SIZE_M']
     assert not use_dg or block_m == 128
 
     if use_dg:
         # TODO: how to test chunks?
-        if False:
+        if True:
             num_chunks = 1
             CHUNK_SIZE = num_tokens
         else:
@@ -1346,18 +1353,21 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 
-
         # TODO: this could be smarter
-        sorted_token_ids, _, pad = (
-            moe_align_block_size(topk_ids, block_m,
-                                 global_num_experts, expert_map))
+        sorted_token_ids, _, _ = (moe_align_block_size(topk_ids, block_m,
+                                                       global_num_experts,
+                                                       expert_map))
 
         num_tokens = top_k_num * M
-        pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) * block_m) - sorted_token_ids.numel()
+        pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) *
+                    block_m) - sorted_token_ids.numel()
         if pad_size > 0:
-            sorted_token_ids = torch.nn.functional.pad(sorted_token_ids, (0, pad_size), "constant", num_tokens)
-        sorted_token_ids = sorted_token_ids.clamp(max=num_tokens-1)
-        new_S = torch.repeat_interleave(hidden_states, top_k_num, dim=0)[sorted_token_ids, ...].shape
+            sorted_token_ids = torch.nn.functional.pad(sorted_token_ids,
+                                                       (0, pad_size),
+                                                       "constant", num_tokens)
+        sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
+        new_S = torch.repeat_interleave(hidden_states, top_k_num,
+                                        dim=0)[sorted_token_ids, ...].shape
         new_M = new_S[0]
 
         intermediate_cache1 = torch.empty((new_M, N),
@@ -1396,7 +1406,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             break
 
         if tokens_in_chunk < CHUNK_SIZE and chunk > 0:
-            assert False # for now
+            assert not use_dg  # for now
             # Adjust the intermediate cache size and config for the last
             # chunk. Note that in most cases we only have one chunk
             # so the cache size and config are already set correctly and
@@ -1418,8 +1428,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             block_shape=block_shape)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(curr_topk_ids, block_m,
-                                 global_num_experts, expert_map))
+            moe_align_block_size(curr_topk_ids, block_m, global_num_experts,
+                                 expert_map))
 
         invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
@@ -1481,7 +1491,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
         ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
                     out_hidden_states[begin_chunk_idx:end_chunk_idx])
-
     return out_hidden_states
 
 
