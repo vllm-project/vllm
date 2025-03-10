@@ -1310,6 +1310,7 @@ class QKVCrossParallelLinear(LinearBase):
 
         # Empty placeholders for loading as a single module.
         placeholder_size = 0
+        assert self.quant_method is not None
         self.quant_method.create_weights(self,
                                          placeholder_size, [placeholder_size],
                                          placeholder_size,
