@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ###############################################################################
-# Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
+# Copyright (C) 2024-2025 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
 from dataclasses import dataclass
@@ -159,6 +159,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 logger().warning("Could not import HPU FusedSDPA kernel. "
                                  "vLLM will use native implementation.")
 
+        self.prefill_use_flex_attention = "flex_attention" in enabled_flags()
+
         suppored_head_sizes = HPUPagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
             raise ValueError(
@@ -236,7 +238,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                         self.head_size)
 
             if attn_metadata is None or attn_metadata.block_list is None:
-                if not self.prefill_use_fusedsdpa:
+                if (not self.prefill_use_fusedsdpa
+                        and not self.prefill_use_flex_attention):
                     # TODO: move this outside of model
                     assert attn_metadata.attn_bias is not None, \
                             'attn_bias must be set before calling model.forward'
@@ -251,20 +254,29 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 else:
                     attn_bias = attn_metadata.attn_bias
 
-                out = ops.prompt_attention(
-                    query.view(query_shape),
-                    key.view(kv_shape),
-                    value.view(kv_shape),
-                    attn_bias=attn_bias,
-                    p=0.0,
-                    scale=self.scale,
-                    matmul_qk_op=self.matmul_qk,
-                    softmax_op=self.softmax,
-                    matmul_av_op=self.matmul_av,
-                    valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                    fsdpa_op=self.fused_scaled_dot_product_attention
-                    if self.prefill_use_fusedsdpa else None,
-                )
+                if not self.prefill_use_flex_attention:
+                    out = ops.prompt_attention(
+                        query.view(query_shape),
+                        key.view(kv_shape),
+                        value.view(kv_shape),
+                        attn_bias=attn_bias,
+                        p=0.0,
+                        scale=self.scale,
+                        matmul_qk_op=self.matmul_qk,
+                        softmax_op=self.softmax,
+                        matmul_av_op=self.matmul_av,
+                        valid_seq_lengths=attn_metadata.seq_lens_tensor,
+                        fsdpa_op=self.fused_scaled_dot_product_attention
+                        if self.prefill_use_fusedsdpa else None,
+                    )
+                else:
+                    out = ops.flex_attention(
+                        query.view(query_shape),
+                        key.view(kv_shape),
+                        value.view(kv_shape),
+                        scale=self.scale,
+                    )
+
             else:
                 # TODO: enable FusedSDPA
                 out = HPUPagedAttention.forward_prefix(
