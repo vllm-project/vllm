@@ -9,7 +9,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 :selected:
 :sync: cuda
 
-:::{include} cuda.inc.md
+:::{include} gpu/cuda.inc.md
 :start-after: "# Installation"
 :end-before: "## Requirements"
 :::
@@ -19,7 +19,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 ::::{tab-item} AMD ROCm
 :sync: rocm
 
-:::{include} rocm.inc.md
+:::{include} gpu/rocm.inc.md
 :start-after: "# Installation"
 :end-before: "## Requirements"
 :::
@@ -29,7 +29,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 ::::{tab-item} Intel XPU
 :sync: xpu
 
-:::{include} xpu.inc.md
+:::{include} gpu/xpu.inc.md
 :start-after: "# Installation"
 :end-before: "## Requirements"
 :::
@@ -49,7 +49,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 ::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
-:::{include} cuda.inc.md
+:::{include} gpu/cuda.inc.md
 :start-after: "## Requirements"
 :end-before: "## Set up using Python"
 :::
@@ -59,7 +59,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 ::::{tab-item} AMD ROCm
 :sync: rocm
 
-:::{include} rocm.inc.md
+:::{include} gpu/rocm.inc.md
 :start-after: "## Requirements"
 :end-before: "## Set up using Python"
 :::
@@ -69,7 +69,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 ::::{tab-item} Intel XPU
 :sync: xpu
 
-:::{include} xpu.inc.md
+:::{include} gpu/xpu.inc.md
 :start-after: "## Requirements"
 :end-before: "## Set up using Python"
 :::
@@ -82,7 +82,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 ### Create a new Python environment
 
-:::{include} ../python_env_setup.inc.md
+:::{include} python_env_setup.inc.md
 :::
 
 :::::{tab-set}
@@ -91,7 +91,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 ::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
-:::{include} cuda.inc.md
+:::{include} gpu/cuda.inc.md
 :start-after: "## Create a new Python environment"
 :end-before: "### Pre-built wheels"
 :::
@@ -122,7 +122,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
-:::{include} cuda.inc.md
+:::{include} gpu/cuda.inc.md
 :start-after: "### Pre-built wheels"
 :end-before: "### Build wheel from source"
 :::
@@ -132,7 +132,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} AMD ROCm
 :sync: rocm
 
-:::{include} rocm.inc.md
+:::{include} gpu/rocm.inc.md
 :start-after: "### Pre-built wheels"
 :end-before: "### Build wheel from source"
 :::
@@ -142,7 +142,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} Intel XPU
 :sync: xpu
 
-:::{include} xpu.inc.md
+:::{include} gpu/xpu.inc.md
 :start-after: "### Pre-built wheels"
 :end-before: "### Build wheel from source"
 :::
@@ -161,7 +161,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
-:::{include} cuda.inc.md
+:::{include} gpu/cuda.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
 :::
@@ -171,7 +171,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} AMD ROCm
 :sync: rocm
 
-:::{include} rocm.inc.md
+:::{include} gpu/rocm.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
 :::
@@ -181,7 +181,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} Intel XPU
 :sync: xpu
 
-:::{include} xpu.inc.md
+:::{include} gpu/xpu.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
 :::
@@ -200,7 +200,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
-:::{include} cuda.inc.md
+:::{include} gpu/cuda.inc.md
 :start-after: "### Pre-built images"
 :end-before: "### Build image from source"
 :::
@@ -210,7 +210,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} AMD ROCm
 :sync: rocm
 
-:::{include} rocm.inc.md
+:::{include} gpu/rocm.inc.md
 :start-after: "### Pre-built images"
 :end-before: "### Build image from source"
 :::
@@ -220,7 +220,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} Intel XPU
 :sync: xpu
 
-:::{include} xpu.inc.md
+:::{include} gpu/xpu.inc.md
 :start-after: "### Pre-built images"
 :end-before: "### Build image from source"
 :::
@@ -237,7 +237,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
-:::{include} cuda.inc.md
+:::{include} gpu/cuda.inc.md
 :start-after: "### Build image from source"
 :end-before: "## Supported features"
 :::
@@ -247,7 +247,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} AMD ROCm
 :sync: rocm
 
-:::{include} rocm.inc.md
+:::{include} gpu/rocm.inc.md
 :start-after: "### Build image from source"
 :end-before: "## Supported features"
 :::
@@ -257,7 +257,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} Intel XPU
 :sync: xpu
 
-:::{include} xpu.inc.md
+:::{include} gpu/xpu.inc.md
 :start-after: "### Build image from source"
 :end-before: "## Supported features"
 :::
@@ -274,7 +274,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} NVIDIA CUDA
 :sync: cuda
 
-:::{include} cuda.inc.md
+:::{include} gpu/cuda.inc.md
 :start-after: "## Supported features"
 :::
 
@@ -283,7 +283,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} AMD ROCm
 :sync: rocm
 
-:::{include} rocm.inc.md
+:::{include} gpu/rocm.inc.md
 :start-after: "## Supported features"
 :::
 
@@ -292,7 +292,7 @@ There is no extra information on creating a new Python environment for this devi
 ::::{tab-item} Intel XPU
 :sync: xpu
 
-:::{include} xpu.inc.md
+:::{include} gpu/xpu.inc.md
 :start-after: "## Supported features"
 :::
 
