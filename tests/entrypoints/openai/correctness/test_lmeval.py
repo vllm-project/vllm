@@ -20,7 +20,7 @@ NUM_CONCURRENT = 500
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 RTOL = 0.03
-EXPECTED_VALUE = 0.58
+EXPECTED_VALUE = 0.54
 DEFAULT_ARGS = ["--max-model-len", "4096", "--disable-log-requests"]
 MORE_ARGS_LIST = [
     [],  # Default

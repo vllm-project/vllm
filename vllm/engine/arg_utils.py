@@ -207,7 +207,7 @@ class EngineArgs:
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
-    generation_config: Optional[str] = None
+    generation_config: Optional[str] = "auto"
     override_generation_config: Optional[Dict[str, Any]] = None
     enable_sleep_mode: bool = False
     model_impl: str = "auto"
@@ -217,6 +217,7 @@ class EngineArgs:
     additional_config: Optional[Dict[str, Any]] = None
     enable_reasoning: Optional[bool] = None
     reasoning_parser: Optional[str] = None
+    use_tqdm_on_load: bool = True
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -751,6 +752,14 @@ class EngineArgs:
                             default=1,
                             help=('Maximum number of forward steps per '
                                   'scheduler call.'))
+        parser.add_argument(
+            '--use-tqdm-on-load',
+            dest='use_tqdm_on_load',
+            action=argparse.BooleanOptionalAction,
+            default=EngineArgs.use_tqdm_on_load,
+            help='Whether to enable/disable progress bar '
+            'when loading model weights.',
+        )
 
         parser.add_argument(
             '--multi-step-stream-outputs',
@@ -1034,13 +1043,13 @@ class EngineArgs:
         parser.add_argument(
             "--generation-config",
             type=nullable_str,
-            default=None,
+            default="auto",
             help="The folder path to the generation config. "
-            "Defaults to None, no generation config is loaded, vLLM defaults "
-            "will be used. If set to 'auto', the generation config will be "
-            "loaded from model path. If set to a folder path, the generation "
-            "config will be loaded from the specified folder path. If "
-            "`max_new_tokens` is specified in generation config, then "
+            "Defaults to 'auto', the generation config will be loaded from "
+            "model path. If set to 'vllm', no generation config is loaded, "
+            "vLLM defaults will be used. If set to a folder path, the "
+            "generation config will be loaded from the specified folder path. "
+            "If `max_new_tokens` is specified in generation config, then "
             "it sets a server-wide limit on the number of output tokens "
             "for all requests.")
 
@@ -1179,6 +1188,7 @@ class EngineArgs:
             download_dir=self.download_dir,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
+            use_tqdm_on_load=self.use_tqdm_on_load,
         )
 
     def create_engine_config(self,
@@ -1473,15 +1483,15 @@ class AsyncEngineArgs(EngineArgs):
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser,
                      async_args_only: bool = False) -> FlexibleArgumentParser:
+        # Initialize plugin to update the parser, for example, The plugin may
+        # adding a new kind of quantization method to --quantization argument or
+        # a new device to --device argument.
+        load_general_plugins()
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
-        # Initialize plugin to update the parser, for example, The plugin may
-        # adding a new kind of quantization method to --quantization argument or
-        # a new device to --device argument.
-        load_general_plugins()
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update(parser)
         return parser

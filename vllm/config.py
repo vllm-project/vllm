@@ -255,7 +255,7 @@ class ModelConfig:
         override_neuron_config: Optional[dict[str, Any]] = None,
         override_pooler_config: Optional["PoolerConfig"] = None,
         logits_processor_pattern: Optional[str] = None,
-        generation_config: Optional[str] = None,
+        generation_config: str = "auto",
         enable_sleep_mode: bool = False,
         override_generation_config: Optional[dict[str, Any]] = None,
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
@@ -951,7 +951,7 @@ class ModelConfig:
         return self.multimodal_config
 
     def try_get_generation_config(self) -> dict[str, Any]:
-        if self.generation_config is None or self.generation_config == "auto":
+        if self.generation_config in ("auto", "vllm"):
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
@@ -971,17 +971,14 @@ class ModelConfig:
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """
         This method returns a dictionary containing the parameters
-        that differ from the default sampling parameters, but only
-        if `generation_config` is set. If `generation_config` is not
-        set, an empty dictionary is returned.
+        that differ from the default sampling parameters. If
+        `generation_config` is `"vllm"`, an empty dictionary is returned.
 
         Returns:
             dict[str, Any]: A dictionary with the differing sampling
-            parameters if `generation_config` is set, otherwise an
-            empty dictionary.
+            parameters, if `generation_config` is `"vllm"` an empty dictionary.
         """
-        if self.generation_config is None:
-            # When generation_config is not set
+        if self.generation_config == "vllm":
             config = {}
         else:
             config = self.try_get_generation_config()
@@ -1280,6 +1277,8 @@ class LoadConfig:
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's
             checkpoints.
+        use_tqdm_on_load: Whether to enable tqdm for showing progress bar during
+            loading. Default to True
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
@@ -1287,6 +1286,7 @@ class LoadConfig:
     model_loader_extra_config: Optional[Union[str, dict]] = field(
         default_factory=dict)
     ignore_patterns: Optional[Union[list[str], str]] = None
+    use_tqdm_on_load: bool = True
 
     def compute_hash(self) -> str:
         """
@@ -3572,11 +3572,11 @@ _current_vllm_config: Optional[VllmConfig] = None
 @contextmanager
 def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     """
-    Temporarily set the current VLLM config.
+    Temporarily set the current vLLM config.
     Used during model initialization.
-    We save the current VLLM config in a global variable,
+    We save the current vLLM config in a global variable,
     so that all modules can access it, e.g. custom ops
-    can access the VLLM config to determine how to dispatch.
+    can access the vLLM config to determine how to dispatch.
     """
     global _current_vllm_config
     old_vllm_config = _current_vllm_config
@@ -3611,7 +3611,7 @@ def get_current_vllm_config() -> VllmConfig:
         # in ci, usually when we test custom ops/modules directly,
         # we don't set the vllm config. In that case, we set a default
         # config.
-        logger.warning("Current VLLM config is not set.")
+        logger.warning("Current vLLM config is not set.")
         from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config
