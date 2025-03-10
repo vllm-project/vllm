@@ -45,7 +45,7 @@ __global__ void permute_cols_kernel(
     const int32_t* __restrict__ sorted_token_ids_ptr,
     const int32_t* __restrict__ expert_ids_ptr,
     const int32_t* __restrict__ num_tokens_past_padded_ptr, int size_m,
-    int size_k, int top_k){};
+    int size_k, int top_k) {};
 
 template <typename scalar_t,  // compute dtype, half or nv_float16
           const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
@@ -187,8 +187,8 @@ dequant<half, vllm::kU4B8.id()>(int q) {
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
-  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
+  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
   // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point
   // directly into `SUB` and `ADD`.
   const int SUB = 0x64086408;
@@ -211,9 +211,9 @@ dequant<nv_bfloat16, vllm::kU4B8.id()>(int q) {
 
   // Guarantee that the `(a & b) | c` operations are LOP3s.
 
-  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
   q >>= 4;
-  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
 
   typename ScalarType<nv_bfloat16>::FragB frag_b;
   static constexpr uint32_t MUL = 0x3F803F80;
@@ -235,8 +235,8 @@ dequant<half, vllm::kU4.id()>(int q) {
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
-  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
+  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
 
   const int SUB = 0x64006400;
   const int MUL = 0x2c002c00;
@@ -258,9 +258,9 @@ dequant<nv_bfloat16, vllm::kU4.id()>(int q) {
 
   // Guarantee that the `(a & b) | c` operations are LOP3s.
 
-  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
   q >>= 4;
-  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
 
   typename ScalarType<nv_bfloat16>::FragB frag_b;
   static constexpr uint32_t MUL = 0x3F803F80;
@@ -610,11 +610,12 @@ __global__ void Marlin(
 
   constexpr int pack_factor = 32 / w_type.size_bits();
   constexpr int moe_block_size = 16 * thread_m_blocks;
-  const int group_size = (!has_act_order && group_blocks == -1) ? 
-    prob_k : 16 * group_blocks;
+  const int group_size =
+      (!has_act_order && group_blocks == -1) ? prob_k : 16 * group_blocks;
   const int scales_expert_stride = prob_n * prob_k / group_size / 8;
-  const int zp_expert_stride = is_zp_float ? 
-    prob_n * prob_k / group_size / 8 : prob_n * prob_k / group_size / (pack_factor * 4);
+  const int zp_expert_stride =
+      is_zp_float ? prob_n * prob_k / group_size / 8
+                  : prob_n * prob_k / group_size / (pack_factor * 4);
 
   // parallel: num valid moe blocks
   int num_tokens_past_padded = num_tokens_past_padded_ptr[0];
@@ -727,6 +728,9 @@ __global__ void Marlin(
     scales_ptr += (expert_id - old_expert_id) * scales_expert_stride;
     if constexpr (has_zp) {
       zp_ptr += (expert_id - old_expert_id) * zp_expert_stride;
+    }
+    if constexpr (has_act_order) {
+      g_idx += (expert_id - old_expert_id) * prob_k;
     }
 
     read_moe_block_data(block_id);
