@@ -42,3 +42,20 @@ def moe_permute(
     ]
 
 
+def moe_unpermute(permuted_hidden_states: torch.Tensor,
+                  topk_weights: torch.Tensor,
+                  topk_ids: torch.Tensor,
+                  token_expert_indices: torch.Tensor,
+                  src_row_id2dst_row_id_map: torch.Tensor,
+                  topk: int,
+                  n_expert: int 
+) -> torch.Tensor:
+    n_token, n_hidden = topk_weights.shape[0], permuted_hidden_states.shape[-1]
+    hidden_states = torch.empty((n_token, n_hidden), dtype=permuted_hidden_states.dtype, 
+                                device=permuted_hidden_states.device)
+
+    torch.ops._moe_C.moe_unpermute(permuted_hidden_states, topk_weights,
+                                   topk_ids, src_row_id2dst_row_id_map,
+                                   n_expert, topk, hidden_states)
+    return hidden_states
+

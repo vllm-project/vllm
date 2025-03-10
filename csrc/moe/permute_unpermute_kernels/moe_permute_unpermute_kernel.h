@@ -1,7 +1,7 @@
 #pragma once
-'''   reference from tensorrt_llm moe kernel implementation archive in https
-    :  // github.com/BBuf/tensorrt-llm-moe/tree/master
-'''
+// reference from tensorrt_llm moe kernel implementation archive in
+// https://github.com/BBuf/tensorrt-llm-moe/tree/master
+
 #include <c10/core/ScalarType.h>
 #include <torch/all.h>
 #include "dispatch.h"
@@ -12,8 +12,8 @@
 #include "cutlass/numeric_size.h"
 #include "cutlass/array.h"
 
-       template <at::ScalarType type>
-       struct ScalarType2CudaType;
+template <at::ScalarType type>
+struct ScalarType2CudaType;
 
 template <>
 struct ScalarType2CudaType<at::ScalarType::Float> {
@@ -259,4 +259,106 @@ void expandInputRowsKernelLauncher(
                                        expanded_dest_row_to_expanded_source_row,
                                        expanded_source_row_to_expanded_dest_row,
                                        num_rows, num_valid_tokens_ptr, cols, k);
+}
+
+template <class T, class U>
+__host__ __device__ constexpr static U arrayConvert(T const& input) {
+  using Type = typename U::Element;
+  static_assert(T::kElements == U::kElements);
+  U u;
+#pragma unroll
+  for (int i = 0; i < U::kElements; i++) {
+    u[i] = static_cast<Type>(input[i]);
+  }
+  return u;
+}
+// Final kernel to unpermute and scale
+// This kernel unpermutes the original data, does the k-way reduction and
+// performs the final skip connection.
+template <typename T, typename OutputType, bool CHECK_SKIPPED>
+__global__ void finalizeMoeRoutingKernel(
+    T const* expanded_permuted_rows, OutputType* reduced_unpermuted_output,
+    float const* scales, int const* expanded_source_row_to_expanded_dest_row,
+    int const* expert_for_source_row, int64_t const orig_cols, int64_t const k,
+    int64_t const* num_valid_ptr) {
+  assert(orig_cols % 4 == 0);
+  int64_t const original_row = blockIdx.x;
+  int64_t const num_rows = gridDim.x;
+  auto const offset = original_row * orig_cols;
+  OutputType* reduced_row_ptr = reduced_unpermuted_output + offset;
+  int64_t const num_valid = *num_valid_ptr;
+
+  // Load 128-bits per thread, according to the smallest data type we read/write
+  constexpr int64_t FINALIZE_ELEM_PER_THREAD =
+      128 / std::min(cutlass::sizeof_bits<OutputType>::value,
+                     cutlass::sizeof_bits<T>::value);
+
+  int64_t const start_offset = threadIdx.x;
+  int64_t const stride = blockDim.x;
+  int64_t const num_elems_in_col = orig_cols / FINALIZE_ELEM_PER_THREAD;
+
+  // using BiasElem = cutlass::Array<ScaleBiasType, FINALIZE_ELEM_PER_THREAD>;
+  using InputElem = cutlass::Array<T, FINALIZE_ELEM_PER_THREAD>;
+  using OutputElem = cutlass::Array<OutputType, FINALIZE_ELEM_PER_THREAD>;
+  using ComputeElem = cutlass::Array<float, FINALIZE_ELEM_PER_THREAD>;
+  // auto const* bias_v = reinterpret_cast<BiasElem const*>(bias);
+  auto const* expanded_permuted_rows_v =
+      reinterpret_cast<InputElem const*>(expanded_permuted_rows);
+  auto* reduced_row_ptr_v = reinterpret_cast<OutputElem*>(reduced_row_ptr);
+
+#pragma unroll
+  for (int elem_index = start_offset; elem_index < num_elems_in_col;
+       elem_index += stride) {
+    bool has_valid = false;
+    ComputeElem thread_output;
+    thread_output.fill(0);
+    float row_rescale{0.f};
+    for (int k_idx = 0; k_idx < k; ++k_idx) {
+      int64_t const expanded_original_row = original_row + k_idx * num_rows;
+      int64_t const expanded_permuted_row =
+          expanded_source_row_to_expanded_dest_row[expanded_original_row];
+
+      int64_t const k_offset = original_row * k + k_idx;
+      float const row_scale = scales[k_offset];
+
+      // Check after row_rescale has accumulated
+      if (CHECK_SKIPPED && expanded_permuted_row >= num_valid) {
+        continue;
+      }
+
+      auto const* expanded_permuted_rows_row_ptr =
+          expanded_permuted_rows_v + expanded_permuted_row * num_elems_in_col;
+
+      int64_t const expert_idx = expert_for_source_row[k_offset];
+
+      ComputeElem expert_result = arrayConvert<InputElem, ComputeElem>(
+          expanded_permuted_rows_row_ptr[elem_index]);
+      thread_output = thread_output + row_scale * (expert_result);
+      has_valid = true;
+    }
+
+    OutputElem output_elem =
+        arrayConvert<ComputeElem, OutputElem>(thread_output);
+    reduced_row_ptr_v[elem_index] = output_elem;
+  }
+}
+
+template <class T, class OutputType>
+void finalizeMoeRoutingKernelLauncher(
+    T const* expanded_permuted_rows, OutputType* reduced_unpermuted_output,
+    float const* scales, int const* expanded_source_row_to_expanded_dest_row,
+    int const* expert_for_source_row, int64_t const num_rows,
+    int64_t const cols, int64_t const k, int64_t const* num_valid_ptr,
+    cudaStream_t stream) {
+  int64_t const blocks = num_rows;
+  int64_t const threads = 256;
+  bool const check_finished = num_valid_ptr != nullptr;
+  using FuncPtr = decltype(&finalizeMoeRoutingKernel<T, OutputType, false>);
+  FuncPtr func_map[2] = {&finalizeMoeRoutingKernel<T, OutputType, false>,
+                         &finalizeMoeRoutingKernel<T, OutputType, true>};
+  auto* const kernel = func_map[check_finished];
+  kernel<<<blocks, threads, 0, stream>>>(
+      expanded_permuted_rows, reduced_unpermuted_output, scales,
+      expanded_source_row_to_expanded_dest_row, expert_for_source_row, cols, k,
+      num_valid_ptr);
 }
