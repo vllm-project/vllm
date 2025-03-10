@@ -1,25 +1,11 @@
 {
-  "type": "array",
-  "items": {
     "type": "object",
     "properties": {
       "name": { "type": "string" },
-      "race": { "type": "string" },
-      "class": { "type": "string" },
-      "level": { "type": "integer" },
-      "background": { "type": "string" },
-      "alignment": { "type": "string" },
-      "backstory": { "type": "string" }
+      "email": { "type": "string" }
     },
     "required": [
       "name",
-      "race",
-      "class",
-      "level",
-      "background",
-      "alignment",
-      "backstory"
+      "email"
     ]
-  }
 }
-
