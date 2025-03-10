@@ -450,11 +450,10 @@ class EngineArgs:
             action='store_true',
             help='Use expert parallelism instead of tensor parallelism '
             'for MoE layers.')
-        parser.add_argument(
-            '--expert-map-path',
-            type=str,
-            default=EngineArgs.expert_map_path,
-            help='Path to expert map file.')
+        parser.add_argument('--expert-map-path',
+                            type=str,
+                            default=EngineArgs.expert_map_path,
+                            help='Path to expert map file.')
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,
