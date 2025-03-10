@@ -553,6 +553,7 @@ setuptools==75.8.0
     # via
     #   mamba-ssm
     #   pytablewriter
+    #   torch
 six==1.16.0
     # via
     #   python-dateutil
