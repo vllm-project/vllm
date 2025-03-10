@@ -170,7 +170,7 @@ class PixtralProcessingInfo(BaseProcessingInfo):
 
         return tokenizer
 
-    def get_hf_processor(self):
+    def get_hf_processor(self) -> PixtralProcessorAdapter:
         return PixtralProcessorAdapter(self.get_tokenizer())
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -183,16 +183,43 @@ class PixtralProcessingInfo(BaseProcessingInfo):
     ) -> Mapping[str, int]:
         return {"image": self.get_max_image_tokens()}
 
+    def get_vision_config(
+        self,
+        processor: Optional[PixtralProcessorAdapter] = None,
+    ):
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        return PixtralVisionConfig(
+            image_size=processor.image_size,
+            patch_size=processor.patch_size,
+        )
+
     def get_num_image_tokens(
         self,
         *,
         image_width: int,
         image_height: int,
+        processor: Optional[PixtralProcessorAdapter] = None,
     ) -> int:
-        image_processor = self.get_hf_processor().image_processor
+        if processor is None:
+            processor = self.get_hf_processor()
 
+        hf_vision_config = self.get_vision_config(processor)
+        hf_encoder_info = PixtralHFEncoderInfo(hf_vision_config)
+        hf_num_tokens = hf_encoder_info.get_num_image_tokens(
+            image_width=image_width,
+            image_height=image_height,
+        )
+
+        image_processor = processor.image_processor
         image = Image.new("RGB", (image_width, image_height), color=0)
-        return len(image_processor(ImageChunk(image=image)).tokens)
+        mistral_num_tokens = len(
+            image_processor(ImageChunk(image=image)).tokens)
+
+        assert hf_num_tokens == mistral_num_tokens
+
+        return hf_num_tokens
 
     def get_image_size_with_most_features(self) -> ImageSize:
         image_processor = self.get_hf_processor().image_processor
@@ -270,10 +297,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
             image_size = images.get_image_size(item_idx)
 
             ncols, nrows = get_pixtral_hf_image_feature_grid_size(
-                PixtralVisionConfig(
-                    image_size=processor.image_size,
-                    patch_size=processor.patch_size,
-                ),
+                self.info.get_vision_config(processor),
                 image_width=image_size.width,
                 image_height=image_size.height,
             )
