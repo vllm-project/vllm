@@ -5,6 +5,7 @@ from abc import abstractmethod
 from typing import Optional, Union
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
@@ -1295,11 +1296,50 @@ class QKVCrossParallelLinear(LinearBase):
 
     @property
     def q_proj_decoder(self) -> ColumnParallelLinear:
-        return self.proj["q_proj_decoder"]
+        layer = self.proj["q_proj_decoder"]
+        for name, param in self.named_parameters():
+            target_param = getattr(layer, name)
+            missing_attrs = set(param.__dict__.keys()) - set(
+                target_param.__dict__.keys())
+            if missing_attrs:
+                missing_attrs_dict = {
+                    k: getattr(param, k)
+                    for k in missing_attrs
+                }
+                missing_attrs_dict["bnb_quant_state"] = {0: missing_attrs_dict["bnb_quant_state"][0]}
+                missing_attrs_dict["bnb_shard_offsets"] = missing_attrs_dict["bnb_shard_offsets"][:2]
+                set_weight_attrs(target_param, missing_attrs_dict)
+        return layer
 
     @property
     def kv_proj_encoder(self) -> QKVParallelLinear:
-        return self.proj["kv_proj_encoder"]
+        layer = self.proj["kv_proj_encoder"]
+        for name, param in self.named_parameters():
+            target_param = getattr(layer, name)
+            missing_attrs = set(param.__dict__.keys()) - set(
+                target_param.__dict__.keys())
+            if missing_attrs:
+                missing_attrs_dict = {
+                    k: getattr(param, k)
+                    for k in missing_attrs
+                }
+                missing_attrs_dict["bnb_quant_state"] = {i-1: missing_attrs_dict["bnb_quant_state"][i] for i in range(1, 3)}
+                missing_attrs_dict["bnb_shard_offsets"] = missing_attrs_dict["bnb_shard_offsets"][1:] - missing_attrs_dict["bnb_shard_offsets"][1]
+                set_weight_attrs(target_param, missing_attrs_dict)
+        return layer
+
+    def selet_proj_params(
+        self,
+        layer: nn.Module,
+        param: nn.Parameter,
+    ) -> nn.Parameter:
+        target_param_list = [
+            v for _, v in layer.named_parameters()
+            if self._is_same_param(param, v)
+        ]
+        assert len(target_param_list) == 1
+        target_param = target_param_list[0]
+        return target_param
 
     def forward(self, decoder_hidden_states, encoder_hidden_states):
         q, _ = self.q_proj_decoder(decoder_hidden_states)
@@ -1338,11 +1378,6 @@ class QKVCrossParallelLinear(LinearBase):
                       loaded_shard_id: Optional[str] = None):
         layer = (self.q_proj_decoder
                  if loaded_shard_id == "q" else self.kv_proj_encoder)
-        target_param_list = [
-            v for _, v in layer.named_parameters()
-            if self._is_same_param(param, v)
-        ]
-        assert len(target_param_list) == 1
-        target_param = target_param_list[0]
+        target_param = self.selet_proj_params(layer, param)
         shard_id_args = (loaded_shard_id, ) if loaded_shard_id != "q" else ()
         layer.weight_loader(target_param, loaded_weight, *shard_id_args)
