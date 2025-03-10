@@ -1308,20 +1308,14 @@ class QKVCrossParallelLinear(LinearBase):
 
         self.quant_config = quant_config
 
-        if quant_config is None:
-            quant_method: Optional[
-                QuantizeMethodBase] = UnquantizedLinearMethod()
-        else:
-            quant_method = quant_config.get_quant_method(self, prefix=prefix)
-
         # Empty placeholders for loading as a single module.
         placeholder_size = 0
-        quant_method.create_weights(self,
-                                    placeholder_size, [placeholder_size],
-                                    placeholder_size,
-                                    placeholder_size,
-                                    self.params_dtype,
-                                    weight_loader=self.weight_loader)
+        self.quant_method.create_weights(self,
+                                         placeholder_size, [placeholder_size],
+                                         placeholder_size,
+                                         placeholder_size,
+                                         self.params_dtype,
+                                         weight_loader=self.weight_loader)
 
         # Use a dictionary to avoid submodules parameters auto-registration:
         # drop-in replacement for a `QKVParallelLinear` module.
@@ -1432,7 +1426,11 @@ class QKVCrossParallelLinear(LinearBase):
         target_param = target_param_list[0]
         return target_param
 
-    def forward(self, decoder_hidden_states, encoder_hidden_states):
+    def forward(
+        self,
+        decoder_hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:  # type: ignore[override]
         q, _ = self.q_proj_decoder(decoder_hidden_states)
         if encoder_hidden_states is None:
             # Encoder KV already cached.
