@@ -2,7 +2,7 @@
 
 import tempfile
 from collections import OrderedDict
-from typing import TypedDict
+from typing import Dict, List, TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -37,7 +37,7 @@ class ContextInfo(TypedDict):
     context_length: str
 
 
-LONG_LORA_INFOS: list[ContextIDInfo] = [{
+LONG_LORA_INFOS: List[ContextIDInfo] = [{
     "lora_id": 1,
     "context_length": "16k",
 }, {
@@ -74,13 +74,11 @@ def dist_init():
     if current_platform.is_cpu():
         backend = "gloo"
 
-    init_distributed_environment(
-        world_size=1,
-        rank=0,
-        distributed_init_method=f"file://{temp_file}",
-        local_rank=0,
-        backend=backend,
-    )
+    init_distributed_environment(world_size=1,
+                                 rank=0,
+                                 distributed_init_method=f"file://{temp_file}",
+                                 local_rank=0,
+                                 backend=backend)
     initialize_model_parallel(1, 1)
     yield
     cleanup_dist_env_and_memory(shutdown_ray=True)
@@ -125,7 +123,7 @@ def dummy_model() -> nn.Module:
             # Special handling for lm_head & sampler
             ("lm_head", ParallelLMHead(512, 10)),
             ("logits_processor", LogitsProcessor(512)),
-            ("sampler", Sampler()),
+            ("sampler", Sampler())
         ]))
     model.config = MagicMock()
     model.embedding_modules = {"lm_head": "lm_head"}
@@ -152,7 +150,7 @@ def dummy_model_gate_up() -> nn.Module:
             # Special handling for lm_head & sampler
             ("lm_head", ParallelLMHead(512, 10)),
             ("logits_processor", LogitsProcessor(512)),
-            ("sampler", Sampler()),
+            ("sampler", Sampler())
         ]))
     model.config = MagicMock()
     model.packed_modules_mapping = {
@@ -209,7 +207,8 @@ def jamba_lora_files():
         safetensors.torch.save_file(tensors, lora_path)
 
     adapter_path = snapshot_download(
-        repo_id="hf-100/Jamba-1.5-mini-Spellbound-StoryWriter-0.1-6583896-ckpt53-lora")
+        repo_id=
+        "hf-100/Jamba-1.5-mini-Spellbound-StoryWriter-0.1-6583896-ckpt53-lora")
 
     remove_unnecessary_weights(adapter_path)
     return adapter_path
@@ -239,11 +238,6 @@ def baichuan_zero_lora_files():
 @pytest.fixture(scope="session")
 def baichuan_regex_lora_files():
     return snapshot_download(repo_id="jeeejeee/baichuan-7b-lora-zero-regex")
-
-
-@pytest.fixture(scope="session")
-def ilama_lora_files():
-    return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")
 
 
 @pytest.fixture(scope="session")
@@ -277,12 +271,6 @@ def long_context_lora_files_16k_1():
 
 
 @pytest.fixture(scope="session")
-def dora_files():
-    return snapshot_download(
-        repo_id="makcedward/Llama-3.2-1B-Instruct-DoRA-Adapter")
-
-
-@pytest.fixture(scope="session")
 def long_context_lora_files_16k_2():
     return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_2")
 
@@ -293,13 +281,11 @@ def long_context_lora_files_32k():
 
 
 @pytest.fixture(scope="session")
-def long_context_infos(
-    long_context_lora_files_16k_1,
-    long_context_lora_files_16k_2,
-    long_context_lora_files_32k,
-):
+def long_context_infos(long_context_lora_files_16k_1,
+                       long_context_lora_files_16k_2,
+                       long_context_lora_files_32k):
     cleanup_dist_env_and_memory(shutdown_ray=True)
-    infos: dict[int, ContextInfo] = {}
+    infos: Dict[int, ContextInfo] = {}
     for lora_checkpoint_info in LONG_LORA_INFOS:
         lora_id = lora_checkpoint_info["lora_id"]
         if lora_id == 1:
@@ -328,12 +314,7 @@ def llama_2_7b_engine_extra_embeddings():
         return get_model_old(**kwargs)
 
     with patch("vllm.worker.model_runner.get_model", get_model_patched):
-        # Reduce memory usage to avoid OOM errors
-        engine = vllm.LLM(
-            "meta-llama/Llama-2-7b-hf",
-            enable_lora=False,
-            gpu_memory_utilization=0.5,  # Lower memory usage
-            max_model_len=128)  # Reduce context size to save memory
+        engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
     yield engine.llm_engine
     del engine
     cleanup_dist_env_and_memory(shutdown_ray=True)
@@ -355,8 +336,8 @@ def run_with_both_engines_lora(request, monkeypatch):
     if use_v1:
         if skip_v1:
             pytest.skip("Skipping test on vllm V1")
-        monkeypatch.setenv("VLLM_USE_V1", "1")
+        monkeypatch.setenv('VLLM_USE_V1', '1')
     else:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+        monkeypatch.setenv('VLLM_USE_V1', '0')
 
     yield
