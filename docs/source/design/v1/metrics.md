@@ -509,7 +509,7 @@ cache to complete other requests), we swap kv cache blocks out to CPU
 memory. This is also known as "KV cache offloading" and is configured
 with `--swap-space` and `--preemption-mode`.
 
-In v0, [VLLM has long supported beam
+In v0, [vLLM has long supported beam
 search](gh-issue:6226). The
 SequenceGroup encapsulated the idea of N Sequences which
 all shared the same prompt kv blocks. This enabled KV cache block

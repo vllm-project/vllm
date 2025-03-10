@@ -93,10 +93,10 @@ class Processor:
     ) -> None:
         # Best of not yet supported.
         if params.best_of is not None and params.best_of > 1:
-            raise ValueError("VLLM V1 does not yet support best_of.")
+            raise ValueError("vLLM V1 does not yet support best_of.")
         # Logits processors not supported.
         if params.logits_processors:
-            raise ValueError("VLLM V1 does not support per request "
+            raise ValueError("vLLM V1 does not support per request "
                              "user provided logits processors.")
 
     def _validate_params(
