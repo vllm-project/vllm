@@ -24,22 +24,13 @@ from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
 logger = init_logger(__name__)
 
 use_deep_gemm = False
-if True or envs.VLLM_USE_DEEP_GEMM:
+if envs.VLLM_USE_DEEP_GEMM:
     try:
         import deep_gemm as dg
+        logger.info("Using DeepGemm for fused MoE.")
         use_deep_gemm = True
     except ImportError:
         logger.warning("Failed to import DeepGemm kernels.")
-
-
-def p(s, t):
-    #print(f"{s}: {t.shape}\n{t}")
-    pass
-
-
-def pp(x):
-    #print(x)
-    pass
 
 
 @triton.jit
@@ -1576,9 +1567,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                           dtype=hidden_states.dtype)
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
-
-    if num_chunks > 1:
-        print("CHUNKS!!!!!!!!!!!!!!!!!!")
 
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
