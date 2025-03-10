@@ -1486,6 +1486,8 @@ def fused_experts_impl(
 
     config = get_config_func(M)
 
+    # XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
     # We can reuse the memory between these because by the time we need
     # cache3, we're done with cache1
     cache13 = torch.empty(M * top_k_num * max(N, w2.shape[1]),
@@ -1500,6 +1502,8 @@ def fused_experts_impl(
     intermediate_cache2 = torch.empty((M * top_k_num, N // 2),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
+
+    # XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
     if hidden_states.dtype == torch.bfloat16:
         compute_type = tl.bfloat16
@@ -1517,6 +1521,9 @@ def fused_experts_impl(
 
     use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2, config, use_fp8_w8a8)
 
+    block_m = config['BLOCK_SIZE_M']
+    assert not use_dg or block_m == 128
+
     if use_dg:
         #print("USE_DG!!!!!!!!!!!!!")
         # TODO: how to test chunks?
@@ -1530,7 +1537,41 @@ def fused_experts_impl(
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
         #print("GOT HERE B")
+
+        # BIG HACK
+        sorted_token_ids, _, _ = (
+            moe_align_block_size(topk_ids, block_m,
+                                 global_num_experts, expert_map))
+
+        num_tokens = top_k_num * M
+        pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) * block_m) - sorted_token_ids.numel()
+        if pad_size > 0:
+            sorted_token_ids = torch.nn.functional.pad(sorted_token_ids, (0, pad_size), "constant", num_tokens)
+        sorted_token_ids = sorted_token_ids.clamp(max=num_tokens-1)
+
+        new_M = sorted_token_ids.numel()//top_k_num
+        #print(f"fused2 m={M}, new_M={new_M}, sort={sorted_token_ids.shape}, hs={hidden_states.shape}, hs[sort]={hidden_states.view(num_tokens, -1)[sorted_token_ids, ...].shape}")
+
+        intermediate_cache1 = torch.empty((new_M, top_k_num, N),
+                                          device=hidden_states.device,
+                                          dtype=hidden_states.dtype)
+        intermediate_cache2 = torch.empty((new_M * top_k_num, N // 2),
+                                          device=hidden_states.device,
+                                          dtype=hidden_states.dtype)
+        intermediate_cache3 = torch.empty((new_M, top_k_num, w2.shape[1]),
+                                          device=hidden_states.device,
+                                          dtype=hidden_states.dtype)
     else:
+        intermediate_cache1 = torch.empty((M, top_k_num, N),
+                                          device=hidden_states.device,
+                                          dtype=hidden_states.dtype)
+        intermediate_cache2 = torch.empty((M * top_k_num, N // 2),
+                                          device=hidden_states.device,
+                                          dtype=hidden_states.dtype)
+        intermediate_cache3 = torch.empty((M, top_k_num, w2.shape[1]),
+                                          device=hidden_states.device,
+                                          dtype=hidden_states.dtype)
+
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
     if num_chunks > 1:
@@ -1561,9 +1602,6 @@ def fused_experts_impl(
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
-        block_m = config['BLOCK_SIZE_M']
-        assert not use_dg or block_m == 128
-
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             moe_align_block_size(curr_topk_ids, block_m,
                                  global_num_experts, expert_map))
@@ -1576,13 +1614,6 @@ def fused_experts_impl(
 
                 sorted_token_ids = sorted_token_ids.clamp(max=num_tokens-1)
                 expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
-
-            scale = sorted_token_ids.numel()//(M*top_k_num)
-
-            intermediate_cache1 = intermediate_cache1.repeat_interleave(scale, dim=0)
-            intermediate_cache2 = intermediate_cache2.repeat_interleave(scale, dim=0)
-            intermediate_cache3 = intermediate_cache3.repeat_interleave(scale, dim=0)
-            #print(f"fused2 {intermediate_cache1.shape}")
 
         p("fused topk", topk_ids)
         p("fused sorted", sorted_token_ids)
