@@ -32,7 +32,10 @@ class HpuPlatform(Platform):
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
         logger.info("Using HPUAttention backend.")
-        return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
+        if use_mla:
+            return "vllm.attention.backends.hpu_attn.HPUMLAAttentionBackend"
+        else:
+            return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:

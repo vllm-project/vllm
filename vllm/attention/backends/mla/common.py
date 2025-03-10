@@ -235,13 +235,14 @@ from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
 
-try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
-    is_vllm_fa = True
-except ImportError:
-    # For rocm use upstream flash attention
-    from flash_attn import flash_attn_varlen_func
-    is_vllm_fa = False
+if current_platform.is_cuda_alike():
+    try:
+        from vllm.vllm_flash_attn import flash_attn_varlen_func
+        is_vllm_fa = True
+    except ImportError:
+        # For rocm use upstream flash attention
+        from flash_attn import flash_attn_varlen_func
+        is_vllm_fa = False
 
 from vllm.attention.ops.triton_flash_attention import triton_attention
 
@@ -1056,6 +1057,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.q_proj = q_proj
         self.kv_b_proj = kv_b_proj
         self.o_proj = o_proj
+
+        if not current_platform.is_cuda_alike():
+            return
+
         self.triton_fa_func = triton_attention
         self.fp8_linear_generic = Fp8LinearGenericOp()
 
@@ -1155,6 +1160,19 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
         def get_and_maybe_dequant_weights(layer: LinearBase):
             if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+                if current_platform.is_hpu() and \
+                    layer.quant_method.quant_config.activation_scheme \
+                        == "static":
+
+                    def get_scales(layer: LinearBase) -> torch.Tensor:
+                        if hasattr(layer, "weight_scale_inv"):
+                            return layer.weight_scale_inv
+                        return layer.weight_scale
+
+                    scales = get_scales(layer)
+                    if len(scales.shape) == 1:
+                        ret = layer.weight.to(act_dtype) * scales.unsqueeze(1)
+                        return ret
                 # NOTE: This should only be used offline, since it's O(N^3)
                 eye = torch.eye(layer.input_size_per_partition,
                                 dtype=act_dtype,
