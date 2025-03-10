@@ -316,6 +316,7 @@ def get_active_block_tables(block_tables, query_lens, seq_lens, block_size,
 @pytest.mark.parametrize("mixed_precision", [True, False])
 @torch.inference_mode()
 def test_contexted_kv_attention(
+    monkeypatch,
     prefill_batch_size: int,
     decode_batch_size: int,
     num_heads: int,
@@ -341,7 +342,7 @@ def test_contexted_kv_attention(
         "--retry_failed_compilation",
     ]
     compiler_flags_str = " ".join(compiler_flags)
-    os.environ["NEURON_CC_FLAGS"] = compiler_flags_str
+    monkeypatch.setenv("NEURON_CC_FLAGS", compiler_flags_str)
 
     torch.manual_seed(0)
     torch.set_printoptions(sci_mode=False)

@@ -94,8 +94,8 @@ def test_models_distributed(
     if (model == "meta-llama/Llama-3.2-1B-Instruct"
             and distributed_executor_backend == "ray"):
         # test Ray Compiled Graph
-        os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
-        os.environ['VLLM_USE_RAY_COMPILED_DAG'] = "1"
+        monkeypatch.setenv("VLLM_USE_RAY_SPMD_WORKER", "1")
+        monkeypatch.setenv("VLLM_USE_RAY_COMPILED_DAG", "1")
 
     dtype = "half"
     max_tokens = 5
