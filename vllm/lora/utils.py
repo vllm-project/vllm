@@ -172,7 +172,9 @@ def is_regex_target_modules(load_modules: Union[str, List[str]],
     return False
 
 
-def get_supported_lora_modules(model: nn.Module) -> List[str]:
+def get_supported_lora_modules(
+        model: nn.Module,
+        ignored_layers: Optional[Union[str, List[str]]]) -> List[str]:
     """
     In vLLM, all linear layers support LoRA.
     """
