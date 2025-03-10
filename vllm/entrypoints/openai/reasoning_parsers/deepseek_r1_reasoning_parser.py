@@ -62,6 +62,9 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         - 'abc' goes to reasoning_content
         - 'xyz' goes to content
         """
+        if self.think_end_token_id in delta_token_ids:
+            self._set_reasoning_complete(True)
+
         # Skip single special tokens
         if len(delta_token_ids) == 1 and (delta_token_ids[0] in [
                 self.think_start_token_id, self.think_end_token_id
