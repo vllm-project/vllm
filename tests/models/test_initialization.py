@@ -46,8 +46,6 @@ def test_can_initialize(model_arch):
         # gpu_blocks (> 0), cpu_blocks
         return 1, 0
 
-    # FIXME: when we turn V1 on by default, we will need to patch
-    # the corresponding method for V1 else the CI run will be long.
     with (patch.object(V0LLMEngine, "_initialize_kv_caches",
                        _initialize_kv_caches_v0),
           patch.object(V1EngineCore, "_initialize_kv_caches",
