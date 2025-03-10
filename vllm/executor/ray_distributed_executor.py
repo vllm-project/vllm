@@ -72,7 +72,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _init_executor(self) -> None:
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
-        if envs.VLLM_USE_V1:
+        if envs.VLLM_USE_V1 and not current_platform.is_xpu():
             # V1 uses SPMD worker and compiled DAG
             os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
             os.environ["VLLM_USE_RAY_COMPILED_DAG"] = "1"
@@ -495,6 +495,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         ray_workers = self.workers
         if async_run_tensor_parallel_workers_only:
             ray_workers = self.non_driver_workers
+        print(f"sent_method: {sent_method} ！！！！！！！！！！！")
         ray_worker_outputs = [
             worker.execute_method.remote(sent_method, *args, **kwargs)
             for worker in ray_workers

@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-import gc
 import os
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.distributed
 
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.v1.worker.gpu_worker import Worker, _get_cache_block_size
+from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.xpu_model_runner import XPUModelRunner
 
 
@@ -20,30 +19,25 @@ class XPUWorker(Worker):
 
     def __init__(
         self,
-        vllm_config,
-        local_rank,
-        rank,
-        distributed_init_method,
+        vllm_config: VllmConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+        is_driver_worker: bool = False,
     ):
-        super().__init__(
-            vllm_config,
-            local_rank,
-            rank,
-            distributed_init_method,
-        )
+        super().__init__(vllm_config, local_rank, rank,
+                         distributed_init_method, is_driver_worker)
         device_config = self.device_config
         assert device_config.device_type == "xpu"
         assert current_platform.is_xpu()
 
     @torch.inference_mode()
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
-
         The engine will first conduct a profiling of the existing memory usage.
         Then, it calculate the maximum possible number of GPU and CPU blocks
         that can be allocated with the remaining free memory.
-
         .. tip::
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
@@ -73,21 +67,15 @@ class XPUWorker(Worker):
             f" {free_gpu_memory}. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
-        cache_block_size = _get_cache_block_size(self.cache_config,
-                                                 self.model_config,
-                                                 self.parallel_config)
-        num_gpu_blocks = int(
-            (total_gpu_memory * self.cache_config.gpu_memory_utilization -
-             peak_memory) // cache_block_size)
-        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
-                             cache_block_size)
-        num_gpu_blocks = max(num_gpu_blocks, 0)
-        num_cpu_blocks = max(num_cpu_blocks, 0)
-        gc.collect()
         torch.xpu.empty_cache()
-        return num_gpu_blocks, num_cpu_blocks
 
-    def initialize(self):
+        available_kv_cache_memory = (
+            total_gpu_memory * self.cache_config.gpu_memory_utilization -
+            peak_memory)
+
+        return int(available_kv_cache_memory)
+
+    def init_device(self):
         if self.device_config.device.type == "xpu" and current_platform.is_xpu(
         ):
             self.device = torch.device(f"xpu:{self.local_rank}")

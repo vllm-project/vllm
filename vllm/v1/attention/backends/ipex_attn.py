@@ -1,19 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Any, Dict, List, Optional, Tuple, Type
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import torch
 
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
-from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+
+
+@dataclass
+class IPEXAttentionMetadata(FlashAttentionMetadata):
+    seq_start_loc: torch.Tensor = torch.tensor([0], dtype=torch.int64)
 
 
 class IPEXAttentionBackend(AttentionBackend):
 
+    accept_output_buffer: bool = True
+
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
 
     @staticmethod
@@ -21,12 +29,12 @@ class IPEXAttentionBackend(AttentionBackend):
         return "IPEX_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type["IPEXAttentionImpl"]:
+    def get_impl_cls() -> type["IPEXAttentionImpl"]:
         return IPEXAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
-        return FlashAttentionMetadata
+    def get_metadata_cls() -> type["AttentionMetadata"]:
+        return IPEXAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -34,7 +42,7 @@ class IPEXAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
@@ -48,11 +56,12 @@ class IPEXAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
@@ -82,20 +91,23 @@ class IPEXAttentionImpl(AttentionImpl):
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
                 f"Supported head sizes are: {support_head_sizes}.")
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "IpexAttnBackendImpl")
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: IPEXAttentionBackend,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with IPEXAttention.
-
         Args:
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
@@ -105,124 +117,54 @@ class IPEXAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "IPEXAttentionImpl")
+        assert output is not None, "Output tensor must be provided."
+        if attn_metadata is None:
+            # Profiling run.
+            return output
 
         # NOTE(woosuk): IPEXAttention does not support FP8 KV cache.
-        assert k_scale == 1.0 and v_scale == 1.0, (
+        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0, (
             "key/v_scale is not supported in IPEXAttention.")
 
-        output = torch.empty_like(query)
-        torch.ops.vllm.ipex_attn_chunked_prefill(
-            output,
-            query,
-            key,
-            value,
-            self.num_heads,
-            self.head_size,
-            self.num_kv_heads,
-            kv_cache,
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        num_heads = self.num_heads
+        head_size = self.head_size
+        num_kv_heads = self.num_kv_heads
+        query = query.view(-1, num_heads, head_size)
+        key = key.view(-1, num_kv_heads, head_size)
+        value = value.view(-1, num_kv_heads, head_size)
+
+        # Reshape the input keys and values and store them in the cache.
+        key_cache, value_cache = kv_cache.unbind(0)
+
+        ipex_ops.reshape_and_cache_flash(
+            key[:num_actual_tokens],
+            value[:num_actual_tokens],
+            key_cache,
+            value_cache,
+            attn_metadata.slot_mapping,
             self.kv_cache_dtype,
-            k_scale,
-            v_scale,
-            self.scale,
-            self.sliding_window,
-            self.alibi_slopes,
-            self.logits_soft_cap,
+            layer._k_scale,
+            layer._v_scale,
         )
-        return output.view(-1, self.num_heads * self.head_size)
 
-
-@torch.library.custom_op("vllm::ipex_attn_fake",
-                         mutates_args=["output", "kv_cache"])
-def ipex_attn_fake(
-    output: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    num_heads: int,
-    head_size: int,
-    num_kv_heads: int,
-    kv_cache: torch.Tensor,
-    kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
-    scale: float,
-    sliding_window: Optional[List[int]] = None,
-    alibi_slopes: Optional[torch.Tensor] = None,
-    logits_soft_cap: Optional[float] = None,
-) -> None:
-    pass
-
-
-@torch.library.custom_op("vllm::ipex_attn_chunked_prefill",
-                         mutates_args=["output", "kv_cache"])
-def ipex_attn_chunked_prefill(
-    output: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    num_heads: int,
-    head_size: int,
-    num_kv_heads: int,
-    kv_cache: torch.Tensor,
-    kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
-    scale: float,
-    sliding_window: Optional[List[int]] = None,
-    alibi_slopes: Optional[torch.Tensor] = None,
-    logits_soft_cap: Optional[float] = None,
-) -> None:
-    context = get_forward_context()
-    current_metadata = context.dynamic_forward_context
-    if current_metadata is None:
-        # Profiling run.
-        return
-
-    assert current_metadata is not None
-    assert isinstance(current_metadata, FlashAttentionMetadata)
-    attn_metadata: FlashAttentionMetadata = current_metadata
-    num_actual_tokens = attn_metadata.num_actual_tokens
-
-    query = query.view(-1, num_heads, head_size)
-    key = key.view(-1, num_kv_heads, head_size)
-    value = value.view(-1, num_kv_heads, head_size)
-
-    # Reshape the input keys and values and store them in the cache.
-    key_cache = kv_cache[0]
-    value_cache = kv_cache[1]
-
-    ipex_ops.reshape_and_cache_flash(
-        key[:num_actual_tokens],
-        value[:num_actual_tokens],
-        key_cache,
-        value_cache,
-        attn_metadata.slot_mapping,
-        kv_cache_dtype,
-        k_scale,
-        v_scale,
-    )
-
-    ipex_ops.chunked_prefill(
-        query[:num_actual_tokens],
-        key_cache,
-        value_cache,
-        output[:num_actual_tokens],
-        attn_metadata.query_start_loc,
-        attn_metadata.seq_start_loc,
-        None,
-        attn_metadata.block_table,
-        alibi_slopes,
-        attn_metadata.max_query_len,
-        attn_metadata.max_seq_len,
-        0.0,
-        scale,
-        False,
-        True,
-        False,
-        None,
-    )
+        ipex_ops.chunked_prefill(
+            query[:num_actual_tokens],
+            key_cache,
+            value_cache,
+            output[:num_actual_tokens],
+            attn_metadata.query_start_loc,
+            attn_metadata.seq_start_loc,
+            None,
+            attn_metadata.block_table,
+            self.alibi_slopes,
+            attn_metadata.max_query_len,
+            attn_metadata.max_seq_len,
+            0.0,
+            self.scale,
+            False,
+            True,
+            False,
+            None,
+        )
+        return output
