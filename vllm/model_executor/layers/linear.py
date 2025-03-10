@@ -2,7 +2,7 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -83,6 +83,41 @@ def adjust_scalar_to_fused_array(param, loaded_weight, shard_id):
         loaded_weight = loaded_weight[0]
 
     return param[shard_id], loaded_weight
+
+
+def left_shift_bitsandbytes_4bit_shard(bnb_weight_attrs: dict[str, Any]):
+    """
+    Separate the BitsAndBytes 4-bit shard.
+
+    For example, given bnb weight attributes as below:
+    {
+        'bnb_shard_offsets': array([0, 4, 8, 16]), 
+        'bnb_quant_state': {0: ..., 1: ..., 2: ...},
+    }
+
+    The function will return:
+    {
+        'bnb_shard_offsets': array([0, 4]), 
+        'bnb_quant_state': {0: ...},
+    }
+    and
+    {
+        'bnb_shard_offsets': array([0, 4, 12]),
+        'bnb_quant_state': {0: ..., 1: ...},
+    }
+    """
+    shard_offsets = bnb_weight_attrs["bnb_shard_offsets"]
+    offset_l = shard_offsets[:2]
+    offset_r = shard_offsets[1:] - shard_offsets[1]
+    quant_state_l = {0: bnb_weight_attrs["bnb_quant_state"][0]}
+    quant_state_r = {
+        i - 1: bnb_weight_attrs["bnb_quant_state"][i]
+        for i in range(1,
+                       len(shard_offsets) - 1)
+    }
+    left = dict(bnb_shard_offsets=offset_l, bnb_quant_state=quant_state_l)
+    right = dict(bnb_shard_offsets=offset_r, bnb_quant_state=quant_state_r)
+    return left, right
 
 
 class LinearMethodBase(QuantizeMethodBase):
@@ -1252,6 +1287,8 @@ class QKVCrossParallelLinear(LinearBase):
                          quant_config=quant_config,
                          prefix=prefix)
 
+        self.quant_config = quant_config
+
         # Empty placeholders for loading as a single module.
         placeholder_size = 0
         quant_method = quant_config.get_quant_method(self, prefix=prefix)
@@ -1299,16 +1336,7 @@ class QKVCrossParallelLinear(LinearBase):
         layer = self.proj["q_proj_decoder"]
         for name, param in self.named_parameters():
             target_param = getattr(layer, name)
-            missing_attrs = set(param.__dict__.keys()) - set(
-                target_param.__dict__.keys())
-            if missing_attrs:
-                missing_attrs_dict = {
-                    k: getattr(param, k)
-                    for k in missing_attrs
-                }
-                missing_attrs_dict["bnb_quant_state"] = {0: missing_attrs_dict["bnb_quant_state"][0]}
-                missing_attrs_dict["bnb_shard_offsets"] = missing_attrs_dict["bnb_shard_offsets"][:2]
-                set_weight_attrs(target_param, missing_attrs_dict)
+            self.sync_weight_attrs(param, target_param, mode="q_proj_decoder")
         return layer
 
     @property
@@ -1316,17 +1344,32 @@ class QKVCrossParallelLinear(LinearBase):
         layer = self.proj["kv_proj_encoder"]
         for name, param in self.named_parameters():
             target_param = getattr(layer, name)
-            missing_attrs = set(param.__dict__.keys()) - set(
-                target_param.__dict__.keys())
-            if missing_attrs:
-                missing_attrs_dict = {
-                    k: getattr(param, k)
-                    for k in missing_attrs
-                }
-                missing_attrs_dict["bnb_quant_state"] = {i-1: missing_attrs_dict["bnb_quant_state"][i] for i in range(1, 3)}
-                missing_attrs_dict["bnb_shard_offsets"] = missing_attrs_dict["bnb_shard_offsets"][1:] - missing_attrs_dict["bnb_shard_offsets"][1]
-                set_weight_attrs(target_param, missing_attrs_dict)
+            self.sync_weight_attrs(param, target_param, mode="kv_proj_encoder")
         return layer
+
+    def sync_weight_attrs(
+        self,
+        src_param: nn.Parameter,
+        tgt_param: nn.Parameter,
+        mode: Literal["q_proj", "kv_proj"],
+    ):
+        missing_attrs_dict = {
+            k: getattr(src_param, k)
+            for k in (set(src_param.__dict__.keys()) -
+                      set(tgt_param.__dict__.keys()))
+        }
+        # TODO(Isotr0py): handle bitsandbytes 8bit
+        use_bitsandbytes_4bit = getattr(src_param, "use_bitsandbytes_4bit",
+                                        False)
+        if (missing_attrs_dict and use_bitsandbytes_4bit):
+            q_proj_attrs, kv_proj_attrs = left_shift_bitsandbytes_4bit_shard(
+                missing_attrs_dict)
+            if mode == "q_proj_decoder":
+                set_weight_attrs(tgt_param, q_proj_attrs)
+            elif mode == "kv_proj_encoder":
+                set_weight_attrs(tgt_param, kv_proj_attrs)
+        else:
+            set_weight_attrs(tgt_param, missing_attrs_dict)
 
     def selet_proj_params(
         self,
