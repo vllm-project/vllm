@@ -52,10 +52,9 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
-from benchmark_dataset import (VISION_ARENA_DATASET_PATH, BurstGPTDataset,
-                               HuggingFaceDataset, RandomDataset,
-                               SampleRequest, ShareGPTDataset, SonnetDataset,
-                               VisionArenaDataset)
+from benchmark_dataset import (BurstGPTDataset, HuggingFaceDataset,
+                               RandomDataset, SampleRequest, ShareGPTDataset,
+                               SonnetDataset, VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -589,8 +588,8 @@ def main(args: argparse.Namespace):
     elif args.dataset_name == "hf":
         # Choose between VisionArenaDataset
         # and HuggingFaceDataset based on provided parameters.
-        dataset_class = (VisionArenaDataset
-                         if args.dataset_path == VISION_ARENA_DATASET_PATH
+        dataset_class = (VisionArenaDataset if args.dataset_path
+                         == VisionArenaDataset.VISION_ARENA_DATASET_PATH
                          and args.hf_subset is None else HuggingFaceDataset)
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
