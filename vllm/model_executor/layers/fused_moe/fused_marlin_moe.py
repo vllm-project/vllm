@@ -171,6 +171,7 @@ def fused_marlin_moe(
     workspace: Optional[torch.Tensor] = None,
     num_bits: int = 8,
     is_k_full: bool = True,
+    inplace: bool = False
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -320,8 +321,13 @@ def fused_marlin_moe(
         use_fp32_reduce=True,
         is_zp_float=False).view(-1, topk, K)
 
+    if inplace:
+        output = hidden_states
+    else:
+        output = torch.empty_like(hidden_states)
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                     dim=1, out=hidden_states)
+                     dim=1,
+                     out=output)
 
 
 def fused_marlin_moe_fake(

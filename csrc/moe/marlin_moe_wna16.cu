@@ -40,14 +40,12 @@ namespace MARLIN_NAMESPACE_NAME {
 
 template <int moe_block_size>
 __global__ void permute_cols_kernel(
-    int4 const* __restrict__ a_int4_ptr,
-    int const* __restrict__ perm_int_ptr,
+    int4 const* __restrict__ a_int4_ptr, int const* __restrict__ perm_int_ptr,
     int4* __restrict__ out_int4_ptr,
     const int32_t* __restrict__ sorted_token_ids_ptr,
     const int32_t* __restrict__ expert_ids_ptr,
-    const int32_t* __restrict__ num_tokens_past_padded_ptr,
-    int size_m, int size_k, int top_k) {};
-
+    const int32_t* __restrict__ num_tokens_past_padded_ptr, int size_m,
+    int size_k, int top_k){};
 
 template <typename scalar_t,  // compute dtype, half or nv_float16
           const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
@@ -75,20 +73,20 @@ __global__ void Marlin(
     const int4* __restrict__ zp_ptr,      // 4bit packed zero-points of shape
                                           // (k/groupsize)x(n/pack_factor)
     const int* __restrict__ g_idx,        // int32 group indices of shape k
-    const int32_t* __restrict__ sorted_token_ids_ptr,       // moe sorted_ids
-    const int32_t* __restrict__ expert_ids_ptr,             // moe expert ids
-    const int32_t* __restrict__ num_tokens_past_padded_ptr, // moe num tokens
-    const float* __restrict__ topk_weights_ptr,             // moe top weights
-    int top_k,               // num of experts per token
-    bool mul_topk_weights,   // mul topk weights or not
-    bool is_ep,              // expert parallelism
-    int num_groups,       // number of scale groups per output channel
-    int prob_m,           // batch dimension m
-    int prob_n,           // output dimension n
-    int prob_k,           // reduction dimension k
-    int* locks,           // extra global storage for barrier synchronization
-    bool use_atomic_add,  // whether to use atomic add to reduce
-    bool use_fp32_reduce  // whether to use fp32 global reduce
+    const int32_t* __restrict__ sorted_token_ids_ptr,        // moe sorted_ids
+    const int32_t* __restrict__ expert_ids_ptr,              // moe expert ids
+    const int32_t* __restrict__ num_tokens_past_padded_ptr,  // moe num tokens
+    const float* __restrict__ topk_weights_ptr,              // moe top weights
+    int top_k,              // num of experts per token
+    bool mul_topk_weights,  // mul topk weights or not
+    bool is_ep,             // expert parallelism
+    int num_groups,         // number of scale groups per output channel
+    int prob_m,             // batch dimension m
+    int prob_n,             // output dimension n
+    int prob_k,             // reduction dimension k
+    int* locks,             // extra global storage for barrier synchronization
+    bool use_atomic_add,    // whether to use atomic add to reduce
+    bool use_fp32_reduce    // whether to use fp32 global reduce
 ) {}
 
 }  // namespace marlin
@@ -189,8 +187,8 @@ dequant<half, vllm::kU4B8.id()>(int q) {
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
   // We want signed int4 outputs, hence we fuse the `-8` symmetric zero point
   // directly into `SUB` and `ADD`.
   const int SUB = 0x64086408;
@@ -213,9 +211,9 @@ dequant<nv_bfloat16, vllm::kU4B8.id()>(int q) {
 
   // Guarantee that the `(a & b) | c` operations are LOP3s.
 
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
   q >>= 4;
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
 
   typename ScalarType<nv_bfloat16>::FragB frag_b;
   static constexpr uint32_t MUL = 0x3F803F80;
@@ -237,8 +235,8 @@ dequant<half, vllm::kU4.id()>(int q) {
   const int HI = 0x00f000f0;
   const int EX = 0x64006400;
   // Guarantee that the `(a & b) | c` operations are LOP3s.
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, LO, EX);
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, HI, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
 
   const int SUB = 0x64006400;
   const int MUL = 0x2c002c00;
@@ -260,9 +258,9 @@ dequant<nv_bfloat16, vllm::kU4.id()>(int q) {
 
   // Guarantee that the `(a & b) | c` operations are LOP3s.
 
-  int lo = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int lo = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
   q >>= 4;
-  int hi = lop3 < (0xf0 & 0xcc) | 0xaa > (q, MASK, EX);
+  int hi = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
 
   typename ScalarType<nv_bfloat16>::FragB frag_b;
   static constexpr uint32_t MUL = 0x3F803F80;
@@ -474,14 +472,12 @@ __device__ inline void barrier_release(int* lock, bool reset = false) {
 // on the given "perm" indices.
 template <int moe_block_size>
 __global__ void permute_cols_kernel(
-    int4 const* __restrict__ a_int4_ptr,
-    int const* __restrict__ perm_int_ptr,
+    int4 const* __restrict__ a_int4_ptr, int const* __restrict__ perm_int_ptr,
     int4* __restrict__ out_int4_ptr,
     const int32_t* __restrict__ sorted_token_ids_ptr,
     const int32_t* __restrict__ expert_ids_ptr,
-    const int32_t* __restrict__ num_tokens_past_padded_ptr,
-    int size_m, int size_k, int top_k) {
-
+    const int32_t* __restrict__ num_tokens_past_padded_ptr, int size_m,
+    int size_k, int top_k) {
   int num_tokens_past_padded = num_tokens_past_padded_ptr[0];
   int num_moe_blocks = div_ceil(num_tokens_past_padded, moe_block_size);
   int32_t block_sorted_ids[moe_block_size];
@@ -492,9 +488,10 @@ __global__ void permute_cols_kernel(
 
   auto read_moe_block_data = [&](int block_id) {
     block_num_valid_tokens = moe_block_size;
-    int4 *tmp_block_sorted_ids = reinterpret_cast<int4*>(block_sorted_ids);
+    int4* tmp_block_sorted_ids = reinterpret_cast<int4*>(block_sorted_ids);
     for (int i = 0; i < moe_block_size / 4; i++) {
-      tmp_block_sorted_ids[i] = ((int4*)sorted_token_ids_ptr)[block_id * moe_block_size / 4 + i];
+      tmp_block_sorted_ids[i] =
+          ((int4*)sorted_token_ids_ptr)[block_id * moe_block_size / 4 + i];
     }
     for (int i = 0; i < moe_block_size; i++) {
       if (block_sorted_ids[i] >= size_m * top_k) {
@@ -511,7 +508,8 @@ __global__ void permute_cols_kernel(
     int in_offset = (row / top_k) * row_stride;
     int out_offset = row * row_stride;
 
-    half const* a_row_half = reinterpret_cast<half const*>(a_int4_ptr + in_offset);
+    half const* a_row_half =
+        reinterpret_cast<half const*>(a_int4_ptr + in_offset);
     half* out_half = reinterpret_cast<half*>(out_int4_ptr + out_offset);
 
     int base_k = 0;
@@ -574,20 +572,20 @@ __global__ void Marlin(
     const int4* __restrict__ zp_ptr,      // 4bit packed zero-points of shape
                                           // (k/groupsize)x(n/pack_factor)
     const int* __restrict__ g_idx,        // int32 group indices of shape k
-    const int32_t* __restrict__ sorted_token_ids_ptr,       // moe sorted_ids
-    const int32_t* __restrict__ expert_ids_ptr,             // moe expert ids
-    const int32_t* __restrict__ num_tokens_past_padded_ptr, // moe num tokens
-    const float* __restrict__ topk_weights_ptr,             // moe top weights
-    int top_k,               // num of experts per token
-    bool mul_topk_weights,   // mul topk weights or not
-    bool is_ep,              // expert parallelism
-    int num_groups,       // number of scale groups per output channel
-    int prob_m,           // batch dimension m
-    int prob_n,           // output dimension n
-    int prob_k,           // reduction dimension k
-    int* locks,           // extra global storage for barrier synchronization
-    bool use_atomic_add,  // whether to use atomic add to reduce
-    bool use_fp32_reduce  // whether to use fp32 global reduce
+    const int32_t* __restrict__ sorted_token_ids_ptr,        // moe sorted_ids
+    const int32_t* __restrict__ expert_ids_ptr,              // moe expert ids
+    const int32_t* __restrict__ num_tokens_past_padded_ptr,  // moe num tokens
+    const float* __restrict__ topk_weights_ptr,              // moe top weights
+    int top_k,              // num of experts per token
+    bool mul_topk_weights,  // mul topk weights or not
+    bool is_ep,             // expert parallelism
+    int num_groups,         // number of scale groups per output channel
+    int prob_m,             // batch dimension m
+    int prob_n,             // output dimension n
+    int prob_k,             // reduction dimension k
+    int* locks,             // extra global storage for barrier synchronization
+    bool use_atomic_add,    // whether to use atomic add to reduce
+    bool use_fp32_reduce    // whether to use fp32 global reduce
 ) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
@@ -612,10 +610,11 @@ __global__ void Marlin(
 
   constexpr int pack_factor = 32 / w_type.size_bits();
   constexpr int moe_block_size = 16 * thread_m_blocks;
-  const int group_size = (!has_act_order && group_blocks == -1) ? 
-    prob_k : 16 * group_blocks;
-  const int zp_row_stride = is_zp_float ? 
-    prob_k / group_size / 8 : prob_k / group_size / (pack_factor * 4);
+  const int group_size =
+      (!has_act_order && group_blocks == -1) ? prob_k : 16 * group_blocks;
+  const int zp_row_stride = is_zp_float
+                                ? prob_k / group_size / 8
+                                : prob_k / group_size / (pack_factor * 4);
 
   // parallel: num valid moe blocks
   int num_tokens_past_padded = num_tokens_past_padded_ptr[0];
@@ -654,7 +653,7 @@ __global__ void Marlin(
 
   int par_id = 0;
   int block_id = -1;
-  int64_t expert_id = 0; // use int64 to avoid computation result overflow
+  int64_t expert_id = 0;  // use int64 to avoid computation result overflow
   int64_t old_expert_id = 0;
   int64_t B_expert_off = 0;
 
@@ -681,9 +680,10 @@ __global__ void Marlin(
   // block_sorted_ids / block_num_valid_tokens / block_topk_weights
   auto read_moe_block_data = [&](int block_id) {
     block_num_valid_tokens = moe_block_size;
-    int4 *tmp_block_sorted_ids = reinterpret_cast<int4*>(block_sorted_ids);
+    int4* tmp_block_sorted_ids = reinterpret_cast<int4*>(block_sorted_ids);
     for (int i = 0; i < moe_block_size / 4; i++) {
-      tmp_block_sorted_ids[i] = ((int4*)sorted_token_ids_ptr)[block_id * moe_block_size / 4 + i];
+      tmp_block_sorted_ids[i] =
+          ((int4*)sorted_token_ids_ptr)[block_id * moe_block_size / 4 + i];
     }
     for (int i = 0; i < moe_block_size; i++) {
       if (block_sorted_ids[i] >= prob_m * top_k) {
@@ -724,33 +724,35 @@ __global__ void Marlin(
     }
 
     B_expert_off = expert_id * prob_n * prob_k / (pack_factor * 4);
-    scales_ptr += (expert_id - old_expert_id) * prob_n * prob_k / group_size / 8;
+    scales_ptr +=
+        (expert_id - old_expert_id) * prob_n * prob_k / group_size / 8;
     if constexpr (has_zp) {
       zp_ptr += (expert_id - old_expert_id) * prob_n * zp_row_stride;
     }
 
     read_moe_block_data(block_id);
   };
-  
+
   // (expert parallelism only) write zero to output
   // if the target blocks is invalid (expert_id == -1)
   auto write_zero_to_invalid_block_output = [&]() {
-    int num_tiles_write_zero = div_ceil(n_tiles * num_invalid_blocks,
-                                        gridDim.x);
+    int num_tiles_write_zero =
+        div_ceil(n_tiles * num_invalid_blocks, gridDim.x);
 
     int ntile_id = (num_tiles_write_zero * blockIdx.x) % n_tiles;
     int remaining_ntiles_in_block = n_tiles - ntile_id;
-    int remaining_ntiles_global = min(
-      num_tiles_write_zero,
-      n_tiles * num_invalid_blocks - num_tiles_write_zero * blockIdx.x
-    );
+    int remaining_ntiles_global =
+        min(num_tiles_write_zero,
+            n_tiles * num_invalid_blocks - num_tiles_write_zero * blockIdx.x);
     int block_id_write = -1;
 
     while (remaining_ntiles_global > 0) {
-      int skip_count = block_id_write == -1 ? 
-        (num_tiles_write_zero * blockIdx.x) / n_tiles : 0;
+      int skip_count = block_id_write == -1
+                           ? (num_tiles_write_zero * blockIdx.x) / n_tiles
+                           : 0;
       block_id_write++;
-      for (int i = block_id_write; i < num_tokens_past_padded / moe_block_size; i++) {
+      for (int i = block_id_write; i < num_tokens_past_padded / moe_block_size;
+           i++) {
         if (expert_ids_ptr[i] == -1) {
           if (skip_count == 0) {
             block_id_write = i;
@@ -788,8 +790,7 @@ __global__ void Marlin(
     }
   };
 
-  if (num_invalid_blocks > 0)
-    write_zero_to_invalid_block_output();
+  if (num_invalid_blocks > 0) write_zero_to_invalid_block_output();
 
   // Compute all information about the current slice which is required for
   // synchronization.
@@ -824,13 +825,14 @@ __global__ void Marlin(
 
     if (first_init && use_atomic_add && slice_count > 0) {
       constexpr int threads_per_m = 16 * thread_n_blocks / 8;
-      int m_per_thread = div_ceil(block_num_valid_tokens, threads / threads_per_m);
+      int m_per_thread =
+          div_ceil(block_num_valid_tokens, threads / threads_per_m);
       for (int i = 0; i < m_per_thread; i++) {
         int row = threads / threads_per_m * i + threadIdx.x / threads_per_m;
         if (row < block_num_valid_tokens) {
           int sorted_row = block_sorted_ids[row];
-          int col = slice_col * 16 * thread_n_blocks / 8 + \
-            threadIdx.x % threads_per_m;
+          int col = slice_col * 16 * thread_n_blocks / 8 +
+                    threadIdx.x % threads_per_m;
           C[sorted_row * prob_n / 8 + col] = {0, 0, 0, 0};
         }
       }
@@ -2352,15 +2354,19 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   if (has_act_order) {
     // Permute A columns
     auto kernel = permute_cols_kernel<16>;
-    if (moe_block_size == 16) {}
-    else if (moe_block_size == 32) kernel = permute_cols_kernel<32>;
-    else if (moe_block_size == 48) kernel = permute_cols_kernel<48>;
-    else if (moe_block_size == 64) kernel = permute_cols_kernel<64>;
-    else TORCH_CHECK(false, "unsupported moe_block_size ", moe_block_size);
+    if (moe_block_size == 16) {
+    } else if (moe_block_size == 32)
+      kernel = permute_cols_kernel<32>;
+    else if (moe_block_size == 48)
+      kernel = permute_cols_kernel<48>;
+    else if (moe_block_size == 64)
+      kernel = permute_cols_kernel<64>;
+    else
+      TORCH_CHECK(false, "unsupported moe_block_size ", moe_block_size);
 
     kernel<<<blocks, default_threads, 0, stream>>>(
-        A_ptr, perm_ptr, a_tmp_ptr, sorted_token_ids_ptr,
-        expert_ids_ptr, num_tokens_past_padded_ptr, prob_m, prob_k, top_k);
+        A_ptr, perm_ptr, a_tmp_ptr, sorted_token_ids_ptr, expert_ids_ptr,
+        num_tokens_past_padded_ptr, prob_m, prob_k, top_k);
     A_ptr = a_tmp_ptr;
     prob_m = prob_m * top_k;
     top_k = 1;
@@ -2633,16 +2639,16 @@ torch::Tensor moe_wna16_marlin_gemm(
         use_atomic_add, use_fp32_reduce, is_zp_float);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
     MARLIN_NAMESPACE_NAME::marlin_mm<nv_bfloat16>(
-        a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(), c.data_ptr<at::BFloat16>(),
-        c_tmp.data_ptr<float>(), b_scales.data_ptr<at::BFloat16>(),
-        b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
-        a_tmp.data_ptr<at::BFloat16>(), sorted_token_ids.data_ptr(),
-        expert_ids.data_ptr(), num_tokens_past_padded.data_ptr(),
-        topk_weights.data_ptr(), moe_block_size, top_k, mul_topk_weights, is_ep,
-        size_m, size_n, size_k, workspace.data_ptr(), b_q_type, has_act_order,
-        is_k_full, has_zp, num_groups, group_size, dev,
-        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
-        use_atomic_add, use_fp32_reduce, is_zp_float);
+        a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
+        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
+        b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
+        perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
+        sorted_token_ids.data_ptr(), expert_ids.data_ptr(),
+        num_tokens_past_padded.data_ptr(), topk_weights.data_ptr(),
+        moe_block_size, top_k, mul_topk_weights, is_ep, size_m, size_n, size_k,
+        workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
+        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
+        thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float);
   } else {
     TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
   }
