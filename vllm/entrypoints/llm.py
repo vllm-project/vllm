@@ -1416,7 +1416,8 @@ class LLM:
         if use_tqdm:
             pbar.close()
 
-        # Make sure that all workers are finished - NOTE(kzawora): this crashes on v1, why?.
+        # Make sure that all workers are finished
+        # NOTE(kzawora): this crashes on v1, why?
         #self.llm_engine.stop_remote_worker_execution_loop()
 
         # Sort the outputs by request ID.

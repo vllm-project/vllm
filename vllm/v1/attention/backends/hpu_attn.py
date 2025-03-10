@@ -5,13 +5,13 @@
 ###############################################################################
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Optional, Type
 
 import torch
-from vllm.attention.backends.hpu_attn import HPUAttentionBackend, HPUAttentionMetadata
+
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.ops.hpu_paged_attn import (HPUPagedAttention,
-                                               HPUPagedAttentionMetadata)
+from vllm.attention.backends.hpu_attn import (HPUAttentionBackend,
+                                              HPUAttentionMetadata)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -26,7 +26,6 @@ class HPUAttentionBackendV1(HPUAttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["AttentionMetadata"]:
         return HPUAttentionMetadataV1
-
 
 
 @dataclass

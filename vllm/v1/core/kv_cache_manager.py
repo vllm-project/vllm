@@ -4,7 +4,6 @@ from collections import defaultdict
 from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils import cdiv
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock,

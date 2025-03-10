@@ -50,7 +50,7 @@ class Sampler(nn.Module):
             self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
 
         # Use int32 to reduce the tensor size.
-        sampled = sampled # .to(torch.int32)
+        sampled = sampled  # .to(torch.int32)
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
