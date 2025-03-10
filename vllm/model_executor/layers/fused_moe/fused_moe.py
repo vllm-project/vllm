@@ -831,13 +831,12 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             # TODO: why is topk 1 for second gemm?
             m_top_k = topk_ids.shape[1]
             M = topk_weights.shape[0]
+            # TODO: better way to do this?
             out_C = C[inv_perm, ...]
-            # TODO: find better way to do this
             out_C = out_C[:(M * m_top_k), ...]
-            tmp_out = out_C.view(-1, m_top_k, B.shape[1])
-            m_tmp_out = (tmp_out * topk_weights.view(M, -1, 1)).to(C.dtype)
-            C.set_(m_tmp_out.untyped_storage(), 0, m_tmp_out.size(),
-                   m_tmp_out.stride())
+            out_C = out_C.view(-1, m_top_k, B.shape[1])
+            out_C.mul_(topk_weights.view(M, -1, 1))
+            C.set_(out_C.untyped_storage(), 0, out_C.size(), out_C.stride())
 
     else:
         fused_moe_kernel[grid](
@@ -1264,7 +1263,7 @@ def fused_experts(hidden_states: torch.Tensor,
                   a1_scale: Optional[torch.Tensor] = None,
                   a2_scale: Optional[torch.Tensor] = None,
                   block_shape: Optional[List[int]] = None,
-                  allow_deep_gemm: bool = False) -> torch.Tensor:
+                  allow_deep_gemm: bool = True) -> torch.Tensor:
 
     if inplace:
         torch.ops.vllm.inplace_fused_experts(
@@ -1539,7 +1538,7 @@ def fused_moe(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[List[int]] = None,
-    allow_deep_gemm: bool = False,
+    allow_deep_gemm: bool = True,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
