@@ -12,9 +12,63 @@ import triton.language as tl
 
 from vllm.utils import direct_register_custom_op
 
-from .utils import get_lora_op_configs
+
+def get_autotune_config():
+    return [
+        triton.Config({
+            'BLOCK_K': 32,
+            'SPLIT_K': 64
+        }, num_warps=8),
+        triton.Config({
+            'BLOCK_K': 32,
+            'SPLIT_K': 96
+        }, num_warps=8),
+        triton.Config({
+            'BLOCK_K': 32,
+            'SPLIT_K': 128
+        }, num_warps=8),
+        triton.Config({
+            'BLOCK_K': 32,
+            'SPLIT_K': 256
+        }, num_warps=8),
+        triton.Config({
+            'BLOCK_K': 64,
+            'SPLIT_K': 64
+        }, num_warps=8),
+        triton.Config({
+            'BLOCK_K': 64,
+            'SPLIT_K': 96
+        }, num_warps=8),
+        triton.Config({
+            'BLOCK_K': 64,
+            'SPLIT_K': 128
+        }, num_warps=8),
+        triton.Config({
+            'BLOCK_K': 128,
+            'SPLIT_K': 64
+        }, num_warps=8),
+        triton.Config({
+            'BLOCK_K': 128,
+            'SPLIT_K': 96
+        }, num_warps=8),
+        triton.Config({
+            'BLOCK_K': 128,
+            'SPLIT_K': 128
+        }, num_warps=8),
+        triton.Config({
+            'BLOCK_K': 256,
+            'SPLIT_K': 64
+        }, num_warps=8),
+        triton.Config({
+            'BLOCK_K': 256,
+            'SPLIT_K': 96
+        }, num_warps=8),
+    ]
 
 
+@triton.autotune(configs=get_autotune_config(),
+                 key=['N', 'K'],
+                 restore_value=["out_ptr"])
 @triton.jit
 def _bgmv_shrink_kernel(
     input_ptr,
@@ -43,6 +97,9 @@ def _bgmv_shrink_kernel(
     cur_batch = tl.program_id(axis=1)
     lora_index = tl.load(lora_indices + cur_batch)
     if lora_index == -1:
+        return
+
+    if pid_sk * BLOCK_K >= K:
         return
 
     offset_n = tl.arange(0, BLOCK_N)
@@ -117,8 +174,6 @@ def _bgmv_shrink(
     batches = lora_indices_tensor.size(0)
     N, K = lora_a_weights.shape[-2:]  # K=hidden_size,N=rank
     BLOCK_N = triton.next_power_of_2(N)
-    # First try to load optimal config from the file
-    config = get_lora_op_configs("bgmv_shrink", batches, K)
 
     grid = lambda META: (
         META["SPLIT_K"],
@@ -140,7 +195,6 @@ def _bgmv_shrink(
         output_tensor.stride(0),
         output_tensor.stride(1),
         BLOCK_N=BLOCK_N,
-        **config,
     )
     return
 
