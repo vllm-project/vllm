@@ -313,12 +313,20 @@ def glm_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         if images is None:
             return hf_processor(*args, **kwargs)
 
+        images = [images] if isinstance(images, Image) else images
+
+        contents = re.findall(
+            r"<\|begin_of_image\|><\|endoftext\|><\|end_of_image\|>(.*?)<\|assistant\|>",
+            text,
+        )
+        assert len(contents) == len(images)
+
         return hf_processor.apply_chat_template(
             [{
                 "role": "user",
-                "image": images,
-                "content": text
-            }],
+                "image": image,
+                "content": content
+            } for image, content in zip(images, contents)],
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
