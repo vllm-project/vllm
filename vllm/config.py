@@ -1133,6 +1133,10 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
+            if envs.VLLM_USE_V1:
+                raise NotImplementedError(
+                    "V1 does not yet support fp8 KV cache. "
+                    "Set VLLM_USE_V1=0 to enable fp8 kv cache.")
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
@@ -1145,7 +1149,7 @@ class CacheConfig:
         if not self.enable_prefix_caching:
             return
 
-        if self.sliding_window is not None:
+        if self.sliding_window is not None and not envs.VLLM_USE_V1:
             raise NotImplementedError(
                 "Prefix caching is not supported with sliding window. "
                 "Run with --disable-sliding-window to use prefix caching.")
@@ -3109,16 +3113,7 @@ class CompilationConfig(BaseModel):
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
 
         if self.splitting_ops is None:
-            if envs.VLLM_USE_V1:
-                # v1 must split the graph on attention ops
-                # for piecewise cudagraph
-                self.splitting_ops = [
-                    "vllm.unified_attention",
-                    "vllm.unified_attention_with_output",
-                ]
-            else:
-                # v0 uses full graph compilation
-                self.splitting_ops = []
+            self.splitting_ops = []
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
@@ -3213,6 +3208,15 @@ class CompilationConfig(BaseModel):
         self.bs_to_padded_graph_size[
             self.max_capture_size] = self.max_capture_size
 
+    def set_splitting_ops_for_v1(self):
+        # If default, override splitting ops for piecewise cudagraph on V1.
+        # NOTE: this function needs to be called
+        if not self.splitting_ops:
+            self.splitting_ops = [
+                "vllm.unified_attention",
+                "vllm.unified_attention_with_output",
+            ]
+
 
 @dataclass
 class VllmConfig:
@@ -3264,6 +3268,7 @@ class VllmConfig:
         vllm_factors: list[Any] = []
         from vllm import __version__
         vllm_factors.append(__version__)
+        vllm_factors.append(envs.VLLM_USE_V1)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
         else:
@@ -3422,6 +3427,7 @@ class VllmConfig:
             # CUDA graphs do not work properly with the custom CUDA kernels.
             # FIXME(woosuk): Disable inductor to reduce the compilation time
             # and avoid any potential issues with the inductor.
+            # FIXME(rob): Add function to set all of these.
             self.compilation_config.custom_ops = ["none"]
             self.compilation_config.use_cudagraph = True
             self.compilation_config.use_inductor = True
@@ -3429,6 +3435,7 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_noop = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
+            self.compilation_config.set_splitting_ops_for_v1()
 
         self._set_cudagraph_sizes()
 

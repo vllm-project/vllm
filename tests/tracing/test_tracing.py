@@ -19,6 +19,16 @@ from opentelemetry.sdk.environment_variables import (
 from vllm import LLM, SamplingParams
 from vllm.tracing import SpanAttributes
 
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    Since this module is V0 only, set VLLM_USE_V1=0 for
+    all tests in the module.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 FAKE_TRACE_SERVER_ADDRESS = "localhost:4317"
 
 FieldName = Literal['bool_value', 'string_value', 'int_value', 'double_value',

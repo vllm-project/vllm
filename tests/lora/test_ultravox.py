@@ -71,6 +71,8 @@ def _get_prompt(audio_count, question, placeholder, model_name) -> str:
                                          add_generation_prompt=True)
 
 
+# Ultravox is not supported on V1.
+@pytest.mark.skip_v1
 def test_ultravox_lora(vllm_runner):
     """
     TODO: Train an Ultravox LoRA instead of using a Llama LoRA.

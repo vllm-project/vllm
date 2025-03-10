@@ -18,6 +18,14 @@ from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import Counter, is_pin_memory_available
 
 
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This file tests V0 internals, so set VLLM_USE_V1=0.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 class MockLogitsSampler(Sampler):
 
     def __init__(self, fake_logits: torch.Tensor):

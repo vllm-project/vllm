@@ -6,8 +6,12 @@ import sys
 import pytest
 import urllib3
 
-from vllm import LLM
+from vllm import LLM, envs
 from vllm.distributed import cleanup_dist_env_and_memory
+
+if envs.VLLM_USE_V1:
+    raise NotImplementedError(
+        "--tokenizer-mode mistral causes us to break on V1.")
 
 MODEL_CONFIGS = [
     {
