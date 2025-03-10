@@ -4,7 +4,7 @@
 
 ```bash
 # Install dependencies.
-pip install -r requirements-docs.txt
+pip install -r ../requirements/docs.txt
 
 # Build the docs.
 make clean

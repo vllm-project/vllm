@@ -223,7 +223,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_quantize)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
 
 try:
@@ -626,15 +625,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
 
-        self.rotary_emb = rotary_emb
-
-        if current_platform.is_cuda():
-            # Hack for V1 for now to avoid torch library overhead (since we are
-            # already inside an attention custom op), pull out the forward
-            # method from the rotary embedding and call it directly (and avoid
-            # calling forward_native, when we can call forward_cuda)
-            # TODO(lucas): we should probably find a cleaner way to do this
-            self.rotary_emb = rotary_emb.forward_cuda
+        # Hack for V1 for now to avoid torch library overhead (since we are
+        # already inside an attention custom op), pull out the forward
+        # method from the rotary embedding and call it directly
+        # TODO(lucas): we should probably find a cleaner way to do this
+        self.rotary_emb = rotary_emb._forward_method
 
         self.q_proj = q_proj
         self.kv_b_proj = kv_b_proj

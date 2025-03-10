@@ -194,7 +194,9 @@ def main(args):
 
     llm = LLM(**dataclasses.asdict(engine_args))
 
-    sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
+    sampling_params = SamplingParams(temperature=0,
+                                     max_tokens=args.output_len,
+                                     detokenize=not args.disable_detokenize)
 
     print("Testing filtered requests")
     prompts = repeat_and_sort_requests(filtered_requests,
@@ -242,6 +244,12 @@ if __name__ == "__main__":
         "added to the input prompt. The input-length-range will "
         "subtract this length when filtering prompts. Only used "
         "when dataset-path is not provided.",
+    )
+    parser.add_argument(
+        '--disable-detokenize',
+        action='store_true',
+        help=("Do not detokenize responses (i.e. do not include "
+              "detokenization time in the latency measurement)"),
     )
 
     parser = EngineArgs.add_cli_args(parser)

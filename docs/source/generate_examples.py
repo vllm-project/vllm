@@ -14,13 +14,14 @@ EXAMPLE_DOC_DIR = ROOT_DIR / "docs/source/getting_started/examples"
 def fix_case(text: str) -> str:
     subs = {
         "api": "API",
-        "Cli": "CLI",
+        "cli": "CLI",
         "cpu": "CPU",
         "llm": "LLM",
         "tpu": "TPU",
         "aqlm": "AQLM",
         "gguf": "GGUF",
         "lora": "LoRA",
+        "rlhf": "RLHF",
         "vllm": "vLLM",
         "openai": "OpenAI",
         "multilora": "MultiLoRA",

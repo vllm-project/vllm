@@ -209,6 +209,15 @@ AI21's Jamba-1.5 models are supported.
 
 Flags: `--tool-call-parser jamba`
 
+### Qwen Models
+
+For Qwen2.5, the chat template in tokenizer_config.json has already included support for the Hermes-style tool use. Therefore, you can use the `hermes` parser to enable tool calls for Qwen models. For more detailed information, please refer to the official [Qwen documentation](https://qwen.readthedocs.io/en/latest/framework/function_call.html#vllm)
+
+* `Qwen/Qwen2.5-*`
+* `Qwen/QwQ-32B`
+
+Flags: `--tool-call-parser hermes`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.

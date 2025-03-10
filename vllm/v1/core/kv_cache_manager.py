@@ -105,8 +105,6 @@ class KVCacheManager:
             # Prefix caching is disabled.
             return [], 0
 
-        computed_blocks = []
-
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
@@ -114,24 +112,31 @@ class KVCacheManager:
             block_hashes = hash_request_tokens(self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
-        for block_hash in block_hashes:
-            # block_hashes is a chain of block hashes. If a block hash is not
-            # in the cached_block_hash_to_id, the following block hashes are
-            # not computed yet for sure.
-            if cached_block := self.block_pool.get_cached_block(block_hash):
-                computed_blocks.append(cached_block)
-            else:
-                break
-
         self.prefix_cache_stats.requests += 1
-        self.prefix_cache_stats.queries += len(block_hashes)
-        self.prefix_cache_stats.hits += len(computed_blocks)
+        if request.sampling_params.prompt_logprobs is None:
+            # Check for cache hits
+            computed_blocks = []
+            for block_hash in block_hashes:
+                # block_hashes is a chain of block hashes. If a block hash
+                # is not in the cached_block_hash_to_id, the following
+                # block hashes are not computed yet for sure.
+                if cached_block := self.block_pool.get_cached_block(
+                        block_hash):
+                    computed_blocks.append(cached_block)
+                else:
+                    break
 
-        # NOTE(woosuk): Since incomplete blocks are not eligible for
-        # sharing, `num_computed_tokens` is always a multiple of
-        # `block_size`.
-        num_computed_tokens = len(computed_blocks) * self.block_size
-        return computed_blocks, num_computed_tokens
+            self.prefix_cache_stats.queries += len(block_hashes)
+            self.prefix_cache_stats.hits += len(computed_blocks)
+
+            # NOTE(woosuk): Since incomplete blocks are not eligible for
+            # sharing, `num_computed_tokens` is always a multiple of
+            # `block_size`.
+            num_computed_tokens = len(computed_blocks) * self.block_size
+            return computed_blocks, num_computed_tokens
+        else:
+            # Skip cache hits for prompt logprobs
+            return [], 0
 
     def allocate_slots(
         self,

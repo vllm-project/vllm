@@ -4,13 +4,16 @@ This example shows how to use vLLM for running offline inference with
 multi-image input on vision language models for text generation,
 using the chat template defined by the model.
 """
+import os
 from argparse import Namespace
 from typing import NamedTuple, Optional
 
+from huggingface_hub import snapshot_download
 from PIL.Image import Image
 from transformers import AutoProcessor, AutoTokenizer
 
 from vllm import LLM, SamplingParams
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.utils import fetch_image
 from vllm.utils import FlexibleArgumentParser
 
@@ -294,6 +297,46 @@ def load_phi3v(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
+    """
+    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    show how to process multi images inputs.
+    """
+
+    model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
+    # Since the vision-lora and speech-lora co-exist with the base model,
+    # we have to manually specify the path of the lora weights.
+    vision_lora_path = os.path.join(model_path, "vision-lora")
+    llm = LLM(
+        model=model_path,
+        trust_remote_code=True,
+        max_model_len=10000,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        enable_lora=True,
+        max_lora_rank=320,
+        lora_extra_vocab_size=0,
+    )
+    lora_request = LoRARequest("vision", 1, vision_lora_path)
+    # To maintain code compatibility in this script, we add LoRA here.
+    llm.llm_engine.add_lora(lora_request=lora_request)
+    # You can also add LoRA using:
+    # llm.generate(prompts, lora_request=lora_request,...)
+
+    placeholders = "".join(f"<|image_{i}|>"
+                           for i, _ in enumerate(image_urls, start=1))
+    prompt = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
+    stop_token_ids = None
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
 def load_qwen_vl_chat(question: str,
                       image_urls: list[str]) -> ModelRequestData:
     model_name = "Qwen/Qwen-VL-Chat"
@@ -459,6 +502,7 @@ model_example_map = {
     "mllama": load_mllama,
     "NVLM_D": load_nvlm_d,
     "phi3_v": load_phi3v,
+    "phi4_mm": load_phi4mm,
     "pixtral_hf": load_pixtral_hf,
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
