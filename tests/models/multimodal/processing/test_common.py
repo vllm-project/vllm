@@ -163,6 +163,7 @@ def _test_processing_correctness(
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
     "meta-llama/Llama-3.2-11B-Vision-Instruct",
     "TIGER-Lab/Mantis-8B-siglip-llama3",
+    "mistralai/Pixtral-12B-2409",
     "mistral-community/pixtral-12b",
     "openbmb/MiniCPM-o-2_6",
     "openbmb/MiniCPM-V-2_6",
