@@ -1349,6 +1349,8 @@ class QKVCrossParallelLinear(LinearBase):
             set_weight_attrs(self.bias, {
                 "weight_loader": self.weight_loader,
             })
+        else:
+            self.bias = None
 
     @property
     def q_proj_decoder(self) -> ColumnParallelLinear:
@@ -1427,11 +1429,11 @@ class QKVCrossParallelLinear(LinearBase):
         target_param = target_param_list[0]
         return target_param
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         decoder_hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, ...]:  # type: ignore[override]
+    ) -> tuple[torch.Tensor, ...]:
         q, _ = self.q_proj_decoder(decoder_hidden_states)
         if encoder_hidden_states is None:
             # Encoder KV already cached.
@@ -1453,3 +1455,12 @@ class QKVCrossParallelLinear(LinearBase):
         target_param = self.select_proj_params(layer, param)
         shard_id_args = (loaded_shard_id, ) if loaded_shard_id != "q" else ()
         layer.weight_loader(target_param, loaded_weight, *shard_id_args)
+
+    def extra_repr(self) -> str:
+        s = f"in_features={self.input_size}"
+        s += f", q_size={self.q_proj_decoder.output_size_per_partition}"
+        s += f", kv_size={self.kv_size}"
+        s += f", bias={self.bias is not None}"
+        s += f", tp_size={get_tensor_model_parallel_world_size()}"
+        s += ", gather_output=False"
+        return s
