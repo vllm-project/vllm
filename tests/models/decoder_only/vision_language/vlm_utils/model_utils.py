@@ -313,6 +313,8 @@ def glm_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         if images is None:
             return hf_processor(*args, **kwargs)
 
+        images = [images] if isinstance(images, Image) else images
+
         contents = re.findall(
             r"<\|begin_of_image\|><\|endoftext\|><\|end_of_image\|>(.*?)<\|assistant\|>",
             text,
