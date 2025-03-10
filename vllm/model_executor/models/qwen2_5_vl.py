@@ -377,6 +377,7 @@ class Qwen2_5_VisionBlock(nn.Module):
                           rotary_pos_emb=rotary_pos_emb,
                           max_seqlen=max_seqlen,
                           seqlens=seqlens)
+
         x = x + self.mlp(self.norm2(x))
         return x
 
