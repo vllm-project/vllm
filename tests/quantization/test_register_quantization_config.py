@@ -103,7 +103,7 @@ def test_register_quantization_config():
                          ])
 def test_custom_quant(vllm_runner, model, monkeypatch):
     """Test infer with the custom quantization method."""
-    # This test relies on V0 internals.
+    # vllm_runner.apply_model() relies on V0 internals.
     monkeypatch.setenv("VLLM_USE_V1", "0")
     with vllm_runner(model_name=model,
                      quantization="custom_quant",

@@ -5,7 +5,6 @@ import pytest
 @pytest.fixture(scope="function", autouse=True)
 def use_v0_only(monkeypatch):
     """
-    Since this module is V0 internals, set VLLM_USE_V1=0
-    for all tests in the module.
+    This module tests V0 internals, so set VLLM_USE_V1=0.
     """
     monkeypatch.setenv('VLLM_USE_V1', '0')

@@ -28,7 +28,7 @@ def test_model_load_and_run(vllm_runner, model_id: str, force_marlin: bool,
     if force_marlin:
         monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
 
-    with vllm_runner(model_id, disable_sliding_window=True) as llm:
+    with vllm_runner(model_id) as llm:
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
         outputs = llm.generate_greedy(prompts=["Hello my name is"],
@@ -48,8 +48,7 @@ KV_CACHE_MODELS = [
                     reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_id", KV_CACHE_MODELS)
 def test_kv_cache_model_load_and_run(vllm_runner, model_id: str, monkeypatch):
-    # This test relies on vllm_runner.apply_model(),
-    # which uses V0 internals.
+    # vllm_runner.apply_model() relies on V0 internals.
     monkeypatch.setenv("VLLM_USE_V1", "0")
     with vllm_runner(model_id, kv_cache_dtype="fp8") as llm:
 
@@ -89,8 +88,7 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str, monkeypatch):
 @pytest.mark.parametrize("force_marlin", [False, True])
 def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
                          monkeypatch) -> None:
-    # This test relies on vllm_runner.apply_model(),
-    # which uses V0 internals.
+    # vllm_runner.apply_model() relies on V0 internals.
     monkeypatch.setenv("VLLM_USE_V1", "0")
 
     if force_marlin:

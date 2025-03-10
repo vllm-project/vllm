@@ -20,8 +20,7 @@ from ..models.utils import check_outputs_equal
 @pytest.fixture(scope="function", autouse=True)
 def use_v0_only(monkeypatch):
     """
-    This module assumes the V0 internals, so set
-    VLLM_USE_V1=0 for this entire module.
+    This module relies on V0 internals, so set VLLM_USE_V1=0.
     """
     monkeypatch.setenv('VLLM_USE_V1', '0')
 
