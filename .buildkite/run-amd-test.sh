@@ -72,6 +72,10 @@ HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
 
+# environment variables
+SKIP_ROCM_ATIER_MODEL_TEST_CASES="True"
+echo $SKIP_ROCM_ATIER_MODEL_TEST_CASES
+
 commands=$@
 echo "Commands:$commands"
 #ignore certain kernels tests

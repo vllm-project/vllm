@@ -2,7 +2,7 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -25,6 +25,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            RowvLLMParameter)
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -36,6 +37,18 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "ModelOptFp8LinearMethod", "IPEXAWQLinearMethod", "IPEXGPTQLinearMethod",
     "HQQMarlinMethod", "QuarkLinearMethod"
 ]
+
+
+def rocm_aiter_tgemm_mm(x: torch.Tensor, weight: torch.Tensor,
+                        bias: torch.Tensor) -> torch.Tensor:
+    from aiter.tuned_gemm import tgemm
+    return tgemm.mm(x, weight, bias)
+
+
+def dispatch_unquantized_linear_func() -> Callable[..., torch.Tensor]:
+    if current_platform.is_rocm_aiter_linear_enabled():
+        return rocm_aiter_tgemm_mm
+    return F.linear
 
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
@@ -138,8 +151,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-
-        return F.linear(x, layer.weight, bias)
+        return dispatch_unquantized_linear_func()(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):

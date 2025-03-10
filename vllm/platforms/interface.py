@@ -143,6 +143,24 @@ class Platform:
         """Stateless version of :func:`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
+    def is_rocm_aiter_moe_enabled(self) -> bool:
+        return False
+
+    def is_rocm_aiter_paged_attn_enabled(self) -> bool:
+        return False
+
+    def is_rocm_aiter_linear_enabled(self) -> bool:
+        return False
+
+    def is_rocm_aiter_rmsnorm_enabled(self) -> bool:
+        return False
+
+    def is_rocm_aiter_fp8_block_scaled_moe_enabled(self) -> bool:
+        return False
+
+    def is_rocm_aiter_w8a8_block_gemm_enabled(self) -> bool:
+        return False
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],

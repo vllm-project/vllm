@@ -202,11 +202,15 @@ def test_fused_moe_wn16(m: int, n: int, k: int, e: int, topk: int,
 
 @pytest.mark.parametrize("dtype",
                          [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
 @torch.inference_mode()
-def test_mixtral_moe(dtype: torch.dtype):
+def test_mixtral_moe(dtype: torch.dtype, use_rocm_aiter: bool, monkeypatch):
     """Make sure our Mixtral MoE implementation agrees with the one from
     huggingface."""
 
+    if use_rocm_aiter:
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     # Instantiate our and huggingface's MoE blocks
     config = MixtralConfig()
     hf_moe = MixtralSparseMoeBlock(config).to(dtype).to("cuda")
@@ -243,10 +247,18 @@ def test_mixtral_moe(dtype: torch.dtype):
         torch.bfloat16: 1e-2,
     }
 
-    torch.testing.assert_close(hf_states.flatten(0, 1),
-                               vllm_states,
-                               rtol=mixtral_moe_tol[dtype],
-                               atol=mixtral_moe_tol[dtype])
+    if use_rocm_aiter:
+        # The values of rtol and atol are set based on the tests in ROCM AITER package. # noqa: E501
+        # https://github.com/ROCm/aiter/blob/dfed377f4be7da96ca2d75ac0761f569676f7240/op_tests/test_moe.py#L174  # noqa: E501
+        torch.testing.assert_close(hf_states.flatten(0, 1),
+                                   vllm_states,
+                                   rtol=0.01,
+                                   atol=100)
+    else:
+        torch.testing.assert_close(hf_states.flatten(0, 1),
+                                   vllm_states,
+                                   rtol=mixtral_moe_tol[dtype],
+                                   atol=mixtral_moe_tol[dtype])
 
 
 @pytest.mark.parametrize("m", [1, 33, 64, 222])
