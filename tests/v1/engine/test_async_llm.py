@@ -46,6 +46,7 @@ async def generate(engine: AsyncLLM,
                    prompt: PromptType,
                    output_kind: RequestOutputKind,
                    max_tokens: int,
+                   n: int = 1,
                    prompt_logprobs: Optional[int] = None) -> tuple[int, str]:
     # Ensure generate doesn't complete too fast for cancellation test.
     await asyncio.sleep(0.2)
@@ -55,6 +56,7 @@ async def generate(engine: AsyncLLM,
                                      ignore_eos=True,
                                      output_kind=output_kind,
                                      temperature=0,
+                                     n=n,
                                      prompt_logprobs=prompt_logprobs)
     async for out in engine.generate(request_id=request_id,
                                      prompt=prompt,
@@ -136,17 +138,22 @@ async def test_abort(monkeypatch, output_kind: RequestOutputKind,
 
         NUM_REQUESTS = 100
         NUM_EXPECTED_TOKENS = 100
+        NUM_EXPECTED_TOKENS_LONG = 50000
         REQUEST_IDS_TO_ABORT = range(1, 100, 10)
+        PARALLEL_SAMPLE_REQ_IDS = range(1, 100, 15)
 
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
 
         # Create concurrent requests.
         tasks: list[asyncio.Task] = []
-        for request_id in request_ids:
+        for idx, request_id in enumerate(request_ids):
+            max_tokens = NUM_EXPECTED_TOKENS_LONG if (
+                idx in REQUEST_IDS_TO_ABORT) else NUM_EXPECTED_TOKENS
+            n = 3 if idx in PARALLEL_SAMPLE_REQ_IDS else 1
             tasks.append(
                 asyncio.create_task(
                     generate(engine, request_id, prompt, output_kind,
-                             NUM_EXPECTED_TOKENS)))
+                             max_tokens, n)))
 
         # API server cancels requests when they disconnect.
         for idx in REQUEST_IDS_TO_ABORT:
@@ -162,10 +169,13 @@ async def test_abort(monkeypatch, output_kind: RequestOutputKind,
             else:
                 # Otherwise, make sure the request was not impacted.
                 num_generated_tokens, request_id = await task
-                assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
+                n = 3 if idx in PARALLEL_SAMPLE_REQ_IDS else 1
+                expected_tokens = NUM_EXPECTED_TOKENS * n
+                assert num_generated_tokens == expected_tokens, (
                     f"{request_id} generated {num_generated_tokens} but "
-                    f"expected {NUM_EXPECTED_TOKENS}")
+                    f"expected {expected_tokens}")
 
+        # Make sure all aborted requests were really aborted.
         assert not engine.output_processor.has_unfinished_requests()
 
         # Confirm we can do another generation.

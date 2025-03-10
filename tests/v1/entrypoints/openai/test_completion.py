@@ -263,14 +263,14 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
 
     prompt = "What is an LLM?"
     n = 3
-    max_tokens = 5
+    max_tokens = 50  # we want some to finish earlier than others
 
     # High temperature to maximize chance of unique completions.
     completion = await client.completions.create(model=model_name,
                                                  prompt=prompt,
                                                  max_tokens=max_tokens,
                                                  n=n,
-                                                 temperature=0.95,
+                                                 temperature=1.0,
                                                  stream=False,
                                                  seed=42)
 
@@ -312,16 +312,16 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
 
     prompt = "What is an LLM?"
     n = 3
-    max_tokens = 5
+    max_tokens = 50  # we want some to finish earlier than others
 
     stream = await client.completions.create(model=model_name,
                                              prompt=prompt,
                                              max_tokens=max_tokens,
                                              n=n,
-                                             temperature=0.95,
+                                             temperature=1.0,
                                              stream=True,
                                              seed=42)
-    chunks: list[list[str]] = [[] for i in range(n)]
+    chunks: list[list[str]] = [[] for _ in range(n)]
     finish_reason_count = 0
     async for chunk in stream:
         index = chunk.choices[0].index
@@ -336,7 +336,7 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     for chunk in chunks:
         chunk_len = len(chunk)
         # Assert correct number of completion tokens
-        assert chunk_len == max_tokens, (
+        assert chunk_len <= max_tokens, (
             f"max_tokens={max_tokens} but chunk len is {chunk_len}.")
         text = "".join(chunk)
         completion_repeats[text] = completion_repeats.get(text, 0) + 1
