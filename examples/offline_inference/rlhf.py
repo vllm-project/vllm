@@ -52,7 +52,7 @@ GPU 2. For the details on how to use ray, please refer to the ray
 documentation https://docs.ray.io/en/latest/ .
 """
 os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
-ray.init()
+ray.init(namespace="rlhf")
 
 pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2, name="inference")
 ray.get(pg_inference.ready())

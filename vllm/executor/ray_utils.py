@@ -292,7 +292,11 @@ def initialize_ray_cluster(
                      ignore_reinit_error=True,
                      num_gpus=parallel_config.world_size)
     else:
-        ray.init(address=ray_address, ignore_reinit_error=True)
+        logger.info(
+            f"Init ray with ray_address: {ray_address}, namespace: rlhf")
+        ray.init(address=ray_address,
+                 ignore_reinit_error=True,
+                 namespace="rlhf")
 
     if parallel_config.placement_group:
         # Placement group is already set.

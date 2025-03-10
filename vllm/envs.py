@@ -402,7 +402,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
-    lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "fork"),
+    lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
 
     # Path to the cache for storing downloaded assets
     "VLLM_ASSETS_CACHE":
