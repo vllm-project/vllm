@@ -1414,7 +1414,7 @@ def cat_with_pad(tensors, dim, padding_value=0):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi4mm)
 class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     """
-    Implements the Phi-4-multimodal-instruct model in VLLM.
+    Implements the Phi-4-multimodal-instruct model in vLLM.
     """
     packed_modules_mapping = {
         "qkv_proj": [

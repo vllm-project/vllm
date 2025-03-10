@@ -31,7 +31,7 @@ class CompilerInterface:
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         """
-        Gather all the relevant information from the VLLM config,
+        Gather all the relevant information from the vLLM config,
         to compute a hash so that we can cache the compiled model.
 
         See :meth:`VllmConfig.compute_hash` to check what information
