@@ -527,6 +527,16 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
         audio_features = audio_input["data"]
         if isinstance(audio_features, list):
+            if len(audio_features) > 1 and isinstance(audio_features[0], list):
+                print("This should not happen. This is likely due to a bug.")
+                print(audio_input['lens'])
+                print(audio_input['token_len'])
+                print(audio_features)
+                audio_features = [torch.stack(x) for x in audio_features]
+                print("After stack:", [x.shape for x in audio_features])
+                audio_features = [
+                    x.reshape(-1, *x.shape[-2:]) for x in audio_features
+                ]
             max_len = max(x.shape[-1] for x in audio_features)
             # Pad and concatenate:
             # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
