@@ -566,7 +566,10 @@ class DeepseekV2Model(nn.Module):
 
     fall_back_to_pt_during_load = False
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", 
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
                  prior_expert_map: Optional[Dict[int, torch.Tensor]] = None):
         super().__init__()
 
@@ -588,14 +591,13 @@ class DeepseekV2Model(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: DeepseekV2DecoderLayer(
-                config,
-                prefix,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prior_expert_map=prior_expert_map
-            ),
+            lambda prefix: DeepseekV2DecoderLayer(config,
+                                                  prefix,
+                                                  model_config=model_config,
+                                                  cache_config=cache_config,
+                                                  quant_config=quant_config,
+                                                  prior_expert_map=
+                                                  prior_expert_map),
             prefix=f"{prefix}.layers")
 
         if get_pp_group().is_last_rank:
@@ -646,10 +648,16 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        para_config = vllm_config.parallel_config
         self.config = config
         self.quant_config = quant_config
 
-        prior_expert_map = torch.load(vllm_config.parallel_config.expert_map_path, map_location=torch.device('cpu'))
+        if para_config.enable_expert_parallel and para_config.expert_map_path:
+            prior_expert_map = torch.load(
+                vllm_config.parallel_config.expert_map_path,
+                map_location=torch.device('cpu'))
+        else:
+            prior_expert_map = None
         self.model = DeepseekV2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"),
                                      prior_expert_map=prior_expert_map)
