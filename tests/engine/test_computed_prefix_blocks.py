@@ -25,7 +25,6 @@ def test_computed_prefix_blocks(model: str, block_size: int):
 
     engine_args = EngineArgs(model=model,
                              block_size=block_size,
-                             enforce_eager=True,
                              enable_prefix_caching=True)
 
     engine = LLMEngine.from_engine_args(engine_args)

@@ -68,7 +68,6 @@ async def test_chat_session_with_echo_and_continue_final_message(
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
-    print(choice)
     assert choice.finish_reason == "stop"
 
     message = choice.message
