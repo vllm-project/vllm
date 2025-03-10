@@ -292,11 +292,11 @@ def determine_expert_map(
             torch.arange(0, local_num_experts, dtype=torch.int32)
     return (local_num_experts, expert_map)
 
+
 def get_expert_map(
-        ep_size: int, 
-        ep_rank: int,
-        global_num_experts: int,
-        layer_prior_expert_map: Optional[torch.Tensor]) -> Tuple[int, Optional[torch.Tensor]]:
+    ep_size: int, ep_rank: int, global_num_experts: int,
+    layer_prior_expert_map: Optional[torch.Tensor]
+) -> Tuple[int, Optional[torch.Tensor]]:
     """Get the expert map for the current rank.
 
     Args:
@@ -309,9 +309,11 @@ def get_expert_map(
     if layer_prior_expert_map is not None:
         # If a prior expert map is provided, use it.
         ranks, expert_nums = layer_prior_expert_map.shape
-        assert ep_size == ranks, "The size of the expert map does not match the number of experts."
-        assert global_num_experts == expert_nums, "The size of the expert map does not match the number of experts."
-        expert_map = layer_prior_expert_map[ep_rank].to(torch.cuda.current_device())
+        assert ep_size == ranks, "The expert ranks doesn't match ep_size."
+        assert global_num_experts == expert_nums, \
+            "The expert nums doesn't match global experts."
+        expert_map = layer_prior_expert_map[ep_rank].to(
+            torch.cuda.current_device())
         local_num_experts = torch.sum(torch.ne(expert_map, -1)).item()
         return (local_num_experts, expert_map)
     else:
