@@ -22,18 +22,11 @@ static __device__ __forceinline__ void moe_q(
 
   const int col_dst_0 = blockIdx.y * mmq_x;
 
-  int token_ids[mmq_x / nwarps];
   int token_offs[mmq_x / nwarps];
   for (int i = 0; i < mmq_x; i += nwarps) {
     token_offs[i / nwarps] = sorted_token_ids[col_dst_0 + threadIdx.y + i];
   }
 
-  for (int i = 0; i < mmq_x; i += nwarps * QI8_1) {
-    const int ids =
-        (i + threadIdx.y * QI8_1 + threadIdx.x / (WARP_SIZE_GGUF / QI8_1)) %
-        mmq_x;
-    token_ids[i / (nwarps * QI8_1)] = token_offs[ids] / top_k;
-  }
   const int exp_idx = expert_ids[blockIdx.y];
   if (exp_idx > 255 || exp_idx < 0) return;
   if (blockIdx.y * mmq_x > num_tokens_post_padded[0]) return;
@@ -58,46 +51,44 @@ static __device__ __forceinline__ void moe_q(
                tile_x_qh, tile_x_sc, threadIdx.y, nrows_x - row_x_0 - 1,
                threadIdx.x, blocks_per_row_x);
 
+    const int blocks_per_r = ((qk*blocks_per_warp)/qr);
 #pragma unroll
-    for (int ir = 0; ir < qr && ib0 * qk + ir * ((qk*blocks_per_warp)/qr) < ncols_x; ++ir) {
+    for (int ir = 0; ir < qr && ib0 * qk + ir * blocks_per_r < ncols_x; ++ir) {
       const int kqs = ir * WARP_SIZE_GGUF + threadIdx.x;
       const int kbxd = kqs / QI8_1;
 
 #pragma unroll
       for (int i = 0; i < mmq_x; i += nwarps) {
-        const int col_y_eff = token_ids[i / nwarps];
+        const int col_y_eff = token_offs[i / nwarps] / top_k;
         const int block_x = ib0 * (qk / QK8_1) + kbxd;
-        const block_q8_1* by0 = &y[col_y_eff * blocks_per_col_y + block_x];
-        const int index_y =
-            (threadIdx.y + i) * WARP_SIZE_GGUF + kqs % WARP_SIZE_GGUF;
-        const int qs =
-            col_y_eff < ncols_y && block_x < blocks_per_col_y
-                ? get_int_from_int8_aligned(by0->qs, threadIdx.x % QI8_1)
-                : 0;
-        tile_y_qs[index_y] = qs;
+        if (col_y_eff < ncols_y && block_x < blocks_per_col_y)
+        {
+            const block_q8_1* by0 = &y[col_y_eff * blocks_per_col_y + block_x];
+            const int index_y =
+                (threadIdx.y + i) * WARP_SIZE_GGUF + kqs % WARP_SIZE_GGUF;
+            tile_y_qs[index_y] = get_int_from_int8_aligned(by0->qs, threadIdx.x % QI8_1);
+        }
       }
 
-#pragma unroll
-      for (int ids0 = 0; ids0 < mmq_x; ids0 += nwarps * QI8_1) {
-        const int ids = (ids0 + threadIdx.y * QI8_1 +
-                         threadIdx.x / (WARP_SIZE_GGUF / QI8_1)) %
-                        mmq_x;
+      if (threadIdx.x < blocks_per_r/QK8_1) {
         const int kby = threadIdx.x % (WARP_SIZE_GGUF / QI8_1);
-        const int col_y_eff = token_ids[ids];
+        const int col_y_eff = token_offs[threadIdx.y] / top_k;
         const int block_x =
             ib0 * (qk / QK8_1) + ir * (WARP_SIZE_GGUF / QI8_1) + kby;
-        const half2* dsi_src = &y[col_y_eff * blocks_per_col_y + block_x].ds;
-        half2* dsi_dst =
-            &tile_y_ds[threadIdx.y * (WARP_SIZE_GGUF / QI8_1) + kby];
-        if (need_sum) {
-          *dsi_dst = col_y_eff < ncols_y && block_x < blocks_per_col_y
-                         ? *dsi_src
-                         : half2(0, 0);
-        } else {
-          float* dfi_dst = (float*)dsi_dst;
-          *dfi_dst = __low2float(
-              col_y_eff < ncols_y && block_x < blocks_per_col_y ? *dsi_src
-                                                                : half2(0, 0));
+
+
+        if (col_y_eff < ncols_y && block_x < blocks_per_col_y)
+        {
+            const half2* dsi_src = &y[col_y_eff * blocks_per_col_y + block_x].ds;
+            half2* dsi_dst =
+                &tile_y_ds[threadIdx.y * (WARP_SIZE_GGUF / QI8_1) + kby];
+
+            if (need_sum) {
+              *dsi_dst = *dsi_src;
+            } else {
+              float* dfi_dst = (float*)dsi_dst;
+              *dfi_dst = __low2float(*dsi_src);
+            }
         }
       }
       __syncthreads();
