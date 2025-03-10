@@ -619,12 +619,22 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = self.cache_config.cache_dtype
 
+        if self.model_config.is_deepseek_mla:
+            if not self.model_config.use_mla:
+                raise NotImplementedError(
+                    "HPU doesn't support MLA off for Deepseek model, \
+                        please set VLLM_MLA_DISABLE_REQUANTIZATION=1.")
+            if not vllm_config.parallel_config.enable_expert_parallel:
+                raise NotImplementedError(
+                    "HPU doesn't support running Deepseek model without expert \
+                    parallelism, please run with --enable-expert-parallel.")
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
+            use_mla=self.model_config.use_mla,
         )
 
         # Lazy initialization
@@ -973,6 +983,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             multi_modal_placeholder_index_maps=
             None,  # FIXME(kzawora): mutli-modality will not work here
             enable_kv_scales_calculation=False,
+            input_positions=input_positions,
         )
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
@@ -1132,7 +1143,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
-        )
+            input_positions=input_positions)
         return PrepareDecodeMetadata(input_tokens=input_tokens,
                                      input_positions=input_positions,
                                      attn_metadata=attn_metadata,
@@ -1337,7 +1348,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         attention_metadata = subtuple(metadata, 'TrimmedAttentionMetadata', [
             'attn_bias', 'seq_lens_tensor', 'block_list', 'block_mapping',
             'block_usage', 'slot_mapping', 'is_prompt', 'block_indices',
-            'block_offsets', 'block_scales', 'block_groups'
+            'block_offsets', 'block_scales', 'block_groups', 'input_positions'
         ])
         return attention_metadata
 
