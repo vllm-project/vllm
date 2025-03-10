@@ -22,10 +22,14 @@ def test_weight_loading(vllm_runner):
     """
     Test parameter weight loading with tp>1.
     """
+
+    # MoE models need fp16.
+    NEEDS_FP16 = (QUANTIZATION == "gptq" or MODEL_NAME
+                  == "nm-testing/test-w4a16-mixtral-actorder-group")
     with vllm_runner(
             model_name=MODEL_NAME,
             revision=REVISION,
-            dtype=torch.half if QUANTIZATION == "gptq" else "auto",
+            dtype=torch.half if NEEDS_FP16 else "auto",
             quantization=None if QUANTIZATION == "None" else QUANTIZATION,
             max_model_len=MAX_MODEL_LEN,
             tensor_parallel_size=2) as model:
