@@ -17,6 +17,7 @@ from vllm.v1.structured_output.grammar import (Grammar, StructuredOutputKey,
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
+    import torch
     import xgrammar as xgr
 
     from vllm.v1.request import Request
@@ -53,8 +54,7 @@ class StructuredOutputManager:
         # compilation, so we set it to half the number of CPUs.
         max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self._grammar_bitmask = xgr.allocate_token_bitmask(
-            self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
+        self._grammar_bitmask: Optional[torch.Tensor] = None
 
     def __getitem__(self, key: StructuredOutputKey) -> Optional[Grammar]:
         # We need to pop and re-insert the grammar here for LRU cache
@@ -133,6 +133,11 @@ class StructuredOutputManager:
         # Prepare the structured output bitmask for this batch.
         if not structured_output_request_ids:
             return None
+
+        if self._grammar_bitmask is None:
+            self._grammar_bitmask = xgr.allocate_token_bitmask(
+                self.vllm_config.scheduler_config.max_num_seqs,
+                self.vocab_size)
 
         # Fill the bitmask using the index of each request equal to its
         # position in the batch. Resize the bitmask down to the size of
