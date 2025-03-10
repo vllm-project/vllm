@@ -923,9 +923,9 @@ class MRotaryEmbedding(RotaryEmbedding):
     def get_input_positions(
         input_tokens: List[int],
         hf_config: PretrainedConfig,
-        image_grid_thw: Union[List[List[int]], torch.Tensor],
-        video_grid_thw: Union[List[List[int]], torch.Tensor],
-        second_per_grid_ts: List[float],
+        image_grid_thw: Optional[Union[List[List[int]], torch.Tensor]],
+        video_grid_thw: Optional[Union[List[List[int]], torch.Tensor]],
+        second_per_grid_ts: Optional[List[float]],
         context_len: int = 0,
         seq_len: Optional[int] = None,
     ) -> Tuple[List[List[int]], int]:
@@ -948,9 +948,9 @@ class MRotaryEmbedding(RotaryEmbedding):
     def get_input_positions_tensor(
         input_tokens: List[int],
         hf_config: PretrainedConfig,
-        image_grid_thw: Union[List[List[int]], torch.Tensor],
-        video_grid_thw: Union[List[List[int]], torch.Tensor],
-        second_per_grid_ts: List[float],
+        image_grid_thw: Optional[Union[List[List[int]], torch.Tensor]],
+        video_grid_thw: Optional[Union[List[List[int]], torch.Tensor]],
+        second_per_grid_ts: Optional[List[float]],
         context_len: int = 0,
         seq_len: Optional[int] = None,
     ) -> Tuple[torch.Tensor, int]:
