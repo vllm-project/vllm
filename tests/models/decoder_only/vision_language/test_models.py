@@ -42,6 +42,7 @@ REQUIRES_V0_MODELS = [
     "qwen_vl",
     "h2ovl",
     "blip2",
+    # V1 Test: not enough KV cache space in C1.
 ]
 
 REQUIRES_V0_MODELS_VIDEO = [

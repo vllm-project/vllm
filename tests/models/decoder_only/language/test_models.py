@@ -7,10 +7,11 @@ import pytest
 
 from ...utils import check_logprobs_close
 
-# These have unsupported head_dim for FA. Unfortunately, we do
-# not have a clean way to fall back when this happens, so we
-# fail with a clear message when it occurs.
-REQUIRES_V0 = ["microsoft/phi-2"]
+# These have unsupported head_dim for FA. We do not
+# not have a clean way to fall back, so we fail with
+# a clear msg when it happens.
+# https://github.com/vllm-project/vllm/issues/14524
+REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
 
 
 @pytest.mark.parametrize(
