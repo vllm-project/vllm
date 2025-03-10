@@ -957,7 +957,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
         logger.info("Starting vLLM API server on http://%s:%d",
                     _listen_addr(sock_addr[0]), sock_addr[1])
-
         shutdown_task = await serve_http(
             app,
             sock=sock,
