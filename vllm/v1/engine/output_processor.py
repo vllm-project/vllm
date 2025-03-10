@@ -118,12 +118,10 @@ class RequestState:
         if self.parent_req is None:
             outputs = [completion_output]
         else:
-            outputs = self.parent_req.get_outputs(request_id,
-                                                  completion_output)
+            request_id, outputs, finished = self.parent_req.get_outputs(
+                request_id, completion_output)
             if not outputs:
                 return None
-            request_id = self.parent_req.request_id
-            finished = not self.parent_req.child_requests
 
         return self._new_request_output(request_id, outputs, finished)
 
