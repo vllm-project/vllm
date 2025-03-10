@@ -111,6 +111,16 @@ def run_fuyu(question: str, modality: str):
     return llm, prompt, stop_token_ids
 
 
+def run_gemma3(question: str, modality: str):
+    assert modality == "image"
+    prompt = f"<image> {question}"
+    model_name = "gg-hf-g/gemma-3-4b-it-pr"
+    llm = LLM(model=model_name,
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 # GLM-4v
 def run_glm4v(question: str, modality: str):
     assert modality == "image"
@@ -589,6 +599,7 @@ model_example_map = {
     "deepseek_vl_v2": run_deepseek_vl2,
     "florence2": run_florence2,
     "fuyu": run_fuyu,
+    "gemma3": run_gemma3,
     "glm4v": run_glm4v,
     "h2ovl_chat": run_h2ovl,
     "idefics3": run_idefics3,
@@ -689,7 +700,7 @@ def main(args):
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
-    sampling_params = SamplingParams(temperature=0.2,
+    sampling_params = SamplingParams(temperature=0.0,
                                      max_tokens=64,
                                      stop_token_ids=stop_token_ids)
 

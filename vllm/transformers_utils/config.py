@@ -715,10 +715,6 @@ def get_hf_text_config(config: PretrainedConfig):
     """Get the "sub" config relevant to llm for multi modal models.
     No op for pure text models.
     """
-    # FIXME(woosuk): This is a hack because Gemma3's text_config does not match
-    # its config.json for some reason. Remove this once the issue is fixed.
-    if config.model_type == "gemma3":
-        return config
     if hasattr(config, "text_config"):
         # The code operates under the assumption that text_config should have
         # `num_attention_heads` (among others). Assert here to fail early

@@ -153,6 +153,7 @@ def _test_processing_correctness(
     "deepseek-ai/deepseek-vl2-tiny",
     "microsoft/Florence-2-base",
     "adept/fuyu-8b",
+    "gg-hf-g/gemma-3-4b-it-pr",
     "THUDM/glm-4v-9b",
     "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",

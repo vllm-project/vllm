@@ -77,6 +77,22 @@ def load_deepseek_vl2(question: str, image_urls: list[str]):
     )
 
 
+def load_gemma3(question, image_urls: list[str]) -> ModelRequestData:
+    model_name = "gg-hf-g/gemma-3-4b-it-pr"
+    llm = LLM(model=model_name,
+              max_model_len=8192,
+              max_num_seqs=2,
+              limit_mm_per_prompt={"image": len(image_urls)})
+    prompt = "<image> " * len(image_urls) + question
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=None,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
 def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "h2oai/h2ovl-mississippi-800m"
 
@@ -453,6 +469,7 @@ def load_qwen2_5_vl(question, image_urls: list[str]) -> ModelRequestData:
 model_example_map = {
     "aria": load_aria,
     "deepseek_vl_v2": load_deepseek_vl2,
+    "gemma3": load_gemma3,
     "h2ovl_chat": load_h2ovl,
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
