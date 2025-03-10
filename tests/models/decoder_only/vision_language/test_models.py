@@ -32,7 +32,7 @@ from .vlm_utils.types import (CustomTestOptions, ExpandableVLMTestArgs,
 if current_platform.is_rocm():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
-REQUIRES_V0_SINGLE_IMAGE = [
+REQUIRES_V0_MODELS = [
     # V1 Test: llava-hf/llava-1.5-7b-hf is broken on V1
     # https://github.com/vllm-project/vllm/issues/14523
     "llava",
@@ -575,9 +575,8 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str,
                              vllm_runner: type[VllmRunner],
                              image_assets: _ImageAssets, monkeypatch):
 
-    if model_type in REQUIRES_V0_SINGLE_IMAGE:
+    if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_single_image_test(
         tmp_path=tmp_path,
@@ -600,7 +599,9 @@ def test_multi_image_models(tmp_path: PosixPath, model_type: str,
                             test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
-                            image_assets: _ImageAssets):
+                            image_assets: _ImageAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_multi_image_test(
         tmp_path=tmp_path,
@@ -623,7 +624,9 @@ def test_image_embedding_models(model_type: str,
                                 test_case: ExpandableVLMTestArgs,
                                 hf_runner: type[HfRunner],
                                 vllm_runner: type[VllmRunner],
-                                image_assets: _ImageAssets):
+                                image_assets: _ImageAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_embedding_test(
         model_test_info=model_test_info,
@@ -643,7 +646,9 @@ def test_image_embedding_models(model_type: str,
     ))
 def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
                       hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
-                      video_assets: _VideoAssets):
+                      video_assets: _VideoAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_video_test(
         model_test_info=model_test_info,
@@ -666,7 +671,10 @@ def test_custom_inputs_models(
     test_case: ExpandableVLMTestArgs,
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
+    monkeypatch,
 ):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_custom_inputs_test(
         model_test_info=model_test_info,
@@ -690,12 +698,8 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    hf_runner: type[HfRunner],
                                    vllm_runner: type[VllmRunner],
                                    image_assets: _ImageAssets, monkeypatch):
-
-    # V1 Test: llava-hf/llava-1.5-7b-hf is broken on V1
-    # https://github.com/vllm-project/vllm/issues/14523
-    if model_type in REQUIRES_V0_SINGLE_IMAGE:
+    if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
-
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_single_image_test(
         tmp_path=tmp_path,
@@ -719,7 +723,9 @@ def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                   test_case: ExpandableVLMTestArgs,
                                   hf_runner: type[HfRunner],
                                   vllm_runner: type[VllmRunner],
-                                  image_assets: _ImageAssets):
+                                  image_assets: _ImageAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_multi_image_test(
         tmp_path=tmp_path,
@@ -743,7 +749,9 @@ def test_image_embedding_models_heavy(model_type: str,
                                       test_case: ExpandableVLMTestArgs,
                                       hf_runner: type[HfRunner],
                                       vllm_runner: type[VllmRunner],
-                                      image_assets: _ImageAssets):
+                                      image_assets: _ImageAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_embedding_test(
         model_test_info=model_test_info,
@@ -764,7 +772,9 @@ def test_image_embedding_models_heavy(model_type: str,
 def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
-                            video_assets: _VideoAssets):
+                            video_assets: _VideoAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_video_test(
         model_test_info=model_test_info,
@@ -788,7 +798,10 @@ def test_custom_inputs_models_heavy(
     test_case: ExpandableVLMTestArgs,
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
+    monkeypatch,
 ):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_custom_inputs_test(
         model_test_info=model_test_info,
