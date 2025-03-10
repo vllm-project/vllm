@@ -33,6 +33,8 @@ namespace vec_op {
 #endif
 
 #define FORCE_INLINE __attribute__((always_inline)) inline
+// Number of elements in single ASIMD vector of given Datatype
+#define NUM_ELEMENTS_REG(vec) (sizeof(vec) / sizeof(vec[0]))
 
 namespace {
 template <typename T, T... indexes, typename F>
@@ -86,8 +88,8 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
   }
 
   void save(void* ptr, const int elem_num) const {
-    int full_blocks = elem_num / 8;
-    int remainder = elem_num % 8;
+    int full_blocks = elem_num / NUM_ELEMENTS_REG(reg.val[0]);
+    int remainder = elem_num % NUM_ELEMENTS_REG(reg.val[0]);
 
     if (full_blocks > 0) {
       vst1q_f16(reinterpret_cast<__fp16*>(ptr), reg.val[0]);
@@ -197,6 +199,25 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
              vcvtq_high_bf16_f32(vcvtq_low_bf16_f32(v.val[2]), v.val[3])}) {};
 
   void save(void* ptr) const { *reinterpret_cast<bfloat16x8x2_t*>(ptr) = reg; };
+  void save(void* ptr, const int elem_num) const {
+    int full_blocks = elem_num / NUM_ELEMENTS_REG(reg.val[0]);
+    int remainder = elem_num % NUM_ELEMENTS_REG(reg.val[0]);
+    for (int i = 0; i < full_blocks; i++)
+      vst1q_bf16(
+          reinterpret_cast<__bf16*>(ptr) + NUM_ELEMENTS_REG(reg.val[0]) * i,
+          reg.val[i]);
+    if (remainder > 0) {
+      bfloat16x8_t temp = reg.val[full_blocks];
+      bfloat16_t* base = reinterpret_cast<bfloat16_t*>(ptr) + full_blocks * 8;
+      if (remainder > 0) base[0] = vgetq_lane_bf16(temp, 0);
+      if (remainder > 1) base[1] = vgetq_lane_bf16(temp, 1);
+      if (remainder > 2) base[2] = vgetq_lane_bf16(temp, 2);
+      if (remainder > 3) base[3] = vgetq_lane_bf16(temp, 3);
+      if (remainder > 4) base[4] = vgetq_lane_bf16(temp, 4);
+      if (remainder > 5) base[5] = vgetq_lane_bf16(temp, 5);
+      if (remainder > 6) base[6] = vgetq_lane_bf16(temp, 6);
+    }
+  };
 };
 
 struct BF16Vec32 : public Vec<BF16Vec32> {
@@ -213,6 +234,25 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
       : reg({vec8_data.reg, vec8_data.reg, vec8_data.reg, vec8_data.reg}) {};
 
   void save(void* ptr) const { *reinterpret_cast<bfloat16x8x4_t*>(ptr) = reg; };
+  void save(void* ptr, const int elem_num) const {
+    int full_blocks = elem_num / NUM_ELEMENTS_REG(reg.val[0]);
+    int remainder = elem_num % NUM_ELEMENTS_REG(reg.val[0]);
+    for (int i = 0; i < full_blocks; i++)
+      vst1q_bf16(
+          reinterpret_cast<__bf16*>(ptr) + NUM_ELEMENTS_REG(reg.val[0]) * i,
+          reg.val[i]);
+    if (remainder > 0) {
+      bfloat16x8_t temp = reg.val[full_blocks];
+      bfloat16_t* base = reinterpret_cast<bfloat16_t*>(ptr) + full_blocks * 8;
+      base[0] = vgetq_lane_bf16(temp, 0);
+      if (remainder > 1) base[1] = vgetq_lane_bf16(temp, 1);
+      if (remainder > 2) base[2] = vgetq_lane_bf16(temp, 2);
+      if (remainder > 3) base[3] = vgetq_lane_bf16(temp, 3);
+      if (remainder > 4) base[4] = vgetq_lane_bf16(temp, 4);
+      if (remainder > 5) base[5] = vgetq_lane_bf16(temp, 5);
+      if (remainder > 6) base[6] = vgetq_lane_bf16(temp, 6);
+    }
+  };
 };
 #endif
 
@@ -372,6 +412,48 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
   }
 };
 
+struct INT32Vec16 : public Vec<INT32Vec16> {
+  constexpr static int VEC_ELEM_NUM = 16;
+  union AliasReg {
+    int32x4x4_t reg;
+    int32_t values[VEC_ELEM_NUM];
+  };
+  int32x4x4_t reg;
+
+  explicit INT32Vec16(const void* ptr) {
+    reg.val[0] = vld1q_s32(reinterpret_cast<const int32_t*>(ptr));
+    reg.val[1] = vld1q_s32(reinterpret_cast<const int32_t*>(ptr) + 4);
+    reg.val[2] = vld1q_s32(reinterpret_cast<const int32_t*>(ptr) + 8);
+    reg.val[3] = vld1q_s32(reinterpret_cast<const int32_t*>(ptr) + 12);
+  }
+
+  void save(int32_t* ptr) const {
+    vst1q_s32(ptr, reg.val[0]);
+    vst1q_s32(ptr + 4, reg.val[1]);
+    vst1q_s32(ptr + 8, reg.val[2]);
+    vst1q_s32(ptr + 12, reg.val[3]);
+  };
+
+  void save(int32_t* ptr, const int elem_num) const {
+    int full_blocks = elem_num / NUM_ELEMENTS_REG(reg.val[0]);
+    int remainder = elem_num % NUM_ELEMENTS_REG(reg.val[0]);
+
+    for (int i = 0; i < full_blocks; i++)
+      vst1q_s32(
+          reinterpret_cast<__int32_t*>(ptr) + NUM_ELEMENTS_REG(reg.val[0]) * i,
+          reg.val[i]);
+
+    if (remainder > 0) {
+      int32x4_t temp = reg.val[full_blocks];
+      int32_t* base = reinterpret_cast<int32_t*>(ptr) + full_blocks * 4;
+      if (remainder > 0) base[0] = vgetq_lane_s32(temp, 0);
+      if (remainder > 1) base[1] = vgetq_lane_s32(temp, 1);
+      if (remainder > 2) base[2] = vgetq_lane_s32(temp, 2);
+      if (remainder > 3) base[3] = vgetq_lane_s32(temp, 3);
+    }
+  }
+};
+
 struct FP32Vec16 : public Vec<FP32Vec16> {
   constexpr static int VEC_ELEM_NUM = 16;
   union AliasReg {
@@ -434,7 +516,12 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg.val[2] = vcvt_f32_f16(vget_low_f16(v.reg.val[1]));
     reg.val[3] = vcvt_f32_f16(vget_high_f16(v.reg.val[1]));
   };
-
+  explicit FP32Vec16(const INT32Vec16& v) {
+    reg.val[0] = vcvtq_f32_s32(v.reg.val[0]);
+    reg.val[1] = vcvtq_f32_s32(v.reg.val[1]);
+    reg.val[2] = vcvtq_f32_s32(v.reg.val[2]);
+    reg.val[3] = vcvtq_f32_s32(v.reg.val[3]);
+  };
   FP32Vec16 operator+(const FP32Vec16& b) const {
     return FP32Vec16(float32x4x4_t({vaddq_f32(reg.val[0], b.reg.val[0]),
                                     vaddq_f32(reg.val[1], b.reg.val[1]),
@@ -463,6 +550,85 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                                     vdivq_f32(reg.val[3], b.reg.val[3])}));
   };
 
+  FP32Vec16 clamp(const FP32Vec16& min, const FP32Vec16& max) const {
+    return FP32Vec16(float32x4x4_t(
+        {vminq_f32(max.reg.val[0], vmaxq_f32(min.reg.val[0], reg.val[0])),
+         vminq_f32(max.reg.val[1], vmaxq_f32(min.reg.val[1], reg.val[1])),
+         vminq_f32(max.reg.val[2], vmaxq_f32(min.reg.val[2], reg.val[2])),
+         vminq_f32(max.reg.val[3], vmaxq_f32(min.reg.val[3], reg.val[3]))}));
+  };
+
+  FP32Vec16 max(const FP32Vec16& b) const {
+    return FP32Vec16(float32x4x4_t({vmaxq_f32(b.reg.val[0], reg.val[0]),
+                                    vmaxq_f32(b.reg.val[1], reg.val[1]),
+                                    vmaxq_f32(b.reg.val[2], reg.val[2]),
+                                    vmaxq_f32(b.reg.val[3], reg.val[3])}));
+  };
+
+  FP32Vec16 max(const FP32Vec16& b, const int elem_num) const {
+    int full_blocks = elem_num / NUM_ELEMENTS_REG(reg.val[0]);
+    int remainder = elem_num % NUM_ELEMENTS_REG(reg.val[0]);
+    float32x4x4_t temp;
+
+    for (int i = 0; i < full_blocks; i++)
+      temp.val[i] = vmaxq_f32(b.reg.val[i], reg.val[i]);
+
+    if (remainder > 0) {
+      float max_v = std::max(vgetq_lane_f32(reg.val[full_blocks], 0),
+                             vgetq_lane_f32(b.reg.val[full_blocks], 0));
+      temp.val[full_blocks] = vsetq_lane_f32(max_v, temp.val[full_blocks], 0);
+    }
+    if (remainder > 1) {
+      float max_v = std::max(vgetq_lane_f32(reg.val[full_blocks], 1),
+                             vgetq_lane_f32(b.reg.val[full_blocks], 1));
+      temp.val[full_blocks] = vsetq_lane_f32(max_v, temp.val[full_blocks], 1);
+    }
+    if (remainder > 2) {
+      float max_v = std::max(vgetq_lane_f32(reg.val[full_blocks], 2),
+                             vgetq_lane_f32(b.reg.val[full_blocks], 2));
+      temp.val[full_blocks] = vsetq_lane_f32(max_v, temp.val[full_blocks], 2);
+    }
+    return FP32Vec16(temp);
+  };
+
+  FP32Vec16 min(const FP32Vec16& b) const {
+    return FP32Vec16(float32x4x4_t({
+        vminq_f32(b.reg.val[0], reg.val[0]),
+        vminq_f32(b.reg.val[1], reg.val[1]),
+        vminq_f32(b.reg.val[2], reg.val[2]),
+        vminq_f32(b.reg.val[3], reg.val[3]),
+    }));
+  };
+  FP32Vec16 min(const FP32Vec16& b, const int elem_num) const {
+    int full_blocks = elem_num / NUM_ELEMENTS_REG(reg.val[0]);
+    const int remainder = elem_num % NUM_ELEMENTS_REG(reg.val[0]);
+    float32x4x4_t temp;
+    for (int i = 0; i < full_blocks; i++)
+      temp.val[i] = vminq_f32(b.reg.val[i], reg.val[i]);
+
+    if (remainder > 0) {
+      float min_v = std::min(vgetq_lane_f32(reg.val[full_blocks], 0),
+                             vgetq_lane_f32(b.reg.val[full_blocks], 0));
+      temp.val[full_blocks] = vsetq_lane_f32(min_v, temp.val[full_blocks], 0);
+    }
+    if (remainder > 1) {
+      float min_v = std::min(vgetq_lane_f32(reg.val[full_blocks], 1),
+                             vgetq_lane_f32(b.reg.val[full_blocks], 1));
+      temp.val[full_blocks] = vsetq_lane_f32(min_v, temp.val[full_blocks], 1);
+    }
+    if (remainder > 2) {
+      float min_v = std::min(vgetq_lane_f32(reg.val[full_blocks], 2),
+                             vgetq_lane_f32(b.reg.val[full_blocks], 2));
+      temp.val[full_blocks] = vsetq_lane_f32(min_v, temp.val[full_blocks], 2);
+    }
+
+    return FP32Vec16(temp);
+  };
+  FP32Vec16 abs() const {
+    return FP32Vec16(
+        float32x4x4_t({vabsq_f32(reg.val[0]), vabsq_f32(reg.val[1]),
+                       vabsq_f32(reg.val[2]), vabsq_f32(reg.val[3])}));
+  }
   float reduce_sum() const {
     AliasReg ar;
     ar.reg = reg;
@@ -472,6 +638,24 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
     return answer;
   };
+
+  float reduce_max() const {
+    AliasReg ar;
+    ar.reg = reg;
+    float max_v = std::numeric_limits<float>::lowest();
+    unroll_loop<int, VEC_ELEM_NUM>(
+        [&max_v, &ar](int i) { max_v = std::max(max_v, ar.values[i]); });
+    return max_v;
+  }
+
+  float reduce_min() const {
+    AliasReg ar;
+    ar.reg = reg;
+    float min_v = std::numeric_limits<float>::max();
+    unroll_loop<int, VEC_ELEM_NUM>(
+        [&min_v, &ar](int i) { min_v = std::min(min_v, ar.values[i]); });
+    return min_v;
+  }
 
   template <int group_size>
   float reduce_sub_sum(int idx) {
@@ -492,6 +676,83 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     vst1q_f32(ptr + 4, reg.val[1]);
     vst1q_f32(ptr + 8, reg.val[2]);
     vst1q_f32(ptr + 12, reg.val[3]);
+  };
+
+  void save(float* ptr, const int elem_num) const {
+    int full_blocks = elem_num / NUM_ELEMENTS_REG(reg.val[0]);
+    int remainder = elem_num % NUM_ELEMENTS_REG(reg.val[0]);
+
+    for (int i = 0; i < full_blocks; i++)
+      vst1q_f32(
+          reinterpret_cast<float32_t*>(ptr) + NUM_ELEMENTS_REG(reg.val[0]) * i,
+          reg.val[i]);
+
+    if (remainder > 0) {
+      float32x4_t temp = reg.val[full_blocks];
+      float* base = reinterpret_cast<float32_t*>(ptr) +
+                    full_blocks * NUM_ELEMENTS_REG(reg.val[0]);
+      if (remainder > 0) base[0] = vgetq_lane_f32(temp, 0);
+      if (remainder > 1) base[1] = vgetq_lane_f32(temp, 1);
+      if (remainder > 2) base[2] = vgetq_lane_f32(temp, 2);
+    }
+  }
+};
+
+struct INT8Vec16 : public Vec<INT8Vec16> {
+  constexpr static int VEC_ELEM_NUM = 16;
+  union AliasReg {
+    int8x16_t reg;
+    int8_t values[VEC_ELEM_NUM];
+  };
+  int8x16_t reg;
+
+  explicit INT8Vec16(const FP32Vec16& vec) {
+    // Convert each 128-bit float32 vector to int32
+    int32x4_t part0 =
+        vcvtq_s32_f32(vec.reg.val[0]);  // Convert first 128-bit block
+    int32x4_t part1 =
+        vcvtq_s32_f32(vec.reg.val[1]);  // Convert second 128-bit block
+    int32x4_t part2 =
+        vcvtq_s32_f32(vec.reg.val[2]);  // Convert third 128-bit block
+    int32x4_t part3 =
+        vcvtq_s32_f32(vec.reg.val[3]);  // Convert fourth 128-bit block
+
+    // Narrow each 32-bit vector to 8 bits and combine
+    int8x8_t lower =
+        vqmovn_s16(vcombine_s16(vqmovn_s32(part0), vqmovn_s32(part1)));
+    int8x8_t upper =
+        vqmovn_s16(vcombine_s16(vqmovn_s32(part2), vqmovn_s32(part3)));
+    reg = vcombine_s8(lower, upper);  // Combine to form a single 128-bit vector
+  }
+
+  void save(int8_t* ptr) const { vst1q_s8(ptr, reg); };
+
+  void save(int8_t* ptr, const int elem_num) const {
+    int full_blocks = elem_num / NUM_ELEMENTS_REG(reg);
+    int remainder = elem_num % NUM_ELEMENTS_REG(reg);
+
+    for (int i = 0; i < full_blocks; i++)
+      vst1q_s8(reinterpret_cast<int8_t*>(ptr) + NUM_ELEMENTS_REG(reg) * i, reg);
+    if (remainder > 0) {
+      int8x16_t temp = reg;
+      int8_t* base =
+          reinterpret_cast<int8_t*>(ptr) + full_blocks * NUM_ELEMENTS_REG(reg);
+      if (remainder > 0) base[0] = vgetq_lane_s8(temp, 0);
+      if (remainder > 1) base[1] = vgetq_lane_s8(temp, 1);
+      if (remainder > 2) base[2] = vgetq_lane_s8(temp, 2);
+      if (remainder > 3) base[3] = vgetq_lane_s8(temp, 3);
+      if (remainder > 4) base[4] = vgetq_lane_s8(temp, 4);
+      if (remainder > 5) base[5] = vgetq_lane_s8(temp, 5);
+      if (remainder > 6) base[6] = vgetq_lane_s8(temp, 6);
+      if (remainder > 7) base[7] = vgetq_lane_s8(temp, 7);
+      if (remainder > 8) base[8] = vgetq_lane_s8(temp, 8);
+      if (remainder > 9) base[9] = vgetq_lane_s8(temp, 9);
+      if (remainder > 10) base[10] = vgetq_lane_s8(temp, 10);
+      if (remainder > 11) base[11] = vgetq_lane_s8(temp, 11);
+      if (remainder > 12) base[12] = vgetq_lane_s8(temp, 12);
+      if (remainder > 13) base[13] = vgetq_lane_s8(temp, 13);
+      if (remainder > 14) base[14] = vgetq_lane_s8(temp, 14);
+    }
   };
 };
 
