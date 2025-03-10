@@ -53,7 +53,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "int size_m, int size_n, int size_k,"
       "bool is_full_k, bool use_atomic_add,"
       "bool use_fp32_reduce, bool is_zp_float) -> Tensor");
+  m.def(
+      "marlin_gemm_moe(Tensor! a, Tensor! b_q_weights, Tensor! sorted_ids, "
+      "Tensor! topk_weights, Tensor! topk_ids, Tensor! b_scales, Tensor! "
+      "b_zeros, Tensor! g_idx, Tensor! perm, Tensor! workspace, "
+      "int b_q_type, SymInt size_m, "
+      "SymInt size_n, SymInt size_k, bool is_k_full, int num_experts, int "
+      "topk, "
+      "int moe_block_size, bool replicate_input, bool apply_weights)"
+      " -> Tensor");
 
+  m.def("moe_permute(Tensor! input, Tensor! topk_weight, Tensor! topk_ids,"
+    "Tensor! token_expert_indicies, int n_expert, int topk, Tensor! permuted_input,"
+    " Tensor! expert_first_token_offset, Tensor!src_row_id2dst_row_id_map)->()");
   // conditionally compiled so impl registration is in source file
 
 #endif
