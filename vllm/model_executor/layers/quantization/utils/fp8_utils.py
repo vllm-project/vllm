@@ -21,8 +21,6 @@ from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
-current_platform_fp8_dtype = current_platform.fp8_dtype()
-
 
 def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
     if isinstance(x, torch.Tensor):
