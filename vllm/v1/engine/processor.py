@@ -4,6 +4,7 @@ import time
 from collections.abc import Mapping
 from typing import Optional, Union
 
+import vllm.platforms
 from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
@@ -133,6 +134,9 @@ class Processor:
         if self.vllm_config.speculative_config:
             raise ValueError("Structured output is not supported with "
                              "speculative decoding.")
+        if vllm.platforms.current_platform.is_tpu():
+            raise ValueError("Structured output is not supported on TPU.")
+
         validate_structured_output_request(params)
 
     def process_inputs(
