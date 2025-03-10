@@ -9,7 +9,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 :selected:
 :sync: tpu
 
-:::{include} tpu.inc.md
+:::{include} ai_accelerator/tpu.inc.md
 :start-after: "# Installation"
 :end-before: "## Requirements"
 :::
@@ -19,7 +19,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Intel Gaudi
 :sync: hpu-gaudi
 
-:::{include} hpu-gaudi.inc.md
+:::{include} ai_accelerator/hpu-gaudi.inc.md
 :start-after: "# Installation"
 :end-before: "## Requirements"
 :::
@@ -29,7 +29,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} AWS Neuron
 :sync: neuron
 
-:::{include} neuron.inc.md
+:::{include} ai_accelerator/neuron.inc.md
 :start-after: "# Installation"
 :end-before: "## Requirements"
 :::
@@ -39,7 +39,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} OpenVINO
 :sync: openvino
 
-:::{include} openvino.inc.md
+:::{include} ai_accelerator/openvino.inc.md
 :start-after: "# Installation"
 :end-before: "## Requirements"
 :::
@@ -56,7 +56,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Google TPU
 :sync: tpu
 
-:::{include} tpu.inc.md
+:::{include} ai_accelerator/tpu.inc.md
 :start-after: "## Requirements"
 :end-before: "## Configure a new environment"
 :::
@@ -66,7 +66,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Intel Gaudi
 :sync: hpu-gaudi
 
-:::{include} hpu-gaudi.inc.md
+:::{include} ai_accelerator/hpu-gaudi.inc.md
 :start-after: "## Requirements"
 :end-before: "## Configure a new environment"
 :::
@@ -76,7 +76,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} AWS Neuron
 :sync: neuron
 
-:::{include} neuron.inc.md
+:::{include} ai_accelerator/neuron.inc.md
 :start-after: "## Requirements"
 :end-before: "## Configure a new environment"
 :::
@@ -86,7 +86,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} OpenVINO
 :sync: openvino
 
-:::{include} openvino.inc.md
+:::{include} ai_accelerator/openvino.inc.md
 :start-after: "## Requirements"
 :end-before: "## Set up using Python"
 :::
@@ -103,7 +103,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Google TPU
 :sync: tpu
 
-:::{include} tpu.inc.md
+:::{include} ai_accelerator/tpu.inc.md
 :start-after: "## Configure a new environment"
 :end-before: "## Set up using Python"
 :::
@@ -113,7 +113,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Intel Gaudi
 :sync: hpu-gaudi
 
-:::{include} hpu-gaudi.inc.md
+:::{include} ai_accelerator/hpu-gaudi.inc.md
 :start-after: "## Configure a new environment"
 :end-before: "## Set up using Python"
 :::
@@ -123,7 +123,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} AWS Neuron
 :sync: neuron
 
-:::{include} neuron.inc.md
+:::{include} ai_accelerator/neuron.inc.md
 :start-after: "## Configure a new environment"
 :end-before: "## Set up using Python"
 :::
@@ -133,7 +133,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} OpenVINO
 :sync: openvino
 
-:::{include} ../python_env_setup.inc.md
+:::{include} python_env_setup.inc.md
 :::
 
 ::::
@@ -150,7 +150,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Google TPU
 :sync: tpu
 
-:::{include} tpu.inc.md
+:::{include} ai_accelerator/tpu.inc.md
 :start-after: "### Pre-built wheels"
 :end-before: "### Build wheel from source"
 :::
@@ -160,7 +160,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Intel Gaudi
 :sync: hpu-gaudi
 
-:::{include} hpu-gaudi.inc.md
+:::{include} ai_accelerator/hpu-gaudi.inc.md
 :start-after: "### Pre-built wheels"
 :end-before: "### Build wheel from source"
 :::
@@ -170,7 +170,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} AWS Neuron
 :sync: neuron
 
-:::{include} neuron.inc.md
+:::{include} ai_accelerator/neuron.inc.md
 :start-after: "### Pre-built wheels"
 :end-before: "### Build wheel from source"
 :::
@@ -180,7 +180,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} OpenVINO
 :sync: openvino
 
-:::{include} openvino.inc.md
+:::{include} ai_accelerator/openvino.inc.md
 :start-after: "### Pre-built wheels"
 :end-before: "### Build wheel from source"
 :::
@@ -197,7 +197,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Google TPU
 :sync: tpu
 
-:::{include} tpu.inc.md
+:::{include} ai_accelerator/tpu.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
 :::
@@ -207,7 +207,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Intel Gaudi
 :sync: hpu-gaudi
 
-:::{include} hpu-gaudi.inc.md
+:::{include} ai_accelerator/hpu-gaudi.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
 :::
@@ -217,7 +217,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} AWS Neuron
 :sync: neuron
 
-:::{include} neuron.inc.md
+:::{include} ai_accelerator/neuron.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
 :::
@@ -227,7 +227,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} OpenVINO
 :sync: openvino
 
-:::{include} openvino.inc.md
+:::{include} ai_accelerator/openvino.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
 :::
@@ -246,7 +246,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Google TPU
 :sync: tpu
 
-:::{include} tpu.inc.md
+:::{include} ai_accelerator/tpu.inc.md
 :start-after: "### Pre-built images"
 :end-before: "### Build image from source"
 :::
@@ -256,7 +256,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Intel Gaudi
 :sync: hpu-gaudi
 
-:::{include} hpu-gaudi.inc.md
+:::{include} ai_accelerator/hpu-gaudi.inc.md
 :start-after: "### Pre-built images"
 :end-before: "### Build image from source"
 :::
@@ -266,7 +266,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} AWS Neuron
 :sync: neuron
 
-:::{include} neuron.inc.md
+:::{include} ai_accelerator/neuron.inc.md
 :start-after: "### Pre-built images"
 :end-before: "### Build image from source"
 :::
@@ -276,7 +276,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} OpenVINO
 :sync: openvino
 
-:::{include} openvino.inc.md
+:::{include} ai_accelerator/openvino.inc.md
 :start-after: "### Pre-built images"
 :end-before: "### Build image from source"
 :::
@@ -293,7 +293,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Google TPU
 :sync: tpu
 
-:::{include} tpu.inc.md
+:::{include} ai_accelerator/tpu.inc.md
 :start-after: "### Build image from source"
 :end-before: "## Extra information"
 :::
@@ -303,7 +303,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Intel Gaudi
 :sync: hpu-gaudi
 
-:::{include} hpu-gaudi.inc.md
+:::{include} ai_accelerator/hpu-gaudi.inc.md
 :start-after: "### Build image from source"
 :end-before: "## Extra information"
 :::
@@ -313,7 +313,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} AWS Neuron
 :sync: neuron
 
-:::{include} neuron.inc.md
+:::{include} ai_accelerator/neuron.inc.md
 :start-after: "### Build image from source"
 :end-before: "## Extra information"
 :::
@@ -323,7 +323,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} OpenVINO
 :sync: openvino
 
-:::{include} openvino.inc.md
+:::{include} ai_accelerator/openvino.inc.md
 :start-after: "### Build image from source"
 :end-before: "## Extra information"
 :::
@@ -340,7 +340,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Google TPU
 :sync: tpu
 
-:::{include} tpu.inc.md
+:::{include} ai_accelerator/tpu.inc.md
 :start-after: "## Extra information"
 :::
 
@@ -349,7 +349,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} Intel Gaudi
 :sync: hpu-gaudi
 
-:::{include} hpu-gaudi.inc.md
+:::{include} ai_accelerator/hpu-gaudi.inc.md
 :start-after: "## Extra information"
 :::
 
@@ -358,7 +358,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} AWS Neuron
 :sync: neuron
 
-:::{include} neuron.inc.md
+:::{include} ai_accelerator/neuron.inc.md
 :start-after: "## Extra information"
 :::
 
@@ -367,7 +367,7 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 ::::{tab-item} OpenVINO
 :sync: openvino
 
-:::{include} openvino.inc.md
+:::{include} ai_accelerator/openvino.inc.md
 :start-after: "## Extra information"
 :::
 
