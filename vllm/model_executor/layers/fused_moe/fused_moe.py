@@ -1539,7 +1539,7 @@ def fused_experts_impl(
         #print("GOT HERE B")
 
         # BIG HACK
-        sorted_token_ids, _, _ = (
+        sorted_token_ids, _, pad = (
             moe_align_block_size(topk_ids, block_m,
                                  global_num_experts, expert_map))
 
@@ -1549,8 +1549,15 @@ def fused_experts_impl(
             sorted_token_ids = torch.nn.functional.pad(sorted_token_ids, (0, pad_size), "constant", num_tokens)
         sorted_token_ids = sorted_token_ids.clamp(max=num_tokens-1)
 
-        new_M = sorted_token_ids.numel()//top_k_num
-        #print(f"fused2 m={M}, new_M={new_M}, sort={sorted_token_ids.shape}, hs={hidden_states.shape}, hs[sort]={hidden_states.view(num_tokens, -1)[sorted_token_ids, ...].shape}")
+        #new_M = sorted_token_ids.numel()//top_k_num
+        #print(f"fused2 m={M}, sort={sorted_token_ids.shape}, pad={pad}, hs={hidden_states.shape}, num_tok={num_tokens}")
+        #print(f"hs[sort]={torch.repeat_interleave(hidden_states, top_k_num, dim=0)[sorted_token_ids, ...].shape}")
+        new_S = torch.repeat_interleave(hidden_states, top_k_num, dim=0)[sorted_token_ids, ...].shape
+        #new_top_k = new_S[0] // M
+        new_M = new_S[0] // top_k_num
+        #new_M = ((new_M + block_m - 1) // block_m) * block_m
+        #print(f"fused2 new_M_b={new_M} top_k = {top_k_num}, new_top_k={new_top_k}")
+        #top_k_num = new_top_k
 
         intermediate_cache1 = torch.empty((new_M, top_k_num, N),
                                           device=hidden_states.device,

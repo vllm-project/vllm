@@ -512,9 +512,9 @@ def iota(shape: Tuple[int, ...], dim: int = 0, **kwargs) -> torch.Tensor:
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
     #itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
-    itertools.product(M_moe_dg, N_moe, K_moe, E, [1, 2, 4], BLOCK_SIZE, DTYPES, SEEDS))
+    itertools.product(M_moe_dg, N_moe, K_moe, E, [1, 2, 4], BLOCK_SIZE, DTYPES, SEEDS)) # all work
     #itertools.product([512], [128], [256], [2], [2], BLOCK_SIZE, DTYPES, SEEDS))
-    #itertools.product([128], [128], [256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS))
+    #itertools.product([128], [128], [256], [8], [6], BLOCK_SIZE, DTYPES, SEEDS))
     #itertools.product([128], [128], [256], [2], [2], BLOCK_SIZE, DTYPES, SEEDS))
     #itertools.product([512], [128], [256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS))
 @torch.inference_mode()
