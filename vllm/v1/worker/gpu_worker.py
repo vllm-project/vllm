@@ -220,9 +220,11 @@ class Worker(WorkerBase):
         # NOTE: This is called after `capture_model` on purpose to prevent
         # memory buffers from being cleared by `torch.cuda.empty_cache`.
         try:
+            max_num_reqs = min(self.scheduler_config.max_num_seqs,
+                               self.scheduler_config.max_num_batched_tokens)
             self.model_runner._dummy_sampler_run(
                 hidden_states=self.model_runner._dummy_run(
-                    num_tokens=self.scheduler_config.max_num_seqs))
+                    num_tokens=max_num_reqs))
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 raise RuntimeError(
