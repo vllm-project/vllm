@@ -106,7 +106,7 @@ def test_moe_permute_unpermute(
     result0 = 0.5 * result0 + torch.randn_like(result0)
 
     result3 = moe_unpermute(result0, topk_weights, topk_ids, 
-                            token_expert_indices, result2, topk,n_expert)
+                            result2, topk,n_expert)
     gold3 = torch_unpermute(result0, topk_weights, topk_ids, 
                             token_expert_indices, result2, topk,n_expert)
 
