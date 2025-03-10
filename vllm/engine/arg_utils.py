@@ -1232,6 +1232,7 @@ class EngineArgs:
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             enable_expert_parallel=self.enable_expert_parallel,
+            expert_map_path=self.expert_map_path,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             tokenizer_pool_config=TokenizerPoolConfig.create_config(
