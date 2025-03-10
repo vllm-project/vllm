@@ -436,7 +436,7 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         quant_type: int,
         row: torch.SymInt,
     ) -> torch.Tensor:
-        return torch.empty((1, row), dtype=torch.float16, device=W.device)
+        return torch.empty((1, row), dtype=X.dtype, device=W.device)
 
     @register_fake("_C::ggml_mul_mat_a8")
     def _ggml_mul_mat_a8_fake(
@@ -446,7 +446,7 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         row: torch.SymInt,
     ) -> torch.Tensor:
         batch = X.size(0)
-        return torch.empty((batch, row), dtype=torch.float16, device=W.device)
+        return torch.empty((batch, row), dtype=X.dtype, device=W.device)
 
 
 # cutlass
