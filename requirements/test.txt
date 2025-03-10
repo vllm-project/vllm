@@ -223,7 +223,7 @@ lm-eval==0.4.4
 lxml==5.3.0
     # via sacrebleu
 mamba-ssm==2.2.4
-    # via -r requirements-test.in
+    # via -r requirements/test.in
 markdown-it-py==3.0.0
     # via rich
 markupsafe==3.0.2
@@ -553,7 +553,6 @@ setuptools==75.8.0
     # via
     #   mamba-ssm
     #   pytablewriter
-    #   torch
 six==1.16.0
     # via
     #   python-dateutil
