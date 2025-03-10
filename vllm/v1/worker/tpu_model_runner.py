@@ -438,7 +438,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
 
         if self.lora_config is not None:
-            self.set_active_loras(self.input_batch, 
+            self.set_active_loras(self.input_batch,
                                   num_scheduled_tokens_per_req)
 
         attn_metadata = PallasMetadata(
