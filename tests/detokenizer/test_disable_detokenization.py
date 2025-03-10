@@ -18,7 +18,7 @@ def test_computed_prefix_blocks(model: str):
         "paper clips? Is there an easy to follow video tutorial available "
         "online for free?")
 
-    llm = LLM(model=model, enforce_eager=True)
+    llm = LLM(model=model)
     sampling_params = SamplingParams(max_tokens=10,
                                      temperature=0.0,
                                      detokenize=False)

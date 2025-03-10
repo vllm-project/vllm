@@ -41,6 +41,7 @@ REQUIRES_V0_MODELS = [
     # https://github.com/vllm-project/vllm/issues/14524
     "qwen_vl",
     "h2ovl",
+    "blip2",
 ]
 
 # yapf: disable
