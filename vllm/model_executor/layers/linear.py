@@ -85,6 +85,8 @@ def adjust_scalar_to_fused_array(param, loaded_weight, shard_id):
     return param[shard_id], loaded_weight
 
 
+# TODO(Isotr0py): We might need a more flexible structure to handle
+# bitsandbytes shard offsets.
 def left_shift_bitsandbytes_4bit_shard(bnb_weight_attrs: dict[str, Any]):
     """
     Separate the BitsAndBytes 4-bit shard.
@@ -1266,6 +1268,23 @@ class RowParallelLinear(LinearBase):
 
 
 class QKVCrossParallelLinear(LinearBase):
+    """Linear layers for efficient cross-attention's QKV transformation.
+
+    Args:
+        hidden_size: input hidden state size of the transformer.
+        head_size: size of each attention head.
+        total_num_heads: total number of attention query heads.
+        total_num_kv_heads: total number of attention key/value heads. If
+                            None, assume total_num_kv_heads = total_num_heads.
+        bias: If true, add bias.
+        skip_bias_add: This was added to enable performance optimizations where
+                       bias can be fused with other element-wise operations. we
+                       skip adding bias but instead return it.
+        params_dtype: Data type for the parameters.
+        quant_config: Quantization configure.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.qkv_proj)
+    """
 
     def __init__(self,
                  hidden_size: int,
@@ -1289,9 +1308,14 @@ class QKVCrossParallelLinear(LinearBase):
 
         self.quant_config = quant_config
 
+        if quant_config is None:
+            quant_method: Optional[
+                QuantizeMethodBase] = UnquantizedLinearMethod()
+        else:
+            quant_method = quant_config.get_quant_method(self, prefix=prefix)
+
         # Empty placeholders for loading as a single module.
         placeholder_size = 0
-        quant_method = quant_config.get_quant_method(self, prefix=prefix)
         quant_method.create_weights(self,
                                     placeholder_size, [placeholder_size],
                                     placeholder_size,
@@ -1351,7 +1375,7 @@ class QKVCrossParallelLinear(LinearBase):
         self,
         src_param: nn.Parameter,
         tgt_param: nn.Parameter,
-        mode: Literal["q_proj", "kv_proj"],
+        mode: Literal["q_proj_decoder", "kv_proj_encoder"],
     ):
         missing_attrs_dict = {
             k: getattr(src_param, k)
@@ -1371,11 +1395,35 @@ class QKVCrossParallelLinear(LinearBase):
         else:
             set_weight_attrs(tgt_param, missing_attrs_dict)
 
+    def _is_same_param(
+        self,
+        src_param: torch.nn.Parameter,
+        map_param: torch.nn.Parameter,
+    ) -> bool:
+        """Check if two parameters are exactly pointing to same things."""
+        # ignore weight_loader because it's always different
+        key_to_ignore = ["weight_loader", "_weight_loader"]
+        has_same_type_name = type(src_param) is type(map_param)
+        src_param_attrs = {
+            k: v
+            for k, v in src_param.__dict__.items() if k not in key_to_ignore
+        }
+        map_param_attrs = {
+            k: v
+            for k, v in map_param.__dict__.items() if k not in key_to_ignore
+        }
+        has_same_attrs = src_param_attrs == map_param_attrs
+        return has_same_type_name and has_same_attrs
+
     def selet_proj_params(
         self,
         layer: nn.Module,
         param: nn.Parameter,
     ) -> nn.Parameter:
+        """
+        Given the placeholder param, 
+        return the corresponding param in the proj layers.
+        """
         target_param_list = [
             v for _, v in layer.named_parameters()
             if self._is_same_param(param, v)
@@ -1396,24 +1444,6 @@ class QKVCrossParallelLinear(LinearBase):
             # Split kv in half
             k, v = kv_enc.split(self.kv_size, dim=-1)
         return q, k, v
-
-    def _is_same_param(
-        self,
-        src_param: torch.nn.Parameter,
-        map_param: torch.nn.Parameter,
-    ):
-        key_to_ignore = ["weight_loader", "_weight_loader"]
-        has_same_type_name = type(src_param) is type(map_param)
-        src_param_attrs = {
-            k: v
-            for k, v in src_param.__dict__.items() if k not in key_to_ignore
-        }
-        map_param_attrs = {
-            k: v
-            for k, v in map_param.__dict__.items() if k not in key_to_ignore
-        }
-        has_same_attrs = src_param_attrs == map_param_attrs
-        return has_same_type_name and has_same_attrs
 
     def weight_loader(self,
                       param: torch.nn.Parameter,
