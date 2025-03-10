@@ -85,7 +85,7 @@ class OpenAIServing:
         self.engine_client = engine_client
         self.model_config = model_config
         self.max_model_len = model_config.max_model_len
-
+        self.max_output_len = model_config.max_output_len
         self.models = models
 
         self.request_logger = request_logger
@@ -251,7 +251,13 @@ class OpenAIServing:
                 f"({token_num} in the messages, "
                 f"{max_tokens} in the completion). "
                 f"Please reduce the length of the messages or completion.")
-
+        elif self.max_output_len is not None and max_tokens > self.max_output_len:
+            print("here is the max output len")
+            print(self.max_output_len)
+            raise ValueError(
+                f"This model's maximum output length is "
+                f"{self.max_output_len} tokens. However, you requested "
+                f"{max_tokens} tokens in the completion.")
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
     def _tokenize_prompt_input(
