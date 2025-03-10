@@ -325,7 +325,7 @@ class OpenAIServingChat(OpenAIServing):
             # already ensures that the reasoning_parser is not None.
             # but the pre-commit hook requires it.
             if should_stream_with_reasoning_parsing and \
-                self.reasoning_parser is not None:
+                    self.reasoning_parser is not None:
                 reasoning_parser = self.reasoning_parser(tokenizer)
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
@@ -336,13 +336,16 @@ class OpenAIServingChat(OpenAIServing):
 
         # Prepare the tool parser if it's needed
         try:
-            use_auto_tool = tool_choice_auto and self.tool_parser
-            use_choice_tool = request.tool_choice and type(
-                request.tool_choice) is ChatCompletionNamedToolChoiceParam
-            if use_auto_tool or use_choice_tool:
-                tool_parsers: list[Optional[ToolParser]] = [
-                    self.tool_parser(tokenizer)
-                ] * num_choices
+            if (tool_choice_auto and self.tool_parser
+                    or request.tool_choice and type(request.tool_choice)
+                    is ChatCompletionNamedToolChoiceParam):
+
+                tool_parsers: list[Optional[ToolParser]] = []
+                if self.tool_parser:
+                    for _ in range(num_choices):
+                        tool_parsers.append(self.tool_parser(tokenizer))
+                    else:
+                        tool_parsers.append(None)
             else:
                 tool_parsers = [None] * num_choices
         except Exception as e:
@@ -462,7 +465,7 @@ class OpenAIServingChat(OpenAIServing):
                     delta_text = output.text
 
                     if not delta_text and not output.token_ids and \
-                        not previous_num_tokens[i]:
+                            not previous_num_tokens[i]:
                         # Chunked prefill case, don't return empty chunks
                         continue
 
@@ -482,7 +485,7 @@ class OpenAIServingChat(OpenAIServing):
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         assert tool_parser is not None
-                        #TODO optimize manipulation of these lists
+                        # TODO optimize manipulation of these lists
                         previous_text = previous_texts[i]
                         previous_token_ids = all_previous_token_ids[i]
                         current_text = previous_text + delta_text
@@ -724,7 +727,7 @@ class OpenAIServingChat(OpenAIServing):
             auto_tools_called = False
 
             if should_stream_with_reasoning_parsing and \
-                self.reasoning_parser is not None:
+                    self.reasoning_parser is not None:
                 try:
                     reasoning_parser = self.reasoning_parser(tokenizer)
                 except RuntimeError as e:
@@ -752,6 +755,12 @@ class OpenAIServingChat(OpenAIServing):
             # if the request uses tools and specified a tool choice
             elif request.tool_choice and type(
                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
+
+                if self.tool_parser is None:
+                    logger.error(
+                        "tool_parser is None, cannot proceed with tool call.")
+                    return self.create_error_response(
+                        "Tool call requested but tool parser is None.")
 
                 try:
                     tool_parser = self.tool_parser(tokenizer)
