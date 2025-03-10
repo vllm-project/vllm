@@ -280,8 +280,8 @@ def get_requests(args, tokenizer):
 
 
 def main(args: argparse.Namespace):
+    print(args)
     random.seed(args.seed)
-
     # Sample the requests.
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)
