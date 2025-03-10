@@ -1007,23 +1007,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
-        if not self.use_spec_decode:
-            sampler_output = self.model.sample(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
-            )
-        else:
-            target_probs = self.model.sampler.compute_probs(
-                logits, sampling_metadata)
+
+        if self.use_spec_decode:
             scheduled_request_ids = scheduler_output.num_scheduled_tokens.keys(
             )
             draft_token_ids = [
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
                 for req_id in scheduled_request_ids
             ]
-            sampler_output = self.rejection_sampler(draft_token_ids,
-                                                    target_probs,
-                                                    sampling_metadata)
+            sample_lens = [len(tokens) + 1 for tokens in draft_token_ids]
+            recover_logits_idx = np.cumsum(sample_lens) - 1
+            target_probs = self.model.sampler.compute_probs(
+                logits, sampling_metadata, sample_lens)
+            bonus_token_ids = self.model.sample(
+                logits=logits[recover_logits_idx, :],
+                sampling_metadata=sampling_metadata,
+            ).sampled_token_ids
+            sampler_output = self.rejection_sampler(
+                draft_token_ids,
+                None,  # draft_probs
+                bonus_token_ids,
+                target_probs,
+                sampling_metadata)
+        else:
+            sampler_output = self.model.sample(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -1085,13 +1095,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def generate_draft_token_ids(
         self,
         sampled_token_ids: list[list[int]],
+        sampling_metadata: Optional[SamplingMetadata] = None,
     ) -> list[list[int]]:
         # TODO(woosuk): Optimize.
         draft_token_ids: list[list[int]] = []
+
         for i, sampled_ids in enumerate(sampled_token_ids):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
                 # Skip speculative decoding.
+                draft_token_ids.append([])
+                continue
+
+            # Skip requests that require top-p, top-k, etc.
+            if sampling_metadata and self._disable_spec_decode(
+                    i, sampling_metadata):
                 draft_token_ids.append([])
                 continue
 
@@ -1488,3 +1506,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     f"Unknown attention type: {attn_module.attn_type}")
 
         return kv_cache_spec
+
+    def _disable_spec_decode(self, req_idx: int,
+                             sampling_metadata: SamplingMetadata) -> bool:
+        return ((sampling_metadata.top_p
+                 and sampling_metadata.top_p[req_idx] < 1.0)
+                or (sampling_metadata.top_k
+                    and sampling_metadata.top_k[req_idx] > 0)
+                or (sampling_metadata.min_p
+                    and sampling_metadata.min_p[req_idx] > 0.0)
+                or (sampling_metadata.frequency_penalties[req_idx] != 0.0)
+                or (sampling_metadata.presence_penalties[req_idx] != 0.0)
+                or (sampling_metadata.repetition_penalties[req_idx] != 1.0))
