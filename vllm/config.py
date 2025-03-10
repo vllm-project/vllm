@@ -38,7 +38,8 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, random_uuid, resolve_obj_by_qualname)
+                        get_cpu_memory, get_open_port, random_uuid,
+                        resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -1435,10 +1436,15 @@ class ParallelConfig:
         self.world_size = self.pipeline_parallel_size * \
             self.tensor_parallel_size
 
-        self.data_parallel_size = envs.VLLM_DP_SIZE
-        self.data_parallel_rank = envs.VLLM_DP_RANK
-        self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
-        self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+        if self.data_parallel_size > 1:
+            self.data_parallel_master_port = get_open_port()
+            # TODO multi-node
+        else:
+            self.data_parallel_size = envs.VLLM_DP_SIZE
+            self.data_parallel_rank = envs.VLLM_DP_RANK
+            self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
+            self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
+
         self.world_size_across_dp = self.world_size * self.data_parallel_size
 
         if self.distributed_executor_backend == "external_launcher":
