@@ -38,10 +38,16 @@ namespace MARLIN_NAMESPACE_NAME {
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
-__global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
-                                    int const* __restrict__ perm_int_ptr,
-                                    int4* __restrict__ out_int4_ptr, int size_m,
-                                    int size_k, int block_rows) {}
+template <int moe_block_size>
+__global__ void permute_cols_kernel(
+    int4 const* __restrict__ a_int4_ptr,
+    int const* __restrict__ perm_int_ptr,
+    int4* __restrict__ out_int4_ptr,
+    const int32_t* __restrict__ sorted_token_ids_ptr,
+    const int32_t* __restrict__ expert_ids_ptr,
+    const int32_t* __restrict__ num_tokens_past_padded_ptr,
+    int size_m, int size_k, int top_k) {};
+
 
 template <typename scalar_t,  // compute dtype, half or nv_float16
           const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
@@ -54,6 +60,7 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
           const bool has_act_order,     // whether act_order is enabled
+          const bool has_zp,            // whether zero-points are enabled
           const int group_blocks = -1,  // number of consecutive 16x16 blocks
                                         // with a separate quantization scale
           const bool is_zp_float        // is zero point of float16 type?
@@ -65,12 +72,22 @@ __global__ void Marlin(
     int4* __restrict__ C_tmp,    // fp32 tmp output buffer (for reduce)
     const int4* __restrict__ scales_ptr,  // fp16 quantization scales of shape
                                           // (k/groupsize)xn
+    const int4* __restrict__ zp_ptr,      // 4bit packed zero-points of shape
+                                          // (k/groupsize)x(n/pack_factor)
     const int* __restrict__ g_idx,        // int32 group indices of shape k
+    const int32_t* __restrict__ sorted_token_ids_ptr,       // moe sorted_ids
+    const int32_t* __restrict__ expert_ids_ptr,             // moe expert ids
+    const int32_t* __restrict__ num_tokens_past_padded_ptr, // moe num tokens
+    const float* __restrict__ topk_weights_ptr,             // moe top weights
+    int top_k,               // num of experts per token
+    bool mul_topk_weights,   // mul topk weights or not
+    bool is_ep,              // expert parallelism
     int num_groups,       // number of scale groups per output channel
     int prob_m,           // batch dimension m
     int prob_n,           // output dimension n
     int prob_k,           // reduction dimension k
     int* locks,           // extra global storage for barrier synchronization
+    bool use_atomic_add,  // whether to use atomic add to reduce
     bool use_fp32_reduce  // whether to use fp32 global reduce
 ) {}
 
@@ -455,27 +472,47 @@ __device__ inline void barrier_release(int* lock, bool reset = false) {
 
 // For a given "a" of size [M,K] performs a permutation of the K columns based
 // on the given "perm" indices.
-__global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
-                                    int const* __restrict__ perm_int_ptr,
-                                    int4* __restrict__ out_int4_ptr, int size_m,
-                                    int size_k, int block_rows) {
-  int start_row = block_rows * blockIdx.x;
-  int finish_row = start_row + block_rows;
-  if (finish_row > size_m) {
-    finish_row = size_m;
-  }
-  int cur_block_rows = finish_row - start_row;
+template <int moe_block_size>
+__global__ void permute_cols_kernel(
+    int4 const* __restrict__ a_int4_ptr,
+    int const* __restrict__ perm_int_ptr,
+    int4* __restrict__ out_int4_ptr,
+    const int32_t* __restrict__ sorted_token_ids_ptr,
+    const int32_t* __restrict__ expert_ids_ptr,
+    const int32_t* __restrict__ num_tokens_past_padded_ptr,
+    int size_m, int size_k, int top_k) {
 
+  int num_tokens_past_padded = num_tokens_past_padded_ptr[0];
+  int num_moe_blocks = div_ceil(num_tokens_past_padded, moe_block_size);
+  int32_t block_sorted_ids[moe_block_size];
+  int block_num_valid_tokens = 0;
+  int64_t old_expert_id = 0;
+  int64_t expert_id = 0;
   int row_stride = size_k * sizeof(half) / 16;
+
+  auto read_moe_block_data = [&](int block_id) {
+    block_num_valid_tokens = moe_block_size;
+    int4 *tmp_block_sorted_ids = reinterpret_cast<int4*>(block_sorted_ids);
+    for (int i = 0; i < moe_block_size / 4; i++) {
+      tmp_block_sorted_ids[i] = ((int4*)sorted_token_ids_ptr)[block_id * moe_block_size / 4 + i];
+    }
+    for (int i = 0; i < moe_block_size; i++) {
+      if (block_sorted_ids[i] >= size_m * top_k) {
+        block_num_valid_tokens = i;
+        break;
+      };
+    }
+  };
 
   auto permute_row = [&](int row) {
     int iters = size_k / default_threads;
     int rest = size_k % default_threads;
 
-    int offset = row * row_stride;
+    int in_offset = (row / top_k) * row_stride;
+    int out_offset = row * row_stride;
 
-    half const* a_row_half = reinterpret_cast<half const*>(a_int4_ptr + offset);
-    half* out_half = reinterpret_cast<half*>(out_int4_ptr + offset);
+    half const* a_row_half = reinterpret_cast<half const*>(a_int4_ptr + in_offset);
+    half* out_half = reinterpret_cast<half*>(out_int4_ptr + out_offset);
 
     int base_k = 0;
 
@@ -498,11 +535,16 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
     }
   };
 
-  for (int i = 0; i < cur_block_rows; i++) {
-    int cur_row = start_row + i;
-    if (cur_row < size_m) {
-      permute_row(cur_row);
-    }
+  for (int index = blockIdx.x; index < num_moe_blocks; index += gridDim.x) {
+    old_expert_id = expert_id;
+    int tmp_expert_id = expert_ids_ptr[index];
+    if (tmp_expert_id == -1) continue;
+    expert_id = tmp_expert_id;
+    perm_int_ptr += (expert_id - old_expert_id) * size_k;
+    read_moe_block_data(index);
+
+    for (int i = 0; i < block_num_valid_tokens; i++)
+      permute_row(block_sorted_ids[i]);
   }
 }
 
@@ -570,7 +612,10 @@ __global__ void Marlin(
 
   constexpr int pack_factor = 32 / w_type.size_bits();
   constexpr int moe_block_size = 16 * thread_m_blocks;
-  constexpr int group_size = 16 * group_blocks;
+  const int group_size = (!has_act_order && group_blocks == -1) ? 
+    prob_k : 16 * group_blocks;
+  const int zp_row_stride = is_zp_float ? 
+    prob_k / group_size / 8 : prob_k / group_size / (pack_factor * 4);
 
   // parallel: num valid moe blocks
   int num_tokens_past_padded = num_tokens_past_padded_ptr[0];
@@ -657,8 +702,9 @@ __global__ void Marlin(
   // when move to next moe block, find the next block_id and expert_id
   // and then read moe block data
   auto update_next_moe_block_data = [&]() {
-    old_expert_id = expert_id;
+    if (par_id >= parallel) return;
 
+    old_expert_id = expert_id;
     if (num_invalid_blocks > 0) {
       int skip_count = block_id == -1 ? par_id : 0;
       block_id++;
@@ -679,7 +725,9 @@ __global__ void Marlin(
 
     B_expert_off = expert_id * prob_n * prob_k / (pack_factor * 4);
     scales_ptr += (expert_id - old_expert_id) * prob_n * prob_k / group_size / 8;
-    zp_ptr += (expert_id - old_expert_id) * prob_n * prob_k / group_size / (pack_factor * 4);
+    if constexpr (has_zp) {
+      zp_ptr += (expert_id - old_expert_id) * prob_n * zp_row_stride;
+    }
 
     read_moe_block_data(block_id);
   };
@@ -701,12 +749,13 @@ __global__ void Marlin(
     while (remaining_ntiles_global > 0) {
       int skip_count = block_id_write == -1 ? 
         (num_tiles_write_zero * blockIdx.x) / n_tiles : 0;
+      block_id_write++;
       for (int i = block_id_write; i < num_tokens_past_padded / moe_block_size; i++) {
-        if (expert_ids_ptr[i] != -1) {
+        if (expert_ids_ptr[i] == -1) {
           if (skip_count == 0) {
             block_id_write = i;
             break;
-          };
+          }
           skip_count--;
         };
       }
@@ -725,18 +774,15 @@ __global__ void Marlin(
       int num_int4s = moe_block_size * stride_n;
       int num_int4s_per_thread = div_ceil(num_int4s, threads);
 
-      for (int i = 0; i < num_int4s_per_thread; i++) {
-        int index = num_int4s_per_thread * threadIdx.x + i;
-        if (index < num_int4s) break;
-
-        int row = num_int4s / stride_n;
+      for (int index = threadIdx.x; index < num_int4s; index += threads) {
+        int row = index / stride_n;
+        if (row >= block_num_valid_tokens) break;
         int sorted_row = block_sorted_ids[row];
-        int col = num_int4s % stride_n;
+        int col = index % stride_n;
         int true_index = sorted_row * global_stride_n + off_stride_n + col;
         C[true_index] = {0, 0, 0, 0};
       }
 
-      block_id_write++;
       ntile_id = 0;
       remaining_ntiles_global -= remaining_ntiles_in_block;
     }
@@ -2305,10 +2351,19 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 
   if (has_act_order) {
     // Permute A columns
-    int block_rows = div_ceil(prob_m, blocks);
-    permute_cols_kernel<<<blocks, default_threads, 0, stream>>>(
-        A_ptr, perm_ptr, a_tmp_ptr, prob_m, prob_k, block_rows);
+    auto kernel = permute_cols_kernel<16>;
+    if (moe_block_size == 16) {}
+    else if (moe_block_size == 32) kernel = permute_cols_kernel<32>;
+    else if (moe_block_size == 48) kernel = permute_cols_kernel<48>;
+    else if (moe_block_size == 64) kernel = permute_cols_kernel<64>;
+    else TORCH_CHECK(false, "unsupported moe_block_size ", moe_block_size);
+
+    kernel<<<blocks, default_threads, 0, stream>>>(
+        A_ptr, perm_ptr, a_tmp_ptr, sorted_token_ids_ptr,
+        expert_ids_ptr, num_tokens_past_padded_ptr, prob_m, prob_k, top_k);
     A_ptr = a_tmp_ptr;
+    prob_m = prob_m * top_k;
+    top_k = 1;
   }
 
   // If we have a full K, then we can run the non-act-order version of Marlin
@@ -2320,23 +2375,23 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 
   if (false) {
   }
-  // GPTQ_CALL_IF(vllm::kU4B8, 16, 4, 256)
-  // GPTQ_CALL_IF(vllm::kU4B8, 8, 8, 256)
-  // GPTQ_CALL_IF(vllm::kU4B8, 8, 4, 128)
-  // GPTQ_CALL_IF(vllm::kU4B8, 4, 8, 128)
-  // GPTQ_CALL_IF(vllm::kU8B128, 16, 4, 256)
-  // GPTQ_CALL_IF(vllm::kU8B128, 8, 8, 256)
-  // GPTQ_CALL_IF(vllm::kU8B128, 8, 4, 128)
-  // GPTQ_CALL_IF(vllm::kU8B128, 4, 8, 128)
+  GPTQ_CALL_IF(vllm::kU4B8, 16, 4, 256)
+  GPTQ_CALL_IF(vllm::kU4B8, 8, 8, 256)
+  GPTQ_CALL_IF(vllm::kU4B8, 8, 4, 128)
+  GPTQ_CALL_IF(vllm::kU4B8, 4, 8, 128)
+  GPTQ_CALL_IF(vllm::kU8B128, 16, 4, 256)
+  GPTQ_CALL_IF(vllm::kU8B128, 8, 8, 256)
+  GPTQ_CALL_IF(vllm::kU8B128, 8, 4, 128)
+  GPTQ_CALL_IF(vllm::kU8B128, 4, 8, 128)
 
   AWQ_CALL_IF(vllm::kU4, 16, 4, 256)
   AWQ_CALL_IF(vllm::kU4, 8, 8, 256)
   AWQ_CALL_IF(vllm::kU4, 8, 4, 128)
   AWQ_CALL_IF(vllm::kU4, 4, 8, 128)
-  // AWQ_CALL_IF(vllm::kU8, 16, 4, 256)
-  // AWQ_CALL_IF(vllm::kU8, 8, 8, 256)
-  // AWQ_CALL_IF(vllm::kU8, 8, 4, 128)
-  // AWQ_CALL_IF(vllm::kU8, 4, 8, 128)
+  AWQ_CALL_IF(vllm::kU8, 16, 4, 256)
+  AWQ_CALL_IF(vllm::kU8, 8, 8, 256)
+  AWQ_CALL_IF(vllm::kU8, 8, 4, 128)
+  AWQ_CALL_IF(vllm::kU8, 4, 8, 128)
 
   // HQQ_CALL_IF(vllm::kU4, 16, 4, 256)
   // HQQ_CALL_IF(vllm::kU4, 8, 8, 256)
@@ -2470,7 +2525,6 @@ torch::Tensor moe_wna16_marlin_gemm(
                 "Unexpected g_idx.size(-1) = ", g_idx.size(-1),
                 " and perm.size(-1) = ", perm.size(-1),
                 ", where size_k = ", size_k);
-
   } else {
     g_idx = torch::empty({0}, options);
     perm = torch::empty({0}, options);
@@ -2479,7 +2533,7 @@ torch::Tensor moe_wna16_marlin_gemm(
   bool has_act_order = g_idx.size(-1) > 0 && perm.size(-1) > 0;
 
   if (has_act_order) {
-    a_tmp = torch::empty({size_m, size_k}, options);
+    a_tmp = torch::empty({size_m * top_k, size_k}, options);
     if (is_k_full) {
       TORCH_CHECK(num_groups > 1, "For act_order, num_groups must be > 1");
       TORCH_CHECK(size_k % num_groups == 0, "size_k = ", size_k,
@@ -2577,18 +2631,18 @@ torch::Tensor moe_wna16_marlin_gemm(
         is_k_full, has_zp, num_groups, group_size, dev,
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
-  // } else if (a.scalar_type() == at::ScalarType::BFloat16) {
-  //   MARLIN_NAMESPACE_NAME::marlin_mm<nv_bfloat16>(
-  //       a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-  //       c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
-  //       b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
-  //       perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
-  //       sorted_token_ids.data_ptr(), expert_ids.data_ptr(),
-  //       num_tokens_past_padded.data_ptr(), topk_weights.data_ptr(),
-  //       moe_block_size, top_k, mul_topk_weights, size_m, size_n, size_k,
-  //       workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
-  //       num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-  //       thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float);
+  } else if (a.scalar_type() == at::ScalarType::BFloat16) {
+    MARLIN_NAMESPACE_NAME::marlin_mm<nv_bfloat16>(
+        a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(), c.data_ptr<at::BFloat16>(),
+        c_tmp.data_ptr<float>(), b_scales.data_ptr<at::BFloat16>(),
+        b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
+        a_tmp.data_ptr<at::BFloat16>(), sorted_token_ids.data_ptr(),
+        expert_ids.data_ptr(), num_tokens_past_padded.data_ptr(),
+        topk_weights.data_ptr(), moe_block_size, top_k, mul_topk_weights, is_ep,
+        size_m, size_n, size_k, workspace.data_ptr(), b_q_type, has_act_order,
+        is_k_full, has_zp, num_groups, group_size, dev,
+        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
+        use_atomic_add, use_fp32_reduce, is_zp_float);
   } else {
     TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
   }
