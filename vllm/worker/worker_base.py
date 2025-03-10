@@ -16,6 +16,7 @@ from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms.cuda import set_cpu_affinity
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, run_method,
@@ -593,6 +594,8 @@ class WorkerWrapperBase:
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
             assert self.worker is not None
+
+        set_cpu_affinity()
 
     def initialize_from_config(self, kv_cache_configs: List[Any]) -> None:
         kv_cache_config = kv_cache_configs[self.rpc_rank]
