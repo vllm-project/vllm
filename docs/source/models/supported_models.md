@@ -847,7 +847,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
 - * `PaliGemmaForConditionalGeneration`
-  * PaliGemma (see note), PaliGemma 2 (see note)
+  * PaliGemma ⚠️, PaliGemma 2 ⚠️
   * T + I<sup>E</sup>
   * `google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, `google/paligemma2-3b-ft-docci-448`, etc.
   *
@@ -917,6 +917,12 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
+:::{warning}
+vLLM does not currently support PrefixLM attention mask, so our PaliGemma implementation uses regular causal attention, which causes the model output to be unstable.
+
+We may deprecate this model series in a future release.
+:::
+
 :::{note}
 `h2oai/h2ovl-mississippi-2b` will be available in V1 once we support backends other than FlashAttention.
 :::
@@ -928,10 +934,6 @@ To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"
 :::{note}
 The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
 For more details, please see: <gh-pr:4087#issuecomment-2250397630>
-:::
-
-:::{note}
-Currently the PaliGemma model series is implemented without PrefixLM attention mask. This model series may be deprecated in a future release.
 :::
 
 :::{note}
