@@ -931,9 +931,10 @@ class MRotaryEmbedding(RotaryEmbedding):
     ) -> Tuple[List[List[int]], int]:
         """Get mrope input positions and delta value."""
 
-        image_grid_thw = image_grid_thw or []
-        video_grid_thw = video_grid_thw or []
-        second_per_grid_ts = second_per_grid_ts or []
+        image_grid_thw = [] if image_grid_thw is None else image_grid_thw
+        video_grid_thw = [] if video_grid_thw is None else video_grid_thw
+        second_per_grid_ts = [] if second_per_grid_ts is None else \
+            second_per_grid_ts
 
         llm_positions, mrope_position_delta = \
             MRotaryEmbedding.get_input_positions_tensor(
