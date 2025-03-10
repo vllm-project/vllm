@@ -314,7 +314,6 @@ def main(args: argparse.Namespace):
                                args.output_len)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
-    total_prompt_tokens = sum(request.prompt_len for request in requests)
     total_num_tokens = sum(request.prompt_len + request.expected_output_len
                            for request in requests)
     total_output_tokens = sum(request.expected_output_len
@@ -323,8 +322,7 @@ def main(args: argparse.Namespace):
         print("\033[91mWARNING\033[0m: Multi-modal request detected. The "
               "following metrics are not accurate because image tokens are not"
               " counted. See vllm-project/vllm/issues/9778 for details.")
-        # TODO(vllm-project/vllm/issues/9778): Count molti-modal token length.
-    print(f"Total input tokens: {total_prompt_tokens}")
+        # TODO(vllm-project/vllm/issues/9778): Count multi-modal token length.
     print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
           f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
           f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
