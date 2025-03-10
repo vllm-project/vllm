@@ -27,11 +27,15 @@ from vllm.utils import get_ip, get_open_port
 
 class MyLLM(LLM):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, pg_name, **kwargs):
         # a hack to make the script work.
         # stop ray from manipulating CUDA_VISIBLE_DEVICES
         # at the top-level
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        # set the placement group name for vLLM to use
+        os.environ['VLLM_RAY_PG_NAME'] = pg_name
+        # set the ray address for vLLM to use
+        os.environ['RAY_ADDRESS'] = ray.get_runtime_context().gcs_address
         super().__init__(*args, **kwargs)
 
 
@@ -50,7 +54,7 @@ documentation https://docs.ray.io/en/latest/ .
 os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
 ray.init()
 
-pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2)
+pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2, name="inference")
 ray.get(pg_inference.ready())
 scheduling_inference = PlacementGroupSchedulingStrategy(
     placement_group=pg_inference,
@@ -71,6 +75,7 @@ llm = ray.remote(
     worker_extension_cls="rlhf_utils.WorkerExtension",
     tensor_parallel_size=2,
     distributed_executor_backend="ray",
+    pg_name="inference",
 )
 
 # Generate texts from the prompts.
