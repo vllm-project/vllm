@@ -510,7 +510,8 @@ class MLACommonMetadataBuilder(Generic[M]):
                 # prefill in the batch, we could probably use a more advanced
                 # algorithm here and allocate more workspace to prefills with
                 # longer context lengths
-                max_context_chunk = (self.chunked_prefill_workspace_size // num_prefills_with_context_cpu)
+                max_context_chunk = (self.chunked_prefill_workspace_size //
+                                     num_prefills_with_context_cpu)
 
                 # align max_context_chunk to page_size by rounding down,
                 # currently the `gather_cache` kernel cannot handle
@@ -525,7 +526,7 @@ class MLACommonMetadataBuilder(Generic[M]):
                 #   `num_prefills_with_context = 4`, create a tensor that looks
                 # like
                 #  [[0, 0, 0, 0], [256, 256, 256, 256], [512, 512, 512, 512]]
-                # Note(simon): this is done in CPU because of downstream requirements
+                # Note(simon): this is done in CPU because of downstream's
                 # of `to_list`.
                 chunk_starts = \
                     torch.arange(num_chunks, dtype=torch.int32) \
@@ -535,8 +536,14 @@ class MLACommonMetadataBuilder(Generic[M]):
                                        chunk_starts + max_context_chunk)
                 chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
 
-                cu_seq_lens_cpu = torch.zeros(num_chunks, self._num_prefills + 1, dtype=torch.int32, pin_memory=True)
-                torch.cumsum(chunk_seq_lens, dim=1, out=cu_seq_lens_cpu[:, 1:], dtype=torch.int32)
+                cu_seq_lens_cpu = torch.zeros(num_chunks,
+                                              self._num_prefills + 1,
+                                              dtype=torch.int32,
+                                              pin_memory=True)
+                torch.cumsum(chunk_seq_lens,
+                             dim=1,
+                             out=cu_seq_lens_cpu[:, 1:],
+                             dtype=torch.int32)
 
                 chunked_context_metadata = \
                     MLACommonPrefillMetadata.ChunkedContextMetadata(
@@ -1048,10 +1055,13 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             decode_q_pe = torch.matmul(decode_hs_or_q_c, self.W_QR)\
                 .view(-1, self.num_heads, self.qk_rope_head_dim)
 
-            decode_q_pe_input = (decode_q_pe.clone().contiguous() if not decode_q_pe.is_contiguous() else decode_q_pe)
+            decode_q_pe_input = (decode_q_pe.clone().contiguous()
+                                 if not decode_q_pe.is_contiguous() else
+                                 decode_q_pe)
 
             decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
-                attn_metadata.decode.input_positions, decode_q_pe_input, decode_k_pe)
+                attn_metadata.decode.input_positions, decode_q_pe_input,
+                decode_k_pe)
 
         if has_prefill:
             assert attn_metadata.prefill is not None
@@ -1059,7 +1069,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 .view(-1, self.num_heads, self.qk_head_dim)
             prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
 
-            prefill_q_pe_input = (prefill_q_pe.clone().contiguous() if not prefill_q_pe.is_contiguous() else prefill_q_pe)
+            prefill_q_pe_input = (prefill_q_pe.clone().contiguous()
+                                  if not prefill_q_pe.is_contiguous() else
+                                  prefill_q_pe)
 
             prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
                 attn_metadata.prefill.input_positions, prefill_q_pe_input,
