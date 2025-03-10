@@ -7,7 +7,9 @@ Run `pytest tests/kernels/test_moe_permute_unpermute.py`.
 import pytest
 import torch
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import moe_permute, moe_unpermute
+from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+    moe_permute, moe_unpermute
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from typing import List
 import numpy as np  # np sort is stable
@@ -23,10 +25,12 @@ def torch_permute(
     token_expert_indices: torch.Tensor,
     topk: int,
     n_expert: int,
-) -> List[torch.Tensor]:
+) -> list[torch.Tensor]:
     # print(topk_ids)
     n_token = hidden_states.shape[0]
-    # sorted_topk_ids, sorted_indices = torch.sort(topk_ids.flatten()) // torch sort is unstable
+    ## torch sort is unstable
+    # sorted_topk_ids, sorted_indices = torch.sort(topk_ids.flatten()) 
+    
     sorted_indices = np.argsort(topk_ids.flatten().cpu().numpy(), kind="stable") 
     sorted_topk_ids = topk_ids.flatten()[sorted_indices]
 
@@ -48,7 +52,8 @@ def torch_permute(
                                              src2dst_idx].reshape((n_token, topk))
 
     # print(expert_first_token_offset)
-    return permuted_hidden_states, expert_first_token_offset, src_row_id2dst_row_id_map
+    return [permuted_hidden_states, expert_first_token_offset, 
+            src_row_id2dst_row_id_map]
 
 def torch_unpermute(permuted_hidden_states: torch.Tensor,
                     topk_weights: torch.Tensor,
@@ -106,7 +111,7 @@ def test_moe_permute_unpermute(
     result0 = 0.5 * result0 + torch.randn_like(result0)
 
     result3 = moe_unpermute(result0, topk_weights, topk_ids, 
-                            token_expert_indices, result2, topk,n_expert)
+                            result2, topk,n_expert)
     gold3 = torch_unpermute(result0, topk_weights, topk_ids, 
                             token_expert_indices, result2, topk,n_expert)
 
