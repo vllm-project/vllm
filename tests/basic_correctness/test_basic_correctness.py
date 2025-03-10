@@ -47,6 +47,7 @@ def test_vllm_gc_ed():
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [False])
 def test_models(
+    monkeypatch,
     hf_runner,
     model: str,
     backend: str,
@@ -63,7 +64,7 @@ def test_models(
         pytest.skip(
             f"{backend} does not support gemma2 with full context length.")
 
-    os.environ["VLLM_ATTENTION_BACKEND"] = backend
+    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
 
     # 5042 tokens for gemma2
     # gemma2 has alternating sliding window size of 4096
@@ -104,6 +105,7 @@ def test_models(
         ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100"),
     ])
 def test_models_distributed(
+    monkeypatch,
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -118,11 +120,11 @@ def test_models_distributed(
 
     if model == "meta-llama/Llama-3.2-1B-Instruct" and distributed_executor_backend == "ray" and attention_backend == "" and test_suite == "L4":  # noqa
         # test Ray Compiled Graph
-        os.environ['VLLM_USE_RAY_SPMD_WORKER'] = "1"
-        os.environ['VLLM_USE_RAY_COMPILED_DAG'] = "1"
+        monkeypatch.setenv("VLLM_USE_RAY_SPMD_WORKER", "1")
+        monkeypatch.setenv("VLLM_USE_RAY_COMPILED_DAG", "1")
 
     if attention_backend:
-        os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
+        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attention_backend)
 
     dtype = "half"
     max_tokens = 5
