@@ -315,7 +315,7 @@ def _cached_encode(
     tokenizer: AnyTokenizer,
     text: str,
     *,
-    add_special_tokens: bool = False,
+    add_special_tokens: Optional[bool] = None,
 ) -> list[int]:
     return encode_tokens(tokenizer,
                          text,
@@ -327,7 +327,7 @@ def _cached_decode(
     tokenizer: AnyTokenizer,
     token_ids: tuple[int, ...],
     *,
-    skip_special_tokens: bool = False,
+    skip_special_tokens: Optional[bool] = None,
 ) -> str:
     return decode_tokens(tokenizer,
                          list(token_ids),
