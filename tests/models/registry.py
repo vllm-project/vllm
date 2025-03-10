@@ -252,7 +252,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
     "LlavaForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-1.5-7b-hf",
-                                                     extras={"mistral": "mistral-community/pixtral-12b"}),  # noqa: E501
+                                                     extras={"mistral": "mistral-community/pixtral-12b", # noqa: E501
+                                                             "mistral-fp8": "nm-testing/pixtral-12b-FP8-dynamic"}),  # noqa: E501
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-v1.6-mistral-7b-hf"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": _HfExamplesInfo("llava-hf/LLaVA-NeXT-Video-7B-hf"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),  # noqa: E501
