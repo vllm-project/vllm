@@ -10,7 +10,6 @@ from typing import Optional, Union
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -21,19 +20,7 @@ from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-
-if not current_platform.is_tpu():
-    from vllm.v1.structured_output import StructuredOutputManager
-else:
-
-    class StructuredOutputManager:
-
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def grammar_bitmask(self, *args, **kwargs):
-            pass
-
+from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
