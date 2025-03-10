@@ -789,7 +789,6 @@ class FlashAttentionImpl(AttentionImpl):
                     value = value.reshape(
                         (num_kv_tokens, num_kv_heads, head_size))
 
-
                 descale_shape = (q_seq_start_loc.shape[0] - 1, key.shape[1])
                 flash_attn_varlen_func(
                     q=query,

@@ -105,10 +105,9 @@ def test_flash_attn_with_paged_kv(
     if not is_fa_version_supported(fa_version):
         pytest.skip(f"Flash attention version {fa_version} not supported due "
                     f"to: \"{fa_version_unsupported_reason(fa_version)}\"")
-    if q_dtype is not None:
-        if dtype != torch.bfloat16 or fa_version == 2:
-            pytest.skip("Flash attention with quantized inputs is only "
-                        "supported on version 3 with bfloat16 base type")
+    if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
+        pytest.skip("Flash attention with quantized inputs is only "
+                    "supported on version 3 with bfloat16 base type")
 
     current_platform.seed_everything(0)
     num_seqs = len(kv_lens)
@@ -224,10 +223,9 @@ def test_varlen_with_paged_kv(
     if not is_fa_version_supported(fa_version):
         pytest.skip(f"Flash attention version {fa_version} not supported due "
                     f"to: \"{fa_version_unsupported_reason(fa_version)}\"")
-    if q_dtype is not None:
-        if dtype != torch.bfloat16 or fa_version == 2:
-            pytest.skip("Flash attention with quantized inputs is only "
-                        "supported on version 3 with bfloat16 base type")
+    if q_dtype is not None and (dtype != torch.bfloat16 or fa_version == 2):
+        pytest.skip("Flash attention with quantized inputs is only "
+                    "supported on version 3 with bfloat16 base type")
     current_platform.seed_everything(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
