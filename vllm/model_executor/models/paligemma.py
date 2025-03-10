@@ -24,9 +24,10 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .siglip import SiglipVisionModel, get_max_siglip_image_tokens
+from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
+from .vision import get_vision_encoder_info
 
 logger = init_logger(__name__)
 
@@ -80,7 +81,8 @@ class PaliGemmaProcessingInfo(BaseProcessingInfo):
     def get_num_image_tokens(self) -> int:
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
-        return get_max_siglip_image_tokens(vision_config)
+        vit_info = get_vision_encoder_info(vision_config)
+        return vit_info.get_max_image_tokens()
 
 
 class PaliGemmaDummyInputsBuilder(
