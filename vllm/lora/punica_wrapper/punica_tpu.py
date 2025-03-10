@@ -28,6 +28,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         # Not all of them are used by the TPU so only convert the useful ones.
         self._token_lora_indices = self._token_lora_indices.to(
             dtype=torch.int32)
+        self._sampler_indices = self._sampler_indices.to(dtype=torch.int32)
+        self._sampler_indices_padded = self._sampler_indices_padded.to(dtype=torch.int32)
         torch._dynamo.mark_dynamic(self._embeddings_indices, 1)
         
     @property
@@ -260,6 +262,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             scale (float): Scaling factor.
             buffer (Optional[torch.Tensor]):Default to None.
         """
+        if self.no_lora:
+            return y
+
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
@@ -270,9 +275,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             buffer = torch.zeros((x.size(0), r),
                                  dtype=torch.float32,
                                  device=x.device)
-        # LogitsProcessorWithLoRA always using bgmv.
-        buffer = bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices,
-                             scale)
+        
+        buffer = bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices, scale)
         y = bgmv_expand(buffer,
                         lora_b_stacked,
                         y,
