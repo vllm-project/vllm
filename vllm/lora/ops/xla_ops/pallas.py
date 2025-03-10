@@ -122,10 +122,10 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
 def bgmv_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
                  idxs: torch.IntTensor):
     T, _ = inputs.shape
-    
+
     if len(loras.shape) == 4:
         loras = loras.squeeze(axis=1)
-    
+
     _, L, _ = loras.shape
 
     return torch.empty((T, L), device=inputs.device)
