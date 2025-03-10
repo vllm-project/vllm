@@ -18,6 +18,10 @@ void int8_scaled_mm_azp(torch::Tensor& c, const torch::Tensor& a,
                         const std::optional<torch::Tensor>& azp,
                         const std::optional<torch::Tensor>& bias);
 
+void mla(torch::Tensor& out, torch::Tensor& query, torch::Tensor& k_cache,
+         torch::Tensor& v_cache, double scale, torch::Tensor& block_tables,
+         torch::Tensor& seq_lens);
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
@@ -163,6 +167,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _utils), utils) {
   // CPU utils
   utils.def("init_cpu_threads_env(str cpu_ids) -> str", &init_cpu_threads_env);
+}
+
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cpu), cpu_ops) {
+  cpu_ops.def(
+      "mla("
+      "   Tensor! out, Tensor query, Tensor k_cache, Tensor v_cache,"
+      "   float scale, Tensor block_tables, Tensor seq_lens) -> ()");
+  cpu_ops.impl("mla", torch::kCPU, &mla);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
