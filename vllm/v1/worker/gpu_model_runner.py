@@ -1334,7 +1334,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # For profile, have maximum num_reqs and that collectively have
         # maximum num_tokens.
-        num_reqs = self.scheduler_config.max_num_seqs
+        num_reqs = self.max_num_reqs
         num_tokens = self.max_num_tokens
         min_tokens_per_req = num_tokens // num_reqs
 
