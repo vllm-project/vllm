@@ -237,8 +237,8 @@ VLM_TEST_SETTINGS = {
     "glm4v": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
         test_type=VLMTestType.IMAGE,
-        prompt_formatter=identity,
-        img_idx_to_prompt=lambda idx: "",
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|begin_of_image|><|endoftext|><|end_of_image|>",  # noqa: E501
         max_model_len=2048,
         max_num_seqs=2,
         dtype="bfloat16",
