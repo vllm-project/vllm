@@ -173,7 +173,7 @@ class RocmPlatform(Platform):
                 if envs.VLLM_USE_V1:
                     raise NotImplementedError(
                         "Multi-step scheduling is not supported (and not "
-                        "needed) on VLLM V1. Please launch without "
+                        "needed) on vLLM V1. Please launch without "
                         "--num-scheduler-steps.")
                 else:
                     parallel_config.worker_cls = \
@@ -181,7 +181,7 @@ class RocmPlatform(Platform):
             elif vllm_config.speculative_config:
                 if envs.VLLM_USE_V1:
                     raise NotImplementedError(
-                        "Speculative decoding is not yet supported on VLLM V1."
+                        "Speculative decoding is not yet supported on vLLM V1."
                     )
                 else:
                     parallel_config.worker_cls = \

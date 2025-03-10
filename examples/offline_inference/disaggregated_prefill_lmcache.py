@@ -5,7 +5,7 @@ with LMCache.
 We will launch 2 vllm instances (GPU 0 for prefill and GPU 1 for decode),
 and launch an additional LMCache server.
 KV cache is transferred in the following manner: 
-VLLM prefill node -> LMCache server -> VLLM decode node.
+vLLM prefill node -> LMCache server -> vLLM decode node.
 
 Note that `pip install lmcache` is needed to run this example.
 Learn more about LMCache in https://github.com/LMCache/LMCache.

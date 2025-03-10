@@ -9,7 +9,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 :selected:
 :sync: x86
 
-:::{include} x86.inc.md
+:::{include} cpu/x86.inc.md
 :start-after: "# Installation"
 :end-before: "## Requirements"
 :::
@@ -19,7 +19,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 ::::{tab-item} ARM AArch64
 :sync: arm
 
-:::{include} arm.inc.md
+:::{include} cpu/arm.inc.md
 :start-after: "# Installation"
 :end-before: "## Requirements"
 :::
@@ -29,7 +29,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 ::::{tab-item} Apple silicon
 :sync: apple
 
-:::{include} apple.inc.md
+:::{include} cpu/apple.inc.md
 :start-after: "# Installation"
 :end-before: "## Requirements"
 :::
@@ -48,7 +48,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 ::::{tab-item} Intel/AMD x86
 :sync: x86
 
-:::{include} x86.inc.md
+:::{include} cpu/x86.inc.md
 :start-after: "## Requirements"
 :end-before: "## Set up using Python"
 :::
@@ -58,7 +58,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 ::::{tab-item} ARM AArch64
 :sync: arm
 
-:::{include} arm.inc.md
+:::{include} cpu/arm.inc.md
 :start-after: "## Requirements"
 :end-before: "## Set up using Python"
 :::
@@ -68,7 +68,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 ::::{tab-item} Apple silicon
 :sync: apple
 
-:::{include} apple.inc.md
+:::{include} cpu/apple.inc.md
 :start-after: "## Requirements"
 :end-before: "## Set up using Python"
 :::
@@ -81,7 +81,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ### Create a new Python environment
 
-:::{include} ../python_env_setup.inc.md
+:::{include} python_env_setup.inc.md
 :::
 
 ### Pre-built wheels
@@ -96,7 +96,7 @@ Currently, there are no pre-built CPU wheels.
 ::::{tab-item} Intel/AMD x86
 :sync: x86
 
-:::{include} x86.inc.md
+:::{include} cpu/x86.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
 :::
@@ -106,7 +106,7 @@ Currently, there are no pre-built CPU wheels.
 ::::{tab-item} ARM AArch64
 :sync: arm
 
-:::{include} arm.inc.md
+:::{include} cpu/arm.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
 :::
@@ -116,7 +116,7 @@ Currently, there are no pre-built CPU wheels.
 ::::{tab-item} Apple silicon
 :sync: apple
 
-:::{include} apple.inc.md
+:::{include} cpu/apple.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
 :::

@@ -248,7 +248,7 @@ class OutputProcessor:
 
         ****************** NOTE FOR DEVELOPERS ******************
 
-        VLLM V1 minimizes the number of python loops over the full
+        vLLM V1 minimizes the number of python loops over the full
         batch to ensure system overheads are minimized. This is the 
         only function that should loop over EngineCoreOutputs.
 

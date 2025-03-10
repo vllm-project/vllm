@@ -51,7 +51,7 @@ def get_env_variable_attn_backend() -> Optional[_Backend]:
 # (default behavior if this variable is None)
 #
 # THIS SELECTION TAKES PRECEDENCE OVER THE
-# VLLM ATTENTION BACKEND ENVIRONMENT VARIABLE
+# VLLM_ATTENTION_BACKEND ENVIRONMENT VARIABLE
 forced_attn_backend: Optional[_Backend] = None
 
 

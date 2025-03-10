@@ -3572,11 +3572,11 @@ _current_vllm_config: Optional[VllmConfig] = None
 @contextmanager
 def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     """
-    Temporarily set the current VLLM config.
+    Temporarily set the current vLLM config.
     Used during model initialization.
-    We save the current VLLM config in a global variable,
+    We save the current vLLM config in a global variable,
     so that all modules can access it, e.g. custom ops
-    can access the VLLM config to determine how to dispatch.
+    can access the vLLM config to determine how to dispatch.
     """
     global _current_vllm_config
     old_vllm_config = _current_vllm_config
@@ -3611,7 +3611,7 @@ def get_current_vllm_config() -> VllmConfig:
         # in ci, usually when we test custom ops/modules directly,
         # we don't set the vllm config. In that case, we set a default
         # config.
-        logger.warning("Current VLLM config is not set.")
+        logger.warning("Current vLLM config is not set.")
         from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config

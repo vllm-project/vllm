@@ -62,7 +62,7 @@ For more information, check out the following:
 :caption: Getting Started
 :maxdepth: 1
 
-getting_started/installation/index
+getting_started/installation
 getting_started/quickstart
 getting_started/examples/examples_index
 getting_started/troubleshooting

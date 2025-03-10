@@ -8,20 +8,20 @@ vLLM supports the following hardware platforms:
 :maxdepth: 1
 :hidden:
 
-gpu/index
-cpu/index
-ai_accelerator/index
+installation/gpu
+installation/cpu
+installation/ai_accelerator
 :::
 
-- <project:gpu/index.md>
+- <project:installation/gpu.md>
   - NVIDIA CUDA
   - AMD ROCm
   - Intel XPU
-- <project:cpu/index.md>
+- <project:installation/cpu.md>
   - Intel/AMD x86
   - ARM AArch64
   - Apple silicon
-- <project:ai_accelerator/index.md>
+- <project:installation/ai_accelerator.md>
   - Google TPU
   - Intel Gaudi
   - AWS Neuron

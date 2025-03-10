@@ -4,6 +4,7 @@ import time
 from collections.abc import Mapping
 from typing import Optional, Union
 
+import vllm.platforms
 from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
@@ -93,10 +94,10 @@ class Processor:
     ) -> None:
         # Best of not yet supported.
         if params.best_of is not None and params.best_of > 1:
-            raise ValueError("VLLM V1 does not yet support best_of.")
+            raise ValueError("vLLM V1 does not yet support best_of.")
         # Logits processors not supported.
         if params.logits_processors:
-            raise ValueError("VLLM V1 does not support per request "
+            raise ValueError("vLLM V1 does not support per request "
                              "user provided logits processors.")
 
     def _validate_params(
@@ -133,6 +134,9 @@ class Processor:
         if self.vllm_config.speculative_config:
             raise ValueError("Structured output is not supported with "
                              "speculative decoding.")
+        if vllm.platforms.current_platform.is_tpu():
+            raise ValueError("Structured output is not supported on TPU.")
+
         validate_structured_output_request(params)
 
     def process_inputs(
