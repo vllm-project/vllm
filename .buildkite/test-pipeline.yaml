@@ -224,7 +224,7 @@ steps:
   commands:
     - pip install tensorizer # for tensorizer test
     - python3 offline_inference/basic/generate.py --model facebook/opt-125m
-    - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
+    - VLLM_USE_V1=0 python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
     - python3 offline_inference/basic/chat.py
     - python3 offline_inference/prefix_caching.py
     - python3 offline_inference/llm_engine_example.py

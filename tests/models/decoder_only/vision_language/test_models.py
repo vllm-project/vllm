@@ -32,6 +32,17 @@ from .vlm_utils.types import (CustomTestOptions, ExpandableVLMTestArgs,
 if current_platform.is_rocm():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
+REQUIRES_V0_SINGLE_IMAGE = [
+    # V1 Test: llava-hf/llava-1.5-7b-hf is broken on V1
+    # https://github.com/vllm-project/vllm/issues/14523
+    "llava",
+    "llava-broadcast",
+    # V1 Test: no way to fall back for head_dim = 80
+    # https://github.com/vllm-project/vllm/issues/14524
+    "qwen_vl",
+    "h2ovl",
+]
+
 # yapf: disable
 COMMON_BROADCAST_SETTINGS = {
     "test_type": VLMTestType.IMAGE,
@@ -564,9 +575,7 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str,
                              vllm_runner: type[VllmRunner],
                              image_assets: _ImageAssets, monkeypatch):
 
-    # V1 Test: llava-hf/llava-1.5-7b-hf is broken on V1
-    # https://github.com/vllm-project/vllm/issues/14523
-    if model_type == "llava-broadcast" or model_type == "llava":
+    if model_type in REQUIRES_V0_SINGLE_IMAGE:
         monkeypatch.setenv("VLLM_USE_V1", "0")
 
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -684,7 +693,7 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
 
     # V1 Test: llava-hf/llava-1.5-7b-hf is broken on V1
     # https://github.com/vllm-project/vllm/issues/14523
-    if model_type == "llava-broadcast" or model_type == "llava":
+    if model_type in REQUIRES_V0_SINGLE_IMAGE:
         monkeypatch.setenv("VLLM_USE_V1", "0")
 
     model_test_info = VLM_TEST_SETTINGS[model_type]

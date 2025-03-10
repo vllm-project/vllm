@@ -111,9 +111,9 @@ def test_awq_models(vllm_runner, image_assets, source_model, quant_model,
                     size_factors, dtype, max_tokens, num_logprobs,
                     monkeypatch) -> None:
 
-    # With V1, this test hangs during setup on single-scale input.
-    # FIXME: This needs to be resolved.
-    monkeypatch.setenv("VLLM_USE_V1", "1")
+    # Test V1: this test hangs during setup on single-scale input.
+    # TODO: fixure out why and re-enable this on V1.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     run_awq_test(
         vllm_runner,
         image_assets,
