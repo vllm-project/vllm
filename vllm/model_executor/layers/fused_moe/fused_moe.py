@@ -750,26 +750,16 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             assert triton.cdiv(B.shape[-1], block_k) == B_scale.shape[-1]
 
         if use_dg:
-            #print("GOT HERE1")
             inv_perm = torch.argsort(sorted_token_ids)
-            #print("GOT HERE2")
-            X = A.shape
-            Y = A_scale.shape
             if not mul_routed_weight:
                 A = A.view(A.shape[0], -1, A.shape[1]).repeat(1, top_k, 1).reshape(-1, A.shape[1])
                 A_scale = A_scale.view(A_scale.shape[0], -1,
                    A_scale.shape[1]).repeat(1, top_k, 1).reshape(-1, A_scale.shape[1])
 
-                #print(f"GOT HERE3 {A.dtype}, {A.shape}, {sorted_token_ids.shape}, {sorted_token_ids.max()}")
                 A = A.view(dtype=torch.uint8)[sorted_token_ids, ...].view(dtype=A.dtype)
-                #print(f"GOT HERE4 {A.shape}")
                 A_scale = A_scale[sorted_token_ids]
-                #print("GOT HERE5")
 
-            #assert X == A.shape
             assert A_scale.shape[-1] == A.shape[-1] // 128
-            #assert Y == A_scale.shape
-            #print("GOT HERE6")
 
     elif use_int8_w8a16 or use_int4_w4a16:
         assert B_scale is not None
@@ -788,10 +778,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                  A.shape[0] * top_k * config['BLOCK_SIZE_M'])
     grid = lambda META: (triton.cdiv(EM, META['BLOCK_SIZE_M']) * triton.cdiv(
         B.shape[1], META['BLOCK_SIZE_N']), )
-
-    p("fused a_q", A)
-    p("fused a_s", A_scale)
-    p("fused expert ids", expert_ids)
 
     if (use_int8_w8a16 or use_int4_w4a16) and \
             block_shape is not None and block_shape[1] > 0:
@@ -1525,20 +1511,22 @@ def fused_experts_impl(
     assert not use_dg or block_m == 128
 
     if use_dg:
-        #print("USE_DG!!!!!!!!!!!!!")
         # TODO: how to test chunks?
-        #num_chunks = 1
-        #CHUNK_SIZE = num_tokens
-        num_chunks = (num_tokens // CHUNK_SIZE) + 1
+        if False:
+            num_chunks = 1
+            CHUNK_SIZE = num_tokens
+        else:
+            num_chunks = (num_tokens // CHUNK_SIZE) + 1
+
         assert w1_scale is not None
         assert w2_scale is not None
+
         # TODO: do this offline
-        #print("GOT HERE A")
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
-        #print("GOT HERE B")
 
-        # BIG HACK
+
+        # TODO: this could be smarter
         sorted_token_ids, _, pad = (
             moe_align_block_size(topk_ids, block_m,
                                  global_num_experts, expert_map))
@@ -1548,24 +1536,16 @@ def fused_experts_impl(
         if pad_size > 0:
             sorted_token_ids = torch.nn.functional.pad(sorted_token_ids, (0, pad_size), "constant", num_tokens)
         sorted_token_ids = sorted_token_ids.clamp(max=num_tokens-1)
-
-        #new_M = sorted_token_ids.numel()//top_k_num
-        #print(f"fused2 m={M}, sort={sorted_token_ids.shape}, pad={pad}, hs={hidden_states.shape}, num_tok={num_tokens}")
-        #print(f"hs[sort]={torch.repeat_interleave(hidden_states, top_k_num, dim=0)[sorted_token_ids, ...].shape}")
         new_S = torch.repeat_interleave(hidden_states, top_k_num, dim=0)[sorted_token_ids, ...].shape
-        #new_top_k = new_S[0] // M
-        new_M = new_S[0] // top_k_num
-        #new_M = ((new_M + block_m - 1) // block_m) * block_m
-        #print(f"fused2 new_M_b={new_M} top_k = {top_k_num}, new_top_k={new_top_k}")
-        #top_k_num = new_top_k
+        new_M = new_S[0]
 
-        intermediate_cache1 = torch.empty((new_M, top_k_num, N),
+        intermediate_cache1 = torch.empty((new_M, N),
                                           device=hidden_states.device,
                                           dtype=hidden_states.dtype)
-        intermediate_cache2 = torch.empty((new_M * top_k_num, N // 2),
+        intermediate_cache2 = torch.empty((new_M, N // 2),
                                           device=hidden_states.device,
                                           dtype=hidden_states.dtype)
-        intermediate_cache3 = torch.empty((new_M, top_k_num, w2.shape[1]),
+        intermediate_cache3 = torch.empty((new_M, w2.shape[1]),
                                           device=hidden_states.device,
                                           dtype=hidden_states.dtype)
     else:
@@ -1619,12 +1599,8 @@ def fused_experts_impl(
             if pad_size > 0:
                 sorted_token_ids = torch.nn.functional.pad(sorted_token_ids, (0, pad_size), "constant", num_tokens)
 
-                sorted_token_ids = sorted_token_ids.clamp(max=num_tokens-1)
-                expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
-
-        p("fused topk", topk_ids)
-        p("fused sorted", sorted_token_ids)
-        p("fused topk_weight", topk_weights)
+            sorted_token_ids = sorted_token_ids.clamp(max=num_tokens-1)
+            expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
 
         invoke_fused_moe_kernel(curr_hidden_states,
                                 w1,
@@ -1646,8 +1622,6 @@ def fused_experts_impl(
                                 use_int4_w4a16=use_int4_w4a16,
                                 use_dg=use_dg,
                                 block_shape=block_shape)
-
-        p("fused inter_out", intermediate_cache1)
 
         if activation == "silu":
             torch.ops._C.silu_and_mul(intermediate_cache2,
@@ -1681,8 +1655,6 @@ def fused_experts_impl(
 
         ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
                     out_hidden_states[begin_chunk_idx:end_chunk_idx])
-
-        p("fused out", out_hidden_states)
 
     return out_hidden_states
 
