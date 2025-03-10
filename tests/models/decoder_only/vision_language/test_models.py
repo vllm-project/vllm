@@ -44,6 +44,12 @@ REQUIRES_V0_MODELS = [
     "blip2",
 ]
 
+REQUIRES_V0_MODELS_VIDEO = [
+    # V1 Test: qwen2-vl is broken on V1 for video
+    # https://github.com/vllm-project/vllm/issues/14528
+    "qwen2_vl"
+]
+
 # yapf: disable
 COMMON_BROADCAST_SETTINGS = {
     "test_type": VLMTestType.IMAGE,
@@ -575,7 +581,10 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str,
                              hf_runner: type[HfRunner],
                              vllm_runner: type[VllmRunner],
                              image_assets: _ImageAssets, monkeypatch):
-
+    if model_type == "glm4v":
+        pytest.skip(
+            # https://github.com/vllm-project/vllm/issues/14529
+            reason="This is currently broken. Skipping for now.")
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -648,7 +657,8 @@ def test_image_embedding_models(model_type: str,
 def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
                       hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
                       video_assets: _VideoAssets, monkeypatch):
-    if model_type in REQUIRES_V0_MODELS:
+    if (model_type in REQUIRES_V0_MODELS
+            or model_type in REQUIRES_V0_MODELS_VIDEO):
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_video_test(
@@ -699,6 +709,10 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    hf_runner: type[HfRunner],
                                    vllm_runner: type[VllmRunner],
                                    image_assets: _ImageAssets, monkeypatch):
+    if model_type == "glm4v":
+        pytest.skip(
+            # https://github.com/vllm-project/vllm/issues/14529
+            reason="This is currently broken. Skipping for now.")
     if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
@@ -774,7 +788,8 @@ def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
                             video_assets: _VideoAssets, monkeypatch):
-    if model_type in REQUIRES_V0_MODELS:
+    if (model_type in REQUIRES_V0_MODELS
+            or model_type in REQUIRES_V0_MODELS_VIDEO):
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_video_test(
