@@ -110,6 +110,8 @@ class Platform:
     # compilation strategy.
     simple_compile_backend: str = "inductor"
 
+    communicate_backend: str
+
     supported_quantization: list[str] = []
 
     def is_cuda(self) -> bool:
@@ -331,6 +333,15 @@ class Platform:
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Usage of this function is discouraged in favor of device. In most cases
+        it’s better to use `vllm.current_platform.device_control_env_var` 
+        environmental variable.
+        """
+        raise NotImplementedError
+
+    @classmethod
     def use_all_gather(cls) -> bool:
         """
         Whether to use allgather in LogitsProcessor to gather the logits.
@@ -342,6 +353,13 @@ class Platform:
         return (envs.VLLM_USE_V1
                 or parallel_config.distributed_executor_backend
                 == "external_launcher")
+
+    @classmethod
+    def device_count(cls) -> int:
+        """
+        Return the number of devices available.
+        """
+        raise NotImplementedError
 
 
 class UnspecifiedPlatform(Platform):
