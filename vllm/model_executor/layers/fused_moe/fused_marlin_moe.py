@@ -26,6 +26,8 @@ def single_marlin_moe(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
     g_idx: Optional[torch.Tensor] = None,
     sort_indices: Optional[torch.Tensor] = None,
     w_zeros: Optional[torch.Tensor] = None,
@@ -83,6 +85,8 @@ def single_marlin_moe(
 
     block_size_m = config['BLOCK_SIZE_M']
 
+    if global_num_experts == -1:
+        global_num_experts = E
     sorted_token_ids, expert_ids, num_tokens_post_padded = \
         moe_align_block_size(topk_ids, block_size_m, E)
 
@@ -98,31 +102,37 @@ def single_marlin_moe(
                                 requires_grad=False)
 
     scalar_type = get_scalar_type(num_bits, w_zeros is not None)
+    intermediate_cache = torch.empty(
+        (M * topk_ids.shape[1], N),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
 
-    intermediate_cache = ops.moe_wna16_marlin_gemm(hidden_states,
-                                                   None,
-                                                   w,
-                                                   scales,
-                                                   w_zeros,
-                                                   g_idx,
-                                                   sort_indices,
-                                                   workspace,
-                                                   sorted_token_ids,
-                                                   expert_ids,
-                                                   num_tokens_post_padded,
-                                                   topk_weights,
-                                                   moe_block_size=block_size_m,
-                                                   top_k=topk,
-                                                   mul_topk_weights=False,
-                                                   b_q_type=scalar_type,
-                                                   size_m=M,
-                                                   size_n=2 * N,
-                                                   size_k=K,
-                                                   is_k_full=is_k_full,
-                                                   use_atomic_add=False,
-                                                   use_fp32_reduce=True,
-                                                   is_zp_float=False).view(
-                                                       -1, topk, 2 * N)
+    ops.moe_wna16_marlin_gemm(hidden_states,
+                              intermediate_cache,
+                              w,
+                              scales,
+                              w_zeros,
+                              g_idx,
+                              sort_indices,
+                              workspace,
+                              sorted_token_ids,
+                              expert_ids,
+                              num_tokens_post_padded,
+                              topk_weights,
+                              moe_block_size=block_size_m,
+                              top_k=topk,
+                              mul_topk_weights=False,
+                              is_ep=expert_map is not None,
+                              b_q_type=scalar_type,
+                              size_m=M,
+                              size_n=N,
+                              size_k=K,
+                              is_k_full=is_k_full,
+                              use_atomic_add=False,
+                              use_fp32_reduce=True,
+                              is_zp_float=False)
+    intermediate_cache = intermediate_cache.view(-1, topk, N)
 
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
@@ -134,9 +144,12 @@ def single_marlin_moe_fake(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
     g_idx: Optional[torch.Tensor] = None,
     sort_indices: Optional[torch.Tensor] = None,
     w_zeros: Optional[torch.Tensor] = None,
+    workspace: Optional[torch.Tensor] = None,
     num_bits: int = 8,
     is_k_full: bool = True,
 ) -> torch.Tensor:
@@ -328,25 +341,26 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
                      out=output)
 
 
-def fused_marlin_moe_fake(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    gating_output: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    g_idx1: Optional[torch.Tensor] = None,
-    g_idx2: Optional[torch.Tensor] = None,
-    sort_indices1: Optional[torch.Tensor] = None,
-    sort_indices2: Optional[torch.Tensor] = None,
-    w1_zeros: Optional[torch.Tensor] = None,
-    w2_zeros: Optional[torch.Tensor] = None,
-    workspace: Optional[torch.Tensor] = None,
-    num_bits: int = 8,
-    is_k_full: bool = True,
-) -> torch.Tensor:
+def fused_marlin_moe_fake(hidden_states: torch.Tensor,
+                          w1: torch.Tensor,
+                          w2: torch.Tensor,
+                          w1_scale: torch.Tensor,
+                          w2_scale: torch.Tensor,
+                          gating_output: torch.Tensor,
+                          topk_weights: torch.Tensor,
+                          topk_ids: torch.Tensor,
+                          global_num_experts: int = -1,
+                          expert_map: Optional[torch.Tensor] = None,
+                          g_idx1: Optional[torch.Tensor] = None,
+                          g_idx2: Optional[torch.Tensor] = None,
+                          sort_indices1: Optional[torch.Tensor] = None,
+                          sort_indices2: Optional[torch.Tensor] = None,
+                          w1_zeros: Optional[torch.Tensor] = None,
+                          w2_zeros: Optional[torch.Tensor] = None,
+                          workspace: Optional[torch.Tensor] = None,
+                          num_bits: int = 8,
+                          is_k_full: bool = True,
+                          inplace: bool = False) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
 
