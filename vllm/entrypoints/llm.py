@@ -169,7 +169,7 @@ class LLM:
         quantization: Optional[str] = None,
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
-        seed: int = 0,
+        seed: Optional[int] = None,
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
@@ -1394,7 +1394,9 @@ class LLM:
                             pbar.postfix = (
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
-                        pbar.update(1)
+                            pbar.update(len(output.outputs))
+                        else:
+                            pbar.update(1)
 
         if use_tqdm:
             pbar.close()
