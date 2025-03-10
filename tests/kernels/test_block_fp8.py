@@ -511,12 +511,7 @@ def iota(shape: Tuple[int, ...], dim: int = 0, **kwargs) -> torch.Tensor:
 # topk 6 broken/slow
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
-    #itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
-    itertools.product(M_moe_dg, N_moe, K_moe, E, [1, 2, 4], BLOCK_SIZE, DTYPES, SEEDS)) # all work
-    #itertools.product([512], [128], [256], [2], [2], BLOCK_SIZE, DTYPES, SEEDS))
-    #itertools.product([128], [128], [256], [8], [6], BLOCK_SIZE, DTYPES, SEEDS))
-    #itertools.product([128], [128], [256], [2], [2], BLOCK_SIZE, DTYPES, SEEDS))
-    #itertools.product([512], [128], [256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS))
+    itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed):
@@ -526,7 +521,6 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
         pytest.skip(f"Skipping test; invalid size m={M}, n={N}, k={K}, topk={topk}, E={E}")
 
     pp(f"\nTEST M={M}, N={N}, K={K}, E={E}, topk={topk}, block_size={block_size}, dtype={dtype}")
-    #print(f"\n\n\nTEST M={M}, N={N}, K={K}, E={E}, topk={topk}, block_size={block_size}, dtype={dtype}")
 
     torch.set_printoptions(profile="full")
 
