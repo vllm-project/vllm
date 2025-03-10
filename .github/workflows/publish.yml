@@ -39,7 +39,7 @@ jobs:
             const script = require('.github/workflows/scripts/create_release.js')
             await script(github, context, core)
 
-  # NOTE(simon): No longer build wheel using Github Actions. See buildkite's release workflow. 
+  # NOTE(simon): No longer build wheel using GitHub Actions. See buildkite's release workflow. 
   # wheel:
   #   name: Build Wheel
   #   runs-on: ${{ matrix.os }}
