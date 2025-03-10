@@ -316,10 +316,8 @@ def main(args: argparse.Namespace):
         raise ValueError(f"Unknown backend: {args.backend}")
     total_num_tokens = sum(request.prompt_len + request.expected_output_len
                            for request in requests)
-    total_num_tokens *= args.n
     total_output_tokens = sum(request.expected_output_len
                               for request in requests)
-    total_output_tokens *= args.n
     if is_multi_modal:
         print("\033[91mWARNING\033[0m: Multi-modal request detected. The "
               "following metrics are not accurate because image tokens are not"
