@@ -299,7 +299,7 @@ if triton.__version__ >= "2.1.0":
                 BLOCK_DMODEL: tl.constexpr, BLOCK_DMODEL_PADDED: tl.constexpr,
                 BLOCK_SIZE: tl.constexpr, BLOCK_N: tl.constexpr,
                 SLIDING_WINDOW: tl.constexpr, num_unroll_cache: tl.constexpr,
-                num_unroll_request: tl.constexpr):
+                num_unroll_request: tl.constexpr, SKIP_DECODE: tl.constexpr):
 
             cur_batch = tl.program_id(0)
             cur_head = tl.program_id(1)
@@ -313,6 +313,9 @@ if triton.__version__ >= "2.1.0":
             cur_batch_query_len = (cur_batch_in_all_stop_index -
                                    cur_batch_in_all_start_index)
             cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
+
+            if SKIP_DECODE and cur_batch_query_len == 1:
+                return
 
             # start position inside of the query
             # generally, N goes over kv, while M goes over query_len
@@ -1121,6 +1124,7 @@ if triton.__version__ >= "2.1.0":
                 BLOCK_DMODEL=Lk,
                 BLOCK_DMODEL_PADDED=Lk_padded,
                 SLIDING_WINDOW=sliding_window,
+                SKIP_DECODE=skip_decode,
             )
             return
 
