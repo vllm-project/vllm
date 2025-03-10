@@ -18,6 +18,7 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
+padding_size = 128 if envs.VLLM_ROCM_MOE_PADDING else 0
 
 
 @triton.jit
@@ -718,6 +719,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             block_shape is not None and block_shape[1] > 0:
         assert B_scale is not None and B_scale.ndim == 3
         assert B_zp is None or B_zp.ndim == 3
+        assert padding_size == 0, "MoE padding is not supported " \
+              "with GPTQ/AWQ quantization"
 
         fused_moe_kernel_gptq_awq[grid](
             A,
@@ -769,7 +772,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             expert_ids,
             num_tokens_post_padded,
             B.shape[1],
-            A.shape[1],
+            B.shape[2] - padding_size,
             EM,
             topk_ids.numel(),
             A.stride(0),
@@ -1205,7 +1208,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         assert hidden_states.shape[1] // 2 == w1.shape[
             2], "Hidden size mismatch"
     else:
-        assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
+        assert hidden_states.shape[
+            1] == w1.shape[2] - padding_size, "Hidden size mismatch"
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
@@ -1232,7 +1236,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
         w1.shape,
-        w2.shape,
+        (w2.shape[0], w2.shape[1], w2.shape[2] - padding_size),
         top_k_num,
         config_dtype,
         block_shape=block_shape,

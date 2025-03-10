@@ -5,8 +5,10 @@ from enum import Enum
 from typing import Callable, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -97,6 +99,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+
+        if envs.VLLM_ROCM_MOE_PADDING:
+            layer.w13_weight = torch.nn.Parameter(F.pad(
+                layer.w13_weight.data, (0, 128), "constant", 0),
+                                                  requires_grad=False)
+            torch.cuda.empty_cache()
+            layer.w2_weight = torch.nn.Parameter(F.pad(layer.w2_weight.data,
+                                                       (0, 128), "constant",
+                                                       0),
+                                                 requires_grad=False)
+            torch.cuda.empty_cache()
 
         if current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
