@@ -235,7 +235,7 @@ steps:
     - python3 offline_inference/basic/classify.py
     - python3 offline_inference/basic/embed.py
     - python3 offline_inference/basic/score.py
-    - python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
+    - VLLM_USE_V1=0 python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Prefix Caching Test # 9min
   mirror_hardwares: [amd]
@@ -380,7 +380,8 @@ steps:
   commands:
     - pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
-    - pytest -v -s models/test_initialization.py
+    # V1 Test: https://github.com/vllm-project/vllm/issues/14531
+    - VLLM_USE_V1=0 pytest -v -s models/test_initialization.py
 
 - label: Language Models Test (Standard) # 32min
   #mirror_hardwares: [amd]
