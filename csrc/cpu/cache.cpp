@@ -98,6 +98,7 @@ void concat_and_cache_mla_cpu_impl(
     const int pe_dim,                          //
     const int block_size                       //
 ) {
+#pragma omp parallel for
   for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
     const int64_t slot_idx = slot_mapping[token_idx];
     // NOTE: slot_idx can be -1 if the token is padded
