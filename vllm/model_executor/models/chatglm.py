@@ -2,6 +2,7 @@
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""
+import json
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -463,7 +464,7 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP):
                 "The configuration of this model indicates that it supports "
                 "vision inputs, but you instantiated the text-only version "
                 "of this model. Please use the vision model by setting "
-                f"`--hf-overrides {hf_overrides!r}`")
+                f"`--hf-overrides '{json.dumps(hf_overrides)}'`")
 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
