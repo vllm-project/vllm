@@ -175,8 +175,10 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalEncDecInputs:
-        mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
+        mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
+                                  return_mm_hashes)
 
         # Check that the number of image tokens in the decoder prompt matches
         # the number of images provided in mm_data
@@ -796,29 +798,40 @@ class MllamaTextCrossAttention(nn.Module):
         self.config = config
         self.pipeline_parallel_rank = get_pp_group().rank_in_group
         self.tensor_parallel_size = get_tp_group().world_size
-        self.num_heads = self.config.num_attention_heads
+        self.num_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
+
         self.num_local_heads = self.num_heads // self.tensor_parallel_size
-        self.num_key_value_heads = self.config.num_key_value_heads
         self.num_local_key_value_heads = \
             self.num_key_value_heads // self.tensor_parallel_size
-        self.dropout = config.dropout
         self.hidden_size = config.hidden_size
         self.head_dim = config.hidden_size // self.num_heads
+        self.num_key_value_heads = config.num_key_value_heads
+
         self.layer_idx = layer_idx
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.q_local_size = self.num_local_heads * self.head_dim
         self.kv_local_size = self.num_local_key_value_heads * self.head_dim
 
-        # TODO: change to Q/KV separate linear after #7448 is merged
-        self.qkv_proj = QKVParallelLinear(
+        # TODO(Isotr0py): Use QKVCrossParallelLinear when it supports
+        # quantization
+        self.q_proj = ColumnParallelLinear(
+            input_size=self.hidden_size,
+            output_size=self.num_heads * self.head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.q_proj",
+        )
+        self.kv_proj = QKVParallelLinear(
             self.hidden_size,
             self.head_dim,
-            self.num_heads,
-            self.num_key_value_heads,
+            total_num_heads=0,
+            total_num_kv_heads=self.num_key_value_heads,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+
         self.o_proj = RowParallelLinear(
             self.num_heads * self.head_dim,
             self.hidden_size,
@@ -849,21 +862,16 @@ class MllamaTextCrossAttention(nn.Module):
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        qkv_dec, _ = self.qkv_proj(hidden_states)
-        q, _, _ = qkv_dec.split(
-            [self.q_local_size, self.kv_local_size, self.kv_local_size],
-            dim=-1)
-        if cross_attention_states is None:
-            k = None
-            v = None
-        else:
-            qkv_enc, _ = self.qkv_proj(cross_attention_states)
-            _, k, v = qkv_enc.split(
-                [self.q_local_size, self.kv_local_size, self.kv_local_size],
-                dim=-1)
+        q, _ = self.q_proj(hidden_states)
+        if cross_attention_states is not None:
+            kv, _ = self.kv_proj(cross_attention_states)
+            k, v = kv.split([self.kv_local_size, self.kv_local_size], dim=-1)
             k = k.view(-1, self.num_local_key_value_heads, self.head_dim)
             v = v.view(-1, self.num_local_key_value_heads, self.head_dim)
             k = self.k_norm(k)
+        else:
+            k = v = None
+
         q = q.view(-1, self.num_local_heads, self.head_dim)
         q = self.q_norm(q)
 
@@ -887,6 +895,7 @@ class MllamaTextCrossAttention(nn.Module):
         kv_cache = self.attn.kv_cache[self.pipeline_parallel_rank]
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
         # Skip writing kv-cache for the initial profiling run.
+        # TODO (NickLucche) replace with custom attn bias and use standard attn
         if len(kv_cache.shape) > 1:
             i = torch.ones(1, dtype=torch.float32)
             if self.attn.backend in (_Backend.FLASH_ATTN,
@@ -1031,7 +1040,6 @@ class MllamaTextModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size + 8,
                                                    config.hidden_size)
@@ -1153,8 +1161,13 @@ class MllamaForCausalLM(nn.Module):
 class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                      SupportsV0Only):
     packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"]
+        "self_attn.qkv_proj": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+        ],
+        "cross_attn.kv_proj": ["cross_attn.k_proj", "cross_attn.v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1424,9 +1437,11 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
+            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
+            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
+            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
+            (".cross_attn.kv_proj", ".cross_attn.k_proj", "k"),
+            (".cross_attn.kv_proj", ".cross_attn.v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]

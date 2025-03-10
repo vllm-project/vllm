@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 import os
 from collections.abc import AsyncGenerator, Mapping
 from typing import Optional, Union
@@ -57,10 +58,9 @@ class AsyncLLM(EngineClient):
         self.log_stats = log_stats
         self.stat_loggers: list[StatLoggerBase] = []
         if self.log_stats:
-            self.stat_loggers.extend([
-                LoggingStatLogger(),
-                PrometheusStatLogger(vllm_config),
-            ])
+            if logger.isEnabledFor(logging.INFO):
+                self.stat_loggers.append(LoggingStatLogger())
+            self.stat_loggers.append(PrometheusStatLogger(vllm_config))
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -72,9 +72,7 @@ class AsyncLLM(EngineClient):
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
-            model_config=vllm_config.model_config,
-            cache_config=vllm_config.cache_config,
-            lora_config=vllm_config.lora_config,
+            vllm_config=vllm_config,
             tokenizer=self.tokenizer,
             input_registry=input_registry,
         )
@@ -194,8 +192,8 @@ class AsyncLLM(EngineClient):
             * 3) Adding the Request to the Detokenizer.
             * 4) Adding the Request to the EngineCore (separate process).
 
-        A separate output_handler loop runs in a background AsyncIO task, 
-        pulling outputs from EngineCore and putting them into the 
+        A separate output_handler loop runs in a background AsyncIO task,
+        pulling outputs from EngineCore and putting them into the
         per-request AsyncStream.
 
         The caller of generate() iterates the returned AsyncGenerator,
@@ -255,13 +253,14 @@ class AsyncLLM(EngineClient):
             while True:
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
+                num_outputs = len(outputs.outputs)
 
-                iteration_stats = IterationStats() if self.log_stats else None
+                iteration_stats = IterationStats() if (
+                    self.log_stats and num_outputs) else None
 
                 # Split outputs into chunks of at most
                 # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                 # event loop for too long.
-                num_outputs = len(outputs.outputs)
                 if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
                     slices = (outputs.outputs, )
                 else:
@@ -287,7 +286,7 @@ class AsyncLLM(EngineClient):
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once Prometheus overhead is non-trivial.
-                self._log_stats(
+                self._record_stats(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
                 )
@@ -306,7 +305,7 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Aborted request %s.", request_id)
 
-    def _log_stats(
+    def _record_stats(
         self,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
@@ -315,10 +314,9 @@ class AsyncLLM(EngineClient):
             return
 
         assert scheduler_stats is not None
-        assert iteration_stats is not None
-        for logger in self.stat_loggers:
-            logger.log(scheduler_stats=scheduler_stats,
-                       iteration_stats=iteration_stats)
+        for stat_logger in self.stat_loggers:
+            stat_logger.record(scheduler_stats=scheduler_stats,
+                               iteration_stats=iteration_stats)
 
     def encode(
         self,
@@ -354,7 +352,8 @@ class AsyncLLM(EngineClient):
         scheduler_outputs=None,
         model_output=None,
     ) -> None:
-        logger.debug("Called do_log_stats.")
+        for stat_logger in self.stat_loggers:
+            stat_logger.log()
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")
