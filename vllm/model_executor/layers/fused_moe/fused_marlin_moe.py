@@ -151,28 +151,26 @@ direct_register_custom_op(
 )
 
 
-def fused_marlin_moe(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    gating_output: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    g_idx1: Optional[torch.Tensor] = None,
-    g_idx2: Optional[torch.Tensor] = None,
-    sort_indices1: Optional[torch.Tensor] = None,
-    sort_indices2: Optional[torch.Tensor] = None,
-    w1_zeros: Optional[torch.Tensor] = None,
-    w2_zeros: Optional[torch.Tensor] = None,
-    workspace: Optional[torch.Tensor] = None,
-    num_bits: int = 8,
-    is_k_full: bool = True,
-    inplace: bool = False
-) -> torch.Tensor:
+def fused_marlin_moe(hidden_states: torch.Tensor,
+                     w1: torch.Tensor,
+                     w2: torch.Tensor,
+                     w1_scale: torch.Tensor,
+                     w2_scale: torch.Tensor,
+                     gating_output: torch.Tensor,
+                     topk_weights: torch.Tensor,
+                     topk_ids: torch.Tensor,
+                     global_num_experts: int = -1,
+                     expert_map: Optional[torch.Tensor] = None,
+                     g_idx1: Optional[torch.Tensor] = None,
+                     g_idx2: Optional[torch.Tensor] = None,
+                     sort_indices1: Optional[torch.Tensor] = None,
+                     sort_indices2: Optional[torch.Tensor] = None,
+                     w1_zeros: Optional[torch.Tensor] = None,
+                     w2_zeros: Optional[torch.Tensor] = None,
+                     workspace: Optional[torch.Tensor] = None,
+                     num_bits: int = 8,
+                     is_k_full: bool = True,
+                     inplace: bool = False) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
     weights, w1 and w2, and top-k gating mechanism.
@@ -257,7 +255,7 @@ def fused_marlin_moe(
         dtype=hidden_states.dtype,
     )
     intermediate_cache13 = torch.empty(
-        (M * topk_ids.shape[1] * max(2 * N, K),),
+        (M * topk_ids.shape[1] * max(2 * N, K), ),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )

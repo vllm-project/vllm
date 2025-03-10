@@ -1124,7 +1124,8 @@ def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
         input, output, b_qweight, b_scales, b_qzeros, g_idx, perm, workspace,
         sorted_token_ids, expert_ids, num_tokens_past_padded, topk_weights,
         moe_block_size, top_k, mul_topk_weights, is_ep, b_q_type.id, size_m,
-        size_n, size_k, is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float)
+        size_n, size_k, is_k_full, use_atomic_add, use_fp32_reduce,
+        is_zp_float)
 
 
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
