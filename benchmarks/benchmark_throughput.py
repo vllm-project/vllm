@@ -348,6 +348,7 @@ if __name__ == "__main__":
     parser.add_argument("--dataset-name",
                         type=str,
                         choices=["sharegpt", "random", "sonnet", "burstgpt"],
+                        help="Name of the dataset to benchmark on.",
                         default="sharegpt")
     parser.add_argument(
         "--dataset",
