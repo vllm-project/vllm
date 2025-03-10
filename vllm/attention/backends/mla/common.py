@@ -1327,21 +1327,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                                                [0, q.shape[-1] - v.shape[-1]],
                                                value=0)
 
-            if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN:
-                attn_output, attn_softmax_lse = self.triton_fa_func(
-                    q,
-                    k,
-                    v_padded,
-                    None,
-                    prefill_metadata.query_start_loc,
-                    prefill_metadata.context_chunk_cu_seq_lens[i],
-                    prefill_metadata.max_query_len,
-                    prefill_metadata.context_chunk_max_seq_lens[i],
-                    False,  # causal
-                    self.scale,
-                    None,  # attn_mask is None unless applying ALiBi mask
-                )
-            elif is_vllm_fa:
+            if is_vllm_fa:
                 attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
                     q=q,
                     k=k,
