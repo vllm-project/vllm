@@ -74,6 +74,13 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = False
+    VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_LINEAR: bool = True
+    VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = True
+    VLLM_ROCM_USE_AITER_RMSNORM: bool = True
+    VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
+    VLLM_ROCM_USE_AITER_W8A8_BLOCK_GEMM: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -518,7 +525,55 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 
-    # Pad the fp8 weights to 256 bytes for ROCm
+    # use aiter ops unless specifically disabled.
+    # Acts as a parent switch to enable the rest of the other operations.
+    "VLLM_ROCM_USE_AITER":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1")),
+
+    # use aiter moe op if aiter ops are enabled.
+    "VLLM_ROCM_USE_AITER_MOE":
+    lambda:
+    (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+     ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
+     ("true", "1")),
+
+    # use aiter block scaled moe op if aiter ops are enabled.
+    # by default this is disabled.
+    "VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE":
+    lambda:
+    (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+     ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE",
+                                 "false").lower() in ("true", "1")),
+
+    # use aiter linear op if aiter ops are enabled.
+    "VLLM_ROCM_USE_AITER_LINEAR":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True"
+                                         ).lower() in ("true", "1")),
+
+    # use aiter rms norm op if aiter ops are enabled.
+    "VLLM_ROCM_USE_AITER_RMSNORM":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True"
+                                         ).lower() in ("true", "1")),
+
+    # use aiter paged attention if aiter ops are enabled.
+    # this is disabled by default.
+    "VLLM_ROCM_USE_AITER_PAGED_ATTN":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN",
+                                         "False").lower() in ("true", "1")),
+
+    # use aiter w8a8 block gemm kernel if aiter ops are enabled.
+    # this is disabled by default.
+    "VLLM_ROCM_USE_AITER_W8A8_BLOCK_GEMM":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_W8A8_BLOCK_GEMM",
+                                         "False").lower() in ("true", "1")),
+
+    # Pad the fp8 weights to 256 bytes for ROCm.
+    # Used only in Fp8LinearMethod
     "VLLM_ROCM_FP8_PADDING":
     lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Divisor for dynamic key scale factor calculation for FP8 KV Cache

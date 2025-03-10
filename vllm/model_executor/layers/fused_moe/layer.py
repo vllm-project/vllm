@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# isort: skip_file
 
 from abc import abstractmethod
 from enum import Enum
@@ -30,6 +31,7 @@ if current_platform.is_tpu():
     from .moe_torch_iterative import fused_moe as fused_moe_pallas
 else:
     fused_moe_pallas = None  # type: ignore
+
 logger = init_logger(__name__)
 
 
@@ -97,6 +99,21 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
+
+        if current_platform.is_rocm_aiter_moe_enabled():
+            # reshaping weights is required for aiter moe kernel.
+            from aiter.ops.shuffle import (shuffle_weight as
+                                           rocm_aiter_shuffle_weight)
+
+            shuffled_w13_weight = rocm_aiter_shuffle_weight(
+                layer.w13_weight.data)
+            layer.w13_weight = torch.nn.Parameter(shuffled_w13_weight,
+                                                  requires_grad=False)
+
+            shuffled_w2_weight = rocm_aiter_shuffle_weight(
+                layer.w2_weight.data)
+            layer.w2_weight = torch.nn.Parameter(shuffled_w2_weight,
+                                                 requires_grad=False)
 
         if current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
