@@ -452,7 +452,8 @@ class EngineArgs:
             'for MoE layers.')
         parser.add_argument(
             '--expert-map-path',
-            action=str,
+            type=str,
+            default=EngineArgs.expert_map_path,
             help='Path to expert map file.')
         parser.add_argument(
             '--max-parallel-loading-workers',

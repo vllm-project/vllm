@@ -649,7 +649,8 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
 
-        prior_expert_map = torch.load(config.expert_map_path)
+        prior_expert_map = torch.load(vllm_config.parallel_config.expert_map_path, map_location=torch.device('cpu'))
+        # prior_expert_map = torch.load("/data/zzd/EPLB/expert_map_lite_en.pth", map_location=torch.device('cpu'))
         self.model = DeepseekV2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"),
                                      prior_expert_map=prior_expert_map)

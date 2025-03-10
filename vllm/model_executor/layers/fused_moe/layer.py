@@ -311,7 +311,7 @@ def get_expert_map(
         ranks, expert_nums = layer_prior_expert_map.shape
         assert ep_size == ranks, "The size of the expert map does not match the number of experts."
         assert global_num_experts == expert_nums, "The size of the expert map does not match the number of experts."
-        expert_map = layer_prior_expert_map[ep_rank]
+        expert_map = layer_prior_expert_map[ep_rank].to(torch.cuda.current_device())
         local_num_experts = torch.sum(torch.ne(expert_map, -1)).item()
         return (local_num_experts, expert_map)
     else:
