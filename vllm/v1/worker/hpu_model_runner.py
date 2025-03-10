@@ -584,12 +584,9 @@ class HpuModelAdapter:
 
 
 def _maybe_wrap_in_hpu_graph(*args, **kwargs):
-    return HpuModelAdapter(*args, **kwargs)
-
-
-#    return htorch.hpu.wrap_in_hpu_graph(
-#        HpuModelAdapter(*args, **kwargs), disable_tensor_cache=True
-#    ) if htorch.utils.internal.is_lazy() else HpuModelAdapter(*args, **kwargs)
+    return htorch.hpu.wrap_in_hpu_graph(
+        HpuModelAdapter(*args, **kwargs), disable_tensor_cache=True
+    ) if htorch.utils.internal.is_lazy() else HpuModelAdapter(*args, **kwargs)
 
 
 def subtuple(obj: object,
@@ -1402,9 +1399,7 @@ class HPUModelRunner:
                                                   dim=1,
                                                   index=(index //
                                                          self.block_size))
-        # NOTE(kzawora): the "-1" is what causes this entire thing to work
-        # properly and have good accuracy - why? beats me...
-        block_offsets = (padded_index - 1) % self.block_size
+        block_offsets = padded_index % self.block_size
         slot_mapping = block_number * self.block_size + block_offsets
         #import pdb; pdb.set_trace()
         # Set an out of range value for the padding tokens so that they
@@ -1415,8 +1410,12 @@ class HPUModelRunner:
         slot_mapping[num_decodes:].apply_(lambda _, ds=dummy_slots: next(ds))
         # BLOCK_TABLE [batch, max_num_blocks_per_req]
         context_lens = self.input_batch.num_computed_tokens_cpu[:num_decodes]
-        num_blocks = np.ceil(context_lens / self.block_size).astype(
-            np.int32).tolist()
+
+        # NOTE(kzawora): the +1 is what causes this entire thing to work,
+        # as in the paged attention, we don't fetch just the context from cache,
+        # but also kvs for the current token
+        num_blocks = np.ceil(
+            (context_lens + 1) / self.block_size).astype(np.int32).tolist()
         block_tables_list = []
         for i, n in enumerate(num_blocks):
             seq_block_table = block_table_cpu_tensor[i, :n].tolist()
