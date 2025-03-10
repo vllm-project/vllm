@@ -1382,9 +1382,9 @@ class LLM:
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
-                        n = len(output.outputs)
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
+                            n = len(output.outputs)
                             assert output.prompt_token_ids is not None
                             total_in_toks += len(output.prompt_token_ids) * n
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
@@ -1395,7 +1395,9 @@ class LLM:
                             pbar.postfix = (
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
-                        pbar.update(n)
+                            pbar.update(n)
+                        else:
+                            pbar.update(1)
 
         if use_tqdm:
             pbar.close()
