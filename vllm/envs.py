@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
+    VLLM_USE_DEEP_GEMM: bool = False
 
 
 def get_default_cache_root():
@@ -630,6 +631,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
+
+    # Allow use of DeepGemm kernels for fused moe ops.
+    "VLLM_USE_DEEP_GEMM":
+    lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
 }
 
 # end-env-vars-definition
