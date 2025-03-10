@@ -36,6 +36,7 @@ class RequestState:
         prompt_token_ids: list[int],
         logprobs_processor: LogprobsProcessor,
         detokenizer: IncrementalDetokenizer,
+        max_tokens_param: Optional[int],
         arrival_time: float,
         queue: Optional[asyncio.Queue[RequestOutput]],
         log_stats: bool,
@@ -50,6 +51,7 @@ class RequestState:
         self.prompt_len = len(prompt_token_ids)
         self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
+        self.max_tokens_param = max_tokens_param
         self.is_prefilling = True
         self.queue = queue
 
@@ -66,6 +68,8 @@ class RequestState:
         queue: Optional[asyncio.Queue[RequestOutput]],
         log_stats: bool,
     ) -> "RequestState":
+        if not request.sampling_params.detokenize:
+            tokenizer = None
         return cls(
             request_id=request.request_id,
             parent_req=parent_req,
@@ -83,6 +87,8 @@ class RequestState:
                 tokenizer=tokenizer,
                 request=request,
             ),
+            max_tokens_param=(request.sampling_params.max_tokens if
+                              request.sampling_params is not None else None),
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
@@ -198,6 +204,8 @@ class OutputProcessor:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
                 self.lora_states.abort_request(req_state)
+                if req_state.parent_req is not None:
+                    req_state.parent_req.finish_child_request(request_id)
 
     def add_request(
         self,
@@ -310,6 +318,8 @@ class OutputProcessor:
                     # If req not finished in EngineCore, but Detokenizer
                     # detected stop string, abort needed in EngineCore.
                     reqs_to_abort.append(req_id)
+                if req_state.parent_req is not None:
+                    req_state.parent_req.finish_child_request(req_id)
 
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,
@@ -350,5 +360,10 @@ class OutputProcessor:
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
             num_prompt_tokens=len(req_state.prompt_token_ids),
+            max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats)
         self.lora_states.finish_request(req_state)
+
+        ParentRequest.observe_finished_request(
+            req_state.parent_req, iteration_stats,
+            req_state.stats.num_generation_tokens)

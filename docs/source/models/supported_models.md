@@ -59,6 +59,10 @@ llm.apply_model(lambda model: print(type(model)))
 
 If it is `TransformersModel` then it means it's based on Transformers!
 
+:::{tip}
+You can force the use of `TransformersModel` by setting `model_impl="transformers"` for <project:#offline-inference> or `--model-impl transformers` for the <project:#openai-compatible-server>.
+:::
+
 :::{note}
 vLLM may not fully optimise the Transformers implementation so you may see degraded performance if comparing a native model to a Transformers model in vLLM.
 :::
@@ -298,6 +302,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `ibm-granite/granite-3.0-1b-a400m-base`, `ibm-granite/granite-3.0-3b-a800m-instruct`, `ibm/PowerMoE-3b`, etc.
   * ✅︎
   * ✅︎
+- * `GraniteMoeSharedForCausalLM`
+  * Granite MoE Shared
+  * `ibm-research/moe-7b-1b-active-shared-experts` (test model)
+  * ✅︎
+  * ✅︎
 - * `GritLM`
   * GritLM
   * `parasail-ai/GritLM-7B-vllm`.
@@ -405,7 +414,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `Phi3ForCausalLM`
   * Phi-4, Phi-3
-  * `microsoft/Phi-4`, `microsoft/Phi-3-mini-4k-instruct`, `microsoft/Phi-3-mini-128k-instruct`, `microsoft/Phi-3-medium-128k-instruct`, etc.
+  * `microsoft/Phi-4-mini-instruct`, `microsoft/Phi-4`, `microsoft/Phi-3-mini-4k-instruct`, `microsoft/Phi-3-mini-128k-instruct`, `microsoft/Phi-3-medium-128k-instruct`, etc.
   * ✅︎
   * ✅︎
 - * `Phi3SmallForCausalLM`
@@ -837,13 +846,13 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
-- * `PaliGemmaForConditionalGeneration`\*
-  * PaliGemma, PaliGemma 2
+- * `PaliGemmaForConditionalGeneration`
+  * PaliGemma ⚠️, PaliGemma 2 ⚠️
   * T + I<sup>E</sup>
   * `google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, `google/paligemma2-3b-ft-docci-448`, etc.
   *
   * ✅︎
-  *
+  * ✅︎
 - * `Phi3VForCausalLM`
   * Phi-3-Vision, Phi-3.5-Vision
   * T + I<sup>E+</sup>
@@ -851,10 +860,17 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
   * ✅︎
+- * `Phi4MMForCausalLM`
+  * Phi-4-multimodal
+  * T + I<sup>+</sup> / T + A<sup>+</sup> / I<sup>+</sup> + A<sup>+</sup>
+  * `microsoft/Phi-4-multimodal-instruct`, etc.
+  * ✅︎
+  *
+  *
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
-  * `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b` (see note), etc.
+  * `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b`, etc.
   *
   * ✅︎
   * ✅︎
@@ -901,6 +917,12 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
+:::{warning}
+vLLM does not currently support PrefixLM attention mask, so our PaliGemma implementation uses regular causal attention, which causes the model output to be unstable.
+
+We may deprecate this model series in a future release.
+:::
+
 :::{note}
 `h2oai/h2ovl-mississippi-2b` will be available in V1 once we support backends other than FlashAttention.
 :::
@@ -912,14 +934,6 @@ To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"
 :::{note}
 The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
 For more details, please see: <gh-pr:4087#issuecomment-2250397630>
-:::
-
-:::{note}
-Currently the PaliGemma model series is implemented without PrefixLM attention mask. This model series may be deprecated in a future release.
-:::
-
-:::{note}
-`mistral-community/pixtral-12b` does not support V1 yet.
 :::
 
 :::{note}
