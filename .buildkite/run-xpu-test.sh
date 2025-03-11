@@ -16,5 +16,5 @@ remove_docker_container
 docker run --name xpu-test --device /dev/dri -v /dev/dri/by-path:/dev/dri/by-path --entrypoint="" xpu-test sh -c '
     python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m
     python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m -tp 2
-    VLLM_USE_V1=1 python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m --block-size 64 
+    VLLM_USE_V1=1 python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager
 '
