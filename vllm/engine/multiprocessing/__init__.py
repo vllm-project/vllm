@@ -137,6 +137,18 @@ class RPCWakeUpRequest(Enum):
 
 
 @dataclass
+class RPCIsSleepingRequest:
+    # Set the default value of request_id to a new UUID
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+
+@dataclass
+class RPCIsSleepingResponse:
+    request_id: str
+    is_sleeping: bool
+
+
+@dataclass
 class RPCLoadAdapterRequest:
     lora_request: LoRARequest
     # Set the default value of request_id to a new UUID
@@ -151,10 +163,10 @@ class RPCAdapterLoadedResponse:
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
                       RPCUProfileRequest, RPCLoadAdapterRequest,
                       RPCResetPrefixCacheRequest, RPCSleepRequest,
-                      RPCWakeUpRequest]
+                      RPCWakeUpRequest, RPCIsSleepingRequest]
 
 REQUEST_OUTPUTS_T = Union[List[RequestOutput], RPCAdapterLoadedResponse,
-                          RPCError]
+                          RPCIsSleepingResponse, RPCError]
 
 
 def ENGINE_DEAD_ERROR(
