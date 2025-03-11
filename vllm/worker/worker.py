@@ -9,6 +9,7 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.control_vectors.request import ControlVectorRequest
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_kv_transfer_initialized,
                               ensure_model_parallel_initialized,
@@ -475,6 +476,13 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def list_prompt_adapters(self) -> Set[int]:
         return self.model_runner.list_prompt_adapters()
+
+    def add_control_vector(
+            self, control_vector_request: ControlVectorRequest) -> bool:
+        return self.model_runner.add_control_vector(control_vector_request)
+
+    def remove_control_vector(self, cv_id: int) -> bool:
+        return self.model_runner.remove_control_vector(cv_id)
 
     @property
     def max_model_len(self) -> int:
