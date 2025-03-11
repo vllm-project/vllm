@@ -114,7 +114,7 @@ class Gemma3Attention(nn.Module):
         self.head_dim = head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = config.query_pre_attn_scalar
+        self.scaling = config.query_pre_attn_scalar**-0.5
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
