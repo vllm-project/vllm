@@ -50,9 +50,6 @@ from .utils import (AutoWeightsLoader, extract_layer_index,
 
 logger = init_logger(__name__)
 
-ATTENTION_TYPE_LOCAL = "local_sliding"
-AttentionType = Literal["global", "local_sliding"]
-
 
 class Gemma3MLP(nn.Module):
 
