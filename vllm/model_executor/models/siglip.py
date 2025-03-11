@@ -44,7 +44,6 @@ class SiglipEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
 
     def get_patch_grid_length(self) -> int:
         image_size, patch_size = self.get_image_size(), self.get_patch_size()
-        assert image_size % patch_size == 0
         return image_size // patch_size
 
 
