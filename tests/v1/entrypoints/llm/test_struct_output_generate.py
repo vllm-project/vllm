@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 
 import jsonschema
 import pytest
@@ -219,25 +220,24 @@ def test_guided_regex(monkeypatch, sample_regex, guided_decoding_backend: str):
                                      guided_decoding=GuidedDecodingParams(
                                          regex=sample_regex,
                                          backend=guided_decoding_backend))
-    with pytest.raises(ValueError,
-                       match="Regex guided decoding is not supported."):
-        llm.generate(prompts=[
+    outputs = llm.generate(
+        prompts=[
             f"Give an example IPv4 address with this regex: {sample_regex}"
         ] * 2,
-                     sampling_params=sampling_params,
-                     use_tqdm=True)
+        sampling_params=sampling_params,
+        use_tqdm=True,
+    )
 
-    # Once regex is supported --
-    #assert outputs is not None
-    #for output in outputs:
-    #    assert output is not None
-    #    assert isinstance(output, RequestOutput)
-    #    prompt = output.prompt
-    #    generated_text = output.outputs[0].text
-    #    print(generated_text)
-    #    assert generated_text is not None
-    #    assert re.fullmatch(sample_regex, generated_text) is not None
-    #    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(generated_text)
+        assert generated_text is not None
+        assert re.fullmatch(sample_regex, generated_text) is not None
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
 @pytest.mark.skip_global_cleanup
