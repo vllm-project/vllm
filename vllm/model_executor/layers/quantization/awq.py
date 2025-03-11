@@ -30,7 +30,7 @@ class AWQConfig(QuantizationConfig):
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.zero_point = zero_point
-        self.modules_to_not_convert = modules_to_not_convert or []
+        self.ignored_modules = modules_to_not_convert or []
 
         if self.weight_bits != 4:
             raise ValueError(
@@ -42,7 +42,7 @@ class AWQConfig(QuantizationConfig):
         return (f"AWQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
                 f"zero_point={self.zero_point}, "
-                f"modules_to_not_convert={self.modules_to_not_convert})")
+                f"ignored_modules={self.ignored_modules})")
 
     def get_name(self) -> str:
         return "awq"
@@ -68,21 +68,21 @@ class AWQConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
-        modules_to_not_convert = cls.get_from_keys_or(
-            config, ["modules_to_not_convert"], None)
-        return cls(weight_bits, group_size, zero_point, modules_to_not_convert)
+        ignored_modules = cls.get_from_keys_or(config, ["ignored_modules"],
+                                               None)
+        return cls(weight_bits, group_size, zero_point, ignored_modules)
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["LinearMethodBase"]:
         if isinstance(layer, LinearBase):
-            if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
+            if is_layer_skipped_awq(prefix, self.ignored_modules):
                 return UnquantizedLinearMethod()
             return AWQLinearMethod(self)
         return None
 
 
-def is_layer_skipped_awq(prefix: str, modules_to_not_convert: List[str]):
-    return any(module_name in prefix for module_name in modules_to_not_convert)
+def is_layer_skipped_awq(prefix: str, ignored_modules: List[str]):
+    return any(module_name in prefix for module_name in ignored_modules)
 
 
 class AWQLinearMethod(LinearMethodBase):

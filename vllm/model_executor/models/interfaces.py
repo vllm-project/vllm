@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
-                    Protocol, Type, Union, overload, runtime_checkable)
+import inspect
+from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Literal,
+                    Optional, Protocol, Type, Union, overload,
+                    runtime_checkable)
 
 import torch
 from torch import Tensor
@@ -13,6 +15,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.utils import supports_kw
 
 from .interfaces_base import is_pooling_model
+from .utils import WeightsMapper
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
@@ -451,26 +454,49 @@ class SupportsQuant:
 
     def __new__(cls, *args, **kwargs) -> "SupportsQuant":
         instance = super().__new__(cls)
-        quant_config = cls._find_quant_config(*args, **kwargs)
+        bound_args = inspect.signature(cls.__init__).bind_partial(
+            instance, *args, **kwargs)
+
+        quant_config = cls._find_quant_config(bound_args)
+        prefix = cls._find_prefix(bound_args)
+        packed_modules_mapping = cls.packed_modules_mapping
+        hf_to_vllm_mapper: WeightsMapper = getattr(cls, "hf_to_vllm_mapper",
+                                                   WeightsMapper())
+
         if quant_config is not None:
+            # 1. update qconfig's packed_modules_mapppings
+            #    currently takes union, in the future could be more precise
+            #    using prefix and hf_to_vllm_mapper
+            quant_config.packed_modules_mapping.update(packed_modules_mapping)
+
+            # 2. update qconfig's ignored modules
+            quant_config.ignored_modules = [
+                prefix + hf_to_vllm_mapper._map_name(module[len(prefix):])
+                if module.startswith(prefix) else module
+                for module in quant_config.ignored_modules
+            ]
+
+            # 3. set model's quantization config
             instance.quant_config = quant_config
-            instance.quant_config.packed_modules_mapping.update(
-                cls.packed_modules_mapping)
+
         return instance
 
     @staticmethod
-    def _find_quant_config(*args, **kwargs) -> Optional[QuantizationConfig]:
+    def _find_quant_config(
+            cls, bound_args: Dict[str, Any]) -> Optional[QuantizationConfig]:
         from vllm.config import VllmConfig  # avoid circular import
 
-        args_values = list(args) + list(kwargs.values())
-        for arg in args_values:
+        for arg in bound_args.values():
             if isinstance(arg, VllmConfig):
                 return arg.quant_config
-
-            if isinstance(arg, QuantizationConfig):
+            elif isinstance(arg, QuantizationConfig):
                 return arg
 
         return None
+
+    @staticmethod
+    def _find_prefix(cls, bound_args: Dict[str, Any]) -> Optional[str]:
+        return bound_args.get("prefix", "")
 
 
 @runtime_checkable

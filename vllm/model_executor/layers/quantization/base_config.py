@@ -62,8 +62,9 @@ class QuantizationConfig(ABC):
 
     def __init__(self):
         super().__init__()
-        # mapping is updated by models as they initialize
+        # These attributes are updated by models as they initialize
         self.packed_modules_mapping: Dict[str, List[str]] = dict()
+        self.ignored_modules: List[str] = list()
 
     @abstractmethod
     def get_name(self) -> str:
