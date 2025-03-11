@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable
 from collections import defaultdict, deque
+from collections.abc import Iterable
 from queue import Queue
-from typing import Deque, Iterable, List, Optional, Union
+from typing import Optional, Union
 
 from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
                          SpeculativeConfig)
@@ -66,8 +66,8 @@ class Scheduler:
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Priority queues for requests.
-        self.waiting: Deque[Request] = deque()
-        self.running: List[Request] = []
+        self.waiting: deque[Request] = deque()
+        self.running: list[Request] = []
 
         # req_id -> Number of times the request has been scheduled.
         # With PP, when the input prompt is divided into chunks, we can
