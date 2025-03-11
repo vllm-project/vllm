@@ -101,6 +101,7 @@ def _v1_expand_kernel(
         CAST_TYPE: tl.constexpr,
         SLICE_NUM: tl.constexpr,
         SAME_STRIDE: tl.constexpr,
+        MAX_LORAS: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,):
@@ -171,6 +172,9 @@ def _v1_expand_kernel(
         output_d0_stride,
         output_d1_stride,
         # constants
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
         SAME_STRIDE,
         SLICE_NUM,
         EVEN_K,
@@ -275,6 +279,7 @@ def _v1_expand(
         CAST_TYPE,
         NUM_SLICES,
         same_stride,
+        MAX_LORAS,
     )
 
     return
