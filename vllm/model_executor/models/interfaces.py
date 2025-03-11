@@ -15,7 +15,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.utils import supports_kw
 
 from .interfaces_base import is_pooling_model
-from .utils import WeightsMapper
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
@@ -453,9 +452,11 @@ class SupportsQuant:
     quant_config: Optional[QuantizationConfig] = None
 
     def __new__(cls, *args, **kwargs) -> "SupportsQuant":
+        from .utils import WeightsMapper  # avoid circular import
+
         instance = super().__new__(cls)
-        bound_args = inspect.signature(cls.__init__).bind_partial(
-            instance, *args, **kwargs)
+        bound_args = inspect.signature(cls.__init__).bind(
+            instance, *args, **kwargs).arguments
 
         quant_config = cls._find_quant_config(bound_args)
         prefix = cls._find_prefix(bound_args)
@@ -483,7 +484,7 @@ class SupportsQuant:
 
     @staticmethod
     def _find_quant_config(
-            cls, bound_args: Dict[str, Any]) -> Optional[QuantizationConfig]:
+            bound_args: Dict[str, Any]) -> Optional[QuantizationConfig]:
         from vllm.config import VllmConfig  # avoid circular import
 
         for arg in bound_args.values():
@@ -495,7 +496,7 @@ class SupportsQuant:
         return None
 
     @staticmethod
-    def _find_prefix(cls, bound_args: Dict[str, Any]) -> Optional[str]:
+    def _find_prefix(bound_args: Dict[str, Any]) -> str:
         return bound_args.get("prefix", "")
 
 
