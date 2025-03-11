@@ -20,7 +20,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
-from vllm.v1.structured_output.utils import validate_structured_output_request
+from vllm.v1.structured_output.utils import (
+    validate_structured_output_request_xgrammar)
 
 
 class Processor:
@@ -124,20 +125,30 @@ class Processor:
     def _validate_structured_output(self, params: SamplingParams) -> None:
         if not params.guided_decoding or not self.decoding_config:
             return
-        if self.decoding_config.guided_decoding_backend != "xgrammar":
-            raise ValueError(
-                "Only xgrammar structured output is supported in V1.")
-        if (params.guided_decoding.backend
-                and params.guided_decoding.backend != 'xgrammar'):
-            raise ValueError(
-                "Only xgrammar structured output is supported in V1.")
+
+        supported_backends = ["xgrammar", "guidance"]
+        engine_level_backend = self.decoding_config.guided_decoding_backend
+        if engine_level_backend not in supported_backends:
+            raise ValueError(f"Only {supported_backends} structured output is "
+                             "supported in V1.")
+        if params.guided_decoding.backend:
+            if params.guided_decoding.backend != engine_level_backend:
+                raise ValueError("Request-level structured output backend must"
+                                 " match engine-level backend. "
+                                 "{params.guided_decoding.backend}"
+                                 " != {engine_level_backend}")
+        else:
+            params.guided_decoding.backend = engine_level_backend
+
         if self.vllm_config.speculative_config:
             raise ValueError("Structured output is not supported with "
                              "speculative decoding.")
+
         if vllm.platforms.current_platform.is_tpu():
             raise ValueError("Structured output is not supported on TPU.")
 
-        validate_structured_output_request(params)
+        if engine_level_backend == "xgrammar":
+            validate_structured_output_request_xgrammar(params)
 
     def process_inputs(
         self,
