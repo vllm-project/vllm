@@ -135,8 +135,7 @@ def _fused_moe_gguf(
         num_tokens, _ = x.shape
         E, N, _ = w1.shape
         top_k = topk_ids.shape[1]
-        # BLOCK_SIZE = ops.ggml_moe_get_block_size(qweight_type)
-        BLOCK_SIZE = 4
+        BLOCK_SIZE = ops.ggml_moe_get_block_size(qweight_type)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = \
                 moe_align_block_size(topk_ids, BLOCK_SIZE, E)
