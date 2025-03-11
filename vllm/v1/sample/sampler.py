@@ -120,11 +120,17 @@ class Sampler(nn.Module):
         return sampled
 
     def compute_probs(self, logits: torch.Tensor,
-                      sampling_metadata: SamplingMetadata) -> torch.Tensor:
+                      sampling_metadata: SamplingMetadata,
+                      sample_lens: list[int]) -> torch.Tensor:
         if sampling_metadata.all_greedy:
             return logits
-        # Apply temperature. This is an in-place op changing logits.
-        logits = self.apply_temperature(logits, sampling_metadata.temperature)
+        assert sampling_metadata.temperature is not None
+        temperature = torch.repeat_interleave(
+            sampling_metadata.temperature,
+            torch.tensor(sample_lens,
+                         device=sampling_metadata.temperature.device))
+        temperature = temperature.unsqueeze(dim=1)
+        logits.div_(temperature)
         return logits.softmax(dim=-1, dtype=torch.float32)
 
     def compute_logprobs(self, logits: torch.Tensor) -> torch.Tensor:
