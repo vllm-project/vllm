@@ -343,6 +343,13 @@ class Platform:
                 or parallel_config.distributed_executor_backend
                 == "external_launcher")
 
+    @classmethod
+    def get_stream_cls(cls) -> str:
+        """
+        Get device specific stream class.
+        """
+        raise NotImplementedError
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 import time
 from typing import Callable, Optional, Union
 
@@ -8,7 +9,8 @@ import torch
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
-from vllm.utils import is_pin_memory_available
+from vllm.platforms import current_platform
+from vllm.utils import is_pin_memory_available, resolve_obj_by_qualname
 
 
 class SpecDecodeWorkerMetrics(
@@ -65,7 +67,11 @@ class AsyncMetricsCollector:
         self._rank: Optional[int] = None
 
         # We don't have a device set yet.
-        self._copy_stream: Optional[torch.cuda.Stream] = None
+        self._stream_cls = None
+        with contextlib.suppress(NotImplementedError):
+            self._stream_cls = resolve_obj_by_qualname(
+                current_platform.get_stream_cls())
+        self._copy_stream = None
 
         self._in_flight_copy: Optional[torch.cuda.Event] = None
 
@@ -81,7 +87,8 @@ class AsyncMetricsCollector:
 
     def init_gpu_tensors(self, rank: int) -> None:
         self._rank = rank
-        self._copy_stream = torch.cuda.Stream()
+        if self._stream_cls:
+            self._copy_stream = self._stream_cls()
 
     def init_tensors(self,
                      rank: int,
@@ -89,8 +96,8 @@ class AsyncMetricsCollector:
         self._rank = rank
         if isinstance(device_type, torch.device):
             device_type = device_type.type
-        if device_type == 'cuda':
-            self._copy_stream = torch.cuda.Stream()
+        if self._stream_cls:
+            self._copy_stream = self._stream_cls()
 
     def maybe_collect_rejsample_metrics(
             self, k: int) -> Optional[SpecDecodeWorkerMetrics]:
