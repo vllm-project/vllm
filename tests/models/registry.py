@@ -241,7 +241,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
                                                hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]}),  # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
-    "Gemma3ForConditionalGeneration": _HfExamplesInfo("gg-hf-g/gemma-3-4b-it-pr"),
+    "Gemma3ForConditionalGeneration": _HfExamplesInfo("gg-hf-g/gemma-3-4b-it"),
     "GLM4VForCausalLM": _HfExamplesInfo("THUDM/glm-4v-9b",
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
