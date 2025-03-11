@@ -202,6 +202,7 @@ steps:
     # split the test to avoid interference
     - VLLM_USE_V1=1 pytest -v -s v1/core
     - VLLM_USE_V1=1 pytest -v -s v1/engine
+    - VLLM_USE_V1=1 pytest -v -s v1/entrypoints/llm
     - VLLM_USE_V1=1 pytest -v -s v1/sample
     - VLLM_USE_V1=1 pytest -v -s v1/worker
     - VLLM_USE_V1=1 pytest -v -s v1/structured_output
