@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 
@@ -9,8 +9,7 @@ from vllm.platforms import current_platform
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for rocm.
 ROCM_FP8_MAX = 224.0
-FP8_DTYPE = torch.float8_e4m3fnuz if current_platform.is_rocm() \
-                else torch.float8_e4m3fn
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
@@ -19,7 +18,7 @@ def as_float32_tensor(x: Union[float, torch.tensor]) -> torch.tensor:
 def ref_dynamic_per_token_quant(x: torch.tensor,
                                 quant_dtype: torch.dtype,
                                 scale_ub: Optional[torch.tensor] = None) \
-        -> Tuple[torch.tensor, torch.tensor]:
+        -> tuple[torch.tensor, torch.tensor]:
 
     assert quant_dtype in [torch.int8, FP8_DTYPE]
     if scale_ub is not None:
@@ -68,7 +67,7 @@ def ref_dynamic_per_token_quant(x: torch.tensor,
 # ref_dynamic_per_token_quant, when we have a dynamic_per_tensor int8 quant
 # kernel
 def ref_dynamic_per_tensor_fp8_quant(x: torch.tensor) \
-                    -> Tuple[torch.tensor, torch.tensor]:
+                    -> tuple[torch.tensor, torch.tensor]:
 
     fp8_traits = torch.finfo(FP8_DTYPE)
     fp8_traits_max = ROCM_FP8_MAX if current_platform.is_rocm() \
