@@ -42,12 +42,16 @@ async def log_stats(request_queues: dict[str, asyncio.Queue]):
 # create async socket use ZMQ_DEALER
 async def create_socket(url: str,
                         zmqctx: zmq.asyncio.Context) -> zmq.asyncio.Socket:
-    sock = zmqctx.socket(zmq.DEALER)
+    socket = zmqctx.socket(zmq.DEALER)
     identity = f"connector-{uuid.uuid4()}"
-    sock.setsockopt(zmq.IDENTITY, identity.encode())
-    sock.connect(url)
+    # unlimited HWM
+    hwm_limit = 0
+    socket.setsockopt(zmq.IDENTITY, identity.encode())
+    socket.setsockopt(zmq.SNDHWM, hwm_limit)
+    socket.setsockopt(zmq.RCVHWM, hwm_limit)
+    socket.connect(url)
     logger.info("%s started at %s", identity, url)
-    return sock
+    return socket
 
 
 @asynccontextmanager
