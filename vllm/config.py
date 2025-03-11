@@ -3525,6 +3525,11 @@ class VllmConfig:
                 not self.model_config.enforce_eager:
                 batch_size_capture_list = [1, 2, 4
                                            ] + [i for i in range(8, 513, 8)]
+                max_num_tokens = self.scheduler_config.max_num_batched_tokens
+                batch_size_capture_list = [
+                    size for size in batch_size_capture_list
+                    if size <= max_num_tokens
+                ]
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
