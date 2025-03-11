@@ -39,7 +39,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
 
 from .chatglm import ChatGLMBaseModel, ChatGLMModel
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
+                         SupportsV0Only)
 from .utils import flatten_bn, merge_multimodal_embeddings
 
 
@@ -527,7 +528,7 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
                                         info=GLM4VProcessingInfo,
                                         dummy_inputs=GLM4VDummyInputsBuilder)
 class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
-                       SupportsMultiModal):
+                       SupportsMultiModal, SupportsV0Only):
 
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],

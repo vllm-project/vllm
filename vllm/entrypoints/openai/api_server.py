@@ -154,21 +154,47 @@ async def build_async_engine_client_from_engine_args(
     Returns the Client or None if the creation failed.
     """
 
-    # AsyncLLMEngine.
-    if (MQLLMEngineClient.is_unsupported_config(engine_args)
-            or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
+    # Create the EngineConfig (determines if we can use V1).
+    usage_context = UsageContext.OPENAI_API_SERVER
+    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+
+    # V1 AsyncLLM.
+    if envs.VLLM_USE_V1:
+        if disable_frontend_multiprocessing:
+            logger.warning(
+                "V1 is enabled, but got --disable-frontend-multiprocessing. "
+                "To disable frontend multiprocessing, set VLLM_USE_V1=0.")
+
+        from vllm.v1.engine.async_llm import AsyncLLM
+        async_llm: Optional[AsyncLLM] = None
+        try:
+            async_llm = AsyncLLM.from_vllm_config(
+                vllm_config=vllm_config,
+                usage_context=usage_context,
+                disable_log_requests=engine_args.disable_log_requests,
+                disable_log_stats=engine_args.disable_log_stats)
+            yield async_llm
+        finally:
+            if async_llm:
+                async_llm.shutdown()
+
+    # V0 AsyncLLM.
+    elif (MQLLMEngineClient.is_unsupported_config(vllm_config)
+          or disable_frontend_multiprocessing):
 
         engine_client: Optional[EngineClient] = None
         try:
-            engine_client = AsyncLLMEngine.from_engine_args(
-                engine_args=engine_args,
-                usage_context=UsageContext.OPENAI_API_SERVER)
+            engine_client = AsyncLLMEngine.from_vllm_config(
+                vllm_config=vllm_config,
+                usage_context=usage_context,
+                disable_log_requests=engine_args.disable_log_requests,
+                disable_log_stats=engine_args.disable_log_stats)
             yield engine_client
         finally:
             if engine_client and hasattr(engine_client, "shutdown"):
                 engine_client.shutdown()
 
-    # MQLLMEngine.
+    # V0MQLLMEngine.
     else:
         if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
             # Make TemporaryDirectory for prometheus multiprocessing
@@ -199,10 +225,11 @@ async def build_async_engine_client_from_engine_args(
         # not actually result in an exitcode being reported. As a result
         # we use a shared variable to communicate the information.
         engine_alive = multiprocessing.Value('b', True, lock=False)
-        engine_process = context.Process(target=run_mp_engine,
-                                         args=(engine_args,
-                                               UsageContext.OPENAI_API_SERVER,
-                                               ipc_path, engine_alive))
+        engine_process = context.Process(
+            target=run_mp_engine,
+            args=(vllm_config, UsageContext.OPENAI_API_SERVER, ipc_path,
+                  engine_args.disable_log_stats,
+                  engine_args.disable_log_requests, engine_alive))
         engine_process.start()
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
@@ -217,8 +244,7 @@ async def build_async_engine_client_from_engine_args(
         atexit.register(_cleanup_ipc_path)
 
         # Build RPCClient, which conforms to EngineClient Protocol.
-        engine_config = engine_args.create_engine_config()
-        build_client = partial(MQLLMEngineClient, ipc_path, engine_config,
+        build_client = partial(MQLLMEngineClient, ipc_path, vllm_config,
                                engine_pid)
         mq_engine_client = await asyncio.get_running_loop().run_in_executor(
             None, build_client)

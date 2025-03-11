@@ -11,12 +11,14 @@ from ..utils import fork_new_process_for_each_test
 
 
 @fork_new_process_for_each_test
-def test_plugin(dummy_opt_path):
+def test_plugin(dummy_opt_path, monkeypatch):
+    # V1 shuts down rather than raising an error here.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     os.environ["VLLM_PLUGINS"] = ""
     with pytest.raises(Exception) as excinfo:
         LLM(model=dummy_opt_path, load_format="dummy")
     error_msg = "has no vLLM implementation and " \
-                "the Transformers implementation is not compatible with vLLM."
+                "the Transformers implementation is not compatible with vLLM"
     assert (error_msg in str(excinfo.value))
 
 
@@ -51,7 +53,10 @@ image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
 
 @fork_new_process_for_each_test
-def test_oot_registration_multimodal(dummy_llava_path):
+def test_oot_registration_multimodal(dummy_llava_path, monkeypatch):
+    # V1: llava-hf/llava-1.5-7b-hf is broken on main for V1.
+    # https://github.com/vllm-project/vllm/issues/14523
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     os.environ["VLLM_PLUGINS"] = "register_dummy_model"
     prompts = [{
         "prompt": "What's in the image?<image>",

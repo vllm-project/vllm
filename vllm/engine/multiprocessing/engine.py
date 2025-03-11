@@ -9,6 +9,7 @@ import cloudpickle
 import zmq
 
 from vllm import AsyncEngineArgs, SamplingParams
+from vllm.config import VllmConfig
 from vllm.engine.llm_engine import LLMEngine
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -110,25 +111,39 @@ class MQLLMEngine:
             return ENGINE_DEAD_ERROR()
 
     @classmethod
-    def from_engine_args(cls, engine_args: AsyncEngineArgs,
-                         usage_context: UsageContext, ipc_path: str):
-        """Creates an MQLLMEngine from the engine arguments."""
+    def from_vllm_config(cls, vllm_config: VllmConfig,
+                         usage_context: UsageContext,
+                         disable_log_requests: bool, disable_log_stats: bool,
+                         ipc_path: str) -> "MQLLMEngine":
         # Setup plugins for each process
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
-        engine_config = engine_args.create_engine_config(usage_context)
-        executor_class = LLMEngine._get_executor_cls(engine_config)
+        use_async_sockets = vllm_config.model_config.use_async_output_proc
 
-        use_async_sockets = engine_config.model_config.use_async_output_proc
+        return cls(
+            vllm_config=vllm_config,
+            executor_class=LLMEngine._get_executor_cls(vllm_config),
+            ipc_path=ipc_path,
+            usage_context=usage_context,
+            use_async_sockets=use_async_sockets,
+            log_requests=(not disable_log_requests),
+            log_stats=(not disable_log_stats),
+        )
 
-        return cls(ipc_path=ipc_path,
-                   use_async_sockets=use_async_sockets,
-                   vllm_config=engine_config,
-                   executor_class=executor_class,
-                   log_requests=not engine_args.disable_log_requests,
-                   log_stats=not engine_args.disable_log_stats,
-                   usage_context=usage_context)
+    @staticmethod
+    def from_engine_args(engine_args: AsyncEngineArgs,
+                         usage_context: UsageContext, ipc_path: str):
+        """Creates an MQLLMEngine from the engine arguments."""
+
+        vllm_config = engine_args.create_engine_config(usage_context)
+        return MQLLMEngine.from_vllm_config(
+            ipc_path=ipc_path,
+            vllm_config=vllm_config,
+            usage_context=usage_context,
+            disable_log_requests=engine_args.disable_log_requests,
+            disable_log_stats=engine_args.disable_log_stats,
+        )
 
     def start(self):
         try:
@@ -396,12 +411,16 @@ def signal_handler(*_) -> None:
     raise KeyboardInterrupt("MQLLMEngine terminated")
 
 
-def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
-                  ipc_path: str, engine_alive):
+def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
+                  ipc_path: str, disable_log_stats: bool,
+                  disable_log_requests: bool, engine_alive):
     try:
-        engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
-                                              usage_context=usage_context,
-                                              ipc_path=ipc_path)
+        engine = MQLLMEngine.from_vllm_config(
+            vllm_config=vllm_config,
+            usage_context=usage_context,
+            disable_log_stats=disable_log_stats,
+            disable_log_requests=disable_log_requests,
+            ipc_path=ipc_path)
 
         signal.signal(signal.SIGTERM, signal_handler)
 
