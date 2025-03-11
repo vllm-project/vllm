@@ -13,6 +13,28 @@ namespace vllm {
 namespace fp8 {
   #ifdef ENABLE_FP8
 
+// Use hardware cvt instruction for fp8 on rocm
+template <typename fp8_type>
+__device__ __forceinline__ fp8_type cvt_c10(float const r) {
+  return {};
+}
+
+template <>
+__device__ __forceinline__ c10::Float8_e4m3fn cvt_c10(float const r) {
+  return c10::Float8_e4m3fn(
+      __hip_cvt_float_to_fp8(r, __hip_fp8_e4m3::__default_saturation,
+                             __hip_fp8_e4m3::__default_interpret),
+      c10::Float8_e4m3fn::from_bits());
+}
+
+template <>
+__device__ __forceinline__ c10::Float8_e4m3fnuz cvt_c10(float const r) {
+  return c10::Float8_e4m3fnuz(
+      __hip_cvt_float_to_fp8(r, __hip_fp8_e4m3_fnuz::__default_saturation,
+                             __hip_fp8_e4m3_fnuz::__default_interpret),
+      c10::Float8_e4m3fnuz::from_bits());
+}
+
 template <typename Tout, typename Tin>
 __inline__ __device__ Tout vec_conversion(const Tin& x) {
   return x;
