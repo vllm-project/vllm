@@ -9,12 +9,10 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from tests.kernels.utils import (compute_max_diff, opcheck, stack_and_dev,
-                                 torch_moe, torch_moe_single)
-from vllm import _custom_ops as ops
+from tests.kernels.utils import (opcheck, stack_and_dev, torch_moe,
+                                 torch_moe_single)
 from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk, moe_align_block_size)
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
     fused_moe as iterative_moe)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
