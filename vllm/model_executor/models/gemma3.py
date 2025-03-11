@@ -17,6 +17,7 @@ from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 
 from vllm.attention import Attention
@@ -186,7 +187,46 @@ class Gemma3Attention(nn.Module):
         k = k.flatten(-2, -1)
 
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, **kwargs)
+        attn_output = self.attn(q, k, v)
+
+        if not kwargs.get("has_images", False):
+            output, _ = self.o_proj(attn_output)
+            return output
+
+        q = q.view(-1, self.num_heads, self.head_dim)
+        # Expand the key and value to handle GQA.
+        num_queries_per_kv = self.num_heads // self.num_kv_heads
+        k = k.view(-1, self.num_kv_heads, self.head_dim)
+        k = k.repeat_interleave(num_queries_per_kv, dim=-2)
+        v = v.view(-1, self.num_kv_heads, self.head_dim)
+        v = v.repeat_interleave(num_queries_per_kv, dim=-2)
+
+        if self.is_sliding:
+            attn_masks = kwargs["local_attn_masks"]
+        else:
+            attn_masks = kwargs["global_attn_masks"]
+
+        seq_lens = kwargs["seq_lens"]
+        start_idx = 0
+        for seq_len, attn_mask in zip(seq_lens, attn_masks):
+            end_idx = start_idx + seq_len
+            query = q[start_idx:end_idx].unsqueeze(0)
+            key = k[start_idx:end_idx].unsqueeze(0)
+            value = v[start_idx:end_idx].unsqueeze(0)
+
+            # Transpose.
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+
+            out = F.scaled_dot_product_attention(
+                query, key, value, attn_mask, self.scaling,
+            )
+
+            out = out.transpose(1, 2).flatten(-2, -1)
+            attn_output[start_idx:end_idx] = out
+            start_idx = end_idx
+
         output, _ = self.o_proj(attn_output)
         return output
 
