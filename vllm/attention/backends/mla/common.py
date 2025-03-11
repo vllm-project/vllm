@@ -226,7 +226,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Fp8)
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    Fp8LinearGenericOp, current_platform_fp8_dtype, is_fp8)
+    Fp8LinearGenericOp, is_fp8)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_quantize)
 from vllm.model_executor.layers.rotary_embedding import (
@@ -1238,7 +1238,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 W_Q_UK, W_Q_UK_scales = scaled_quantize(
                     W_Q_UK,
                     self.reqaunt_weight_group_shape,
-                    quant_dtype=current_platform_fp8_dtype)
+                    quant_dtype=current_platform.fp8_dtype())
                 # For FP8 save the transpose so we can use
                 # `apply_w8a8_block_fp8_linear` directly
                 self.W_Q_UK = W_Q_UK.T.contiguous()
@@ -1255,7 +1255,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 W_UV_O, W_UV_O_scales = scaled_quantize(
                     W_UV_O,
                     self.reqaunt_weight_group_shape,
-                    quant_dtype=current_platform_fp8_dtype)
+                    quant_dtype=current_platform.fp8_dtype())
                 # For FP8 save the transpose so we can use
                 # `apply_w8a8_block_fp8_linear` directly
                 self.W_UV_O = W_UV_O.T.contiguous()

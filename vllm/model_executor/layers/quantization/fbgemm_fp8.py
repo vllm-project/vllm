@@ -127,7 +127,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
 
         weight = layer.weight
 
-        if current_platform.is_rocm():
+        if current_platform.is_fp8_fnuz():
             weight, weight_scale, input_scale = \
                 normalize_e4m3fn_to_e4m3fnuz(
                     weight=weight,

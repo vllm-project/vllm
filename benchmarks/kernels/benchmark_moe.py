@@ -18,8 +18,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import *
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
 
-FP8_DTYPE = torch.float8_e4m3fnuz if current_platform.is_rocm(
-) else torch.float8_e4m3fn
+FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class BenchmarkConfig(TypedDict):
