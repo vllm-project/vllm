@@ -49,7 +49,7 @@ def test_lm_eval_correctness():
 
     if eval_config[
             "model_name"] == "nm-testing/Meta-Llama-3-70B-Instruct-FBGEMM-nonuniform":  #noqa: E501
-        pytest.skip("FBGEMM is currently failing on main.", reason="FBGEMM ")
+        pytest.skip("FBGEMM is currently failing on main.")
 
     # Launch eval requests.
     results = launch_lm_eval(eval_config)

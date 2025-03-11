@@ -16,6 +16,9 @@ MIN_CAPABILITY = os.environ.get("MIN_CAPABILITY", "80")
 
 
 @pytest.mark.skipif(
+    MODEL_NAME == "casperhansen/deepseek-coder-v2-instruct-awq",
+    reason="OOM in the CI")
+@pytest.mark.skipif(
     not current_platform.has_device_capability(int(MIN_CAPABILITY)),
     reason="Current system does not have minimum capability.")
 def test_weight_loading(vllm_runner):
