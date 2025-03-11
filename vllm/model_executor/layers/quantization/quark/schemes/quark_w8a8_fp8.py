@@ -39,7 +39,7 @@ class QuarkW8A8Fp8(QuarkScheme):
                 logical_widths=layer.logical_widths,
             )
 
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
                     weight=weight,
                     weight_scale=max_w_scale,
@@ -55,7 +55,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         elif self.qscheme == "per_channel":
             weight = layer.weight
 
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 weight, weight_scale, input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(
                         weight=weight,
