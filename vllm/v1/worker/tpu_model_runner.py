@@ -145,13 +145,6 @@ class TPUModelRunner:
             (self.max_num_tokens, padded_max_num_blocks_per_req),
             dtype=self.input_batch.block_table.get_cpu_tensor().dtype,
             device="cpu")
-        # page_indices: [max_num_seqs, pages_per_seq],
-        # pages_per_seq=9, NUM_KV_PAGES_PER_BLOCK=4
-        # 4, 4, 4: 
-        # 4, 4, 1: 9, -1, int.max, _
-        #   
-        # pages_per_seq%NUM_KV_PAGES_PER_BLOCK==0
-
 
         self.query_start_loc_cpu = torch.zeros(self.max_num_tokens + 1,
                                                dtype=torch.int32,
