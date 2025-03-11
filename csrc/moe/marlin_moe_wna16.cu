@@ -2641,10 +2641,10 @@ torch::Tensor moe_wna16_marlin_gemm(
               MARLIN_NAMESPACE_NAME::min_thread_n);
 
   int max_n_tiles = size_n / MARLIN_NAMESPACE_NAME::min_thread_n;
-  int min_workspace_size = min(
-      max_n_tiles * (int)(sorted_token_ids.size(0) / moe_block_size), sms);
-  TORCH_CHECK(workspace.numel() >= min_workspace_size, "workspace.numel = ",
-              workspace.numel(),
+  int min_workspace_size =
+      min(max_n_tiles * (int)(sorted_token_ids.size(0) / moe_block_size), sms);
+  TORCH_CHECK(workspace.numel() >= min_workspace_size,
+              "workspace.numel = ", workspace.numel(),
               " is below min_workspace_size = ", min_workspace_size);
 
   int dev = a.get_device();
