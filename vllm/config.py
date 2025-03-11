@@ -140,6 +140,7 @@ class ModelConfig:
             the default version.
         max_model_len: Maximum length of a sequence (including prompt and
             output). If None, will be derived from the model.
+        max_output_len: Maximum number of output tokens that can be requested in a single API call.
         spec_target_max_model_len: Specify the the maximum length for spec
             decoding draft models.
         quantization: Quantization method that was used to quantize the model
@@ -238,6 +239,7 @@ class ModelConfig:
         rope_theta: Optional[float] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
+        max_output_len: Optional[int] = None,
         spec_target_max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
         enforce_eager: Optional[bool] = None,
@@ -378,6 +380,7 @@ class ModelConfig:
                 delattr(self.hf_text_config, "sliding_window")
                 sliding_window = None
 
+        self.max_output_len = max_output_len
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
