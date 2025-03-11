@@ -272,6 +272,7 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
                                                  n=n,
                                                  temperature=1.0,
                                                  stream=False,
+                                                 logprobs=0,
                                                  seed=42)
 
     # Assert `n` completions
@@ -279,6 +280,7 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
     assert num_completions == n, (
         f"Num completions {num_completions} but expected {n}.")
     completion_repeats: dict[str, int] = {}
+    output_token_lengths = set()
     for idx, choice in enumerate(completion.choices):
         # Assert correct completion index & some finish reason.
         assert choice.index == idx, (
@@ -287,6 +289,9 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
             "None finish_reason is invalid.")
         text = choice.text
         completion_repeats[text] = completion_repeats.get(text, 0) + 1
+        output_token_lengths.add(len(choice.logprobs.tokens))
+    # Assert subrequests finished at different times
+    assert len(output_token_lengths) > 1
     # Assert `n` unique completions
     num_unique = len(completion_repeats)
     if num_unique != n:
@@ -333,14 +338,18 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     assert finish_reason_count == n, (
         f"Expected {n} completions with valid indices and finish_reason.")
     completion_repeats: dict[str, int] = {}
+    chunk_lengths = set()
     for chunk in chunks:
         chunk_len = len(chunk)
         # Assert correct number of completion tokens
+        chunk_lengths.add(chunk_len)
         assert chunk_len <= max_tokens, (
             f"max_tokens={max_tokens} but chunk len is {chunk_len}.")
         text = "".join(chunk)
         completion_repeats[text] = completion_repeats.get(text, 0) + 1
         print(text)
+    # Assert subrequests finished at different times
+    assert len(chunk_lengths) > 1
     # Assert `n` unique completions
     num_unique = len(completion_repeats)
     if num_unique != n:

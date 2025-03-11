@@ -55,14 +55,15 @@ async def generate(engine: AsyncLLM,
     sampling_params = SamplingParams(max_tokens=max_tokens,
                                      ignore_eos=True,
                                      output_kind=output_kind,
-                                     temperature=0,
+                                     temperature=0.5,
+                                     seed=33,
                                      n=n,
                                      prompt_logprobs=prompt_logprobs)
     async for out in engine.generate(request_id=request_id,
                                      prompt=prompt,
                                      sampling_params=sampling_params):
 
-        num_tokens = len(out.outputs[0].token_ids)
+        num_tokens = sum(len(output.token_ids) for output in out.outputs)
         if output_kind == RequestOutputKind.DELTA:
             count += num_tokens
         else:
@@ -186,3 +187,36 @@ async def test_abort(monkeypatch, output_kind: RequestOutputKind,
         num_generated_tokens, request_id = await task
         assert num_generated_tokens == NUM_EXPECTED_TOKENS
         assert not engine.output_processor.has_unfinished_requests()
+
+
+@pytest.mark.parametrize("n", [1, 3])
+@pytest.mark.parametrize("engine_args_and_prompt",
+                         [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
+                          (VISION_ENGINE_ARGS, VISION_PROMPT)])
+@pytest.mark.asyncio
+async def test_finished_flag(monkeypatch, n: int,
+                             engine_args_and_prompt: tuple[AsyncEngineArgs,
+                                                           PromptType]):
+
+    with monkeypatch.context() as m, ExitStack() as after:
+        m.setenv("VLLM_USE_V1", "1")
+        engine_args, prompt = engine_args_and_prompt
+
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        sampling_params = SamplingParams(max_tokens=100,
+                                         output_kind=RequestOutputKind.DELTA,
+                                         temperature=1.0,
+                                         seed=33,
+                                         n=n)
+        outputs = [
+            out
+            async for out in engine.generate(request_id="request-33",
+                                             prompt=prompt,
+                                             sampling_params=sampling_params)
+        ]
+
+        # Assert only the last output has the finished flag set
+        assert all(not out.finished for out in outputs[:-1])
+        assert outputs[-1].finished
