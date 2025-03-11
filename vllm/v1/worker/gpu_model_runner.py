@@ -1015,11 +1015,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             target_probs = self.model.sampler.compute_probs(
                 logits, sampling_metadata)
-            scheduled_request_ids = scheduler_output.num_scheduled_tokens.keys(
-            )
             draft_token_ids = [
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
-                for req_id in scheduled_request_ids
+                for req_id in self.input_batch.req_ids
             ]
             sampler_output = self.rejection_sampler(draft_token_ids,
                                                     target_probs,
