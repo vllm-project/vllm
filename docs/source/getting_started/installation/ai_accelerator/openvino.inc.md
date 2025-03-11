@@ -54,7 +54,7 @@ Currently, there are no pre-built OpenVINO images.
 ### Build image from source
 
 ```console
-docker build -f Dockerfile.openvino -t vllm-openvino-env .
+docker build -f dockerfiles/Dockerfile.openvino -t vllm-openvino-env .
 docker run -it --rm vllm-openvino-env
 ```
 

@@ -44,7 +44,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101")
 #
 # Note: the CUDA torch version is derived from pyproject.toml and various
 # requirements.txt files and should be kept consistent.  The ROCm torch
-# versions are derived from Dockerfile.rocm
+# versions are derived from dockerfiles/Dockerfile.rocm
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.5.1")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.5.1")
