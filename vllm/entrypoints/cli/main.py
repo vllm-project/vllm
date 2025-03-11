@@ -5,6 +5,8 @@ import os
 import signal
 import sys
 
+import vllm.entrypoints.cli.connect
+import vllm.entrypoints.cli.disagg
 import vllm.entrypoints.cli.openai
 import vllm.entrypoints.cli.serve
 import vllm.version
@@ -16,6 +18,8 @@ logger = init_logger(__name__)
 CMD_MODULES = [
     vllm.entrypoints.cli.openai,
     vllm.entrypoints.cli.serve,
+    vllm.entrypoints.cli.disagg,
+    vllm.entrypoints.cli.connect,
 ]
 
 
