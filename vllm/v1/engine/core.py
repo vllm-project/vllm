@@ -170,7 +170,9 @@ class EngineCore:
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
-        if not self.scheduler.has_unfinished_requests():
+        # Check for any requests remaining in the scheduler - unfinished,
+        # or finished and not yet removed from the batch.
+        if not self.scheduler.has_requests():
             return EngineCoreOutputs(
                 outputs=[],
                 scheduler_stats=self.scheduler.make_stats(),
@@ -220,23 +222,18 @@ class EngineCore:
                 self.batch_queue.put_nowait(
                     (future, scheduler_output))  # type: ignore
 
-        # If all requests are scheduled or the job queue is full,
+        scheduled_batch = (scheduler_output is not None
+                           and scheduler_output.total_num_scheduled_tokens > 0)
+
+        # If no more requests can be scheduled and the job queue is not empty,
         # block until the first batch in the job queue is finished.
-        if (scheduler_output is None
-                or scheduler_output.total_num_scheduled_tokens == 0):
-            try:
-                future, scheduler_output = self.batch_queue.get(
-                    timeout=POLLING_TIMEOUT_S)
-                # Blocking until the first result is available.
-                model_output = future.result()
-                self.batch_queue.task_done()
-                engine_core_outputs = self.scheduler.update_from_output(
-                    scheduler_output, model_output)
-            except queue.Empty:
-                # If the queue is empty (timeout at .get), return
-                # an empty EngineCoreOutputs for logging.
-                engine_core_outputs = EngineCoreOutputs(
-                    outputs=[], scheduler_stats=self.scheduler.make_stats())
+        if not scheduled_batch and not self.batch_queue.empty():
+            future, scheduler_output = self.batch_queue.get_nowait()
+            # Blocking until the first result is available.
+            model_output = future.result()
+            self.batch_queue.task_done()
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output)
 
         return engine_core_outputs
 
@@ -352,7 +349,7 @@ class EngineCoreProc(EngineCore):
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
-            while not self.scheduler.has_unfinished_requests():
+            while not self.scheduler.has_requests():
                 logger.debug("EngineCore busy loop waiting.")
                 req = self.input_queue.get()
                 self._handle_client_request(*req)
