@@ -5,7 +5,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import Any, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Any, List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.utils.checkpoint
@@ -525,23 +525,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         if audio_input["type"] == "audio_embeds":
             return audio_input["data"]
 
-        audio_features = audio_input["data"]
-        if isinstance(audio_features, list):
-            audio_features = [
-                torch.stack(x) if isinstance(x, list) else x
-                for x in audio_features
-            ]
-            audio_features = [
-                x.reshape(-1, *x.shape[-2:]) for x in audio_features
-            ]
-            max_len = max(x.shape[-1] for x in audio_features)
-            # Pad and concatenate:
-            # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
-            audio_features = torch.cat(
-                [F.pad(x, (0, max_len - x.shape[-1])) for x in audio_features])
-        else:
-            # Flatten [B, N, 80, M] -> [B * N, 80, M]
-            audio_features = flatten_bn(audio_features)
+        # Pad and concatenate audio features
+        # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
+        audio_features = pad_and_concat_to_dim3(audio_input["data"])
 
         if isinstance(audio_input['lens'], list):
             # [B1, B2] -> [B1+B2]
@@ -656,3 +642,31 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         loader = AutoWeightsLoader(self,
                                    ignore_unexpected_prefixes=["audio_tower."])
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+
+def pad_and_concat_to_dim3(
+    features: Union[torch.Tensor, List[torch.Tensor], List[List[torch.Tensor]]]
+) -> torch.Tensor:
+    """
+    Pad and concatenate a list of tensors.
+
+    output:
+        Tensor of shape [B, C, M] where M is the maximum length of the input
+        tensors, B is the sum of the batch sizes of the input tensors.
+        C must be the same for all input tensors.
+    """
+    if isinstance(features, torch.Tensor):
+        if features.ndim > 3:
+            # Flatten [B, N, 80, M] -> [B * N, 80, M]
+            features = flatten_bn(features)
+        return features
+
+    features = [pad_and_concat_to_dim3(f) for f in features]
+
+    max_len = max(f.shape[-1] for f in features)
+    # Ensure all features have dim=3
+    features = [f.view(-1, *f.shape[-2:]) for f in features]
+    # Pad and oncatenate:
+    # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
+    features = [F.pad(f, (0, max_len - f.shape[-1])) for f in features]
+    return torch.cat(features)
