@@ -1,5 +1,7 @@
 #include <cstdint>
 
+/* Adapted from ./csrc/quantization/gguf/mmq.cuh
+   based on ./vllm/model_executor/layers/fused_moe/fused_moe.py */
 template <typename scalar_t, int qk, int qr, int qi, bool need_sum,
           typename block_q_t, int mmq_x, int mmq_y, int nwarps,
           allocate_tiles_cuda_t allocate_tiles, load_tiles_cuda_t load_tiles,

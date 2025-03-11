@@ -8,6 +8,7 @@ from gguf import GGMLQuantizationType as WeightType
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
@@ -18,6 +19,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.utils import set_weight_attrs
+
+logger = init_logger(__name__)
 
 
 class GGUFConfig(QuantizationConfig):
@@ -150,6 +153,9 @@ def _fused_moe_gguf(
             topk_weights.view(num_tokens, top_k, 1))
         ops.moe_sum(out, out_hidden_states)
     else:
+        logger.warning_once("There is no support for fast MoE kernel "
+                            "for current quantization method. "
+                            "Falling back to slow implementation. ")
         for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
             inp = x[tok].reshape((1, ) + x.shape[1:])
             current_hidden_state = None
