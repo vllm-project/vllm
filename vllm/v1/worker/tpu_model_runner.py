@@ -29,8 +29,7 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
-                             ModelRunnerOutput)
-from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput, SamplerOutput
+                             ModelRunnerOutput, SamplerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.sample.tpu_metadata import TPUSupportedSamplingMetadata
@@ -456,6 +455,8 @@ class TPUModelRunner:
         # TODO: Support prompt logprobs.
         padded_num_reqs = _get_padded_num_reqs_with_upper_limit(
             num_reqs, self.max_num_reqs)
+        # Indices at which we sample (positions of last token in the sequence).
+        # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logits_indices = logits_indices.to(self.device)
         return attn_metadata, logits_indices
@@ -591,15 +592,11 @@ class TPUModelRunner:
 
         sampling_metadata = self.input_batch.sampling_metadata
         num_reqs = self.input_batch.num_reqs
-        # Indices at which we sample (positions of last token in the sequence).
-        # logits_indices = logits_indices[:num_reqs]
-        padded_do_sample_indices = _pad_indices_do_sample(
-            logits_indices, num_reqs)
         # NOTE (NickLucche) here we sync with TPU: if there's any shape
         # mismatch in pre-processing, it will trigger a small recompilation
         # of the code thus far. Forward graph remains untouched.
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_sampling_metadata(sampling_metadata, padded_do_sample_indices,
+            from_sampling_metadata(sampling_metadata, logits_indices,
                                     num_reqs, self.device)
         # Make mypy happy
         sampling_metadata = cast(SamplingMetadata, tpu_sampling_metadata)
@@ -614,6 +611,8 @@ class TPUModelRunner:
         xm.mark_step()  # break model graph
         selected_token_ids = self.model.sample_from_hidden(
             hidden_states, sampling_metadata)
+        # Remove padding on cpu and keep dynamic op outside of xla graph.
+        selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
@@ -644,10 +643,7 @@ class TPUModelRunner:
 
         max_gen_len = selected_token_ids.shape[-1]
         if max_gen_len == 1:
-            # ModelWrapper returns reqs output + padding. Remove padding
-            # here to keep dynamic op outside of main graph.
             valid_sampled_token_ids = selected_token_ids.tolist()
-            valid_sampled_token_ids = valid_sampled_token_ids[:num_reqs]
 
             for i, req_state, seq_len in request_seq_lens:
                 token_id = valid_sampled_token_ids[i][0]
@@ -784,8 +780,8 @@ class TPUModelRunner:
         num_reqs_to_sample = MIN_NUM_SEQS
         hsize = self.model_config.get_hidden_size()
         device = self.device
-        # Compile sampling step for different model+sampler outputs in
-        # [MIN_NUM_SEQS, pad(max_num_reqs)]
+        # Compile sampling step for different model+sampler outputs in bucketed
+        # n_tokens x max_num_reqs. Graph is really small so this is fine.
         while True:
             dummy_hidden = torch.randn((num_tokens, hsize), device=device)
             while True:
@@ -919,10 +915,6 @@ class ModelWrapperV1(nn.Module):
         return self.model.get_input_embeddings(*args, **kwargs)
 
 
-def _get_padded_number(n: int, multiple: int) -> int:
-    return ((n + multiple - 1) // multiple) * multiple
-
-
 def _get_padded_token_len(x: int) -> int:
     if x <= 16:
         return 16
@@ -930,26 +922,5 @@ def _get_padded_token_len(x: int) -> int:
 
 
 def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
-    res = 64 if x <= 64 else 1 << (x - 1).bit_length()
+    res = MIN_NUM_SEQS if x <= MIN_NUM_SEQS else 1 << (x - 1).bit_length()
     return min(res, upper_limit)
-
-def _pad_indices_do_sample(indices_do_sample: torch.Tensor,
-                           num_do_sample: int) -> torch.Tensor:
-    # FIXME
-    # `num_do_sample` \in [1, max_num_seqs]
-    # Find closest power of two for padding size.
-    if num_do_sample < MIN_NUM_SEQS:
-        padded_do_sample = MIN_NUM_SEQS
-    else:
-        lower = 1 << (num_do_sample.bit_length() - 1)
-        upper = lower << 1
-        padded_do_sample = lower \
-            if (num_do_sample - lower) < (upper - num_do_sample) else upper
-    if num_do_sample < padded_do_sample:
-        padded_indices = torch.zeros(padded_do_sample,
-                                     dtype=indices_do_sample.dtype,
-                                     device=indices_do_sample.device)
-        padded_indices[:num_do_sample] = indices_do_sample[:num_do_sample]
-        indices_do_sample = padded_indices
-
-    return indices_do_sample

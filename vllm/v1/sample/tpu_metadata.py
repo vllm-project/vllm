@@ -53,6 +53,7 @@ class TPUSupportedSamplingMetadata:
         default_factory=lambda: list())
 
     allowed_token_ids_mask = None
+    bad_words_token_ids = None
     indices_do_sample: torch.Tensor = None
 
     def __post_init__(self):
@@ -60,7 +61,7 @@ class TPUSupportedSamplingMetadata:
         if self.indices_do_sample is None:
             self.indices_do_sample = torch.zeros(temp.shape[0],
                                                  device=temp.device,
-                                                 dtype=torch.long)
+                                                 dtype=torch.int32)
         if self.do_argmax is None:
             self.do_argmax = torch.tensor(0,
                                           dtype=torch.bool,
