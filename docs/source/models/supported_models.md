@@ -541,14 +541,11 @@ You should manually set mean pooling by passing `--override-pooler-config '{"poo
 :::
 
 :::{note}
-Unlike base Qwen2, `Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
-You can set `--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
+The HF implementation of `Alibaba-NLP/gte-Qwen2-1.5B-instruct` is hardcoded to use causal attention despite what is shown in `config.json`. To compare vLLM vs HF results,
+you should set `--hf-overrides '{"is_causal": true}'` in vLLM so that the two implementations are consistent with each other.
 
-On the other hand, its 1.5B variant (`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
-despite being described otherwise on its model card.
-
-Regardless of the variant, you need to enable `--trust-remote-code` for the correct tokenizer to be
-loaded. See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
+For both the 1.5B and 7B variants, you also need to enable `--trust-remote-code` for the correct tokenizer to be loaded.
+See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
 :::
 
 If your model is not in the above list, we will try to automatically convert the model using

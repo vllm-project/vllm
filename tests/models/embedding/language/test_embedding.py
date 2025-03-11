@@ -42,8 +42,8 @@ def test_models(
     if model == "ssmits/Qwen2-7B-Instruct-embed-base":
         vllm_extra_kwargs["override_pooler_config"] = \
             PoolerConfig(pooling_type="MEAN")
-    if model == "Alibaba-NLP/gte-Qwen2-7B-instruct":
-        vllm_extra_kwargs["hf_overrides"] = {"is_causal": False}
+    if model == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
+        vllm_extra_kwargs["hf_overrides"] = {"is_causal": True}
 
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
