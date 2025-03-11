@@ -112,6 +112,8 @@ class StructuredOutputManager:
             ctx = self.compiler.compile_builtin_json_grammar()
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
+        elif request_type == StructuredOutputOptions.REGEX:
+            ctx = self.compiler.compile_regex(grammar_spec)
         else:
             logger.error("Validation should have already occurred. "
                          "Please file an issue.")
