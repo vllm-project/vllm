@@ -705,10 +705,16 @@ class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
         self.scheduler_config = scheduler_config
 
         # TODO(Shinichi): Remove this workaround.
+        # vllm.model_executor.models.interfaces.IsHybrid requires
+        # self.config.layers_block_type to be set.
         self.config.layers_block_type = [
             "mamba" if is_mamba(self.config, i) else "attention"
             for i in range(self.config.num_hidden_layers)
         ]
+        # ModelConfig.get_head_size assumes head_dim is set or calculated as
+        # hidden_size // num_attention_heads. However, this is not always
+        # the case for PLaMo2, as indicated by the FIXME comment.
+        setattr(self.config, "head_dim", self.config.hidden_size_per_head)
 
         self.model = Plamo2Model(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "model"))
