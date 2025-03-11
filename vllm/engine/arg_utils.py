@@ -389,8 +389,10 @@ class EngineArgs:
         parser.add_argument('--max-output-len',
                             type=int,
                             default=EngineArgs.max_output_len,
-                            help='Maximum number of tokens that can be requested in a single request. '
-                                'If set, this will override any larger max_tokens value in the request.')
+                            help='Maximum number of tokens that can be '
+                            'requested in a single request. '
+                            'If set, this will override any larger max_tokens '
+                            'value in the request.')
         parser.add_argument(
             '--guided-decoding-backend',
             type=str,
