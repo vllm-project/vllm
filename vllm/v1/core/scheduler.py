@@ -68,10 +68,13 @@ class Scheduler:
         self.waiting: deque[Request] = deque()
         self.running: list[Request] = []
 
-        # req_id -> Number of times the request has been scheduled.
-        # With PP, when the input prompt is divided into chunks, we can
-        # schedule a new chunk even before the previous chunk has completed
-        # the full pipeline stages. This helps reduce TTFT.
+        # req_id -> a queue of computed tokens when the request is scheduled.
+        # With PP, when an input prompt is split into chunks, we can schedule
+        # a new chunk even before the previous chunk has completed the full
+        # pipeline stages. This helps reduce TTFT.
+        # In this case, the deque will have multiple elements with the
+        # computed tokens before each chunk was scheduled. This is used by
+        # update_from_output() to determine the request status.
         self.scheduled_req_ids_to_orig_computed_tokens: dict[
             str, deque[int]] = defaultdict(deque)
 
@@ -83,7 +86,7 @@ class Scheduler:
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
-        # Request id -> Queue of CachedRequestData
+        # Request id -> deque of CachedRequestData
         self._cached_reqs_data: dict[
             str, deque[CachedRequestData]] = defaultdict(deque)
 
