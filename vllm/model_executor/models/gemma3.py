@@ -13,13 +13,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Iterable, Optional, Set, Tuple, Union, Literal
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
-# FIXME
-# from transformers import Gemma3Config
-from transformers.models.gemma3.configuration_gemma3 import Gemma3Config, Gemma3TextConfig
+from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
