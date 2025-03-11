@@ -1335,6 +1335,7 @@ class ParallelConfig:
     data_parallel_master_ip: str = "127.0.0.1"
     data_parallel_master_port: int = 29500  # Port of the data parallel master.
     enable_expert_parallel: bool = False  # Use EP instead of TP for MoE layers.
+    expert_map_path: Optional[str] = None  # Path to the expert map file.
 
     # Maximum number of multiple batches
     # when load model sequentially. To avoid RAM OOM when using tensor

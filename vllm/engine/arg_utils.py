@@ -115,6 +115,7 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     enable_expert_parallel: bool = False
+    expert_map_path: Optional[str] = None
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
@@ -449,6 +450,10 @@ class EngineArgs:
             action='store_true',
             help='Use expert parallelism instead of tensor parallelism '
             'for MoE layers.')
+        parser.add_argument('--expert-map-path',
+                            type=str,
+                            default=EngineArgs.expert_map_path,
+                            help='Path to expert map file.')
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,
@@ -1226,6 +1231,7 @@ class EngineArgs:
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             enable_expert_parallel=self.enable_expert_parallel,
+            expert_map_path=self.expert_map_path,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             tokenizer_pool_config=TokenizerPoolConfig.create_config(
