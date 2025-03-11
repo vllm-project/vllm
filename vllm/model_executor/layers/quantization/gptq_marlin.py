@@ -402,7 +402,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             torch.empty(num_experts,
                         scales_size13,
                         2 * intermediate_size_per_partition,
-                        dtype=torch.half),
+                        dtype=params_dtype),
             requires_grad=False,
         )
         layer.register_parameter("w13_scales", w13_scales)
@@ -412,7 +412,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             torch.empty(num_experts,
                         scales_size2,
                         hidden_size,
-                        dtype=torch.half),
+                        dtype=params_dtype),
             requires_grad=False,
         )
         layer.register_parameter("w2_scales", w2_scales)
@@ -597,10 +597,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor:
         assert activation == "silu", "Only SiLU activation is supported."
 
-        # The input must currently be float16
-        orig_dtype = x.dtype
-        x = x.half()
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -630,4 +626,4 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             sort_indices2=layer.w2_g_idx_sort_indices,
             num_bits=self.quant_config.quant_type.size_bits,
             workspace=layer.workspace,
-            is_k_full=self.is_k_full).to(orig_dtype)
+            is_k_full=self.is_k_full)

@@ -2673,7 +2673,8 @@ torch::Tensor moe_wna16_marlin_gemm(
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float);
   } else {
-    TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
+    TORCH_CHECK(false,
+                "moe_wna16_marlin_gemm only supports bfloat16 and float16");
   }
 
   return c;
