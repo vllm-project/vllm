@@ -34,13 +34,15 @@ class Scheduler:
         cache_config: CacheConfig,
         lora_config: Optional[LoRAConfig],
         speculative_config: Optional[SpeculativeConfig],
-        log_stats: bool,
         structured_output_manager: StructuredOutputManager,
+        include_finished_set: bool = False,
+        log_stats: bool = False,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
         self.speculative_config = speculative_config
+        self.include_finished_set = include_finished_set
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
 
@@ -640,10 +642,16 @@ class Scheduler:
                 new_running.append(request)
 
         self.running = new_running
-        return EngineCoreOutputs(
+        engine_core_outputs = EngineCoreOutputs(
             outputs=outputs,
             scheduler_stats=self.make_stats(),
         )
+        if self.include_finished_set:
+            #TODO currently sending duplicates here, fix this
+            engine_core_outputs.finished_requests = (
+                scheduler_output.finished_req_ids | self.finished_req_ids)
+
+        return engine_core_outputs
 
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len
@@ -713,7 +721,7 @@ class Scheduler:
         return len(self.waiting) + len(self.running)
 
     def has_unfinished_requests(self) -> bool:
-        return self.get_num_unfinished_requests() > 0
+        return len(self.running) > 0 or len(self.waiting) > 0
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
