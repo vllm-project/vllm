@@ -67,6 +67,11 @@ class EngineCore:
 
         # Setup scheduler.
         if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
+            logger.warning(
+                "Using configured V1 scheduler class %s. "
+                "This scheduler interface is not public and "
+                "compatibility may not be maintained.",
+                vllm_config.scheduler_config.scheduler_cls)
             Scheduler = resolve_obj_by_qualname(
                 vllm_config.scheduler_config.scheduler_cls)
         else:
