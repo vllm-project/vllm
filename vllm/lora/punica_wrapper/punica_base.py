@@ -342,7 +342,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
     @abstractmethod
     def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
                    x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
-                   scale: float, **kwargs) -> None:
+                   scale: float, **kwargs) -> Optional[torch.Tensor]:
         """
         Performs GEMM  for multiple slices of lora_a.
 
@@ -369,7 +369,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
                    output_slices: Tuple[int, ...],
                    offset_start: int = 0,
                    add_inputs=True,
-                   **kwargs) -> None:
+                   **kwargs) -> Optional[torch.Tensor]:
         """
         Performs GEMM and bias addition for multiple slices of lora_b.
       
@@ -401,7 +401,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
                            x: torch.Tensor,
                            lora_b_stacked: torch.Tensor,
                            add_inputs: bool = True,
-                           **kwargs) -> None:
+                           **kwargs) -> Optional[torch.Tensor]:
         """
         Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
         and this layer only requires the expand operation.
@@ -428,7 +428,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
                         output_slices: Tuple[int, ...],
                         *,
                         buffer: Optional[Tuple[torch.Tensor, ...]] = None,
-                        **kwargs) -> None:
+                        **kwargs) -> Optional[torch.Tensor]:
         """
         Applicable to linear-related lora. 
 
@@ -463,7 +463,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
                         scale,
                         *,
                         buffer: Optional[torch.Tensor] = None,
-                        **kwargs) -> None:
+                        **kwargs) -> Optional[torch.Tensor]:
         """
         Applies lora  specifically for LogitsProcessorWithLoRA.
         
