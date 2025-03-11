@@ -23,7 +23,6 @@ class IncrementalDetokenizer:
 
     # Stop strings
     stop: list[str] = field(default_factory=list)
-    ignore_eos: bool = False
     include_stop_str_in_output: bool = False
 
     # Metadata for incremental detokenization
