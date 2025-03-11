@@ -32,6 +32,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -44,7 +45,7 @@ _PAD_SLOT_ID = 1_000_000_000
 INVALID_TOKEN_ID = -1
 
 
-class TPUModelRunner:
+class TPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(
         self,
@@ -428,6 +429,10 @@ class TPUModelRunner:
             self.device)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
 
+        if self.lora_config is not None:
+            self.set_active_loras(self.input_batch,
+                                  num_scheduled_tokens_per_req)
+
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
@@ -664,6 +669,10 @@ class TPUModelRunner:
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
+        if self.lora_config:
+            model = self.load_lora_model(model, self.model_config,
+                                         self.scheduler_config,
+                                         self.lora_config, self.device)
         model = model.eval()
         xm.mark_step()
         xm.wait_device_ops()
@@ -761,7 +770,9 @@ class TPUModelRunner:
         start = time.perf_counter()
         num_tokens = 16
         while True:
-            self._dummy_run(self.kv_caches, num_tokens)
+            with self.maybe_profile_with_lora(
+                    self.lora_config, np.array([num_tokens], dtype=np.int32)):
+                self._dummy_run(self.kv_caches, num_tokens)
             logger.info("  -- num_tokens: %d", num_tokens)
             xm.mark_step()
             xm.wait_device_ops()
