@@ -646,9 +646,6 @@ class Scheduler:
         )
 
     def _check_stop(self, request: Request) -> bool:
-        '''Check for token-based stop conditions (EOS,stop token).
-        Output text truncation is deferred to frontend.
-        '''
         if (request.num_tokens >= self.max_model_len
                 or request.num_output_tokens >= request.max_tokens):
             request.status = RequestStatus.FINISHED_LENGTH_CAPPED
