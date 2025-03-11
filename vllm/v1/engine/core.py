@@ -17,6 +17,7 @@ import zmq.asyncio
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
@@ -31,6 +32,18 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
+if not current_platform.is_tpu():
+    from vllm.v1.structured_output import StructuredOutputManager
+else:
+
+    class StructuredOutputManager:
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
 
 logger = init_logger(__name__)
 
