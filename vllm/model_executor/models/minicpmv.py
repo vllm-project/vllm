@@ -446,8 +446,8 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
     def get_num_frames_with_most_features(self, seq_len: int) -> int:
         mm_config = self.ctx.get_mm_config()
-        max_images = mm_config.limit_per_prompt.get("image", 1)
-        max_videos = mm_config.limit_per_prompt.get("video", 1)
+        max_images = mm_config.get_limit_per_prompt("image")
+        max_videos = mm_config.get_limit_per_prompt("video")
 
         # count <image_idx></image_idx> tokens
         # which are not in get_max_image_tokens
@@ -780,6 +780,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: Union[str, List[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         supported_mm_modalities = self.info.get_supported_mm_modalities()
         if isinstance(prompt, list):
@@ -791,7 +792,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 [index for index, m in enumerate(matches) if m == modality])
             for modality in supported_mm_modalities
         }
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
+        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
+                               return_mm_hashes)
         # Exclude <image_id>x</image_id> from placeholders
         if "image" in result["mm_placeholders"] and \
             self.info.get_model_version() == (2, 6):

@@ -25,12 +25,12 @@ RUN apt-get update -y && \
     wget
 
 WORKDIR /workspace/vllm
-COPY requirements-xpu.txt /workspace/vllm/requirements-xpu.txt
-COPY requirements-common.txt /workspace/vllm/requirements-common.txt
+COPY requirements/xpu.txt /workspace/vllm/requirements/xpu.txt
+COPY requirements/common.txt /workspace/vllm/requirements/common.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir \
-    -r requirements-xpu.txt
+    -r requirements/xpu.txt
 
 RUN git clone https://github.com/intel/pti-gpu && \
     cd pti-gpu/sdk && \

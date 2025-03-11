@@ -10,7 +10,10 @@ Reasoning models return a additional `reasoning_content` field in their outputs,
 
 vLLM currently supports the following reasoning models:
 
-- [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) (`deepseek_r1`, which looks for `<think> ... </think>`)
+| Model Series | Parser Name | Structured Output Support |
+|--------------|-------------|------------------|
+| [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `guided_json`, `guided_regex` |
+| [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` |
 
 ## Quickstart
 
@@ -76,13 +79,101 @@ Streaming chat completions are also supported for reasoning models. The `reasoni
 }
 ```
 
-Please note that it is not compatible with the OpenAI Python client library. You can use the `requests` library to make streaming requests. You could checkout the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
+OpenAI Python client library does not officially support `reasoning_content` attribute for streaming output. But the client support extra attributes in the response. You can use `hasattr` to check if the `reasoning_content` attribute is present in the response. For example:
+
+```python
+from openai import OpenAI
+
+# Modify OpenAI's API key and API base to use vLLM's API server.
+openai_api_key = "EMPTY"
+openai_api_base = "http://localhost:8000/v1"
+
+client = OpenAI(
+    api_key=openai_api_key,
+    base_url=openai_api_base,
+)
+
+models = client.models.list()
+model = models.data[0].id
+
+messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
+stream = client.chat.completions.create(model=model,
+                                        messages=messages,
+                                        stream=True)
+
+print("client: Start streaming chat completions...")
+printed_reasoning_content = False
+printed_content = False
+
+for chunk in stream:
+    reasoning_content = None
+    content = None
+    # Check the content is reasoning_content or content
+    if hasattr(chunk.choices[0].delta, "reasoning_content"):
+        reasoning_content = chunk.choices[0].delta.reasoning_content
+    elif hasattr(chunk.choices[0].delta, "content"):
+        content = chunk.choices[0].delta.content
+
+    if reasoning_content is not None:
+        if not printed_reasoning_content:
+            printed_reasoning_content = True
+            print("reasoning_content:", end="", flush=True)
+        print(reasoning_content, end="", flush=True)
+    elif content is not None:
+        if not printed_content:
+            printed_content = True
+            print("\ncontent:", end="", flush=True)
+        # Extract and print the content
+        print(content, end="", flush=True)
+```
+
+Remember to check whether the `reasoning_content` exists in the response before accessing it. You could checkout the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
+
+## Structured output
+
+The reasoning content is also available in the structured output. The structured output engine like `xgrammar` will use the reasoning content to generate structured output.
+
+```python
+from openai import OpenAI
+from pydantic import BaseModel
+
+# Modify OpenAI's API key and API base to use vLLM's API server.
+openai_api_key = "EMPTY"
+openai_api_base = "http://localhost:8000/v1"
+
+client = OpenAI(
+    api_key=openai_api_key,
+    base_url=openai_api_base,
+)
+
+models = client.models.list()
+model = models.data[0].id
+
+
+class People(BaseModel):
+    name: str
+    age: int
+
+
+json_schema = People.model_json_schema()
+
+prompt = ("Generate a JSON with the name and age of one random person.")
+completion = client.chat.completions.create(
+    model=model,
+    messages=[{
+        "role": "user",
+        "content": prompt,
+    }],
+    extra_body={"guided_json": json_schema},
+)
+print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+print("content: ", completion.choices[0].message.content)
+```
 
 ## Limitations
 
 - The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`).
 - It is not compatible with [`tool_calling`](#tool_calling).
-- The reasoning content is not available for all models. Check the model's documentation to see if it supports reasoning.
 
 ## How to support a new reasoning model
 
@@ -166,9 +257,10 @@ class DeepSeekReasoner(Reasoner):
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.end_token_id in input_ids
+    ...
 ```
 
-The structured output engine like xgrammar will use `end_token_id` to check if the reasoning content is present in the model output and skip the structured output if it is the case.
+The structured output engine like `xgrammar` will use `end_token_id` to check if the reasoning content is present in the model output and skip the structured output if it is the case.
 
 Finally, you can enable reasoning for the model by using the `--enable-reasoning` and `--reasoning-parser` flags.
 

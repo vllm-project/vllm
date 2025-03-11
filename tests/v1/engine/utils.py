@@ -30,9 +30,6 @@ FULL_STRINGS = [
 STOP_STRINGS = ["I love working on", "company by far", "brother in"]
 PROMPT_LEN = 5
 
-PLP_APC_UNSUPPORTED_MSG = ("Prefix caching with prompt logprobs not yet "
-                           "supported on VLLM V1.")
-
 random.seed(42)
 
 
