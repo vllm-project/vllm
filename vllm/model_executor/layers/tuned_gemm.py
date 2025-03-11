@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.envs import VLLM_USE_ROCM_SKINNY_GEMM
 from vllm.platforms import current_platform
 from vllm.utils import is_mi250, is_navi
@@ -68,6 +69,8 @@ class TunedGemm:
         self.solids = solds
 
     def query_sol(self, m, n, k, bias, dtype):
+        if envs.VLLM_USE_V1:
+            return 0, 0
         return self.solids.get((m, n, k, bias, str(dtype)), (0, 0))
 
     def apply_skinny(self, m, n, k, inp_view, weights):

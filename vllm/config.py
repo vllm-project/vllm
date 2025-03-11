@@ -3450,6 +3450,10 @@ class VllmConfig:
             # FIXME(woosuk): Disable inductor to reduce the compilation time
             # and avoid any potential issues with the inductor.
             self.compilation_config.custom_ops = ["none"]
+            if current_platform.is_rocm():
+                self.compilation_config.custom_ops = [
+                    "+rms_norm", "+silu_and_mul"
+                ]
             self.compilation_config.use_cudagraph = True
             self.compilation_config.use_inductor = True
             self.compilation_config.cudagraph_num_of_warmups = 1
