@@ -37,6 +37,7 @@ def shape_supported_by_cutlass(weight: torch.Tensor, block_size: List[int],
                                weight_scale: torch.Tensor,
                                input_2d: torch.Tensor) -> bool:
     if current_platform.is_rocm():
+        # TODO this is never used, as cutlass_block_fp8_supported is False
         scale_a_shape = ((input_2d.shape[-1] // block_size[1], ) +
                          input_2d.shape[:-1])[::-1]
         scale_b_shape = (weight_scale.view(-1, 1)
