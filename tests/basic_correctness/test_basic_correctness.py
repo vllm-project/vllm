@@ -53,7 +53,6 @@ def test_models(
     dtype: str,
     max_tokens: int,
     enforce_eager: bool,
-    monkeypatch,
 ) -> None:
 
     if backend == "FLASHINFER" and current_platform.is_rocm():
@@ -64,7 +63,7 @@ def test_models(
         pytest.skip(
             f"{backend} does not support gemma2 with full context length.")
 
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
+    os.environ["VLLM_ATTENTION_BACKEND"] = backend
 
     # 5042 tokens for gemma2
     # gemma2 has alternating sliding window size of 4096

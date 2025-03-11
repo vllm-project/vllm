@@ -12,7 +12,7 @@ from typing import Any, Optional, TypeAlias
 import torch
 import tqdm
 
-from vllm import LLM, SamplingParams, envs
+from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.profiler import layerwise_profile
 from vllm.utils import FlexibleArgumentParser
@@ -361,10 +361,6 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
 
 
 if __name__ == "__main__":
-    if envs.VLLM_USE_V1:
-        raise NotImplementedError(
-            "This example uses V0 internals. Set VLLM_USE_V1=0.")
-
     parser = FlexibleArgumentParser(description="""
 Profile a model
 
