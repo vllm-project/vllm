@@ -1347,6 +1347,7 @@ class QKVCrossParallelLinear(LinearBase):
         if bias:
             self.bias = torch.nn.Parameter()
             set_weight_attrs(self.bias, {
+                "output_dim": 0,
                 "weight_loader": self.weight_loader,
             })
         else:
