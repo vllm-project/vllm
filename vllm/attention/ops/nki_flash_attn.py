@@ -869,3 +869,46 @@ def flash_attn_varlen_nkifunc(
 
     o = flash_paged_attention[1, n_kv_head](**kwargs)
     return o
+
+
+def reshape_and_cache(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """
+    Writes key-value pairs to the KV cache at specified positions.
+
+    Args:
+        key (torch.Tensor): Key tensor with shape
+            (num_tokens, n_kv_head, d_head)
+        value (torch.Tensor): Value tensor with shape 
+            (num_tokens, n_kv_head, d_head)
+        key_cache (torch.Tensor): Key cache tensor with shape 
+            (num_blocks, n_kv_head, block_size, d_head)
+        value_cache (torch.Tensor): Value cache tensor with shape
+            (num_blocks, n_kv_head, block_size, d_head) 
+        slot_mapping (torch.Tensor): Mapping tensor indicating cache positions
+            with shape (num_tokens)
+
+    Returns:
+        None: Updates the key_cache and value_cache tensors in-place
+    """
+    block_size = key_cache.size(2)
+
+    # Calculate indices with explicit floor division
+    block_indices = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    block_offsets = slot_mapping % block_size
+
+    # Update caches using index_put_
+    key_cache.index_put_(
+        (block_indices.unsqueeze(1),
+         torch.arange(key_cache.size(1),
+                      device=key.device), block_offsets.unsqueeze(1)), key)
+
+    value_cache.index_put_(
+        (block_indices.unsqueeze(1),
+         torch.arange(value_cache.size(1),
+                      device=value.device), block_offsets.unsqueeze(1)), value)
