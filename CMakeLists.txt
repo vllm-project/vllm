@@ -15,7 +15,7 @@ project(vllm_extensions LANGUAGES CXX)
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
-
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
@@ -597,6 +597,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 endif()
 
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  cuda_archs_loose_intersection(MOE_PERMUTE_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
+  if (MOE_PERMUTE_ARCHS)
+    set(MARLIN_PERMUTE_SRC
+        "csrc/moe/permute_unpermute_kernels/dispatch.h" 
+        "csrc/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.h"
+        "csrc/moe/moe_permute_unpermute_op.cu")
+
+    set_gencode_flags_for_srcs(
+      SRCS "${MARLIN_PERMUTE_SRC}"
+      CUDA_ARCHS "${MOE_PERMUTE_ARCHS}")
+
+    list(APPEND VLLM_MOE_EXT_SRC "${MARLIN_PERMUTE_SRC}")
+    message(STATUS "Building MOE permute kernels for archs: ${MOE_PERMUTE_ARCHS}")
+  else()
+    message(STATUS "Not building MOE permute kernels as no compatible archs found"
+                   " in CUDA target architectures")
+  endif()
+endif()
 message(STATUS "Enabling moe extension.")
 define_gpu_extension_target(
   _moe_C
@@ -605,6 +624,8 @@ define_gpu_extension_target(
   SOURCES ${VLLM_MOE_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
+  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
 
