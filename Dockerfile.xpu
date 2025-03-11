@@ -33,10 +33,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-cache-dir \
     -r requirements/xpu.txt
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install intel-extension-for-pytorch==2.6.10+xpu \
-    --extra-index-url=https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
-
 ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
 
 COPY . .
@@ -49,6 +45,10 @@ ENV VLLM_TARGET_DEVICE=xpu
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 setup.py install
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install intel-extension-for-pytorch==2.6.10+xpu \
+    --extra-index-url=https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
 
 CMD ["/bin/bash"]
 
