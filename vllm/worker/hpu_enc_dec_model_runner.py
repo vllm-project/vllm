@@ -442,7 +442,8 @@ class HPUEncoderDecoderModelRunner(
                                         seq_len,
                                         is_prompt,
                                         lora_request=None,
-                                        temperature=0):
+                                        temperature=0,
+                                        last_block_assigned=0):
         sampling_params = SamplingParams(temperature=temperature)
         num_blocks = math.ceil(seq_len / self.block_size)
         cross_block_table: Optional[List[int]] = None
