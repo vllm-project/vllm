@@ -7,7 +7,7 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, FinishReason
 
 logger = init_logger(__name__)
 
@@ -23,6 +23,7 @@ class IncrementalDetokenizer:
 
     # Stop strings
     stop: list[str] = field(default_factory=list)
+    ignore_eos: bool = False
     include_stop_str_in_output: bool = False
 
     # Metadata for incremental detokenization
@@ -88,7 +89,8 @@ class IncrementalDetokenizer:
             stop_buffer_length=stop_buffer_length,
         )
 
-    def update(self, new_token_ids: list[int]) -> Optional[str]:
+    def update(self, new_token_ids: list[int],
+               finish_reason: Optional[FinishReason]) -> Optional[str]:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
@@ -127,7 +129,16 @@ class IncrementalDetokenizer:
 
         self.output_text += decoded_text
 
-        # 2) Evaluate stop criteria.
+        # 2) Deferred text truncation for engine core EOS/stop-token checks
+        #    Invariant: engine core finish_reason == STOP only if
+        #    EOS/stop-token occurred.
+        if finish_reason == FinishReason.STOP:
+            if not self.include_stop_str_in_output:
+                self.output_text = self.output_text[:-len(
+                    new_decoded_token_text)]
+            return None  # No stop string
+
+        # 3) Evaluate stop-string criteria.
         stop_string = None
         if self.stop:
             stop = StopChecker.check_stop_strings(

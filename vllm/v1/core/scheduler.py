@@ -601,7 +601,7 @@ class Scheduler:
 
                     # Check for stop and update request state.
                     # This must be called before we make the EngineCoreOutput.
-                    stopped = self._check_stop(request)
+                    stopped = self._check_token_stops(request)
                     if stopped:
                         self._free_request(request)
                         break
@@ -645,7 +645,10 @@ class Scheduler:
             scheduler_stats=self.make_stats(),
         )
 
-    def _check_stop(self, request: Request) -> bool:
+    def _check_token_stops(self, request: Request) -> bool:
+        '''Check for token-based stop conditions (EOS,stop token).
+        Output text truncation is deferred to frontend.
+        '''
         if (request.num_tokens >= self.max_model_len
                 or request.num_output_tokens >= request.max_tokens):
             request.status = RequestStatus.FINISHED_LENGTH_CAPPED
