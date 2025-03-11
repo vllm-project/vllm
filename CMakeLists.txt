@@ -422,7 +422,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # 2:4 Sparse Kernels
 
   # The 2:4 sparse kernels cutlass_scaled_sparse_mm and cutlass_compressor
-  # require CUDA 12.2 or later (and only work on Hopper and Blackwell).
+  # require CUDA 12.2 or later (and only work on Hopper).
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
     set_gencode_flags_for_srcs(
