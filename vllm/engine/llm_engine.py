@@ -34,6 +34,7 @@ from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
 from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
+from vllm.logging_utils.dump_input import dump_engine_exception_v0
 from vllm.logits_process import get_bad_words_logits_processors
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
@@ -1407,6 +1408,7 @@ class LLMEngine:
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
                 self._skip_scheduling_next_step = False
+
             except InputProcessingError as e:
                 # The input for this request cannot be processed, so we must
                 # abort it. If there are remaining requests in the batch that
@@ -1420,6 +1422,17 @@ class LLMEngine:
                     allow_async_output_proc=allow_async_output_proc)
                 # Raise so the caller is notified that this request failed
                 raise
+            except BaseException as err:
+                stats = self._get_stats(scheduler_outputs=scheduler_outputs)
+                dump_engine_exception_v0(
+                    err=err,
+                    config=self.vllm_config,
+                    use_cached_outputs=self.use_cached_outputs,
+                    stats=stats,
+                    execute_model_req=execute_model_req,
+                )
+                # Re-raise exception
+                raise err
 
             # We need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.

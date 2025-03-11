@@ -30,6 +30,8 @@ logger = init_logger(__name__)
 
 _G = TypeVar("_G", bound=BaseTokenizerGroup, default=BaseTokenizerGroup)
 
+VLLM_ENABLE_V1_MULTIPROCESSING = envs.VLLM_ENABLE_V1_MULTIPROCESSING
+
 
 class LLMEngine:
     """Legacy LLMEngine for backwards compatibility."""
@@ -102,7 +104,7 @@ class LLMEngine:
         vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
 
-        if envs.VLLM_ENABLE_V1_MULTIPROCESSING:
+        if VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.debug("Enabling multiprocessing for LLMEngine.")
             enable_multiprocessing = True
 
