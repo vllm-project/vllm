@@ -31,6 +31,13 @@ constexpr int kMaxBlocks = 36;
 // Counter may overflow, but it's fine since unsigned int overflow is
 // well-defined behavior.
 using FlagType = uint32_t;
+
+// Two sets of peer counters are needed for two syncs: starting and ending an
+// operation. The reason is that it's possible for peer GPU block to arrive at
+// the second sync point while the current GPU block haven't passed the first
+// sync point. Thus, peer GPU may write counter+1 while current GPU is busy
+// waiting for counter. We use alternating counter array to avoid this
+// possibility.
 struct Signal {
   alignas(128) FlagType start[kMaxBlocks][8];
   alignas(128) FlagType end[kMaxBlocks][8];
@@ -38,11 +45,7 @@ struct Signal {
 };
 
 struct __align__(16) RankData {
-  const void*
-#if !defined(USE_ROCM)
-      __restrict__
-#endif
-      ptrs[8];
+  const void* ptrs[8];
 };
 
 struct __align__(16) RankSignals {
@@ -174,7 +177,6 @@ static DINLINE FlagType ld_flag_volatile(FlagType* flag_addr) {
                : "l"(flag_addr));
   return flag;
 }
-#endif
 
 // This function is meant to be used as the first synchronization in the all
 // reduce kernel. Thus, it doesn't need to make any visibility guarantees for
@@ -184,23 +186,12 @@ template <int ngpus>
 DINLINE void start_sync(const RankSignals& sg, Signal* self_sg, int rank) {
   uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
   if (threadIdx.x < ngpus) {
-#if !defined(USE_ROCM)
     auto peer_counter_ptr = &sg.signals[threadIdx.x]->start[blockIdx.x][rank];
     auto self_counter_ptr = &self_sg->start[blockIdx.x][threadIdx.x];
     // Write the expected counter value to peer and wait for correct value
     // from peer.
     st_flag_volatile(peer_counter_ptr, flag);
     while (ld_flag_volatile(self_counter_ptr) != flag);
-#else
-    // simultaneously write to the corresponding flag of all ranks.
-    // Latency = 1 p2p write
-    __scoped_atomic_store_n(&sg.signals[threadIdx.x]->start[blockIdx.x][rank],
-                            flag, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
-    // wait until we got true from all ranks
-    while (__scoped_atomic_load_n(&self_sg->start[blockIdx.x][threadIdx.x],
-                                  __ATOMIC_RELAXED,
-                                  __MEMORY_SCOPE_DEVICE) < flag);
-#endif
   }
   __syncthreads();
   // use one thread to update flag
@@ -214,12 +205,7 @@ DINLINE void start_sync(const RankSignals& sg, Signal* self_sg, int rank) {
 template <int ngpus, bool final_sync = false>
 DINLINE void end_sync(const RankSignals& sg, Signal* self_sg, int rank) {
   __syncthreads();
-  // eliminate the case that prior writes are not visible after signals become
-  // visible. Note that I did not managed to make this happen through a lot of
-  // testing. Might be the case that hardware provides stronger guarantee than
-  // the memory model.
   uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
-#if !defined(USE_ROCM)
   if (threadIdx.x < ngpus) {
     auto peer_counter_ptr = &sg.signals[threadIdx.x]->end[blockIdx.x][rank];
     auto self_counter_ptr = &self_sg->end[blockIdx.x][threadIdx.x];
@@ -234,7 +220,35 @@ DINLINE void end_sync(const RankSignals& sg, Signal* self_sg, int rank) {
     }
   }
   if constexpr (!final_sync) __syncthreads();
+
+  // use one thread to update flag
+  if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
+}
+
 #else
+
+template <int ngpus>
+DINLINE void start_sync(const RankSignals& sg, Signal* self_sg, int rank) {
+  uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
+  if (threadIdx.x < ngpus) {
+    // simultaneously write to the corresponding flag of all ranks.
+    // Latency = 1 p2p write
+    __scoped_atomic_store_n(&sg.signals[threadIdx.x]->start[blockIdx.x][rank],
+                            flag, __ATOMIC_RELAXED, __MEMORY_SCOPE_SYSTEM);
+    // wait until we got true from all ranks
+    while (__scoped_atomic_load_n(&self_sg->start[blockIdx.x][threadIdx.x],
+                                  __ATOMIC_RELAXED,
+                                  __MEMORY_SCOPE_DEVICE) < flag);
+  }
+  __syncthreads();
+  // use one thread to update flag
+  if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
+}
+
+template <int ngpus, bool final_sync = false>
+DINLINE void end_sync(const RankSignals& sg, Signal* self_sg, int rank) {
+  __syncthreads();
+  uint32_t flag = self_sg->_flag[blockIdx.x] + 1;
   if (threadIdx.x < ngpus) {
     // simultaneously write to the corresponding flag of all ranks.
     // Latency = 1 p2p write
@@ -248,11 +262,12 @@ DINLINE void end_sync(const RankSignals& sg, Signal* self_sg, int rank) {
                                final_sync ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE,
                                __MEMORY_SCOPE_DEVICE) < flag);
   }
-  __syncthreads();
-#endif
+  if constexpr (!final_sync) __syncthreads();
   // use one thread to update flag
   if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
 }
+
+#endif
 
 template <typename P, int ngpus, typename A>
 DINLINE P packed_reduce(const P* ptrs[], int idx) {
@@ -315,7 +330,6 @@ __global__ void __launch_bounds__(512, 1)
   for (int idx = start + tid; idx < end; idx += stride) {
     tmp_out[idx - start] = packed_reduce<P, ngpus, A>(ptrs, idx);
   }
-  // multi_gpu_barrier<ngpus, false, true>(sg, self_sg, rank);
   end_sync<ngpus>(sg, self_sg, rank);
 
   // stage 2: allgather. Note: it's important to match the tid between
@@ -347,7 +361,7 @@ class CustomAllreduce {
   bool full_nvlink_;
 
   RankSignals sg_;
-  // Stores an map from a pointer to its peer pointters from all ranks.
+  // Stores an map from a pointer to its peer pointers from all ranks.
   std::unordered_map<void*, RankData*> buffers_;
   Signal* self_sg_;
 
