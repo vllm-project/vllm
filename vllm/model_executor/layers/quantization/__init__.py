@@ -8,6 +8,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 QUANTIZATION_METHODS: List[str] = [
     "aqlm",
     "awq",
+    "awq_hpu",
     "deepspeedfp",
     "tpu_int8",
     "fp8",
@@ -22,6 +23,7 @@ QUANTIZATION_METHODS: List[str] = [
     "gptq_marlin",
     "awq_marlin",
     "gptq",
+    "gptq_hpu",
     "compressed-tensors",
     "bitsandbytes",
     "qqq",
@@ -78,6 +80,10 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         raise ValueError(f"Invalid quantization method: {quantization}")
 
     # lazy import to avoid triggering `torch.compile` too early
+    from vllm_hpu_extension.awq_hpu import AWQHPUConfig
+
+    from vllm_hpu_extension.gptq_hpu import GPTQHPUConfig
+
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
     from .aqlm import AQLMConfig
@@ -107,6 +113,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     method_to_config: Dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,
         "awq": AWQConfig,
+        "awq_hpu": AWQHPUConfig,
         "deepspeedfp": DeepSpeedFPConfig,
         "tpu_int8": Int8TpuConfig,
         "fp8": Fp8Config,
@@ -120,6 +127,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
         "gptq_marlin": GPTQMarlinConfig,
         "awq_marlin": AWQMarlinConfig,
         "gptq": GPTQConfig,
+        "gptq_hpu": GPTQHPUConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "ptpc_fp8": PTPCFp8Config,
