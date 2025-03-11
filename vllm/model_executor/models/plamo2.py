@@ -714,7 +714,7 @@ class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
         # ModelConfig.get_head_size assumes head_dim is set or calculated as
         # hidden_size // num_attention_heads. However, this is not always
         # the case for PLaMo2, as indicated by the FIXME comment.
-        setattr(self.config, "head_dim", self.config.hidden_size_per_head)
+        self.config.head_dim = self.config.hidden_size_per_head
 
         self.model = Plamo2Model(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "model"))
