@@ -2,7 +2,7 @@
 import pytest
 
 
-# TODO: this should be removed. Right now V1 overrides
+# TEST V1: this should be removed. Right now V1 overrides
 # all the torch compile logic. We should re-enable this
 # as we add torch compile support back to V1.
 @pytest.fixture(scope="function", autouse=True)
