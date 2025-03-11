@@ -44,6 +44,7 @@ from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.reasoning_parser import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
@@ -394,6 +395,12 @@ class LLMEngine:
                 "vllm.llm_engine",
                 self.observability_config.otlp_traces_endpoint)
 
+        if self.decoding_config.reasoning_backend is not None:
+            reasoner_class = ReasoningParserManager.get_reasoning_parser(
+                self.decoding_config.reasoning_backend)
+            self.reasoner: ReasoningParser = reasoner_class(
+                self.tokenizer.get_lora_tokenizer())
+
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
         self.output_processor = (
@@ -406,6 +413,7 @@ class LLMEngine:
                 stop_checker=StopChecker(
                     self.scheduler_config.max_model_len,
                     get_tokenizer_for_seq,
+                    self.reasoner,
                 ),
             ))
 
@@ -2054,8 +2062,9 @@ class LLMEngine:
             guided_decoding.backend = guided_decoding.backend or \
                 self.decoding_config.guided_decoding_backend
 
-            logger.debug("Reasoning backend: %s",
-                         self.decoding_config.reasoning_backend)
+            if self.decoding_config.reasoning_backend is not None:
+                logger.debug("Building with reasoning backend %s",
+                             self.decoding_config.reasoning_backend)
 
             processor = get_local_guided_decoding_logits_processor(
                 guided_params=guided_decoding,
