@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class KVCacheSpecBase:
+class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
     """
@@ -55,7 +55,7 @@ class KVCacheSpecBase:
 
 
 @dataclass
-class FullAttentionSpec(KVCacheSpecBase):
+class FullAttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
@@ -76,9 +76,6 @@ class FullAttentionSpec(KVCacheSpecBase):
         return cdiv(num_tokens, self.block_size) * self.page_size_bytes
 
 
-KVCacheSpec = dict[str, KVCacheSpecBase]
-
-
 @dataclass
 class KVCacheTensor:
     """
@@ -87,6 +84,18 @@ class KVCacheTensor:
     be extended to support multiple layers sharing the same memory pool.
     """
     size: int  # The size of KV cache Tensor in bytes
+
+
+@dataclass
+class ManagerKVLayer:
+    """
+    Represents a set of model layers that share the same KV cache block table.
+    These layers are regarded as one layer in the KV cache manager.
+    """
+    # The names of model layers represented by this manager layer
+    layer_names: list[str]
+    # The KV cache spec of this manager layer
+    kv_cache_spec: KVCacheSpec
 
 
 @dataclass
@@ -99,17 +108,24 @@ class KVCacheConfig:
     """layer_name -> how to initialize KV cache for that layer"""
     tensors: dict[str, KVCacheTensor]
     """
-    A list of kv-cache groups. Each group includes a set of layers with
-    the same kv-cache spec, and the total page_size of layers inside a group
-    is same across all groups (as the KVCacheManager only supports allocating
-    pages of the same size). For example:
-    1. A model only uses full attention: one group with all layers in the model.
-    2. (not implemented yet) A model with the same number of full attention
-    layers and sliding window attention layers: two groups, one for full
-    attention layers and one for sliding window attention layers.
-    3. (not implemented yet) A model with 2 full attention layers and 4 sliding
-    window attention layers: three groups, (full * 2), (sw * 2), (sw * 2).
+    The manager_layers of the model.
+    The layers in the models are repeated with some patterns, e.g., a model
+    with 10 full attention layers and 20 sliding window attention layers can be
+    regarded as repeating the pattern (1 * full, 2 * sw) 10 times. 
+    The KVCacheManager allocate different block tables for each of the 3 layers
+    in the pattern, and repeat each of them 10 times to generate the 
+    block_table for the 30 layers in the model. 
+    From the view of KVCacheManager, there are only 3 layers, so we call the 3 
+    layers in the pattern "manager layers".
+
+    The KVCacheManager allocates the blocks for each manager layer, and the
+    model runner applies the block table of the manager layer to all layers 
+    represented by it.
+    For example:
+    1. A model only uses full attention. There is only one manager layer, 
+    and the block table is shared by all layers.
+    2. (WIP) A model with 10 full attention layers and 20 sliding window 
+    attention. There are 3 manager layers (1 * full, 2 * sw), and the block 
+    table of each manager layer is shared by 10 layers of the same type.
     """
-    groups: list[list[str]]
-    """the KVCacheSpec of the model"""
-    kv_cache_spec: KVCacheSpec
+    manager_layers: list[ManagerKVLayer]
