@@ -468,6 +468,22 @@ __device__ inline void barrier_release(int* lock, bool reset = false) {
   }
 }
 
+// Wait until value of lock to be negative, and then add 1
+__device__ inline void wait_negative_and_add(int* lock) {
+  if (threadIdx.x == 0) {
+    int state = 0;
+    do
+      // Guarantee that subsequent writes by this threadblock will be visible
+      // globally.
+      asm volatile("ld.global.acquire.gpu.b32 %0, [%1];\n"
+                   : "=r"(state)
+                   : "l"(lock));
+    while (state >= 0);
+    atomicAdd(lock, 1);
+  }
+  __syncthreads();
+}
+
 // For a given "a" of size [M,K] performs a permutation of the K columns based
 // on the given "perm" indices.
 template <int moe_block_size>
@@ -826,7 +842,7 @@ __global__ void Marlin(
       locks_off++;
     }
 
-    if (first_init && use_atomic_add && slice_count > 0) {
+    if (first_init && use_atomic_add && slice_count > 1 && slice_idx == 0) {
       constexpr int threads_per_m = 16 * thread_n_blocks / 8;
       int m_per_thread =
           div_ceil(block_num_valid_tokens, threads / threads_per_m);
@@ -839,6 +855,11 @@ __global__ void Marlin(
           C[sorted_row * prob_n / 8 + col] = {0, 0, 0, 0};
         }
       }
+      // After write zero to output, write a negative value to lock.
+      // Every SM that processes the same slice would wait for
+      // the negative value, and then atomicAdd 1 to it.
+      // After all SMs are processed, the lock value would back to 0 again.
+      locks[locks_off] = 1 - slice_count;
     }
 
     if (slice_col == n_tiles) {
@@ -1943,6 +1964,8 @@ __global__ void Marlin(
         }
         barrier_release(&locks[locks_off], last);
       }
+      if (use_atomic_add && slice_count > 1 && slice_idx != 0)
+        wait_negative_and_add(&locks[locks_off]);
       if (last || use_atomic_add)
         // only the last block in a slice actually writes the result
         write_result();
