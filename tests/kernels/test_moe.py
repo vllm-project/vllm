@@ -53,8 +53,6 @@ def test_fused_moe(
     dtype: torch.dtype,
     padding: bool,
 ):
-    envs.VLLM_ROCM_MOE_PADDING = padding
-
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -85,23 +83,20 @@ def test_fused_moe(
                                      renormalize=False)
 
     # Pad the weight if moe padding is enabled
-    if envs.VLLM_ROCM_MOE_PADDING:
-        w1 = F.pad(w1, (0, 128), "constant", 0)
+    if padding:
+        w1 = F.pad(w1, (0, 128), "constant", 0)[..., 0:-128]
         torch.cuda.empty_cache()
-        w2 = F.pad(w2, (0, 128), "constant", 0)
+        w2 = F.pad(w2, (0, 128), "constant", 0)[..., 0:-128]
         torch.cuda.empty_cache()
 
-    with mock.patch(
-            'vllm.model_executor.layers.fused_moe.fused_moe.padding_size',
-            128 if padding else 0):
-        triton_output = fused_moe(a,
-                                  w1,
-                                  w2,
-                                  score,
-                                  topk,
-                                  global_num_experts=e,
-                                  expert_map=e_map,
-                                  renormalize=False)
+    triton_output = fused_moe(a,
+                              w1,
+                              w2,
+                              score,
+                              topk,
+                              global_num_experts=e,
+                              expert_map=e_map,
+                              renormalize=False)
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
     torch.testing.assert_close(iterative_output,
                                torch_output,
@@ -241,8 +236,6 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool):
         dp_size=1,
     ).cuda()
 
-    envs.VLLM_ROCM_MOE_PADDING = padding
-
     # Load the weights
     vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
     for i in range(config.num_local_experts):
@@ -257,22 +250,19 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool):
     vllm_inputs = hf_inputs.flatten(0, 1)
 
     # Pad the weight if moe padding is enabled
-    if envs.VLLM_ROCM_MOE_PADDING:
+    if padding:
         vllm_moe.experts.w13_weight = Parameter(F.pad(
-            vllm_moe.experts.w13_weight, (0, 128), "constant", 0),
+            vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[..., 0:-128],
                                                 requires_grad=False)
         torch.cuda.empty_cache()
         vllm_moe.experts.w2_weight = Parameter(F.pad(
-            vllm_moe.experts.w2_weight, (0, 128), "constant", 0),
+            vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
                                                requires_grad=False)
         torch.cuda.empty_cache()
 
     # Run forward passes for both MoE blocks
     hf_states, _ = hf_moe.forward(hf_inputs)
-    with mock.patch(
-            'vllm.model_executor.layers.fused_moe.fused_moe.padding_size',
-            128 if padding else 0):
-        vllm_states = vllm_moe.forward(vllm_inputs)
+    vllm_states = vllm_moe.forward(vllm_inputs)
 
     mixtral_moe_tol = {
         torch.float32: 1e-3,
