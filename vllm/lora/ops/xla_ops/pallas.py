@@ -114,6 +114,8 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
         loras = torch.nn.functional.pad(loras, (0, D1 - D, 0, L1 - L, 0, 0))
     if D1 != D or T1 != T:
         inputs = torch.nn.functional.pad(inputs, (0, D1 - D, 0, T1 - T))
+        if T1 != T:
+            idxs = torch.nn.functional.pad(idxs, ((0, T1 - T)))
 
     return kernel(idxs, inputs, loras)[:T, :L]
 

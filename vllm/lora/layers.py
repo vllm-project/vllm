@@ -1159,7 +1159,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits
 
-        # LogitsProcessorWithLoRA always using bgmv
+        # LogitsProcessorWithLoRA always uses bgmv
         lora_output = self.punica_wrapper.add_lora_logits(
             logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked,
             1.0)
