@@ -364,11 +364,13 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                     img_pos = (input_token_ids == self.config.image_token_index)
                     img_mask[:, :, :, img_pos] += 1
                     img_mask[:, :, img_pos, :] += 1
-
                     global_attn_mask = torch.where(img_mask == 2, 0, global_attn_mask)
                     global_attn_masks.append(global_attn_mask)
 
-                    local_attn_mask = global_attn_mask
+                    SLIDING_WINDOW_SIZE = 1024
+                    local_attn_mask = torch.ones_like(global_attn_mask)
+                    local_attn_mask = torch.tril(local_attn_mask, diagonal=-SLIDING_WINDOW_SIZE)
+                    local_attn_mask = torch.where(local_attn_mask == 0, global_attn_mask, float("-inf"))
                     local_attn_masks.append(local_attn_mask)
 
                 kwargs["global_attn_masks"] = global_attn_masks
