@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsQuant
 
 from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
@@ -443,9 +444,10 @@ class SiglipVisionTransformer(nn.Module):
         return encoder_outputs
 
 
-class SiglipVisionModel(nn.Module):
+class SiglipVisionModel(nn.Module, SupportsQuant):
     config_class = SiglipVisionConfig
     main_input_name = "pixel_values"
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(
         self,
