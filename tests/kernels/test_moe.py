@@ -315,9 +315,8 @@ def test_fused_marlin_moe(
             zeros1_l.append(zeros1)
         else:
             test_perm = torch.randperm(k)
-            quant_res = marlin_quantize(
-                w1[i].transpose(1, 0), quant_type, group_size, act_order,
-                test_perm)
+            quant_res = marlin_quantize(w1[i].transpose(1, 0), quant_type,
+                                        group_size, act_order, test_perm)
             w_ref1, qweight1, scales1, g_idx1, sort_indices1, _ = quant_res
 
             w_ref1_l.append(w_ref1.T)
@@ -351,9 +350,8 @@ def test_fused_marlin_moe(
             zeros2_l.append(zeros2)
         else:
             test_perm = torch.randperm(n)
-            quant_res = marlin_quantize(
-                w2[i].transpose(1, 0), quant_type, group_size, act_order,
-                test_perm)
+            quant_res = marlin_quantize(w2[i].transpose(1, 0), quant_type,
+                                        group_size, act_order, test_perm)
             w_ref2, qweight2, scales2, g_idx2, sort_indices2, _ = quant_res
 
             w_ref2_l.append(w_ref2.T)
