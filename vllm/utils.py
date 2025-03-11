@@ -2377,3 +2377,10 @@ def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
         obj[key1] = v2
     else:
         obj.pop(key1, None)
+
+
+def next_power_of_2(x: int) -> int:
+    """
+    Returns the smallest power of two that is greater than or equal to x.
+    """
+    return 1 << (x - 1).bit_length()
