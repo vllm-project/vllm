@@ -83,8 +83,8 @@ class LoRAModelRunnerMixin:
                                       lora_requests)
 
     @contextmanager
-    def maybe_profile_with_lora(self, lora_config: LoRAConfig,
-                                num_scheduled_tokens: np.ndarray):
+    def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
+                                  num_scheduled_tokens: np.ndarray):
         if lora_config is None:
             yield
         else:
