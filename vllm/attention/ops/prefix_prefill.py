@@ -277,7 +277,7 @@ if triton.__version__ >= "2.1.0":
                                 "num_unroll_cache": num_unroll_cache, \
                                 "num_unroll_request": num_unroll_request }, \
                                 num_warps=num_warps) \
-                for block_m in [32, 64] for block_n in [32, 64, 128] \
+                for block_m in [32, 64, 128] for block_n in [32, 64, 128] \
                 for num_warps in [4, 8] for num_unroll_cache in [1, 2] \
                 for num_unroll_request in [1, 2]
             ],
@@ -398,23 +398,12 @@ if triton.__version__ >= "2.1.0":
                                   (start_n + offs_bs_n[None, :])
                                   < SLIDING_WINDOW, qk, -10000)
 
-                # -- compute m_ij, p, l_ij
-                m_ij = tl.max(qk, 1)  # [M]
-                p = tl.exp(qk - m_ij[:, None])  # [M,N]
-                l_ij = tl.sum(p, 1)  # [M]
-                # -- update m_i and l_i
-                m_i_new = tl.maximum(m_i, m_ij)  # [M]
-                alpha = tl.exp(m_i - m_i_new)  # [M]
-                beta = tl.exp(m_ij - m_i_new)  # [M]
-                l_i_new = alpha * l_i + beta * l_ij  # [M]
-
-                # -- update output accumulator --
-                # scale p
-                p_scale = beta / l_i_new
-                p = p * p_scale[:, None]
-                # scale acc
-                acc_scale = l_i / l_i_new * alpha
-                acc = acc * acc_scale[:, None]
+                # compute running maximum
+                m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+                p = tl.exp(qk - m_ij[:, None])
+                l_ij = tl.sum(p, axis=1)
+                alpha = tl.exp(m_i - m_ij)
+                acc = acc * alpha[:, None]
 
                 # update acc
                 v_load = tl.load(V_cache + off_v)
@@ -426,8 +415,8 @@ if triton.__version__ >= "2.1.0":
 
                 acc = tl.dot(p, v, acc=acc, input_precision=IN_PRECISION)
                 # # update m_i and l_i
-                l_i = l_i_new
-                m_i = m_i_new
+                l_i = l_i * alpha + l_ij
+                m_i = m_ij
 
             off_k = (offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh +
                      offs_d[:, None] * stride_kd)
@@ -463,22 +452,13 @@ if triton.__version__ >= "2.1.0":
                         offs_m[:, None] - (start_n + offs_n[None, :])
                         < SLIDING_WINDOW, qk, -10000)
 
-                # -- compute m_ij, p, l_ij
-                m_ij = tl.max(qk, 1)
+                # compute running maximum
+                m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
                 p = tl.exp(qk - m_ij[:, None])
-                l_ij = tl.sum(p, 1)
-                # -- update m_i and l_i
-                m_i_new = tl.maximum(m_i, m_ij)
-                alpha = tl.exp(m_i - m_i_new)
-                beta = tl.exp(m_ij - m_i_new)
-                l_i_new = alpha * l_i + beta * l_ij
-                # -- update output accumulator --
-                # scale p
-                p_scale = beta / l_i_new
-                p = p * p_scale[:, None]
-                # scale acc
-                acc_scale = l_i / l_i_new * alpha
-                acc = acc * acc_scale[:, None]
+                l_ij = tl.sum(p, axis=1)
+                alpha = tl.exp(m_i - m_ij)
+                acc = acc * alpha[:, None]
+
                 # update acc
                 v = tl.load(
                     v_ptrs +
@@ -490,8 +470,10 @@ if triton.__version__ >= "2.1.0":
 
                 acc = tl.dot(p, v, acc=acc, input_precision=IN_PRECISION)
                 # update m_i and l_i
-                l_i = l_i_new
-                m_i = m_i_new
+                l_i = l_i * alpha + l_ij
+                m_i = m_ij
+
+            acc = acc / l_i[:, None]
 
             # initialize pointers to output
             off_o = (
