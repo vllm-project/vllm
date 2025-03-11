@@ -104,7 +104,7 @@ class EngineArgs:
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
-    seed: int = 0
+    seed: Optional[int] = None
     max_model_len: Optional[int] = None
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
@@ -114,6 +114,7 @@ class EngineArgs:
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
+    enable_expert_parallel: bool = False
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
@@ -206,7 +207,7 @@ class EngineArgs:
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
-    generation_config: Optional[str] = None
+    generation_config: Optional[str] = "auto"
     override_generation_config: Optional[Dict[str, Any]] = None
     enable_sleep_mode: bool = False
     model_impl: str = "auto"
@@ -216,6 +217,7 @@ class EngineArgs:
     additional_config: Optional[Dict[str, Any]] = None
     enable_reasoning: Optional[bool] = None
     reasoning_parser: Optional[str] = None
+    use_tqdm_on_load: bool = True
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -275,7 +277,9 @@ class EngineArgs:
         parser.add_argument(
             '--skip-tokenizer-init',
             action='store_true',
-            help='Skip initialization of tokenizer and detokenizer.')
+            help='Skip initialization of tokenizer and detokenizer. '
+            'Expects valid prompt_token_ids and None for prompt from '
+            'the input. The generated output will contain token ids.')
         parser.add_argument(
             '--revision',
             type=nullable_str,
@@ -440,6 +444,11 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.tensor_parallel_size,
                             help='Number of tensor parallel replicas.')
+        parser.add_argument(
+            '--enable-expert-parallel',
+            action='store_true',
+            help='Use expert parallelism instead of tensor parallelism '
+            'for MoE layers.')
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,
@@ -743,6 +752,14 @@ class EngineArgs:
                             default=1,
                             help=('Maximum number of forward steps per '
                                   'scheduler call.'))
+        parser.add_argument(
+            '--use-tqdm-on-load',
+            dest='use_tqdm_on_load',
+            action=argparse.BooleanOptionalAction,
+            default=EngineArgs.use_tqdm_on_load,
+            help='Whether to enable/disable progress bar '
+            'when loading model weights.',
+        )
 
         parser.add_argument(
             '--multi-step-stream-outputs',
@@ -1026,13 +1043,13 @@ class EngineArgs:
         parser.add_argument(
             "--generation-config",
             type=nullable_str,
-            default=None,
+            default="auto",
             help="The folder path to the generation config. "
-            "Defaults to None, no generation config is loaded, vLLM defaults "
-            "will be used. If set to 'auto', the generation config will be "
-            "loaded from model path. If set to a folder path, the generation "
-            "config will be loaded from the specified folder path. If "
-            "`max_new_tokens` is specified in generation config, then "
+            "Defaults to 'auto', the generation config will be loaded from "
+            "model path. If set to 'vllm', no generation config is loaded, "
+            "vLLM defaults will be used. If set to a folder path, the "
+            "generation config will be loaded from the specified folder path. "
+            "If `max_new_tokens` is specified in generation config, then "
             "it sets a server-wide limit on the number of output tokens "
             "for all requests.")
 
@@ -1171,6 +1188,7 @@ class EngineArgs:
             download_dir=self.download_dir,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
+            use_tqdm_on_load=self.use_tqdm_on_load,
         )
 
     def create_engine_config(self,
@@ -1207,6 +1225,7 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
+            enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             tokenizer_pool_config=TokenizerPoolConfig.create_config(
@@ -1421,8 +1440,19 @@ class EngineArgs:
         # When no user override, set the default values based on the usage
         # context.
         # Use different default values for different hardware.
-        from vllm.platforms import current_platform
-        device_name = current_platform.get_device_name().lower()
+
+        # Try to query the device name on the current platform. If it fails,
+        # it may be because the platform that imports vLLM is not the same
+        # as the platform that vLLM is running on (e.g. the case of scaling
+        # vLLM with Ray) and has no GPUs. In this case we use the default
+        # values for non-H100/H200 GPUs.
+        try:
+            from vllm.platforms import current_platform
+            device_name = current_platform.get_device_name().lower()
+        except Exception:
+            # This is only used to set default_max_num_batched_tokens
+            device_name = "no-device"
+
         if "h100" in device_name or "h200" in device_name:
             # For H100 and H200, we use larger default values.
             default_max_num_batched_tokens = {
@@ -1459,15 +1489,15 @@ class AsyncEngineArgs(EngineArgs):
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser,
                      async_args_only: bool = False) -> FlexibleArgumentParser:
+        # Initialize plugin to update the parser, for example, The plugin may
+        # adding a new kind of quantization method to --quantization argument or
+        # a new device to --device argument.
+        load_general_plugins()
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
-        # Initialize plugin to update the parser, for example, The plugin may
-        # adding a new kind of quantization method to --quantization argument or
-        # a new device to --device argument.
-        load_general_plugins()
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update(parser)
         return parser

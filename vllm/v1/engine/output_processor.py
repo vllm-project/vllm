@@ -68,6 +68,8 @@ class RequestState:
         queue: Optional[asyncio.Queue[RequestOutput]],
         log_stats: bool,
     ) -> "RequestState":
+        if not request.sampling_params.detokenize:
+            tokenizer = None
         return cls(
             request_id=request.request_id,
             parent_req=parent_req,
@@ -246,7 +248,7 @@ class OutputProcessor:
 
         ****************** NOTE FOR DEVELOPERS ******************
 
-        VLLM V1 minimizes the number of python loops over the full
+        vLLM V1 minimizes the number of python loops over the full
         batch to ensure system overheads are minimized. This is the 
         only function that should loop over EngineCoreOutputs.
 
