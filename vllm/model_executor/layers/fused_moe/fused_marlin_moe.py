@@ -332,10 +332,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         use_fp32_reduce=True,
         is_zp_float=False).view(-1, topk, K)
 
-    if inplace:
-        output = hidden_states
-    else:
-        output = torch.empty_like(hidden_states)
+    output = hidden_states if inplace else torch.empty_like(hidden_states)
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                      dim=1,
                      out=output)
