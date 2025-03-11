@@ -38,7 +38,7 @@ class DummyOutputNorm(nn.Module):
         if residual is None:
             return x
         else:
-            return x, residual
+            return x + residual, None
 
 
 class EAGLE(nn.Module):
