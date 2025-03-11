@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# isort: skip_file
 
 from typing import Any, Callable, Dict, List, Optional
 
@@ -558,13 +557,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                   requires_grad=False)
             if current_platform.is_rocm_aiter_fp8_block_scaled_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
-                from aiter.ops.shuffle import (shuffle_weight as
-                                               rocm_aiter_shuffle_weight)
+                from aiter.ops.shuffle import shuffle_weight
 
-                layer.w13_weight = torch.nn.Parameter(
-                    rocm_aiter_shuffle_weight(layer.w13_weight.data),
-                    requires_grad=False)
-                layer.w2_weight = torch.nn.Parameter(rocm_aiter_shuffle_weight(
+                layer.w13_weight = torch.nn.Parameter(shuffle_weight(
+                    layer.w13_weight.data),
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffle_weight(
                     layer.w2_weight.data),
                                                      requires_grad=False)
             return
@@ -599,8 +597,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             if current_platform.is_rocm_aiter_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
-                from aiter.ops.shuffle import (shuffle_weight as
-                                               rocm_aiter_shuffle_weight)
+                from aiter.ops.shuffle import shuffle_weight
 
                 w13_scales = layer.w13_weight_scale.data.unsqueeze(
                     -1).unsqueeze(-1).expand(
@@ -611,10 +608,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     w2_scales.contiguous(), requires_grad=False)
                 layer.w13_weight_scale = torch.nn.Parameter(
                     w13_scales.contiguous(), requires_grad=False)
-                layer.w13_weight = torch.nn.Parameter(
-                    rocm_aiter_shuffle_weight(layer.w13_weight),
-                    requires_grad=False)
-                layer.w2_weight = torch.nn.Parameter(rocm_aiter_shuffle_weight(
+                layer.w13_weight = torch.nn.Parameter(shuffle_weight(
+                    layer.w13_weight),
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffle_weight(
                     layer.w2_weight),
                                                      requires_grad=False)
             return
@@ -687,8 +684,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             if current_platform.is_rocm_aiter_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
-                from aiter.ops.shuffle import (shuffle_weight as
-                                               rocm_aiter_shuffle_weight)
+                from aiter.ops.shuffle import shuffle_weight
 
                 max_w13_scales = max_w13_scales.unsqueeze(-1).unsqueeze(
                     -1).expand((-1, layer.w13_weight.shape[1], -1))
@@ -696,10 +692,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     -1).expand((-1, layer.w2_weight.shape[1], -1))
                 layer.w2_weight_scale = torch.nn.Parameter(
                     w2_scales.contiguous(), requires_grad=False)
-                layer.w13_weight = torch.nn.Parameter(
-                    rocm_aiter_shuffle_weight(layer.w13_weight),
-                    requires_grad=False)
-                layer.w2_weight = torch.nn.Parameter(rocm_aiter_shuffle_weight(
+                layer.w13_weight = torch.nn.Parameter(shuffle_weight(
+                    layer.w13_weight),
+                                                      requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffle_weight(
                     layer.w2_weight),
                                                      requires_grad=False)
 

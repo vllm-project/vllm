@@ -24,7 +24,7 @@ def rms_norm(*, x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float,
 
 def fused_add_rms_norm(
         *, x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
-        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+        variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
 
     ops.fused_add_rms_norm(
@@ -38,7 +38,7 @@ def fused_add_rms_norm(
 
 def rocm_aiter_rmsnorm2d_fwd_with_add(
         *, x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
-        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+        variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
     import aiter as rocm_aiter
 
     rocm_aiter.rmsnorm2d_fwd_with_add(

@@ -171,6 +171,8 @@ def torch_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
                               scale_a=scale_a,
                               scale_b=scale_b,
                               bias=bias)
+    # A fix for discrepancy in scaled_mm which returns tuple
+    # for torch < 2.5 and a single value in torch >= 2.5
     if type(output) is tuple and len(output) == 2:
         output = output[0]
 
@@ -211,7 +213,7 @@ def torch_channelwise_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                      input_2d: torch.Tensor,
                                      output_shape: List,
                                      **kwargs) -> torch.Tensor:
-    # use unfused DQ due to limitations with scaled_mm
+    # Use unfused DQ due to limitations with scaled_mm
 
     # Symmetric quantized GEMM by definition computes the following:
     #   C = (s_x * X) (s_w * W) + bias
@@ -260,6 +262,8 @@ def dispatch_w8a8_scaled_mm(
         if current_platform.is_rocm_aiter_linear_enabled():
             return rocm_aiter_per_tensor_w8a8_scaled_mm
         return torch_per_tensor_w8a8_scaled_mm
+    # torch.scaled_mm supports per tensor weights + activations only
+    # so fallback to naive if per channel or per token
     if (use_per_token_if_dynamic and not per_tensor_weights
             and not per_tensor_activations and USE_ROWWISE_TORCH_SCALED_MM):
         return torch_per_token_w8a8_scaled_mm
@@ -304,8 +308,20 @@ class Fp8LinearOp:
         # TODO(luka) remove this parameter in favor of __init__
         use_per_token_if_dynamic: Optional[bool] = None
     ) -> torch.Tensor:
+        # ops.scaled_fp8_quant supports both dynamic and static quant.
+        #   If dynamic, layer.input_scale is None and x_scale computed from x.
+        #   If static, layer.input_scale is scalar and x_scale is input_scale.
+
+        # View input as 2D matrix for fp8 methods
+
         input_2d = input.view(-1, input.shape[-1])
         output_shape = [*input.shape[:-1], weight.shape[1]]
+        # TODO(luka) this is here because currently MLA only decides this
+        #  during the forward method instead of in __init__.
+        if use_per_token_if_dynamic is None:
+            use_per_token_if_dynamic = self.use_per_token_if_dynamic
+
+        # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
         if self.cutlass_fp8_supported:
             qinput, x_scale = ops.scaled_fp8_quant(
                 input_2d,
@@ -314,12 +330,11 @@ class Fp8LinearOp:
                 use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         else:
-            config = get_current_vllm_config().compilation_config
-            do_pad = config.level < CompilationLevel.PIECEWISE
+            # Maybe apply padding to output, see comment in __init__
             qinput, x_scale = ops.scaled_fp8_quant(
                 input_2d,
                 input_scale,
-                num_token_padding=17 if do_pad else None,
+                num_token_padding=self.output_padding,
                 use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         per_tensor_weights = (weight_scale.numel() == 1)
