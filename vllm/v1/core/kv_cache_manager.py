@@ -136,7 +136,8 @@ class KVCacheManager:
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[List[KVCacheBlock]] = None
+        new_computed_blocks: Optional[List[KVCacheBlock]] = None,
+        num_lookahead_slots=0,
     ) -> Optional[List[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -228,11 +229,16 @@ class KVCacheManager:
         # FIXME: `num_cached_blocks` is not correct when the prefix cache
         # of a new request is hit.
         num_cached_blocks = self.num_cached_block[request.request_id]
-        # Speculated tokens might be rejected in the future, so we does
+        # Speculated tokens might be rejected in the future, so we do
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
         num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
-            request.spec_token_ids)) // self.block_size
+            request.spec_token_ids) - num_lookahead_slots) // self.block_size
+
+        print('num_tokens ' + str(num_tokens))
+        print('request.spec_token_ids ' + str(request.spec_token_ids))
+        print('num_computed_tokens ' + str(num_computed_tokens))
+        print('num_full_blocks_after_append ' + str(num_full_blocks_after_append))
 
         self.block_pool.cache_full_blocks(
             request=request,

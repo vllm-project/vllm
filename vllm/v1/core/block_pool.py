@@ -139,10 +139,10 @@ class BlockPool:
                 end_token_idx = (blk_idx + 1) * block_size
                 block_tokens = request.all_token_ids[
                     start_token_idx:end_token_idx]
-                #assert len(block_tokens) == block_size, (
-                #    f"Expected {block_size} tokens, got "
-                #    f"{len(block_tokens)} at {blk_idx}th block for request "
-                #    f"{request.request_id}({request})")
+                assert len(block_tokens) == block_size, (
+                    f"Expected {block_size} tokens, got "
+                    f"{len(block_tokens)} at {blk_idx}th block for request "
+                    f"{request.request_id}({request})")
 
                 # Generate extra keys for multi-modal inputs. Note that since
                 # we reach to this branch only when the block is completed with

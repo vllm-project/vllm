@@ -124,6 +124,12 @@ class Scheduler:
 
         # For logging.
         scheduled_timestamp = time.monotonic()
+        num_lookahead_slots = 0
+        if self.speculative_config is not None:
+            num_lookahead_slots = \
+            self.speculative_config.num_lookahead_slots
+
+
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -138,11 +144,11 @@ class Scheduler:
             if self.speculative_config is None:
                 print('self.speculative_config.num_lookahead_slots is not set ')
                 num_new_tokens = (request.num_tokens_with_spec -
-                                request.num_computed_tokens)
+                                  request.num_computed_tokens)
             else:
-                print('self.speculative_config.num_lookahead_slots ' + str(self.speculative_config.num_lookahead_slots))
+                print('self.speculative_config.num_lookahead_slots ' + str(num_lookahead_slots))
                 num_new_tokens = (request.num_tokens_with_spec -
-                                request.num_computed_tokens) + self.speculative_config.num_lookahead_slots
+                                request.num_computed_tokens) + num_lookahead_slots
 
             num_new_tokens = min(num_new_tokens, token_budget)
             assert num_new_tokens > 0
@@ -164,7 +170,7 @@ class Scheduler:
 
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens)
+                    request, num_new_tokens, num_lookahead_slots=num_lookahead_slots)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
@@ -261,10 +267,10 @@ class Scheduler:
                     print('self.speculative_config.num_lookahead_slots is not set ')
                     num_new_tokens = request.num_tokens - num_computed_tokens
                 else:
-                    print('self.speculative_config.num_lookahead_slots ' + str(self.speculative_config.num_lookahead_slots))
+                    print('self.speculative_config.num_lookahead_slots ' + str(num_lookahead_slots))
                     print('request.num_tokens ' + str(request.num_tokens))
                     print('num_computed_tokens ' + str(num_computed_tokens))
-                    num_new_tokens = request.num_tokens - num_computed_tokens + self.speculative_config.num_lookahead_slots
+                    num_new_tokens = request.num_tokens - num_computed_tokens + num_lookahead_slots
                     #num_new_tokens = request.num_tokens - num_computed_tokens
 
                 #num_new_tokens = request.num_tokens - num_computed_tokens
@@ -293,7 +299,8 @@ class Scheduler:
                     break
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, computed_blocks)
+                    request, num_new_tokens, computed_blocks,
+                    num_lookahead_slots)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
@@ -503,6 +510,11 @@ class Scheduler:
 
         new_running: List[Request] = []
         outputs: List[EngineCoreOutput] = []
+        num_lookahead_slots = 0
+        if self.speculative_config is not None:
+            num_lookahead_slots = \
+            self.speculative_config.num_lookahead_slots
+
 
         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
         # loop can be a performance bottleneck. We should do our best to avoid
@@ -524,8 +536,8 @@ class Scheduler:
                 print('request.num_computed_tokens ' + str(request.num_computed_tokens))
                 print('num_tokens_scheduled ' + str(num_tokens_scheduled))
                 print('request.num_tokens ' + str(request.num_tokens))
-                request.num_computed_tokens += num_tokens_scheduled
-                
+                request.num_computed_tokens += (num_tokens_scheduled - num_lookahead_slots)
+                 
                 assert request.num_computed_tokens <= request.num_tokens
             else:
                 # num_computed_tokens_step represents the number of tokens
@@ -541,7 +553,7 @@ class Scheduler:
 
                 num_computed_tokens_step = num_scheduled_tokens[req_id] - (
                     len(scheduled_spec_token_ids) + 1 -
-                    len(generated_token_ids))
+                    len(generated_token_ids)) - num_lookahead_slots
                 request.num_computed_tokens += num_computed_tokens_step
 
             cached_encoder_input_ids = (

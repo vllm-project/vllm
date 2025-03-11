@@ -434,6 +434,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 continue
 
             # Update the persistent batch.
+            print('self.input_batch.num_computed_tokens_cpu ' + str(num_computed_tokens))
+            print('req_id ' + str(req_id))
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
             self.input_batch.block_table.append_row(req_data.new_block_ids,
@@ -505,6 +507,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         max_num_scheduled_tokens = 0
         for i, req_id in enumerate(self.input_batch.req_ids):
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            print('req_id ' + str(req_id))
+            print('num_tokens ' + str(num_tokens))
             num_scheduled_tokens[i] = num_tokens
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
@@ -528,6 +532,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get positions.
         positions_np = self.positions_np[:total_num_scheduled_tokens]
+        print('self.input_batch.num_computed_tokens_cpu[req_indices] ' + str(self.input_batch.num_computed_tokens_cpu[req_indices]))
+        print('arange ' + str(arange))
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
@@ -588,6 +594,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 non_blocking=True)
         else:
             # Common case (1D positions)
+            print('total_num_scheduled_tokens ' + str(total_num_scheduled_tokens))
+            print('self.positions_cpu[:total_num_scheduled_tokens] ' + str(self.positions_cpu[:total_num_scheduled_tokens]))
             self.positions[:total_num_scheduled_tokens].copy_(
                 self.positions_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
@@ -604,18 +612,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             common_prefix_len=common_prefix_len,
         )
 
+        num_lookahead_slots = 0
+        if self.speculative_config is not None:
+            num_lookahead_slots = \
+            self.speculative_config.num_lookahead_slots
+
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if use_spec_decode:
+            #print('cu_num_tokens ' + str(cu_num_tokens))
             logits_indices = self._calc_spec_decode_metadata(
-                scheduler_output, cu_num_tokens)
+                scheduler_output, cu_num_tokens, num_lookahead_slots)
         else:
             # NOTE(woosuk): Due to chunked prefills, the batch may contain
             # partial requests. While we should not sample any token
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            logits_indices = attn_metadata.query_start_loc[1:] - 1
+            #print('XYZ')
+            #logits_indices = attn_metadata.query_start_loc[1:] - torch.arange(
+            #    1, len(attn_metadata.query_start_loc),
+            #    device=attn_metadata.query_start_loc.device) * num_lookahead_slots
+            #logits_indices = attn_metadata.query_start_loc[1:] - torch.arange(
+            #    1, len(attn_metadata.query_start_loc),
+            #    device=attn_metadata.query_start_loc.device) * num_lookahead_slots - 1
+            logits_indices = attn_metadata.query_start_loc[1:] - 1 - num_lookahead_slots
+            #print('test_logits ' + str(test_logits))
+            #logits_indices = attn_metadata.query_start_loc[1:] - 1
+            #print('logits_indices123 ' + str(logits_indices))
+ 
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -763,6 +788,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         cu_num_tokens: np.ndarray,
+        num_lookahead_slots: int,
     ) -> torch.Tensor:
         # Get the number of spec decode tokens for each request.
         num_reqs = self.input_batch.num_reqs
@@ -780,7 +806,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         #                 [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
         num_sampled_tokens = num_spec_decode_tokens + 1
         # logits_start_loc: [0, 103, 104, 206, 207]
-        logits_start_loc = cu_num_tokens - num_sampled_tokens
+        #logits_start_loc = cu_num_tokens - num_sampled_tokens - \
+        #    (np.arange(1, num_reqs + 1) * num_lookahead_slots)
+        logits_start_loc = cu_num_tokens - num_sampled_tokens - num_lookahead_slots
         # [0, 103, 104, 206, 207] ->
         #               [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
         logits_start_loc = np.repeat(logits_start_loc, num_sampled_tokens)
@@ -902,6 +930,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
         self._update_states(scheduler_output)
 
+        num_lookahead_slots = 0
+        if self.speculative_config is not None:
+            num_lookahead_slots = self.speculative_config.num_lookahead_slots
+
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
             self._execute_encoder(scheduler_output)
@@ -965,19 +997,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata, self.vllm_config):
+            print('input_ids ' + str(input_ids))
+            print('positions ' + str(positions))
+            print('logits_indices ' + str(logits_indices))
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
-            print('hidden_states returned shape ' + str(hidden_states.shape))
+            #print('hidden_states ' + str(hidden_states))
+            #print('hidden_states returned shape ' + str(hidden_states.shape))
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             return hidden_states
-
+        
+        #print('logits_indices ' + str(logits_indices))
         hidden_states = hidden_states[:num_scheduled_tokens]
+        #print('hidden_states.shape ' + str(hidden_states.shape))
         sample_hidden_states = hidden_states[logits_indices]
+        #print('sample_hidden_states ' + str(sample_hidden_states))        
         logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
@@ -996,18 +1035,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
                 for req_id in scheduled_request_ids
             ]
+            print('draft_token_ids ' + str(draft_token_ids))
+            print('target_probs ' + str(target_probs))
             sampler_output = self.rejection_sampler(draft_token_ids,
                                                     target_probs,
                                                     sampling_metadata)
         
-        print('Sampler Output ' + str(sampler_output))
+        #print('Sampler Output ' + str(sampler_output))
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         for i, req_id in enumerate(self.input_batch.req_ids):
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
-                       scheduler_output.num_scheduled_tokens[req_id])
+                       scheduler_output.num_scheduled_tokens[req_id] - num_lookahead_slots)
             if seq_len < req_state.num_tokens:
                 # Ignore the sampled token.
                 # Rewind the generator state as if the token was not sampled.
@@ -1044,9 +1085,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for seq in sampled_token_ids[valid_mask].split(gen_lens)
             ]
         
-        print('hidden_states ' + str(hidden_states))
-        print('sample_hidden_states ' + str(sample_hidden_states))
-        print('sampled_token_ids ' + str(sampled_token_ids))
+        #print('hidden_states ' + str(hidden_states))
+        #print('sample_hidden_states ' + str(sample_hidden_states))
+        #print('sampled_token_ids ' + str(sampled_token_ids))
 
         if not self.use_spec_decode:
             spec_token_ids = None
@@ -1054,6 +1095,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids = self.generate_draft_token_ids(
                 hidden_states, input_ids, positions, attn_metadata,
                 valid_sampled_token_ids)
+            print('spec_token_ids ' + str(spec_token_ids))
 
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1089,6 +1131,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.spec_decode_model is not None:
                 drafter_output = self.drafter.propose(hidden_states, input_ids, positions, attn_metadata)
             else:
+                print('self.input_batch.token_ids_cpu[i, :end_idx] ' + str(self.input_batch.token_ids_cpu[i, :end_idx]))
                 drafter_output = self.drafter.propose(
                     self.input_batch.token_ids_cpu[i, :end_idx],
                     self.speculative_config.ngram_prompt_lookup_min,

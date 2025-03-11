@@ -39,6 +39,7 @@ class NgramProposer:
               followed that pattern. Here we will return [4,2,3] because 
               we only have three tokens after the match.
         """
+        print('context_token_ids ' + str(context_token_ids))
         return _find_subarray_kmp(context_token_ids, n, k)
 
 
