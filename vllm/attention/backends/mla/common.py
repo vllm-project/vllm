@@ -239,9 +239,15 @@ try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     is_vllm_fa = True
 except ImportError:
-    # For rocm use upstream flash attention
-    from flash_attn import flash_attn_varlen_func
     is_vllm_fa = False
+    try:
+        # For rocm use upstream flash attention
+        from flash_attn import flash_attn_varlen_func
+    except ImportError:
+        import intel_extension_for_pytorch.llm.modules as ipex_modules
+
+        flash_attn_varlen_func = ipex_modules.PagedAttention \
+                                .flash_attn_varlen_func
 
 from vllm.attention.ops.triton_flash_attention import triton_attention
 
@@ -995,7 +1001,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             head_dim=self.runner.model_config.get_head_size(),
-            is_profile_run=self.runner.in_profile_run,
+            is_profile_run=getattr(self.runner, "in_profile_run", False),
             # MLACommonMetadata Chunk prefill specific
             context_chunk_cu_seq_lens=context_chunk_cu_seq_lens,
             context_chunk_starts=context_chunk_starts,
@@ -1506,7 +1512,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             raise NotImplementedError(
                 "output is not yet supported for MLAImplBase")
 
-        if attn_metadata.is_profile_run and \
+        if getattr(attn_metadata, "is_profile_run", False) and \
             attn_metadata.context_chunk_workspace is not None:
             # During the profile run try to simulate to worse case output size
             # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`

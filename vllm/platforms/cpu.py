@@ -37,6 +37,9 @@ class CpuPlatform(Platform):
                              use_mla: bool) -> str:
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
+        if use_mla:
+            logger.info("Using CPU MLA backend.")
+            return "vllm.attention.backends.cpu_mla.CPUMLABackend"
         logger.info("Using Torch SDPA backend.")
         return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
 
