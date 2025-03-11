@@ -119,11 +119,7 @@ class Gemma3Attention(nn.Module):
         self.head_dim = head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        # FIXME(woosuk): This seems like a bug in config.json.
-        if config.query_pre_attn_scalar < 1:
-            self.scaling = config.query_pre_attn_scalar
-        else:
-            self.scaling = config.query_pre_attn_scalar**-0.5
+        self.scaling = config.query_pre_attn_scalar
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -145,23 +141,29 @@ class Gemma3Attention(nn.Module):
 
         # TODO(woosuk): Add reference to the original HF implementation.
         layer_idx = extract_layer_index(prefix)
-        attn_type = config.attention_pattern[layer_idx % len(config.attention_pattern)]
-        use_sliding_window = (attn_type == ATTENTION_TYPE_LOCAL)
+        self.is_sliding = bool((layer_idx + 1) % config.sliding_window_pattern)
 
         # Initialize the rotary embedding.
-        self.rope_theta = (config.rope_local_base_freq if use_sliding_window else
-                            config.rope_global_base_freq)
+        if self.is_sliding:
+            # Local attention. Override the values in config.json.
+            self.rope_theta = config.rope_local_base_freq
+            self.rope_scaling = {"rope_type": "default"}
+            self.sliding_window = config.interleaved_sliding_window
+        else:
+            # Global attention. Use the values in config.json.
+            self.rope_theta = config.rope_theta
+            self.rope_scaling = config.rope_scaling
+            self.sliding_window = None
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=self.rope_theta,
             is_neox_style=True,
+            rope_scaling=self.rope_scaling,
         )
 
         # Initialize the attention.
-        sliding_window = (config.interleaved_sliding_window if
-            use_sliding_window else None)
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
@@ -169,7 +171,7 @@ class Gemma3Attention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config,
                               logits_soft_cap=attn_logits_soft_cap,
-                              per_layer_sliding_window=sliding_window,
+                              per_layer_sliding_window=self.sliding_window,
                               prefix=f"{prefix}.attn")
 
     def forward(
@@ -290,7 +292,9 @@ class Gemma3Model(nn.Module):
                 ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+        # NOTE(woosuk): Only apply the normalizer to the output of
+        # vocab embedding. Don't apply it to the vision embedding.
+        return self.embed_tokens(input_ids) * self.normalizer
 
     def forward(
         self,
@@ -304,7 +308,6 @@ class Gemma3Model(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
-            hidden_states *= self.normalizer
             residual = None
         else:
             assert intermediate_tensors is not None

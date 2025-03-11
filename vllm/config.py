@@ -2624,7 +2624,9 @@ def _get_and_verify_max_len(
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    if rope_scaling is not None:
+    # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
+    # scaling, so we skip applying the scaling factor again.
+    if rope_scaling is not None and "gemma3" not in hf_config.model_type:
         # No need to consider "type" key because of patch_rope_scaling when
         # loading HF config
         rope_type = rope_scaling["rope_type"]

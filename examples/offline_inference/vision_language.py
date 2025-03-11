@@ -113,8 +113,8 @@ def run_fuyu(question: str, modality: str):
 
 def run_gemma3(question: str, modality: str):
     assert modality == "image"
-    prompt = f"<image> {question}"
-    model_name = "gg-hf-g/gemma-3-4b-it-pr"
+    prompt = f"<start_of_image> {question}"
+    model_name = "gg-hf-g/gemma-3-4b"
     llm = LLM(model=model_name,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
