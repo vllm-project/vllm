@@ -5,9 +5,6 @@ from functools import lru_cache, wraps
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
-from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
-                    amdsmi_get_processor_handles, amdsmi_init,
-                    amdsmi_shut_down, amdsmi_topo_get_link_type)
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -23,8 +20,9 @@ else:
 logger = init_logger(__name__)
 
 try:
-    from amdsmi import (amdsmi_get_gpu_asic_info, amdsmi_get_processor_handles,
-                        amdsmi_init, amdsmi_shut_down)
+    from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
+                        amdsmi_get_processor_handles, amdsmi_init,
+                        amdsmi_shut_down, amdsmi_topo_get_link_type)
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
 

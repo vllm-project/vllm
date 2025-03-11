@@ -5,6 +5,8 @@ from typing import Optional
 import torch
 from torch.distributed import ProcessGroup
 
+from vllm.platforms import current_platform
+
 from .base_device_communicator import DeviceCommunicatorBase
 
 
@@ -30,7 +32,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
-            CustomAllreduce)
+            BaseCustomAllreduce, CudaCustomAllreduce, RocmCustomAllreduce)
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
 
@@ -41,13 +43,20 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
-        self.ca_comm: Optional[CustomAllreduce] = None
+        self.ca_comm: Optional[BaseCustomAllreduce] = None
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
-            self.ca_comm = CustomAllreduce(
-                group=self.cpu_group,
-                device=self.device,
-            )
+            assert current_platform.is_cuda_alike()
+            if current_platform.is_cuda():
+                self.ca_comm = CudaCustomAllreduce(
+                    group=self.cpu_group,
+                    device=self.device,
+                )
+            else:
+                self.ca_comm = RocmCustomAllreduce(
+                    group=self.cpu_group,
+                    device=self.device,
+                )
 
     def all_reduce(self, input_):
         # always try custom allreduce first,
