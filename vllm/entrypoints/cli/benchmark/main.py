@@ -5,6 +5,8 @@ import vllm.entrypoints.cli.benchmark.serve
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.utils import FlexibleArgumentParser
 
+# TODO: Add the rest of the benchmark subcommands here,
+# e.g., throughput, latency, etc.
 BENCHMARK_CMD_MODULES = [
     vllm.entrypoints.cli.benchmark.serve,
 ]
