@@ -205,16 +205,12 @@ class EngineCore:
                 self.batch_queue.put_nowait(
                     (future, scheduler_output))  # type: ignore
 
-                # Successfully scheduled a new batch. Immediately return without
-                # checking the job queue for result.
-                return None
-
-        assert (scheduler_output is not None
-                and scheduler_output.total_num_scheduled_tokens > 0)
+        scheduled_batch = (scheduler_output is not None
+                           and scheduler_output.total_num_scheduled_tokens > 0)
 
         # If no more requests can be scheduled and the job queue is not empty,
         # block until the first batch in the job queue is finished.
-        if not self.batch_queue.empty():
+        if not scheduled_batch and not self.batch_queue.empty():
             future, scheduler_output = self.batch_queue.get_nowait()
             # Blocking until the first result is available.
             model_output = future.result()
