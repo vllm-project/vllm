@@ -53,13 +53,15 @@ class HpuPlatform(Platform):
             raise NotImplementedError(
                 "Multi-step execution is not implemented for HPU")
 
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "Speculative decoding is not implemented for HPU")
-
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
+            if vllm_config.speculative_config:
+                parallel_config.worker_cls = \
+                    "vllm.spec_decode.spec_decode_worker.create_spec_worker"
+                parallel_config.sd_worker_cls = \
+                    "vllm.worker.hpu_worker.HPUWorker"
+            else:
+                parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
 
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently

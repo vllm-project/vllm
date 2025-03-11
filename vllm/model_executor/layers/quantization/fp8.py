@@ -891,8 +891,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     ):
         hidden_dim = x.shape[-1]
         num_experts = layer.w13_weight.shape[0]
-        # hpu.moe supports maximum 64 experts
-        moe_n_slice = 4 if num_experts > 64 else 1
+        # hpu.moe supports maximum 32 experts,
+        # otherwise segment fault might trigger
+        moe_n_slice = 8 if num_experts > 32 else 1
         n_expert_slice = num_experts // moe_n_slice
         assert n_expert_slice * moe_n_slice == num_experts
         x = x.view(-1, hidden_dim)

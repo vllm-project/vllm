@@ -106,6 +106,9 @@ class RMSNorm(CustomOp):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         from vllm_hpu_extension.ops import HPUFusedRMSNorm
+        if x.dim() < 3:
+            # fix an known bug before synapse 1.21 release
+            HPUFusedRMSNorm = None
         if HPUFusedRMSNorm is None:
             return self.forward_native(x, residual)
         if residual is not None:
