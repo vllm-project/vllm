@@ -9,7 +9,6 @@ python -m transformers.models.gemma3.convert_gemma3_weights_orbax_to_hf \
 """
 
 import dataclasses
-import math
 from collections.abc import Iterator, Sequence
 from typing import Any
 
@@ -20,16 +19,15 @@ import tree
 from absl import app, flags, logging
 from orbax import checkpoint as obc
 
-from ..gemma import GemmaTokenizerFast
 from ...image_utils import PILImageResampling
+from ..gemma import GemmaTokenizerFast
 from . import (
     Gemma3ForCausalLM,
     Gemma3ForConditionalGeneration,
-    Gemma3Processor,
     Gemma3ImageProcessor,
+    Gemma3Processor,
 )
 from .configuration_gemma3 import (
-    DEFAULT_ATTENION_PATTERN,
     Gemma3Config,
     Gemma3TextConfig,
     SiglipVisionConfig,
@@ -38,18 +36,44 @@ from .configuration_gemma3 import (
 
 # ==== Internal Constants and Classes ====
 
-_CHAT_TEMPLATE = (
-    "{{ bos_token }}{% set system_message = '' %}{% if messages[0]['role'] == 'system' %}"
-    "{% set system_message = messages[0]['content'] | trim + '\n\n' %}{% set messages = messages[1:] %}"
-    "{% endif %}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}"
-    "{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}"
-    "{% if loop.index0 == 0 and message['role'] == 'user' %}"
-    "{{ '<start_of_turn>' + message['role'] + '\n' + system_message + message['content'] | trim + '<end_of_turn>\n' }}"
-    "{% elif (message['role'] == 'assistant') %}{% set role = 'model' %}"
-    "{{ '<start_of_turn>' + role + '\n' + message['content'] | trim + '<end_of_turn>\n' }}{% else %}"
-    "{{ '<start_of_turn>' + message['role'] + '\n' + message['content'] | trim + '<end_of_turn>\n' }}{% endif %}"
-    "{% endfor %}{% if add_generation_prompt %}{{ '<start_of_turn>model\n' }}{% endif %}"
-)
+
+_CHAT_TEMPLATE = """{{ bos_token }}
+{%- if messages[0]['role'] == 'system' -%}
+    {%- set first_user_prefix = messages[0]['content'][0]['text'] + '\n\n' -%}
+    {%- set loop_messages = messages[1:] -%}
+{%- else -%}
+    {%- set first_user_prefix = "" -%}
+    {%- set loop_messages = messages -%}
+{%- endif -%}
+{%- for message in loop_messages -%}
+    {%- if (message['role'] == 'user') != (loop.index0 % 2 == 0) -%}
+        {{ raise_exception("Conversation roles must alternate user/assistant/user/assistant/...") }}
+    {%- endif -%}
+    {%- if (message['role'] == 'assistant') -%}
+        {%- set role = "model" -%}
+    {%- else -%}
+        {%- set role = message['role'] -%}
+    {%- endif -%}
+    {{ '<start_of_turn>' + role + '\n' + (first_user_prefix if loop.first else "") }}
+    {%- if message['content'] is string -%}
+        {{ message['content'] | trim }}
+    {%- elif message['content'] is iterable -%}
+        {%- for item in message['content'] -%}
+            {%- if item['type'] == 'image' -%}
+                {{ '<start_of_image>' }}
+            {%- elif item['type'] == 'text' -%}
+                {{ item['text'] | trim }}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- else -%}
+        {{ raise_exception("Invalid content type") }}
+    {%- endif -%}
+    {{ '<end_of_turn>\n' }}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{'<start_of_turn>model\n'}}
+{%- endif -%}
+"""
 
 _DTYPES = {
     "float32": torch.float32,
@@ -93,13 +117,13 @@ _VARIANTS = {
         text_config=Gemma3TextConfig(
             vocab_size=262_144,
             hidden_size=1152,
-            intermediate_size=6912,
+            intermediate_size=6 * 1152,
             num_attention_heads=4,
             num_hidden_layers=26,
             num_key_value_heads=1,
-            attention_pattern=DEFAULT_ATTENION_PATTERN,
+            head_dim=256,
             sliding_window=512,
-            rope_global_base_freq=1_000_000,
+            rope_theta=1_000_000,  # used for global RoPE only
             rope_local_base_freq=10_000,
             attn_logit_softcapping=None,
             query_pre_attn_scalar=256**-0.5,
@@ -111,13 +135,14 @@ _VARIANTS = {
         text_config=Gemma3TextConfig(
             vocab_size=262_144,
             hidden_size=2560,
-            intermediate_size=10_240,
+            intermediate_size=2560 * 8 // 2,
             num_attention_heads=8,
+            head_dim=256,
             num_hidden_layers=34,
             num_key_value_heads=4,
-            attention_pattern=DEFAULT_ATTENION_PATTERN,
             sliding_window=1024,
-            rope_global_base_freq=1_000_000,
+            rope_scaling={"rope_type": "linear", "factor": 8.0},  # used for global RoPE only
+            rope_theta=1_000_000,
             rope_local_base_freq=10_000,
             attn_logit_softcapping=None,
             query_pre_attn_scalar=256**-0.5,
@@ -127,14 +152,15 @@ _VARIANTS = {
     _VARIANT_GEMMA_3_12B: Gemma3Config(
         text_config=Gemma3TextConfig(
             vocab_size=262_144,
-            hidden_size=3840,
-            intermediate_size=3840 * 8 // 2,
+            hidden_size=30 * 128,
+            intermediate_size=30 * 128 * 8 // 2,
             num_attention_heads=16,
+            head_dim=256,
             num_hidden_layers=48,
             num_key_value_heads=8,
-            attention_pattern=DEFAULT_ATTENION_PATTERN,
             sliding_window=1024,
-            rope_global_base_freq=1_000_000,
+            rope_scaling={"rope_type": "linear", "factor": 8.0},  # used for global RoPE only
+            rope_theta=1_000_000,
             rope_local_base_freq=10_000,
             attn_logit_softcapping=None,
             query_pre_attn_scalar=256**-0.5,
@@ -144,18 +170,18 @@ _VARIANTS = {
     _VARIANT_GEMMA_3_27B: Gemma3Config(
         text_config=Gemma3TextConfig(
             vocab_size=262_144,
-            hidden_size=5376,
-            intermediate_size=5376 * 8 // 2,
+            hidden_size=42 * 128,
+            intermediate_size=42 * 128 * 8 // 2,
             num_attention_heads=32,
             num_hidden_layers=62,
             num_key_value_heads=16,
             head_dim=128,
-            attention_pattern=DEFAULT_ATTENION_PATTERN,
             sliding_window=1024,
-            rope_global_base_freq=1_000_000,
+            rope_scaling={"rope_type": "linear", "factor": 8.0},  # used for global RoPE only
+            rope_theta=1_000_000,
             rope_local_base_freq=10_000,
             attn_logit_softcapping=None,
-            query_pre_attn_scalar=1 / math.sqrt(5376 // 32),  # 1 / sqrt(hidden_size // num_attention_heads)
+            query_pre_attn_scalar=(42 * 128 // 32) ** -0.5,  # 1 / sqrt(hidden_size // num_attention_heads)
         ),
         vision_config=_VISION_CONFIG,
     ),
@@ -483,6 +509,7 @@ def main(*args):
     )
 
     if INCLUDE_CHAT_TEMPLATE.value:
+        # Include chat temaplate for CausalLM models
         tokenizer.chat_template = _CHAT_TEMPLATE
 
     if _TEXT_ONLY.value:
@@ -493,16 +520,19 @@ def main(*args):
     else:
         image_processor = Gemma3ImageProcessor(
             image_seq_length=256,
-            image_mean=(127.5,) * 3,
-            image_std=(127.5,) * 3,
+            image_mean=(0.5,) * 3,
+            image_std=(0.5,) * 3,
             size={"height": 896, "width": 896},
-            do_rescale=False,
             resample=PILImageResampling.BILINEAR,
         )
         processor = Gemma3Processor(
             image_processor=image_processor,
             tokenizer=tokenizer,
         )
+        if INCLUDE_CHAT_TEMPLATE.value:
+            # Duplicate so multimodal instruct models can also be used for CausalLM
+            processor.chat_template = tokenizer.chat_template
+
         processor.save_pretrained(output_path)
         logging.info("Saved Gemma3Processor for %s to %s", variant, output_path)
         del processor

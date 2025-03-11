@@ -60,7 +60,7 @@ class Gemma3ImageProcessor(BaseImageProcessor):
             `do_resize` in the `preprocess` method.
         size (`Dict[str, int]` *optional*, defaults to `{"height": 224, "width": 224}`):
             Size of the image after resizing. Can be overridden by `size` in the `preprocess` method.
-        resample (`PILImageResampling`, *optional*, defaults to `Resampling.BICUBIC`):
+        resample (`PILImageResampling`, *optional*, defaults to `Resampling.BILINEAR`):
             Resampling filter to use if resizing the image. Can be overridden by `resample` in the `preprocess` method.
         do_rescale (`bool`, *optional*, defaults to `True`):
             Whether to rescale the image by the specified scale `rescale_factor`. Can be overridden by `do_rescale` in
@@ -82,6 +82,12 @@ class Gemma3ImageProcessor(BaseImageProcessor):
             Whether to convert the image to RGB.
         do_pan_and_scan (`bool`, *optional*):
             Whether to apply `pan_and_scan` to images.
+        pan_and_scan_min_crop_size (`int`, *optional*):
+            Minimum size of each crop in pan and scan.
+        pan_and_scan_max_num_crops (`int`, *optional*):
+            Maximum number of crops per image in pan and scan.
+        pan_and_scan_min_ratio_to_activate (`float`, *optional*):
+            Minimum aspect ratio to activate pan and scan.
     """
 
     model_input_names = ["pixel_values", "num_crops"]
@@ -91,7 +97,7 @@ class Gemma3ImageProcessor(BaseImageProcessor):
         do_resize: bool = True,
         size: Dict[str, int] = None,
         resample: PILImageResampling = PILImageResampling.BILINEAR,
-        do_rescale: bool = False,
+        do_rescale: bool = True,
         rescale_factor: Union[int, float] = 1 / 255,
         do_normalize: bool = True,
         image_mean: Optional[Union[float, List[float]]] = None,
@@ -105,6 +111,7 @@ class Gemma3ImageProcessor(BaseImageProcessor):
     ) -> None:
         super().__init__(**kwargs)
         size = size if size is not None else {"height": 224, "width": 224}
+        size = get_size_dict(size, default_to_square=True)
         image_mean = image_mean if image_mean is not None else IMAGENET_STANDARD_MEAN
         image_std = image_std if image_std is not None else IMAGENET_STANDARD_STD
 
@@ -132,17 +139,18 @@ class Gemma3ImageProcessor(BaseImageProcessor):
         input_data_format: Optional[Union[str, ChannelDimension]] = None,
     ):
         """
-        Pan and Scan and image, whatever it means. TODO: write-up docs
+        Pan and Scan and image, by cropping into smaller images when the aspect ratio exceeds
+        minumum allowed ratio.
 
         Args:
             image (`np.ndarray`):
                 Image to resize.
-            pan_and_scan_min_crop_size (`int`):
-                Size of pan_and_scan_min_crop_size.
-            pan_and_scan_max_num_crops (`int`):
-                pan_and_scan_max_num_crops for the image.
-            pan_and_scan_min_ratio_to_activate (`int`):
-                pan_and_scan_min_ratio_to_activate for the image..
+            pan_and_scan_min_crop_size (`int`, *optional*):
+                Minimum size of each crop in pan and scan.
+            pan_and_scan_max_num_crops (`int`, *optional*):
+                Maximum number of crops per image in pan and scan.
+            pan_and_scan_min_ratio_to_activate (`float`, *optional*):
+                Minimum aspect ratio to activate pan and scan.
             data_format (`str` or `ChannelDimension`, *optional*):
                 The channel dimension format of the image. If not provided, it will be the same as the input image.
             input_data_format (`ChannelDimension` or `str`, *optional*):
@@ -288,6 +296,12 @@ class Gemma3ImageProcessor(BaseImageProcessor):
                 Whether to convert the image to RGB.
             do_pan_and_scan (`bool`, *optional*, defaults to `self.do_convert_rgb`):
                 Whether to apply `pan_and_scan` to images.
+            pan_and_scan_min_crop_size (`int`, *optional*, defaults to `self.pan_and_scan_min_crop_size`):
+                Minimum size of each crop in pan and scan.
+            pan_and_scan_max_num_crops (`int`, *optional*, defaults to `self.pan_and_scan_max_num_crops`):
+                Maximum number of crops per image in pan and scan.
+            pan_and_scan_min_ratio_to_activate (`float`, *optional*, defaults to `self.pan_and_scan_min_ratio_to_activate`):
+                Minimum aspect ratio to activate pan and scan.
         """
         do_resize = do_resize if do_resize is not None else self.do_resize
         size = size if size is not None else self.size
