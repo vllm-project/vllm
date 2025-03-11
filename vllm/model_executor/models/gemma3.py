@@ -173,6 +173,7 @@ class Gemma3Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -185,7 +186,7 @@ class Gemma3Attention(nn.Module):
         k = k.flatten(-2, -1)
 
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q, k, v, **kwargs)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -234,6 +235,7 @@ class Gemma3DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
+        **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
@@ -244,6 +246,7 @@ class Gemma3DecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
+            **kwargs,
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
 
@@ -297,6 +300,7 @@ class Gemma3Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -313,6 +317,7 @@ class Gemma3Model(nn.Module):
                 positions,
                 hidden_states,
                 residual,
+                **kwargs,
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -422,9 +427,10 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+                                   inputs_embeds, **kwargs)
         return hidden_states
 
     def compute_logits(
