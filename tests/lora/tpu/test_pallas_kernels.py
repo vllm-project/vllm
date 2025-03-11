@@ -59,15 +59,15 @@ def ref_bgmv(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.Tensor):
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("op_type", ["shrink", "expand"])
 @pytest.mark.parametrize("seed", [0])
-def test_bgmv(T, D, L, N, dtype, op_type, seed):
+def test_bgmv_correctness(T, D, L, N, dtype, op_type, seed):
+    if op_type == "expand":
+        D, L = L, D
+
     inputs, loras, idxs, ref_output = generate_test_data(
         T, D, L, N, seed, dtype)
 
     # Run bgmv
-    if op_type == "expand":
-        output = torch.ops.xla.bgmv(inputs, loras, idxs)  # TODO: Specialise
-    else:
-        output = torch.ops.xla.bgmv(inputs, loras, idxs)
+    output = torch.ops.xla.bgmv(inputs, loras, idxs)
 
     # Make sure we have no NaNs
     assert not torch.any(torch.isnan(output))
