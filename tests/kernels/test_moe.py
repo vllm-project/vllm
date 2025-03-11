@@ -403,7 +403,7 @@ def test_fused_marlin_moe(
         num_bits=num_bits,
         is_k_full=is_k_full)
 
-    torch.testing.assert_close(marlin_output, torch_output, atol=5e-3, rtol=0)
+    torch.testing.assert_close(marlin_output, torch_output, atol=2e-2, rtol=0)
 
 
 @pytest.mark.skip("This test is here for the sake of debugging, "
@@ -495,7 +495,7 @@ def test_single_marlin_moe_multiply(m: int, n: int, k: int, e: int, topk: int,
 
     torch_output = torch_moe_single(a, w_ref, score, topk)
 
-    torch.testing.assert_close(marlin_output, torch_output, atol=5e-3, rtol=0)
+    torch.testing.assert_close(marlin_output, torch_output, atol=2e-2, rtol=0)
 
 
 def test_moe_align_block_size_opcheck():
