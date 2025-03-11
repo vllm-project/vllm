@@ -1098,6 +1098,21 @@ def sgl_moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                                               experts_ids, num_tokens_post_pad)
 
 
+def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
+                   b_qweight: torch.Tensor, b_scales: torch.Tensor,
+                   b_qzeros: Optional[torch.Tensor],
+                   topk_weights: Optional[torch.Tensor],
+                   sorted_token_ids: torch.Tensor, experts_ids: torch.Tensor,
+                   num_tokens_post_pad: torch.Tensor, top_k: int,
+                   BLOCK_SIZE_M: int, BLOCK_SIZE_N: int, BLOCK_SIZE_K: int,
+                   bit: int) -> torch.Tensor:
+    torch.ops._moe_C.moe_wna16_gemm(input, output, b_qweight, b_scales,
+                                    b_qzeros, topk_weights, sorted_token_ids,
+                                    experts_ids, num_tokens_post_pad, top_k,
+                                    BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K,
+                                    bit)
+
+
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  token_expert_indicies: torch.Tensor,
                  gating_output: float) -> None:
