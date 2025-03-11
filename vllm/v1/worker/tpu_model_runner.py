@@ -438,8 +438,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
 
         if self.lora_config is not None:
+            # We need to respect padding when activating LoRA adapters
+            padded_num_scheduled_tokens_per_req = np.copy(
+                num_scheduled_tokens_per_req
+            )  # Copying to avoid accidental state corruption bugs
+            padded_num_scheduled_tokens_per_req[
+                -1] += padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+
             self.set_active_loras(self.input_batch,
-                                  num_scheduled_tokens_per_req)
+                                  padded_num_scheduled_tokens_per_req)
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
