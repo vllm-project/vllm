@@ -1123,7 +1123,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 # It's necessary to distinguish between the
                 # max_position_embeddings of VLMs and LLMs.
                 if hasattr(self.model.config, "max_position_embeddings"):
-                    max_pos_embeddings = self.model.config.max_position_embeddings  # noqa: E501
+                    max_pos_embeddings = (
+                        self.model.config.max_position_embeddings)
                 else:
                     max_pos_embeddings = (
                         self.model.config.text_config.max_position_embeddings)
@@ -1145,7 +1146,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         logger.info("Model loading took %.4f GB and %.6f seconds",
                     self.model_memory_usage / float(2**30),
                     time_after_load - time_before_load)
-
         if self.prompt_adapter_config:
             self.prompt_adapter_manager = LRUCacheWorkerPromptAdapterManager(
                 self.scheduler_config.max_num_seqs,
