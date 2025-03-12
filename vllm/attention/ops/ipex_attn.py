@@ -17,7 +17,7 @@ class _PagedAttention:
 
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
-        return [32, 64, 80, 96, 112, 128, 256]
+        return [32, 64, 80, 96, 112, 128, 192, 256]
 
     @staticmethod
     def get_kv_cache_shape(
