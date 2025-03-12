@@ -18,6 +18,9 @@ logger = init_logger(__name__)
 
 _LOCAL_LOGGING_INTERVAL_SEC = 5.0
 
+STANDARD_LOGGING_LOGGER_NAME = "logging"
+PROMETHEUS_LOGGING_LOGGER_NAME = "prometheus"
+
 
 class StatLoggerBase(ABC):
 
