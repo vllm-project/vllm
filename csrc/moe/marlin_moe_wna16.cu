@@ -798,9 +798,9 @@ __global__ void Marlin(
       for (int index = threadIdx.x; index < num_int4s; index += threads) {
         int row = index / stride_n;
         if (row >= block_num_valid_tokens) break;
-        int sorted_row = block_sorted_ids[row];
+        int64_t sorted_row = block_sorted_ids[row];
         int col = index % stride_n;
-        int true_index = sorted_row * global_stride_n + off_stride_n + col;
+        int64_t true_index = sorted_row * global_stride_n + off_stride_n + col;
         C[true_index] = {0, 0, 0, 0};
       }
 
@@ -849,7 +849,7 @@ __global__ void Marlin(
       for (int i = 0; i < m_per_thread; i++) {
         int row = threads / threads_per_m * i + threadIdx.x / threads_per_m;
         if (row < block_num_valid_tokens) {
-          int sorted_row = block_sorted_ids[row];
+          int64_t sorted_row = block_sorted_ids[row];
           int col = slice_col * 16 * thread_n_blocks / 8 +
                     threadIdx.x % threads_per_m;
           C[sorted_row * prob_n / 8 + col] = {0, 0, 0, 0};
@@ -1124,8 +1124,8 @@ __global__ void Marlin(
       for (int i = 0; i < a_sh_wr_iters; i++) {
         int a_idx = a_gl_rd_delta_i * i + a_gl_rd + a_gl_rd_delta_o * a_off;
         int row = a_idx / a_gl_stride;
-        int sorted_row = block_sorted_ids[row] / top_k;
-        int true_idx = sorted_row * a_gl_stride + a_idx % a_gl_stride;
+        int64_t sorted_row = block_sorted_ids[row] / top_k;
+        int64_t true_idx = sorted_row * a_gl_stride + a_idx % a_gl_stride;
         cp_async4_pred(&sh_a_stage[a_sh_wr_trans[i]], &A[true_idx],
                        row < block_num_valid_tokens);
       }
@@ -1627,8 +1627,8 @@ __global__ void Marlin(
       for (int i = 0; i < thread_m_blocks * 4; i++) {
         int c_idx =
             c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
-        int sorted_row = block_sorted_ids[c_idx / c_gl_stride];
-        int true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
+        int64_t sorted_row = block_sorted_ids[c_idx / c_gl_stride];
+        int64_t true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
         if (c_idx / c_gl_stride < block_num_valid_tokens)
           sh_red[c_sh_wr + c_sh_wr_delta * i] = C[true_idx];
       }
@@ -1656,8 +1656,8 @@ __global__ void Marlin(
 
         int c_idx =
             c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2);
-        int sorted_row = block_sorted_ids[c_idx / c_gl_stride];
-        int true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
+        int64_t sorted_row = block_sorted_ids[c_idx / c_gl_stride];
+        int64_t true_idx = sorted_row * c_gl_stride + c_idx % c_gl_stride;
         if (c_idx / c_gl_stride < block_num_valid_tokens) C[true_idx] = c;
       }
     }
@@ -1769,8 +1769,8 @@ __global__ void Marlin(
          i < div_ceil(16 * thread_m_blocks, threads / (2 * thread_n_blocks));
          i++) {
       int row = c_gl_wr / c_gl_stride;
-      int sorted_row = block_sorted_ids[row];
-      int true_idx = sorted_row * c_gl_stride + c_gl_wr % c_gl_stride;
+      int64_t sorted_row = block_sorted_ids[row];
+      int64_t true_idx = sorted_row * c_gl_stride + c_gl_wr % c_gl_stride;
       scalar_t2 topk_weight_score =
           Dtype::num2num2(Dtype::float2num(block_topk_weights[row]));
       if (row < block_num_valid_tokens) {
@@ -2521,9 +2521,9 @@ torch::Tensor moe_wna16_marlin_gemm(
   auto options_fp32 =
       torch::TensorOptions().dtype(at::kFloat).device(a.device());
   if (use_fp32_reduce && !use_atomic_add) {
-    const int max_c_tmp_size =
-        min((int)(size_n * sorted_token_ids.size(0)),
-            (int)(sms * moe_block_size * MARLIN_NAMESPACE_NAME::max_thread_n));
+    const long max_c_tmp_size =
+        min(((long) size_n * sorted_token_ids.size(0)),
+            (long)(sms * moe_block_size * MARLIN_NAMESPACE_NAME::max_thread_n));
     c_tmp = torch::empty({max_c_tmp_size}, options_fp32);
   } else {
     c_tmp = torch::empty({0}, options_fp32);
@@ -2681,7 +2681,3 @@ torch::Tensor moe_wna16_marlin_gemm(
 }
 
 #endif
-
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("moe_wna16_marlin_gemm", &moe_wna16_marlin_gemm);
-}
