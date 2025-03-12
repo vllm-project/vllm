@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
+import vllm.envs as envs
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
@@ -297,7 +298,9 @@ def initialize_ray_cluster(
                      ignore_reinit_error=True,
                      num_gpus=parallel_config.world_size)
     else:
-        ray.init(address=ray_address, ignore_reinit_error=True)
+        ray.init(address=ray_address,
+                 ignore_reinit_error=True,
+                 namespace=envs.VLLM_RAY_NAMESPACE)
 
     if parallel_config.placement_group:
         # Placement group is already set.
