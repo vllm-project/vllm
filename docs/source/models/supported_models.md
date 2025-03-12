@@ -954,7 +954,8 @@ Both V0 and V1 support `Gemma3ForConditionalGeneration` for text-only inputs.
 However, for text + image inputs, only V0 supports it correctly.
 V1 does not strictly follow the original attention in Gemma 3.
 
-Specifically, the model uses bidirectional attention only for the image tokens.
+Specifically, the model uses bidirectional attention between the image tokens while
+using causal attention otherwise.
 Unfortunately, this attention pattern is not supported by any of the current attention backends.
 Therefore, we temporarily use the naive PyTorch SDPA with masking tensors **in V0**.
 This could lead to significant memory usage for long prompts (w/ images).
