@@ -118,6 +118,23 @@ def run_fuyu(questions: list[str], modality: str):
     return llm, prompts, stop_token_ids
 
 
+# Gemma 3
+def run_gemma3(questions: list[str], modality: str):
+    assert modality == "image"
+    model_name = "google/gemma-3-4b-it"
+
+    llm = LLM(model=model_name,
+              max_model_len=2048,
+              max_num_seqs=2,
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+
+    prompts = [("<bos><start_of_turn>user\n"
+                f"<start_of_image>{question}<end_of_turn>\n"
+                "<start_of_turn>model\n") for question in questions]
+    stop_token_ids = None
+    return llm, prompts, stop_token_ids
+
+
 # GLM-4v
 def run_glm4v(questions: list[str], modality: str):
     assert modality == "image"
@@ -405,7 +422,7 @@ def run_mllama(questions: list[str], modality: str):
             "type": "image"
         }, {
             "type": "text",
-            "text": f"{question}"
+            "text": question
         }]
     }] for question in questions]
     prompts = tokenizer.apply_chat_template(messages,
@@ -664,6 +681,7 @@ model_example_map = {
     "deepseek_vl_v2": run_deepseek_vl2,
     "florence2": run_florence2,
     "fuyu": run_fuyu,
+    "gemma3": run_gemma3,
     "glm4v": run_glm4v,
     "h2ovl_chat": run_h2ovl,
     "idefics3": run_idefics3,
