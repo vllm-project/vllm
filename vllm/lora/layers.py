@@ -1151,8 +1151,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                                                       posinf=pos_inf,
                                                       neginf=neg_inf))
 
-        # HPU needs special handling to prune out dummy samples.
-        if current_platform.is_hpu():
+        # TPU/HPU needs special handling to prune out dummy samples.
+        if current_platform.is_hpu() or current_platform.is_tpu():
             lora_logits = lora_logits[:logits.shape[0], :]
 
         logits[:,

@@ -780,7 +780,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         start = time.perf_counter()
         num_tokens = 16
         while True:
-            with self.maybe_profile_with_lora(
+            with self.maybe_dummy_run_with_lora(
                     self.lora_config, np.array([num_tokens], dtype=np.int32)):
                 self._dummy_run(self.kv_caches, num_tokens)
             logger.info("  -- num_tokens: %d", num_tokens)
