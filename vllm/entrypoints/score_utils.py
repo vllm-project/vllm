@@ -49,7 +49,7 @@ def _validate_score_input_lens(
         raise ValueError("At least one text_pair element must be given")
 
 
-def _validate_truncatation_size(
+def _validate_truncation_size(
         max_model_len: int,
         truncate_prompt_tokens: int) -> Union[int, ValueError]:
     if truncate_prompt_tokens is not None and truncate_prompt_tokens == -1:
