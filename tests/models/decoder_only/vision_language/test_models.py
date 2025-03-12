@@ -238,7 +238,11 @@ VLM_TEST_SETTINGS = {
         models=["google/gemma-3-4b-it"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=identity,
-        img_idx_to_prompt=lambda idx: "<start_of_image> ",
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<start_of_image> What's the content in the center of the image?",  # noqa: E501
+            "cherry_blossom": "<start_of_image> What is the season?",
+        }),
+        multi_image_prompt="<start_of_image> <start_of_image> Describe the two images in detail.",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
         # TODO: Use AutoModelForVision2Seq once transformers supports this
