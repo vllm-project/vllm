@@ -22,3 +22,16 @@ def test_ggml_opcheck(quant_type):
             (qweight, x, quant_type, qweight.shape[0]))
     opcheck(torch.ops._C.ggml_mul_mat_vec_a8,
             (qweight, x, quant_type, qweight.shape[0]))
+
+    shape = [256, 1024, 336]
+    qweight = torch.randint(0, 100, shape, device='cuda', dtype=torch.uint8)
+    x = torch.rand((1, 1024), device='cuda', dtype=torch.float16)
+    sorted_token_ids = torch.arange(776, device='cuda')
+    expert_ids = torch.randint(0, 256, (194, ), device='cuda')
+    num_tokens_post_padded = torch.tensor([1],
+                                          dtype=torch.int64,
+                                          device='cuda')
+
+    opcheck(torch.ops._C.ggml_moe_a8,
+            (x, qweight, sorted_token_ids, expert_ids, num_tokens_post_padded,
+             quant_type, qweight.shape[0], 1, x.shape[0]))
