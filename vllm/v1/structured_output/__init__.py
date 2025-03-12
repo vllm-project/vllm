@@ -1,18 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import copy
 import multiprocessing
-from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import LazyLoader
-from vllm.v1.structured_output.grammar import (Grammar, StructuredOutputKey,
-                                               StructuredOutputOptions)
+from vllm.v1.structured_output.grammar import Grammar, StructuredOutputOptions
 
 if TYPE_CHECKING:
     import numpy as np
@@ -28,24 +26,56 @@ logger = init_logger(__name__)
 
 class StructuredOutputManager:
 
-    def __init__(self, vllm_config: VllmConfig, max_cache_size: int = 500):
-        tokenizer_group = init_tokenizer_from_configs(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            parallel_config=vllm_config.parallel_config,
-            lora_config=vllm_config.lora_config)  # type: ignore[arg-type]
-        tokenizer_group.ping()
+    def __init__(self, vllm_config: VllmConfig):
         self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.vllm_config = vllm_config
+        self.init_complete = False
+
+    def _delayed_init(self):
+        """Initialization delayed until we know it is needed."""
+        tokenizer_group = init_tokenizer_from_configs(
+            model_config=self.vllm_config.model_config,
+            scheduler_config=self.vllm_config.scheduler_config,
+            parallel_config=self.vllm_config.parallel_config,
+            lora_config=self.vllm_config.lora_config)  # type: ignore[arg-type]
+        tokenizer_group.ping()
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
-        tokenizer_info = xgr.TokenizerInfo.from_huggingface(
-            tokenizer, vocab_size=self.vocab_size)
+        if isinstance(tokenizer, MistralTokenizer):
+            # NOTE: ideally, xgrammar should handle this accordingly.
+            # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
+            try:
+                encoded_vocab = [
+                    token for token, _ in sorted(
+                        tokenizer.get_vocab().items(),
+                        key=lambda x: x[1],
+                    )
+                ]
+                stop_token_ids = None
+                if hasattr(
+                        tokenizer,
+                        "eos_token_id",
+                ) and tokenizer.eos_token_id is not None:
+                    stop_token_ids = [tokenizer.eos_token_id]
+            except AttributeError as e:
+                raise ValueError(
+                    f"Cannot get the vocabulary of the tokenizer "
+                    f"{type(tokenizer)}. The tokenizer should have a "
+                    "get_vocab method.") from e
+            tokenizer_info = xgr.TokenizerInfo(
+                encoded_vocab=encoded_vocab,
+                # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
+                vocab_type=xgr.VocabType.BYTE_FALLBACK,
+                vocab_size=self.vocab_size,
+                stop_token_ids=stop_token_ids,
+                add_prefix_space=True,
+            )
+        else:
+            tokenizer_info = xgr.TokenizerInfo.from_huggingface(
+                tokenizer,
+                vocab_size=self.vocab_size,
+            )
         self.compiler = xgr.GrammarCompiler(tokenizer_info, max_threads=8)
-
-        self.max_cache_size = max_cache_size
-        self.request_key_to_grammar: OrderedDict[StructuredOutputKey,
-                                                 Grammar] = OrderedDict()
 
         # The default max_workers if not specified is the number of CPUs * 5,
         # which is way too high since these tasks are CPU-bound, not I/O bound.
@@ -54,53 +84,34 @@ class StructuredOutputManager:
         max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self._grammar_bitmask = xgr.allocate_token_bitmask(
-            self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size)
+            self.vllm_config.scheduler_config.max_num_seqs,
+            self.vocab_size,
+        )
 
-    def __getitem__(self, key: StructuredOutputKey) -> Optional[Grammar]:
-        # We need to pop and re-insert the grammar here for LRU cache
-        # of request_key_to_grammar
-        if key in self.request_key_to_grammar:
-            # Move accessed item to the end (most recently used)
-            value = self.request_key_to_grammar.pop(key)
-            if value is not None:
-                self.request_key_to_grammar[key] = value
-            return value
-        return None
+        self.init_complete = True
 
-    def populate_cache(self, request: Request) -> None:
+    def grammar_init(self, request: Request) -> None:
         if request.structured_output_request is None:
             return
 
-        grammar = self.request_key_to_grammar.get(
-            request.structured_output_request.structured_output_key)
-        if grammar:
-            request.structured_output_request.grammar = copy.copy(grammar)
-            return
-        request.structured_output_request.grammar = self.cache(request)
+        # The first time this is called, we need to finish initialization
+        # of xgrammar. We defer it to avoid the import of xgrammar and
+        # initialization cost if it is not going to be used.
+        if not self.init_complete:
+            self._delayed_init()
 
-    def cache(self, request: Request):
-        return self.executor.submit(self._executor_loop, request)
+        grammar: Future[Grammar] = self.executor.submit(
+            self._async_create_grammar, request)
+        request.structured_output_request.grammar = grammar  # type: ignore[assignment]
 
-    def _executor_loop(self, request: Request) -> Grammar:
-        # NOTE: The structured_output_request should never be
-        # None in this case, but mypy can't infer this
-        # correctly, so we need to ignore the error here.
+    def _async_create_grammar(self, request: Request) -> Grammar:
         key = request.structured_output_request.structured_output_key  # type: ignore[union-attr]
-        grammar = self.request_key_to_grammar.get(key)
-        if grammar is not None:
-            return copy.copy(grammar)
-        grammar = self.initialize_grammar(key)
-        # If cache is full, remove the least recently used item
-        if len(self.request_key_to_grammar) >= self.max_cache_size:
-            self.request_key_to_grammar.popitem(last=False)
-        self.request_key_to_grammar[key] = grammar
-        return copy.copy(grammar)
 
-    def initialize_grammar(self, key: StructuredOutputKey) -> Grammar:
         # Note that the request was validated in the engine core client,
         # so at this point we know it is a supported type of request.
         #
-        # TODO: we still need to handle xgrammar compilation failures
+        # TODO: we still need to handle xgrammar compilation failures,
+        # though it should be unlikely as we test that up front as well.
         request_type, grammar_spec = key
 
         if request_type == StructuredOutputOptions.JSON:
@@ -112,6 +123,8 @@ class StructuredOutputManager:
             ctx = self.compiler.compile_builtin_json_grammar()
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
+        elif request_type == StructuredOutputOptions.REGEX:
+            ctx = self.compiler.compile_regex(grammar_spec)
         else:
             logger.error("Validation should have already occurred. "
                          "Please file an issue.")

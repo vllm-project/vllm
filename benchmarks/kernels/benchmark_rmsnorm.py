@@ -139,7 +139,7 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
 
     print(f"Naive output={output_naive}")
     print(f"FlashInfer output={output_flashinfer}")
-    print(f"VLLM output={output_vllm}")
+    print(f"vLLM output={output_vllm}")
 
     if torch.allclose(output_naive, output_flashinfer, atol=1e-2,
                       rtol=1e-2) and torch.allclose(
