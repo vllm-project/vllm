@@ -348,7 +348,7 @@ def main(args: argparse.Namespace):
     requests = get_requests(args, tokenizer)
     is_multi_modal = any(request.multi_modal_data is not None
                          for request in requests)
-    if args.backend in "vllm":
+    if args.backend == "vllm":
         if args.async_engine:
             elapsed_time = uvloop.run(
                 run_vllm_async(
@@ -434,7 +434,8 @@ def validate_args(args):
         if args.input_len is None:
             raise ValueError("input_len must be provided for a random dataset")
 
-    # === Dataset Name Specific Checks === --hf-subset and --hf-split: only used
+    # === Dataset Name Specific Checks ===
+    # --hf-subset and --hf-split: only used
     # when dataset_name is 'hf'
     if args.dataset_name != "hf" and (
             getattr(args, "hf_subset", None) is not None
