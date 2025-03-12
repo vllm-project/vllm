@@ -37,10 +37,12 @@ def test_ngram_correctness(monkeypatch, test_prompts, sampling_config,
         del ref_llm
 
         spec_llm = LLM(model=model_name,
-                       speculative_model='[ngram]',
-                       ngram_prompt_lookup_max=5,
-                       ngram_prompt_lookup_min=3,
-                       num_speculative_tokens=3)
+                       speculative_config={
+                           "proposer": "[ngram]",
+                           "ngram_prompt_lookup_max": 5,
+                           "ngram_prompt_lookup_min": 3,
+                           "num_speculative_tokens": 3,
+                       })
         spec_outputs = spec_llm.generate(test_prompts, sampling_config)
         for ref_output, spec_output in zip(ref_outputs, spec_outputs):
             assert ref_output.outputs[0].text == spec_output.outputs[0].text, \

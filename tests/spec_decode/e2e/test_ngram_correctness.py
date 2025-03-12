@@ -344,7 +344,6 @@ def test_ngram_disable_queue(vllm_runner, common_llm_kwargs,
         "proposer": "[ngram]",
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,
-        "disable_by_batch_size": 4,
         "disable_mqa_scorer": True,
     },
 }])

@@ -1799,28 +1799,34 @@ class SpeculativeConfig:
             'typical_acceptance_sampler' for RejectionSampler and
             TypicalAcceptanceSampler respectively. If not specified, it
             defaults to 'rejection_sampler'.
+        - draft_tensor_parallel_size (Optional[int]): The degree of the tensor
+            parallelism for the draft model. Can be 1 or match the target
+            model's tensor parallel size.
         - disable_logprobs (bool): If set to True, token log probabilities are
             not returned during speculative decoding. If set to False, token
             log probabilities are returned according to the log probability
             settings in SamplingParams. If not specified, it defaults to True.
 
     - Model Configuration:
-        - model (Optional[str]): The name of the speculative model,
-            if provided.
+        - model (Optional[str]): The name of the draft model, if provided.
         - quantization (Optional[str]): Quantization method that was used to
-            quantize the speculative model weights. If None, we assume the
-            model weights are not quantized.
+            quantize the draft model weights. If None, we assume the
+            model weights are not quantized. Note that it only takes effect
+            when using the draft model-based speculative method.
         - max_model_len (Optional[int]): The maximum model length of the
-            speculative model. Used when testing the ability to skip
+            draft model. Used when testing the ability to skip
             speculation for some sequences.
-        - draft_tensor_parallel_size (Optional[int]): The degree of the tensor
-            parallelism for the draft model. Can be 1 or match the target
-            model's tensor parallel size.
+        - revision: The specific model version to use for the draft model. It
+            can be a branch name, a tag name, or a commit id. If unspecified,
+            will use the default version.
+        - code_revision: The specific revision to use for the draft model code
+            on Hugging Face Hub. It can be a branch name, a tag name, or a
+            commit id. If unspecified, will use the default version.
 
     - Advanced Token Control:
-        - disable_mqa_scorer (bool): Disable the MQA scorer for the speculative
-            model and fall back to batch expansion for scoring. If not
-            specified, it defaults to False.
+        - disable_mqa_scorer (bool): Disable the MQA scorer and fall back to
+            batch expansion for scoring proposals. If not specified, it
+            defaults to False.
         - disable_by_batch_size (Optional[int]): Disable speculative decoding
             for new incoming requests when the number of enqueued requests is
             larger than this value, if provided.
@@ -1858,21 +1864,23 @@ class SpeculativeConfig:
     # speculative configs from cli args
     num_speculative_tokens: int = field(default=None,
                                         init=True)  # type: ignore
-    model: Optional[str] = None
     proposer: Optional[str] = None
+    acceptance_method: str = "rejection_sampler"
+    draft_tensor_parallel_size: Optional[int] = None
+    disable_logprobs: bool = True
+
+    model: Optional[str] = None
     quantization: Optional[str] = None
     max_model_len: Optional[int] = None
     revision: Optional[str] = None
     code_revision: Optional[str] = None
-    draft_tensor_parallel_size: Optional[int] = None
+
     disable_mqa_scorer: bool = False
     disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
-    acceptance_method: str = "rejection_sampler"
     typical_acceptance_sampler_posterior_threshold: Optional[float] = None
     typical_acceptance_sampler_posterior_alpha: Optional[float] = None
-    disable_logprobs: bool = True
 
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
