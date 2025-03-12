@@ -9,7 +9,7 @@ from pathlib import PosixPath
 
 import pytest
 from packaging.version import Version
-from transformers import AutoModelForVision2Seq
+from transformers import AutoModelForPreTraining, AutoModelForVision2Seq
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
@@ -233,6 +233,16 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+    ),
+    "gemma3": VLMTestInfo(
+        models=["google/gemma-3-4b-it"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=identity,
+        img_idx_to_prompt=lambda idx: "<start_of_image> ",
+        max_model_len=4096,
+        max_num_seqs=2,
+        # TODO: Use AutoModelForVision2Seq once transformers supports this
+        auto_cls=AutoModelForPreTraining,
     ),
     "glm4v": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
