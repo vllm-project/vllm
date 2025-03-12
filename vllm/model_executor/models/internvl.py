@@ -52,7 +52,7 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 VIDEO_CONTEXT = '<|video_pad|>'
-MAX_FRAMES_PER_VIDEO = 32
+MAX_FRAMES_PER_VIDEO = 20
 
 
 class InternVLImagePixelInputs(TypedDict):
@@ -726,7 +726,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
     def get_max_video_tokens(self, seq_len: int) -> int:
         return self.get_num_video_tokens(
             num_frames=self.get_num_frames_with_most_features(seq_len),
-        )
+        ) + 160 - 1
 
 
 class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
@@ -860,10 +860,10 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 num_frames=num_frames,
             )
             feature_size_per_frame = feature_size // num_frames
-            feature_per_frame = hf_processor.get_image_repl_features(
+            feature_per_frame = hf_processor.get_image_repl_full(
                     feature_size_per_frame, num_patches=1)
 
-            return ''.join([f'Frame{i+1}: {feature_per_frame}\n' for i in range(num_frames)])
+            return '\n'.join([f'Frame-{i+1}: {feature_per_frame}' for i in range(num_frames)])
 
         return [
             PromptReplacement(
