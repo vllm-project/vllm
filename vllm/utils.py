@@ -2163,8 +2163,9 @@ def get_mp_context(
     VLLM_WORKER_MULTIPROC_METHOD environment variable.
 
     Args:
-        override_mp_method: If provided, it will be used instead of the
-            VLLM_WORKER_MULTIPROC_METHOD environment variable.
+        override_mp_method: It can be "spawn" or "fork". If provided,
+            it will be used instead of the VLLM_WORKER_MULTIPROC_METHOD
+            environment variable.
         override_reason: If provided, it will be logged as a warning.
 
     Returns:
