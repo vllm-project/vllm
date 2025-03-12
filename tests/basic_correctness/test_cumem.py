@@ -123,8 +123,7 @@ def test_cumem_with_cudagraph():
         # sleep mode with pytorch checkpoint
         ("facebook/opt-125m", False),
     ])
-def test_end_to_end(monkeypatch, model: str, use_v1: bool):
-    import os
+def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
     monkeypatch.setenv("VLLM_USE_V1", "1" if use_v1 else "0")
     free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running

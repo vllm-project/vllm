@@ -42,7 +42,7 @@ def test_multi_step_llm(
     num_prompts: int,
     num_logprobs: Optional[int],
     attention_backend: str,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test vLLM engine with multi-step scheduling via sync LLM Engine.
 
@@ -136,7 +136,7 @@ def test_multi_step_llm_w_prompt_logprobs(
     num_logprobs: Optional[int],
     num_prompt_logprobs: Optional[int],
     attention_backend: str,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test prompt logprobs with multi-step scheduling via sync LLM Engine.
 
@@ -230,7 +230,7 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
     num_prompts: int,
     num_logprobs: Optional[int],
     attention_backend: str,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test vLLM engine with multi-step+"single-step chunked prefill"+APC.
 

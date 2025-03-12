@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import os
 
 import neuronxcc.nki.language as nl
 import pytest
@@ -99,7 +98,7 @@ def ref_block_tables_transform(
 )
 @torch.inference_mode()
 def test_load_and_transform_block_tables(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     num_tiles,
     num_blocks_per_tile,
     q_head_per_kv_head,

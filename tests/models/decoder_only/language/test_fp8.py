@@ -54,7 +54,7 @@ def test_models(
     backend: str,
     tensor_parallel_size: int,
     disable_async_output_proc: bool,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     Only checks log probs match to cover the discrepancy in

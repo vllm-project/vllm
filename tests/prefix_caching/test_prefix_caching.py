@@ -47,7 +47,7 @@ def test_mixed_requests(
     cached_position: int,
     enable_chunked_prefill: bool,
     block_size: int,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     Test the case when some sequences have the prefix cache hit
@@ -106,7 +106,7 @@ def test_mixed_requests(
 def test_unstable_prompt_sequence(
     vllm_runner,
     backend: str,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
     if backend == "FLASHINFER" and current_platform.is_rocm():

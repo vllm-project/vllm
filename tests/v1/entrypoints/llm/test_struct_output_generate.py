@@ -16,7 +16,8 @@ GUIDED_DECODING_BACKENDS_V1 = ["xgrammar"]
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
-def test_guided_json_completion(monkeypatch, sample_json_schema,
+def test_guided_json_completion(monkeypatch: pytest.MonkeyPatch,
+                                sample_json_schema,
                                 guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=MODEL_NAME, max_model_len=1024)
@@ -49,7 +50,8 @@ def test_guided_json_completion(monkeypatch, sample_json_schema,
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
-def test_guided_json_object(monkeypatch, guided_decoding_backend: str):
+def test_guided_json_object(monkeypatch: pytest.MonkeyPatch,
+                            guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=MODEL_NAME, max_model_len=1024)
     sampling_params = SamplingParams(temperature=1.0,
@@ -83,7 +85,8 @@ def test_guided_json_object(monkeypatch, guided_decoding_backend: str):
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
-def test_guided_json_unsupported_schema(monkeypatch, unsupported_json_schema,
+def test_guided_json_unsupported_schema(monkeypatch: pytest.MonkeyPatch,
+                                        unsupported_json_schema,
                                         guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=MODEL_NAME, max_model_len=1024)
@@ -106,7 +109,7 @@ def test_guided_json_unsupported_schema(monkeypatch, unsupported_json_schema,
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
-def test_guided_grammar_ebnf(monkeypatch, sample_sql_ebnf,
+def test_guided_grammar_ebnf(monkeypatch: pytest.MonkeyPatch, sample_sql_ebnf,
                              guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=MODEL_NAME, max_model_len=1024)
@@ -144,7 +147,7 @@ def test_guided_grammar_ebnf(monkeypatch, sample_sql_ebnf,
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
-def test_guided_grammar_lark(monkeypatch, sample_sql_lark,
+def test_guided_grammar_lark(monkeypatch: pytest.MonkeyPatch, sample_sql_lark,
                              guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=MODEL_NAME, max_model_len=1024)
@@ -187,7 +190,7 @@ def test_guided_grammar_lark(monkeypatch, sample_sql_lark,
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
-def test_guided_grammar_ebnf_invalid(monkeypatch,
+def test_guided_grammar_ebnf_invalid(monkeypatch: pytest.MonkeyPatch,
                                      guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=MODEL_NAME, max_model_len=1024)
@@ -211,7 +214,8 @@ def test_guided_grammar_ebnf_invalid(monkeypatch,
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
-def test_guided_regex(monkeypatch, sample_regex, guided_decoding_backend: str):
+def test_guided_regex(monkeypatch: pytest.MonkeyPatch, sample_regex,
+                      guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=MODEL_NAME, max_model_len=1024)
     sampling_params = SamplingParams(temperature=0.8,
@@ -243,7 +247,8 @@ def test_guided_regex(monkeypatch, sample_regex, guided_decoding_backend: str):
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
-def test_guided_choice_completion(monkeypatch, sample_guided_choice,
+def test_guided_choice_completion(monkeypatch: pytest.MonkeyPatch,
+                                  sample_guided_choice,
                                   guided_decoding_backend: str):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     llm = LLM(model=MODEL_NAME, max_model_len=1024)
@@ -267,4 +272,3 @@ def test_guided_choice_completion(monkeypatch, sample_guided_choice,
         assert generated_text is not None
         assert generated_text in sample_guided_choice
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-

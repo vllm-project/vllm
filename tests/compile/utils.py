@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
-
+import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
@@ -61,7 +60,7 @@ if not current_platform.is_rocm() and is_quant_method_supported("awq"):
     }))
 
 
-def check_full_graph_support(monkeypatch,
+def check_full_graph_support(monkeypatch: pytest.MonkeyPatch,
                              model,
                              model_kwargs,
                              optimization_level,

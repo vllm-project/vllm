@@ -7,7 +7,6 @@ prefill requests are chunked.
 
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
-import os
 
 import pytest
 
@@ -43,7 +42,7 @@ def test_models(
     enforce_eager: bool,
     tensor_parallel_size: int,
     attention_backend: str,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     Checks exact match decode between huggingface model and vllm runner with
@@ -87,7 +86,7 @@ def test_models_distributed(
     model: str,
     distributed_executor_backend: str,
     attention_backend: str,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     override_backend_env_variable(monkeypatch, attention_backend)
 
@@ -274,21 +273,11 @@ def test_models_cpu(
     chunked_prefill_token_size: int,
     enforce_eager: bool,
     attention_backend: str,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    test_models(
-        hf_runner,
-        vllm_runner,
-        example_prompts,
-        model,
-        dtype,
-        max_tokens,
-        chunked_prefill_token_size,
-        enforce_eager,
-        1,
-        attention_backend,
-        monkeypatch,
-    )
+    test_models(hf_runner, vllm_runner, example_prompts, model, dtype,
+                max_tokens, chunked_prefill_token_size, enforce_eager, 1,
+                attention_backend, monkeypatch)
 
 
 @pytest.mark.parametrize("max_tokens", [16])

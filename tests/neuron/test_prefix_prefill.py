@@ -316,7 +316,7 @@ def get_active_block_tables(block_tables, query_lens, seq_lens, block_size,
 @pytest.mark.parametrize("mixed_precision", [True, False])
 @torch.inference_mode()
 def test_contexted_kv_attention(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     prefill_batch_size: int,
     decode_batch_size: int,
     num_heads: int,
@@ -326,7 +326,6 @@ def test_contexted_kv_attention(
     large_tile_size,
     mixed_precision: bool,
 ) -> None:
-    import os
 
     import torch_xla.core.xla_model as xm
 

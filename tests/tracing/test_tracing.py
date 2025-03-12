@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import threading
 from collections.abc import Iterable
 from concurrent import futures
@@ -70,7 +69,7 @@ def trace_service():
     server.stop(None)
 
 
-def test_traces(monkeypatch, trace_service):
+def test_traces(monkeypatch: pytest.MonkeyPatch, trace_service):
     monkeypatch.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
 
     sampling_params = SamplingParams(temperature=0.01,
@@ -135,7 +134,8 @@ def test_traces(monkeypatch, trace_service):
     assert metrics.model_execute_time is None
 
 
-def test_traces_with_detailed_steps(monkeypatch, trace_service):
+def test_traces_with_detailed_steps(monkeypatch: pytest.MonkeyPatch,
+                                    trace_service):
     monkeypatch.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
 
     sampling_params = SamplingParams(temperature=0.01,

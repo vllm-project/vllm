@@ -52,7 +52,7 @@ async def test_multi_step(
     num_logprobs: Optional[int],
     attention_backend: str,
     enable_chunked_prefill: bool,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test vLLM engine with multi-step scheduling in an OpenAI-protocol
     client/server environment.
@@ -152,7 +152,7 @@ async def test_multi_step(
 async def test_multi_step_pp_smoke(
     tp_size: int,
     pp_size: int,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     Smoke test for the vLLM engine with multi-step scheduling in an

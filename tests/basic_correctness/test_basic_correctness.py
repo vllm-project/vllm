@@ -47,7 +47,7 @@ def test_vllm_gc_ed():
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [False])
 def test_models(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     hf_runner,
     model: str,
     backend: str,
@@ -105,7 +105,7 @@ def test_models(
         ("meta-llama/Meta-Llama-3-8B", "ray", "FLASHINFER", "A100"),
     ])
 def test_models_distributed(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     hf_runner,
     vllm_runner,
     example_prompts,

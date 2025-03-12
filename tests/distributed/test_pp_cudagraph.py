@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
-
 import pytest
 
 from ..utils import compare_two_settings, fork_new_process_for_each_test
@@ -15,7 +13,8 @@ from ..utils import compare_two_settings, fork_new_process_for_each_test
     "FLASHINFER",
 ])
 @fork_new_process_for_each_test
-def test_pp_cudagraph(monkeypatch, PP_SIZE, MODEL_NAME, ATTN_BACKEND):
+def test_pp_cudagraph(monkeypatch: pytest.MonkeyPatch, PP_SIZE, MODEL_NAME,
+                      ATTN_BACKEND):
     cudagraph_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",

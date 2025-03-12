@@ -28,7 +28,7 @@ TENSOR_PARALLEL_SIZES = [1]
 @pytest.mark.parametrize("enforce_eager", [True])
 @pytest.mark.parametrize("tensor_parallel_size", TENSOR_PARALLEL_SIZES)
 def test_models(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     model: str,
     max_tokens: int,
     enforce_eager: bool,
