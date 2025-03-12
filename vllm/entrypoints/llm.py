@@ -3,8 +3,10 @@
 import itertools
 import warnings
 from collections.abc import Sequence
+from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
+from typing import (Any, Callable, ClassVar, Dict, List, Optional, Union, cast,
+                    overload)
 
 import cloudpickle
 import torch.nn as nn

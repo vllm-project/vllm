@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Mapping
-from typing import Any, Dict, Optional, Union, cast
+from typing import Any, Dict, List, Optional, Union, cast
 
 from typing_extensions import assert_never
 
