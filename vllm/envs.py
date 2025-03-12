@@ -89,7 +89,6 @@ if TYPE_CHECKING:
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
-    VLLM_RAY_NAMESPACE: Optional[str] = None
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     VLLM_DP_RANK: int = 0
@@ -591,11 +590,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Format: comma-separated list of integers, e.g. "0,1,2,3"
     "VLLM_RAY_BUNDLE_INDICES":
     lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
-
-    # Namespace for Ray, if it is set, it can control precisely
-    # which Ray namespace is used.
-    "VLLM_RAY_NAMESPACE":
-    lambda: os.getenv("VLLM_RAY_NAMESPACE", None),
 
     # When on a Nvidia GPU aligns single entries (within a page) so they are 256
     # byte aligned for better performance, this increases the memory usage of
