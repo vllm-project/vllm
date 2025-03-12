@@ -61,6 +61,8 @@ class FalconMamba2MLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
         )
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.intermediate_size = config.intermediate_size
         self.gate_multiplier, self.down_multiplier = config.mlp_multipliers
         if config.hidden_act != "silu":
             raise ValueError(
@@ -71,7 +73,8 @@ class FalconMamba2MLP(nn.Module):
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
-        x = self.act_fn(x * self.gate_multiplier)
+        x[:, :self.intermediate_size // self.tp_size] *= self.gate_multiplier
+        x = self.act_fn(x)
         x, _ = self.down_proj(x)
         x = x * self.down_multiplier
         return x
@@ -118,19 +121,21 @@ class FalconMamba2SSMDecoderLayer(nn.Module):
             2 * self.d_ssm + 2 * self.groups_time_state_size + self.config.mamba_n_heads
         ) // self.tp_size
         mup_vector = torch.ones(1, vector_shape)
-
+        # Z vector 0 -> d_ssm
         mup_vector[:, : self.d_ssm // self.tp_size] *= self.zxbcdt_multipliers[0]
-
+        # X vector d_ssm -> 2 * d_ssm
         mup_vector[:, (self.d_ssm // self.tp_size): (2 * self.d_ssm // self.tp_size)] *= self.zxbcdt_multipliers[1]
+        # B vector 2 * d_ssm -> 2 * d_ssm + (n_group * d_state)
         mup_vector[
             :, (2 * self.d_ssm)  // self.tp_size : (2 * self.d_ssm + self.groups_time_state_size)  // self.tp_size
         ] *= self.zxbcdt_multipliers[2]
+        # C vector 2 * d_ssm + (n_group * d_state) -> 2 * d_ssm + 2 * (n_group * d_state)
         mup_vector[
             :,
             (2 * self.d_ssm + self.groups_time_state_size)  // self.tp_size : (2 * self.d_ssm
             + 2 * self.groups_time_state_size)  // self.tp_size,
         ] *= self.zxbcdt_multipliers[3]
-
+        # dt vector 2 * d_ssm + 2 * (n_group * d_state) -> 2 * d_ssm + 2 * (n_group * d_state) + n_heads
         mup_vector[
             :, (2 * self.d_ssm + 2 * self.groups_time_state_size)  // self.tp_size:
         ] *= self.zxbcdt_multipliers[4]
