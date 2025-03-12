@@ -362,3 +362,55 @@ void finalizeMoeRoutingKernelLauncher(
       expanded_source_row_to_expanded_dest_row, expert_for_source_row, cols, k,
       num_valid_ptr);
 }
+
+__global__ void preprocess_topk_id(int* topk_id_ptr, int size,
+                                   int* expert_map_ptr, int num_experts) {
+  auto tidx = threadIdx.x;
+  auto bidx = blockIdx.x;
+  auto lidx = tidx & 31;
+  auto widx = tidx >> 5;
+  auto warp_count = (blockDim.x + 31) >> 5;
+  auto offset = bidx * blockDim.x;
+  auto bound = min(offset + blockDim.x, size);
+  extern __shared__ int smem[];
+  int* smem_reduce = smem;
+  int* smem_expert_map = smem + 32;
+  int start_expert = num_experts;
+  for (int i = tidx; i < num_experts; i += blockDim.x) {
+    auto expert_map = expert_map_ptr[i];
+    if (expert_map != -1) {
+      start_expert = min(start_expert, i);
+    }
+    smem_expert_map[i] = expert_map;
+  }
+  start_expert = __reduce_min_sync(-1, start_expert);
+
+  if (lidx == 0) {
+    smem_reduce[widx] = start_expert;
+  }
+  __syncthreads();
+
+  start_expert = (lidx < warp_count) ? smem_reduce[lidx] : num_experts;
+  start_expert = __reduce_min_sync(-1, start_expert);
+
+  if (offset + tidx < bound) {
+    auto topk_id = topk_id_ptr[offset + tidx];
+    if (smem_expert_map[topk_id] == -1) {
+      topk_id += num_experts;
+    } else {
+      topk_id -= start_expert;
+    }
+    __syncwarp();
+    topk_id_ptr[offset + tidx] = topk_id;
+  }
+}
+
+void preprocess_topk_id_launcher(int* topk_id_ptr, int size,
+                                 int* expert_map_ptr, int num_experts,
+                                 cudaStream_t stream) {
+  int block = std::min(size, 1024);
+  int grid = (size + block - 1) / block;
+  int smem_size = (num_experts + 32) * sizeof(int);
+  preprocess_topk_id<<<grid, block, smem_size, stream>>>(
+      topk_id_ptr, size, expert_map_ptr, num_experts);
+}
