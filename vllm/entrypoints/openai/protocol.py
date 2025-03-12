@@ -1020,8 +1020,8 @@ PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest]
 
 class ScoreRequest(OpenAIBaseModel):
     model: Optional[str] = None
-    text_1: Union[List[str], str]
-    text_2: Union[List[str], str]
+    text_1: Union[list[str], str]
+    text_2: Union[list[str], str]
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # doc: begin-score-pooling-params

@@ -18,7 +18,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.score_utils import (_cosine_similarity,
                                           _validate_score_input_lens,
-                                          _validate_truncatation_size)
+                                          _validate_truncation_size)
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -230,7 +230,7 @@ class ServingScores(OpenAIServing):
         request_id: str,
         raw_request: Optional[Request] = None,
         truncate_prompt_tokens: Optional[int] = None,
-    ) -> List[PoolingRequestOutput]:
+    ) -> list[PoolingRequestOutput]:
 
         (
             lora_request,
@@ -243,10 +243,10 @@ class ServingScores(OpenAIServing):
 
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-        truncate_prompt_tokens = _validate_truncatation_size(
+        truncate_prompt_tokens = _validate_truncation_size(
             self.max_model_len, truncate_prompt_tokens)
 
-        tokenization_kwargs: Dict[str, Any] = {}
+        tokenization_kwargs: dict[str, Any] = {}
         if truncate_prompt_tokens is not None:
             tokenization_kwargs["truncation"] = True
             tokenization_kwargs["max_length"] = truncate_prompt_tokens

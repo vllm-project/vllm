@@ -3,10 +3,8 @@
 import itertools
 import warnings
 from collections.abc import Sequence
-from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import (Any, Callable, ClassVar, Dict, List, Optional, Union, cast,
-                    overload)
+from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
 
 import cloudpickle
 import torch.nn as nn
@@ -855,7 +853,7 @@ class LLM:
                        Optional[Union[str, list[str]]]] = None,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
-        prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
+        prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
@@ -921,7 +919,7 @@ class LLM:
                 self.llm_engine.model_config.max_model_len,
                 truncate_prompt_tokens)
 
-        tokenization_kwargs: Dict[str, Any] = {}
+        tokenization_kwargs: dict[str, Any] = {}
         if truncate_prompt_tokens is not None:
             tokenization_kwargs["truncation"] = True
             tokenization_kwargs["max_length"] = truncate_prompt_tokens
@@ -1081,7 +1079,7 @@ class LLM:
             truncate_prompt_tokens = _validate_truncation_size(
                 self.max_model_len, truncate_prompt_tokens)
 
-        tokenization_kwargs: Dict[str, Any] = {}
+        tokenization_kwargs: dict[str, Any] = {}
         if truncate_prompt_tokens is not None:
             tokenization_kwargs["truncation"] = True
             tokenization_kwargs["max_length"] = truncate_prompt_tokens
@@ -1298,7 +1296,7 @@ class LLM:
                       Sequence[PoolingParams]],
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
         prompt_adapter_request: Optional[PromptAdapterRequest],
-        tokenization_kwargs: Optional[Dict[str, Any]] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         guided_options: Optional[GuidedDecodingRequest] = None,
         priority: Optional[list[int]] = None,
     ) -> None:
@@ -1346,7 +1344,7 @@ class LLM:
         self,
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
-        tokenization_kwargs: Optional[Dict[str, Any]] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
