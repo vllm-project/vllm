@@ -35,6 +35,7 @@ from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -955,7 +956,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ]
             sample_lens = [len(tokens) + 1 for tokens in draft_token_ids]
             recover_logits_idx = np.cumsum(sample_lens) - 1
-            target_probs = self.model.sampler.compute_probs(
+            target_probs = self.rejection_sampler.compute_probs(
                 logits, sampling_metadata, sample_lens)
             bonus_token_ids = self.model.sample(
                 logits=logits[recover_logits_idx, :],
@@ -1019,7 +1020,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids = None
         else:
             spec_token_ids = self.generate_draft_token_ids(
-                valid_sampled_token_ids)
+                valid_sampled_token_ids, sampling_metadata)
 
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1034,11 +1035,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def generate_draft_token_ids(
         self,
         sampled_token_ids: list[list[int]],
-        sampling_metadata: Optional[SamplingMetadata] = None,
+        sampling_metadata: SamplingMetadata,
     ) -> list[list[int]]:
         # TODO(woosuk): Optimize.
         draft_token_ids: list[list[int]] = []
-
         for i, sampled_ids in enumerate(sampled_token_ids):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
@@ -1047,8 +1047,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 continue
 
             # Skip requests that require top-p, top-k, etc.
-            if sampling_metadata and self._disable_spec_decode(
-                    i, sampling_metadata):
+            if not is_spec_decode_supported(i, sampling_metadata):
                 draft_token_ids.append([])
                 continue
 
@@ -1443,15 +1442,3 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     f"Unknown attention type: {attn_module.attn_type}")
 
         return kv_cache_spec
-
-    def _disable_spec_decode(self, req_idx: int,
-                             sampling_metadata: SamplingMetadata) -> bool:
-        return ((sampling_metadata.top_p
-                 and sampling_metadata.top_p[req_idx] < 1.0)
-                or (sampling_metadata.top_k
-                    and sampling_metadata.top_k[req_idx] > 0)
-                or (sampling_metadata.min_p
-                    and sampling_metadata.min_p[req_idx] > 0.0)
-                or (sampling_metadata.frequency_penalties[req_idx] != 0.0)
-                or (sampling_metadata.presence_penalties[req_idx] != 0.0)
-                or (sampling_metadata.repetition_penalties[req_idx] != 1.0))

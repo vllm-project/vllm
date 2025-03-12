@@ -18,7 +18,11 @@ try:
 except ImportError:
     is_flashinfer_available = False
 
-is_flashinfer_available = False  # Turn off FlashInfer by default for now.
+# Turn off FlashInfer by default for now because
+# of its correctness issue in the reject sampling kernel.
+# Possible related issue:
+# https://github.com/flashinfer-ai/flashinfer/issues/879
+is_flashinfer_available = False
 logger = init_logger(__name__)
 INVALID_TOKEN_ID = -1
 
@@ -43,9 +47,7 @@ class RejectionSampler(nn.Module):
         strategies.
     output tokens: 
         Tokens are finally generated with the rejection sampler. 
-        output tokens = accepted tokens +
-                        recovered tokens +
-                        bonus tokens
+        output tokens = accepted tokens + recovered tokens + bonus tokens
     """
 
     def __init__(self):
@@ -85,7 +87,7 @@ class RejectionSampler(nn.Module):
         draft_probs: Optional[torch.Tensor],
         bonus_token_ids_tensor: torch.Tensor,  # [batch_size, 1]
         target_probs: torch.Tensor,  # [num_total_tokens, vocab_size]
-        sampling_metadata: SamplingMetadata
+        sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
         '''
         Args:
@@ -151,7 +153,7 @@ class RejectionSampler(nn.Module):
                 sample_lens = [len(x) + 1 for x in draft_token_ids]
                 target_probs = _convert_2d_probs(target_probs, sample_lens)
 
-        if self.forward_method == self.forward_native:
+        elif self.forward_method == self.forward_native:
             # Create one-hot tensor for draft token ids.
             # This is used for ngram where we don't have draft_probs.
             if draft_probs is None and not sampling_metadata.all_greedy:
@@ -192,11 +194,11 @@ class RejectionSampler(nn.Module):
     def forward_native(
         self,
         draft_token_ids_tensor: torch.Tensor,
-        draft_probs: Optional[
-            torch.Tensor],  # [batch_size, max_spec_len, vocab_size]
+        # [batch_size, max_spec_len, vocab_size]
+        draft_probs: Optional[torch.Tensor],
         bonus_token_ids_tensor: torch.Tensor,
-        target_probs: torch.
-        Tensor,  # [batch_size, max_spec_len + 1, vocab_size]
+        # [batch_size, max_spec_len + 1, vocab_size]
+        target_probs: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
         # Add 1 to include the 'bonus' token.
@@ -294,6 +296,42 @@ class RejectionSampler(nn.Module):
 
         return SamplerOutput(sampled_token_ids=output_token_ids,
                              logprobs_tensors=None)
+
+    def compute_probs(self, logits: torch.Tensor,
+                      sampling_metadata: SamplingMetadata,
+                      sample_lens: list[int]) -> torch.Tensor:
+        """
+        Compute probability distribution from logits based on sampling metadata.
+    
+        This function applies temperature scaling to the logits and converts 
+        them to probabilities using softmax. Note that division by 
+        temperature is not performed inplace to preserve the original logits 
+        tensor, which will be used by the original sampler to get bonus tokens.
+        
+        Args:
+            logits: Input logits tensor to be converted to probabilities
+            sampling_metadata: Metadata containing sampling parameters such 
+                    as temperature and whether greedy sampling is used
+            sample_lens: List of sample lengths used for repeating 
+                    temperature values
+            
+        Returns:
+            torch.Tensor: Probability distribution (softmax of scaled logits) 
+                    if non-greedy sampling is used, otherwise returns the 
+                    original logits
+        """
+        if sampling_metadata.all_greedy:
+            return logits
+        assert sampling_metadata.temperature is not None
+        # We should optimize the following code as
+        # ut will cause CPU -> GPU synchronization.
+        temperature = torch.repeat_interleave(
+            sampling_metadata.temperature,
+            torch.tensor(sample_lens,
+                         device=sampling_metadata.temperature.device))
+        temperature = temperature.unsqueeze(dim=1)
+        logits = logits / temperature
+        return logits.softmax(dim=-1, dtype=torch.float32)
 
 
 def _create_greedy_token_probs(
