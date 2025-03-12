@@ -385,6 +385,7 @@ class InputRegistry:
         self,
         ctx: InputContext,
         inputs: ProcessorInputs,
+        **kwargs: object,
     ) -> ProcessorInputs:
         """The default input processor is a no-op."""
         return inputs
