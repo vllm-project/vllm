@@ -15,8 +15,8 @@
 # limitations under the License.
 """PyTorch Mllama model."""
 import math
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from collections.abc import Iterable, Mapping, Sequence
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import numpy as np
 import torch
@@ -43,6 +43,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVCrossParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -54,16 +55,17 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
+from vllm.multimodal.inputs import (MultiModalEncDecInputs,
+                                    MultiModalFieldConfig, MultiModalKwargs)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataDict, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
-                                        PromptReplacement)
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
 from .clip import CLIPMLP
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsV0Only
 from .llama import LlamaDecoderLayer, LlamaMLP
 from .utils import maybe_prefix
 
@@ -169,6 +171,29 @@ class MllamaDummyInputsBuilder(BaseDummyInputsBuilder[MllamaProcessingInfo]):
 class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
                                 ):
 
+    def apply(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
+    ) -> MultiModalEncDecInputs:
+        mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
+                                  return_mm_hashes)
+
+        # Check that the number of image tokens in the decoder prompt matches
+        # the number of images provided in mm_data
+        num_image_tokens = mm_inputs['prompt_token_ids'].count(
+            self.info.get_hf_config().image_token_index)
+        image_data = mm_data.get("image", [])
+        num_images = 1 if isinstance(image_data, Image) else len(image_data)
+        if num_image_tokens != num_images:
+            raise ValueError(
+                f"The number of image tokens ({num_image_tokens}) must be"
+                f" the same as the number of images ({num_images})")
+
+        return mm_inputs
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -243,12 +268,12 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         image_token_id = self.info.get_hf_config().image_token_index
         return [image_token_id] * num_images
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         token_per_chunk = self.info.get_token_per_chunk_from_config()
         image_token_id = self.info.get_hf_config().image_token_index
 
@@ -774,21 +799,22 @@ class MllamaTextCrossAttention(nn.Module):
         self.config = config
         self.pipeline_parallel_rank = get_pp_group().rank_in_group
         self.tensor_parallel_size = get_tp_group().world_size
-        self.num_heads = self.config.num_attention_heads
+        self.num_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
+
         self.num_local_heads = self.num_heads // self.tensor_parallel_size
-        self.num_key_value_heads = self.config.num_key_value_heads
         self.num_local_key_value_heads = \
             self.num_key_value_heads // self.tensor_parallel_size
-        self.dropout = config.dropout
         self.hidden_size = config.hidden_size
         self.head_dim = config.hidden_size // self.num_heads
+        self.num_key_value_heads = config.num_key_value_heads
+
         self.layer_idx = layer_idx
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.q_local_size = self.num_local_heads * self.head_dim
         self.kv_local_size = self.num_local_key_value_heads * self.head_dim
 
-        # TODO: change to Q/KV separate linear after #7448 is merged
-        self.qkv_proj = QKVParallelLinear(
+        self.qkv_proj = QKVCrossParallelLinear(
             self.hidden_size,
             self.head_dim,
             self.num_heads,
@@ -797,6 +823,7 @@ class MllamaTextCrossAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+
         self.o_proj = RowParallelLinear(
             self.num_heads * self.head_dim,
             self.hidden_size,
@@ -827,21 +854,12 @@ class MllamaTextCrossAttention(nn.Module):
         kv_range_for_decode: Optional[List[Tuple[int, int]]],
         cross_attention_states: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        qkv_dec, _ = self.qkv_proj(hidden_states)
-        q, _, _ = qkv_dec.split(
-            [self.q_local_size, self.kv_local_size, self.kv_local_size],
-            dim=-1)
-        if cross_attention_states is None:
-            k = None
-            v = None
-        else:
-            qkv_enc, _ = self.qkv_proj(cross_attention_states)
-            _, k, v = qkv_enc.split(
-                [self.q_local_size, self.kv_local_size, self.kv_local_size],
-                dim=-1)
+        q, k, v = self.qkv_proj(hidden_states, cross_attention_states)
+        if cross_attention_states is not None:
             k = k.view(-1, self.num_local_key_value_heads, self.head_dim)
             v = v.view(-1, self.num_local_key_value_heads, self.head_dim)
             k = self.k_norm(k)
+
         q = q.view(-1, self.num_local_heads, self.head_dim)
         q = self.q_norm(q)
 
@@ -865,6 +883,7 @@ class MllamaTextCrossAttention(nn.Module):
         kv_cache = self.attn.kv_cache[self.pipeline_parallel_rank]
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
         # Skip writing kv-cache for the initial profiling run.
+        # TODO (NickLucche) replace with custom attn bias and use standard attn
         if len(kv_cache.shape) > 1:
             i = torch.ones(1, dtype=torch.float32)
             if self.attn.backend in (_Backend.FLASH_ATTN,
@@ -1009,7 +1028,6 @@ class MllamaTextModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size + 8,
                                                    config.hidden_size)
@@ -1128,7 +1146,8 @@ class MllamaForCausalLM(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(MllamaMultiModalProcessor,
                                         info=MllamaProcessingInfo,
                                         dummy_inputs=MllamaDummyInputsBuilder)
-class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
+class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                     SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]

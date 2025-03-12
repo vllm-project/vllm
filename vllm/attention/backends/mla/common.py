@@ -226,23 +226,30 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Fp8)
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    apply_fp8_linear_generic, current_platform_fp8_dtype, is_fp8)
+    Fp8LinearGenericOp, is_fp8)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     scaled_quantize)
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.multimodal import MultiModalPlaceholderMap
+from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
+    is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
     from flash_attn import flash_attn_varlen_func
+    is_vllm_fa = False
+
+from vllm.attention.ops.triton_flash_attention import triton_attention
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
                                           ModelInputForGPUWithSamplingMetadata)
+
+is_hip = current_platform.is_rocm()
 
 
 class MLACommonBackend(AttentionBackend):
@@ -292,7 +299,10 @@ class MLACommonBackend(AttentionBackend):
         return [576]
 
 
-class MLACommonState(AttentionState):
+T = TypeVar("T", bound="MLACommonMetadata")
+
+
+class MLACommonState(AttentionState, Generic[T]):
 
     def __init__(self, runner):
         self.runner = runner
@@ -303,9 +313,10 @@ class MLACommonState(AttentionState):
         cache_config = runner.cache_config
 
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+        self.enable_prefix_caching = cache_config.enable_prefix_caching
 
-        if self.chunked_prefill_enabled:
-            self.chunked_prefill_workspace_size = min(
+        if self.chunked_prefill_enabled or self.enable_prefix_caching:
+            self.context_chunk_workspace_size = min(
                 # Max sure there is enough for 8 full length request or at least
                 # 4 pages of cache per request
                 max(
@@ -320,7 +331,7 @@ class MLACommonState(AttentionState):
                 #   2*(192*128)*(64*1024) = 3gb
                 # (assuming 192 QK head dim, 128 heads, and fp16)
                 128 * 1024)
-            assert self.chunked_prefill_workspace_size >= \
+            assert self.context_chunk_workspace_size >= \
                 scheduler_config.max_num_seqs * cache_config.block_size
 
     @contextmanager
@@ -354,7 +365,9 @@ class MLACommonState(AttentionState):
         return self.__class__(self.runner)
 
     def graph_capture_get_metadata_for_batch(
-            self, batch_size: int, is_encoder_decoder_model: bool = False):
+            self,
+            batch_size: int,
+            is_encoder_decoder_model: bool = False) -> T:
         assert self._is_graph_capturing
 
         attn_metadata = self.runner.attn_backend.make_metadata(
@@ -418,23 +431,23 @@ class MLACommonState(AttentionState):
                 "TritonMLAState does not support encoder/decoder yet")
 
     def begin_forward(self, model_input):
-        if self.chunked_prefill_enabled:
-            if not hasattr(self, "chunked_prefill_workspace"):
+        if self.chunked_prefill_enabled or self.enable_prefix_caching:
+            if not hasattr(self, "context_chunk_workspace"):
                 # not self.runner.device does not return the correct device
                 # for this process, (init_device sets the correct device but
                 # only on the Worker). The only way Ive figured out to get the
                 # correct device is to allocate the workspace on the first call
                 # to begin_forward and use the device of the input tokens
                 assert model_input.input_tokens is not None
-                self.chunked_prefill_workspace = torch.empty(
-                    (self.chunked_prefill_workspace_size,
+                self.context_chunk_workspace = torch.empty(
+                    (self.context_chunk_workspace_size,
                      self.model_config.get_head_size()),
                     dtype=self.model_config.dtype,
                     device=model_input.input_tokens.device,
                 )
 
-            model_input.attn_metadata.chunked_prefill_workspace = \
-                self.chunked_prefill_workspace
+            model_input.attn_metadata.context_chunk_workspace = \
+                self.context_chunk_workspace
 
 
 @dataclass
@@ -506,8 +519,8 @@ class MLACommonMetadata(AttentionMetadata):
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor] = None
 
-    _cached_prefill_metadata: Optional["MLACommonMetadata"] = None
-    _cached_decode_metadata: Optional["MLACommonMetadata"] = None
+    _cached_prefill_metadata: Optional[Any] = None
+    _cached_decode_metadata: Optional[Any] = None
 
     num_prefill_tokens: int
 
@@ -525,7 +538,7 @@ class MLACommonMetadata(AttentionMetadata):
     context_chunk_seq_tot: Optional[List[int]] = None
     context_chunk_max_seq_lens: Optional[List[int]] = None
     # Set by MLAAttentionState in `begin_forward` so it doesn't get broadcasted
-    chunked_prefill_workspace: Optional[torch.Tensor] = None
+    context_chunk_workspace: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         supported_head_sizes = MLACommonBackend.get_supported_head_sizes()
@@ -536,7 +549,7 @@ class MLACommonMetadata(AttentionMetadata):
                 f" received {self.head_dim}.")
 
     @property
-    def prefill_metadata(self) -> Optional["MLACommonMetadata"]:
+    def prefill_metadata(self):
         if self.num_prefills == 0:
             return None
 
@@ -564,7 +577,7 @@ class MLACommonMetadata(AttentionMetadata):
         input_positions = (None if self.input_positions is None else
                            self.input_positions[:self.num_prefill_tokens])
 
-        self._cached_prefill_metadata = MLACommonMetadata(
+        self._cached_prefill_metadata = self.__class__(
             # Required by ModelRunner
             use_cuda_graph=False,  # Not Attention Related
             # Required by Attention Metadata
@@ -598,7 +611,7 @@ class MLACommonMetadata(AttentionMetadata):
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional["MLACommonMetadata"]:
+    def decode_metadata(self):
         if self.num_decode_tokens == 0:
             return None
 
@@ -616,7 +629,7 @@ class MLACommonMetadata(AttentionMetadata):
         input_positions = (None if self.input_positions is None else
                            self.input_positions[self.num_prefill_tokens:])
 
-        self._cached_decode_metadata = MLACommonMetadata(
+        self._cached_decode_metadata = self.__class__(
             # Required by ModelRunner
             use_cuda_graph=self.use_cuda_graph,  # Not Attention Related
             # Required by Attention Metadata
@@ -722,10 +735,7 @@ class MLACommonMetadata(AttentionMetadata):
                                    block_tables=self.block_tables)
 
 
-T = TypeVar("T", bound=MLACommonMetadata)
-
-
-class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
+class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
     """
     NOTE: Please read the comment at the top of the file before trying to 
     understand this class
@@ -738,11 +748,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
         self.block_size = input_builder.block_size
         self.chunked_prefill_enabled = \
             self.runner.scheduler_config.chunked_prefill_enabled
+        self.enable_prefix_caching = \
+            self.runner.cache_config.enable_prefix_caching
 
-        if self.chunked_prefill_enabled:
+        if self.chunked_prefill_enabled or self.enable_prefix_caching:
             attn_state = self.input_builder.runner.attn_state
-            self.chunked_prefill_workspace_size = \
-                attn_state.chunked_prefill_workspace_size
+            self.context_chunk_workspace_size = \
+                attn_state.context_chunk_workspace_size
             self.page_size = self.runner.block_size
 
     def prepare(self):
@@ -911,7 +923,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
         context_chunk_seq_tot = None
         context_chunk_max_seq_lens = None
 
-        if self.chunked_prefill_enabled and self.num_prefills > 0 \
+        if (self.chunked_prefill_enabled or self.enable_prefix_caching) \
+            and self.num_prefills > 0 \
             and context_lens_tensor is not None \
             and context_lens_tensor[:self.num_prefills].max() > 0:
 
@@ -927,7 +940,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
             # algorithm here and allocate more workspace to prefills with
             # longer context lengths
             max_context_chunk = \
-                self.chunked_prefill_workspace_size // num_prefills_with_context
+                self.context_chunk_workspace_size // num_prefills_with_context
 
             # align max_context_chunk to page_size by rounding down,
             # currently the `gather_cache` kernel cannot handle
@@ -956,9 +969,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[MLACommonMetadata]):
                 chunk_seq_lens.max(dim=1).values.tolist()
             context_chunk_seq_tot = chunk_seq_lens.sum(dim=1).tolist()
             assert max(context_chunk_seq_tot) <= \
-                self.chunked_prefill_workspace_size
+                self.context_chunk_workspace_size
 
-        return MLACommonMetadata(
+        return self.runner.attn_backend.make_metadata(
             # Required by ModelRunner
             use_cuda_graph=use_captured_graph,  # Not Attention Related
             # Required by Attention Metadata
@@ -1043,12 +1056,14 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.q_proj = q_proj
         self.kv_b_proj = kv_b_proj
         self.o_proj = o_proj
-        self.vllm_flash_attn_version = get_flash_attn_version()
+        self.triton_fa_func = triton_attention
+        self.fp8_linear_generic = Fp8LinearGenericOp()
 
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
         # latter has an additional parameter to control FA2 vs FA3
         self.flash_attn_varlen_func = flash_attn_varlen_func
+        self.vllm_flash_attn_version = get_flash_attn_version()
         if self.vllm_flash_attn_version is not None:
             self.flash_attn_varlen_func = \
                 functools.partial(flash_attn_varlen_func,
@@ -1057,7 +1072,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     def _v_up_proj_and_o_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
             if is_fp8(self.W_UV_O):
-                output_parallel = apply_fp8_linear_generic(
+                output_parallel = self.fp8_linear_generic.apply(
                     x.flatten(start_dim=1), self.W_UV_O, self.W_UV_O_scales,
                     self.reqaunt_input_group_shape,
                     self.reqaunt_weight_group_shape)
@@ -1077,7 +1092,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
     def _q_proj_and_k_up_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
             if is_fp8(self.W_Q_UK):
-                return apply_fp8_linear_generic(
+                return self.fp8_linear_generic.apply(
                     x, self.W_Q_UK, self.W_Q_UK_scales,
                     self.reqaunt_input_group_shape,
                     self.reqaunt_weight_group_shape).view(
@@ -1223,7 +1238,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 W_Q_UK, W_Q_UK_scales = scaled_quantize(
                     W_Q_UK,
                     self.reqaunt_weight_group_shape,
-                    quant_dtype=current_platform_fp8_dtype)
+                    quant_dtype=current_platform.fp8_dtype())
                 # For FP8 save the transpose so we can use
                 # `apply_w8a8_block_fp8_linear` directly
                 self.W_Q_UK = W_Q_UK.T.contiguous()
@@ -1240,7 +1255,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 W_UV_O, W_UV_O_scales = scaled_quantize(
                     W_UV_O,
                     self.reqaunt_weight_group_shape,
-                    quant_dtype=current_platform_fp8_dtype)
+                    quant_dtype=current_platform.fp8_dtype())
                 # For FP8 save the transpose so we can use
                 # `apply_w8a8_block_fp8_linear` directly
                 self.W_UV_O = W_UV_O.T.contiguous()
@@ -1278,8 +1293,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         # Fetch from attn_metadata directly, since it late bound by
         # MLAAttentionState, grabbing it directly `attn_metadata` can avoid
         # any weirdness around prefill_metadata caching
-        assert attn_metadata.chunked_prefill_workspace is not None
-        workspace = attn_metadata.chunked_prefill_workspace
+        assert attn_metadata.context_chunk_workspace is not None
+        workspace = attn_metadata.context_chunk_workspace
 
         for i in range(iters):
             toks = prefill_metadata.context_chunk_seq_tot[i]
@@ -1294,7 +1309,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             )
 
             kv_c_normed = workspace[:toks]\
-                [..., :self.kv_lora_rank].unsqueeze(1)
+                [..., :self.kv_lora_rank]
             k_pe = workspace[:toks]\
                 [..., self.kv_lora_rank:].unsqueeze(1)
 
@@ -1312,18 +1327,48 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                                                [0, q.shape[-1] - v.shape[-1]],
                                                value=0)
 
-            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
-                max_seqlen_q=prefill_metadata.max_query_len,
-                max_seqlen_k=prefill_metadata.context_chunk_max_seq_lens[i],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_softmax_lse=True,
-            )
+            if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN:
+                attn_output, attn_softmax_lse = self.triton_fa_func(
+                    q,
+                    k,
+                    v_padded,
+                    None,
+                    prefill_metadata.query_start_loc,
+                    prefill_metadata.context_chunk_cu_seq_lens[i],
+                    prefill_metadata.max_query_len,
+                    prefill_metadata.context_chunk_max_seq_lens[i],
+                    False,  # causal
+                    self.scale,
+                    None,  # attn_mask is None unless applying ALiBi mask
+                )
+            elif is_vllm_fa:
+                attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
+                    q=q,
+                    k=k,
+                    v=v_padded,
+                    cu_seqlens_q=prefill_metadata.query_start_loc,
+                    cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
+                    max_seqlen_q=prefill_metadata.max_query_len,
+                    max_seqlen_k=prefill_metadata.
+                    context_chunk_max_seq_lens[i],
+                    softmax_scale=self.scale,
+                    causal=False,  # Context is unmasked
+                    return_softmax_lse=True,
+                )
+            else:
+                attn_output, attn_softmax_lse, _ = self.flash_attn_varlen_func(
+                    q=q,
+                    k=k,
+                    v=v_padded,
+                    cu_seqlens_q=prefill_metadata.query_start_loc,
+                    cu_seqlens_k=prefill_metadata.context_chunk_cu_seq_lens[i],
+                    max_seqlen_q=prefill_metadata.max_query_len,
+                    max_seqlen_k=prefill_metadata.
+                    context_chunk_max_seq_lens[i],
+                    softmax_scale=self.scale,
+                    causal=False,  # Context is unmasked
+                    return_attn_probs=True,
+                )
 
             if output is None:
                 output = attn_output
@@ -1371,21 +1416,53 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
                                            value=0)
 
-        output = self.flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v_padded,
-            cu_seqlens_q=prefill_metadata.query_start_loc,
-            cu_seqlens_k=prefill_metadata.query_start_loc,
-            max_seqlen_q=prefill_metadata.max_prefill_seq_len,
-            max_seqlen_k=prefill_metadata.max_prefill_seq_len,
-            softmax_scale=self.scale,
-            causal=True,
-            return_softmax_lse=has_context,
-        )
+        if is_hip and envs.VLLM_USE_TRITON_FLASH_ATTN:
+            output = self.triton_fa_func(
+                q,
+                k,
+                v_padded,
+                None,
+                prefill_metadata.query_start_loc,
+                prefill_metadata.query_start_loc,
+                prefill_metadata.max_prefill_seq_len,
+                prefill_metadata.max_prefill_seq_len,
+                True,  # causal
+                self.scale,
+                None,  # attn_mask is None unless applying ALiBi mask
+            )
+            ## triton flash attention always return 2 objects
+            if not has_context:
+                output = output[0]
+        elif is_vllm_fa:
+            output = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v_padded,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=has_context,
+            )
+        else:
+            output = self.flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v_padded,
+                cu_seqlens_q=prefill_metadata.query_start_loc,
+                cu_seqlens_k=prefill_metadata.query_start_loc,
+                max_seqlen_q=prefill_metadata.max_prefill_seq_len,
+                max_seqlen_k=prefill_metadata.max_prefill_seq_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_attn_probs=has_context,
+            )
 
         if has_context:
-            suffix_output, suffix_lse = output
+            # ROCm flash_attn_varlen_func will return 3 objects instead of 2
+            suffix_output, suffix_lse, *rest = output
             context_output, context_lse = self._compute_prefill_context( \
                 q, kv_c_and_k_pe_cache, attn_metadata)
 
@@ -1430,12 +1507,12 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 "output is not yet supported for MLAImplBase")
 
         if attn_metadata.is_profile_run and \
-            attn_metadata.chunked_prefill_workspace is not None:
+            attn_metadata.context_chunk_workspace is not None:
             # During the profile run try to simulate to worse case output size
             # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
             # since this can be large
             _ = torch.empty(
-                (attn_metadata.chunked_prefill_workspace.shape[0],
+                (attn_metadata.context_chunk_workspace.shape[0],
                  self.num_heads, self.qk_nope_head_dim + self.v_head_dim),
                 device=k_c_normed.device,
                 dtype=k_c_normed.dtype,
