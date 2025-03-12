@@ -5,7 +5,7 @@
 #include <cmath>
 #include <c10/core/ScalarType.h>
 
-#ifdef USE_CUDA_FP8_FORMAT
+#ifndef USE_ROCM
   #include <c10/util/Float8_e4m3fn.h>
   #define MAYBE_HOST_DEVICE C10_HOST_DEVICE
 #else

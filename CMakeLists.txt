@@ -157,20 +157,6 @@ endif()
 get_torch_gpu_compiler_flags(VLLM_GPU_FLAGS ${VLLM_GPU_LANG})
 
 #
-# Get supported FP8 format based on GPU arches
-#
-get_supported_fp8_format(FP8_FORMAT ${VLLM_GPU_LANG} "${VLLM_GPU_ARCHES}")
-if(${FP8_FORMAT} STREQUAL "E4M3FN")
-  message(STATUS "FP8 format: E4M3FN")
-  list(APPEND VLLM_GPU_FLAGS "-DUSE_CUDA_FP8_FORMAT")
-elseif(${FP8_FORMAT} STREQUAL "E4M3FNUZ")
-  message(STATUS "FP8 format: E4M3FNUZ")
-  list(APPEND VLLM_GPU_FLAGS "-DUSE_HIP_FP8_FORMAT")
-elseif(${FP8_FORMAT} STREQUAL "CONFLICT")
-  message(FATAL_ERROR "Target architectures support different types of FP8 formats!")
-endif()
-
-#
 # Set nvcc parallelism.
 #
 if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
