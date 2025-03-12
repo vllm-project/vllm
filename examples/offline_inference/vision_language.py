@@ -465,6 +465,7 @@ def run_nvlm_d(questions: list[str], modality: str):
         trust_remote_code=True,
         max_model_len=4096,
         tensor_parallel_size=4,
+        mm_processor_kwargs={"do_pan_and_scan": True},  # Default is False
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
