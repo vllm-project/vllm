@@ -1504,6 +1504,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     assert not use_dg or block_m == 128
 
     if use_dg:
+        #print("USE_DG")
         if M % 128 != 0:
             CHUNK_SIZE = (M // 128) * 128
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
@@ -1518,11 +1519,11 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 
         # TODO: this could be smarter
+        num_tokens = top_k_num * M
         sorted_token_ids, _, _ = (moe_align_block_size(topk_ids, block_m,
                                                        global_num_experts,
                                                        expert_map))
 
-        num_tokens = top_k_num * M
         pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) *
                     block_m) - sorted_token_ids.numel()
         if pad_size > 0:
@@ -1532,6 +1533,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
         new_S = torch.repeat_interleave(hidden_states, top_k_num,
                                         dim=0)[sorted_token_ids, ...].shape
+        #new_M = hidden_states.shape[0] * top_k_num * global_num_experts
         new_M = new_S[0]
 
         intermediate_cache1 = torch.empty((new_M, N),
