@@ -111,8 +111,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
-        layer.w13_weight = torch.nn.Parameter(self.add_padding_to_weight(layer.w13_weight.data), requires_grad=False)
-        layer.w2_weight = torch.nn.Parameter(self.add_padding_to_weight(layer.w2_weight.data), requires_grad=False)
+        layer.w13_weight = torch.nn.Parameter(self.add_padding_to_weight(
+            layer.w13_weight.data),
+                                              requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(self.add_padding_to_weight(
+            layer.w2_weight.data),
+                                             requires_grad=False)
 
         if current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
