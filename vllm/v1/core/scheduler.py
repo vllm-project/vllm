@@ -583,10 +583,6 @@ class Scheduler:
                         self.encoder_cache_manager.free_encoder_input(
                             request, input_id)
 
-            # Add newly generated spec token ids to the request.
-            if spec_token_ids is not None:
-                request.spec_token_ids = spec_token_ids[req_index]
-
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
 
@@ -621,6 +617,16 @@ class Scheduler:
                     request.request_id,
                     new_token_ids,
                 )
+
+            # Add newly generated spec token ids to the request.
+            if spec_token_ids is not None:
+                if request.use_structured_output:
+                    metadata = request.structured_output_request
+                    assert metadata is not None and metadata.grammar is not None
+                    request.spec_token_ids = metadata.grammar.validate_tokens(
+                        spec_token_ids[req_index])
+                else:
+                    request.spec_token_ids = spec_token_ids[req_index]
 
             # Transmit partial if chunked prefill & prompt logprobs is enabled
             if new_token_ids or prompt_logprobs_tensors is not None:
