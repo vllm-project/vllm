@@ -45,7 +45,14 @@ void moe_permute(
   int64_t* valid_num_ptr = nullptr;
   // pre-process kernel for expert-parallelism:
   // no local expert id plus "n_expert" offset for priority to local expert
-  // map lacal expert id [n, .., n+n_local_expert-1] to [0, n_local_expert -1]
+  // map local expert id [n, .., n+n_local_expert-1] to [0, n_local_expert -1]
+  // For example, 4 expert with ep_size=2. ep_rank=1 owns global expert id
+  // [2,3] with expert_map[-1, -1, 0, 1], preprocess_topk_id  process topk_ids
+  // and map global expert id [2, 3] to local_expert id [0, 1] and map global
+  // expert id [0, 1] ( not in ep rank=1)  to [4, 5] by plus n_expert. This map
+  // operation is to make local expert high priority in following sort topk_ids
+  // and scan local expert_first_token_offset for each ep rank for next group
+  // gemm.
   if (expert_map.has_value()) {
     int* expert_map_ptr = reinterpret_cast<int*>(expert_map.value().data_ptr());
     valid_num_ptr =
@@ -80,7 +87,8 @@ void moe_unpermute(
     torch::Tensor& topk_weights,               //[n_token, topk]
     torch::Tensor& topk_ids,                   // [n_token, topk]
     torch::Tensor& src_row_id2dst_row_id_map,  // [n_token, topk]
-    int64_t n_expert, int64_t topk,
+    torch::Tensor& expert_first_token_offset,  // [n_local_expert+1]
+    int64_t n_expert, int64_t n_local_expert, int64_t topk,
     torch::Tensor& hidden_states  // [n_token, hidden]
 ) {
   TORCH_CHECK(src_row_id2dst_row_id_map.sizes() == topk_ids.sizes(),
@@ -96,12 +104,14 @@ void moe_unpermute(
   auto n_token = hidden_states.size(0);
   auto n_hidden = hidden_states.size(1);
   auto stream = at::cuda::getCurrentCUDAStream().stream();
+  int64_t* valid_ptr =
+      get_ptr<int64_t>(expert_first_token_offset) + n_local_expert;
   MOE_DISPATCH(hidden_states.scalar_type(), [&] {
     finalizeMoeRoutingKernelLauncher<scalar_t, scalar_t>(
         get_ptr<scalar_t>(permuted_hidden_states),
         get_ptr<scalar_t>(hidden_states), get_ptr<float>(topk_weights),
         get_ptr<int>(src_row_id2dst_row_id_map), get_ptr<int>(topk_ids),
-        n_token, n_hidden, topk, nullptr, stream);
+        n_token, n_hidden, topk, valid_ptr, stream);
   });
 }
 

@@ -23,7 +23,7 @@ def moe_permute(
     - token_expert_indices (torch.Tensor): indice for expanded hidden.
     - topk (int): The number of top-k experts to select.
     - n_expert (int): The number of expert.
-    - n_localexpert (int): The number of expert in current EP rank.
+    - n_local_expert (int): The number of expert in current EP rank.
     - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices 
         from the global expert space to the local expert space of the expert 
         parallel shard.
@@ -69,8 +69,10 @@ def moe_unpermute(permuted_hidden_states: torch.Tensor,
                   topk_weights: torch.Tensor,
                   topk_ids: torch.Tensor,
                   src_row_id2dst_row_id_map: torch.Tensor,
+                  expert_first_token_offset: torch.Tensor, 
                   topk: int,
-                  n_expert: int 
+                  n_expert: int,
+                  n_local_expert:int,
 ) -> torch.Tensor:
     """
     This function expands and permutes activation to gathering uncontinuous 
@@ -79,10 +81,14 @@ def moe_unpermute(permuted_hidden_states: torch.Tensor,
     - permuted_hidden_states (torch.Tensor): permuted activation.
     - topk_weights (torch.Tensor): topk expert route weight for each token.
     - topk_ids (torch.Tensor): topk expert route id for each token.
+    - expert_first_token_offset (torch.Tensor): offset of the first token
+       of each expert for grouped gemm.
     - topk (int): The number of top-k experts to select.
     - n_expert (int): The number of expert.
+    - n_local_expert (int): The number of expert in current EP rank.
     Returns:
-    - hidden_states (torch.Tensor): The reduced and unpermuted activation tensor.  
+    - hidden_states (torch.Tensor): The reduced and unpermuted activation 
+      tensor.  
     """   
     n_token, n_hidden = topk_weights.shape[0], permuted_hidden_states.shape[-1]
     hidden_states = torch.empty((n_token, n_hidden), dtype=permuted_hidden_states.dtype, 
@@ -90,6 +96,7 @@ def moe_unpermute(permuted_hidden_states: torch.Tensor,
 
     torch.ops._moe_C.moe_unpermute(permuted_hidden_states, topk_weights,
                                    topk_ids, src_row_id2dst_row_id_map,
-                                   n_expert, topk, hidden_states)
+                                   expert_first_token_offset, n_expert, 
+                                   n_local_expert, topk, hidden_states)
     return hidden_states
 
