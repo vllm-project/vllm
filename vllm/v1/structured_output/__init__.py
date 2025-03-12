@@ -27,6 +27,7 @@ logger = init_logger(__name__)
 class StructuredOutputManager:
 
     def __init__(self, vllm_config: VllmConfig):
+        self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.vllm_config = vllm_config
         self.init_complete = False
 
@@ -83,7 +84,8 @@ class StructuredOutputManager:
         max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self._grammar_bitmask = xgr.allocate_token_bitmask(
-            self.vllm_config.scheduler_config.max_num_seqs, self.vocab_size,
+            self.vllm_config.scheduler_config.max_num_seqs,
+            self.vocab_size,
         )
 
         self.init_complete = True
