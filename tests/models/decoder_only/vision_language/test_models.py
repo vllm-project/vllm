@@ -239,10 +239,10 @@ VLM_TEST_SETTINGS = {
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=identity,
         single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<start_of_image> What's the content in the center of the image?",  # noqa: E501
-            "cherry_blossom": "<start_of_image> What is the season?",
+            "stop_sign": "<bos><start_of_turn>user\n<start_of_image>What's the content in the center of the image?<end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
+            "cherry_blossom": "<bos><start_of_turn>user\n<start_of_image>What is the season?<end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
         }),
-        multi_image_prompt="<start_of_image> <start_of_image> Describe the two images in detail.",  # noqa: E501
+        multi_image_prompt="<bos><start_of_turn>user\n<start_of_image><start_of_image>Describe the two images in detail.<end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
         # TODO: Use AutoModelForVision2Seq once transformers supports this
