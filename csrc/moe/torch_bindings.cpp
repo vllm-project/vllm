@@ -72,7 +72,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   m.def(
       "moe_unpermute(Tensor! permuted_hidden_states, Tensor! topk_weights,"
-      "Tensor! topk_ids,Tensor! src_row_id2dst_row_id_map, int n_expert, int "
+      "Tensor! topk_ids,Tensor! src_row_id2dst_row_id_map, Tensor! "
+      "expert_first_token_offset, int n_expert, int n_local_expert,int "
       "topk, Tensor! hidden_states)->()");
   // conditionally compiled so impl registration is in source file
 

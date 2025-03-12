@@ -372,33 +372,23 @@ __global__ void preprocess_topk_id(int* topk_id_ptr, int size,
   auto warp_count = (blockDim.x + 31) >> 5;
   auto offset = bidx * blockDim.x;
   auto bound = min(offset + blockDim.x, size);
-  extern __shared__ int smem[];
-  int* smem_reduce = smem;
-  int* smem_expert_map = smem + 32;
-  int start_expert = num_experts;
+  extern __shared__ int smem_expert_map[];
+  // store expert_map in smem
   for (int i = tidx; i < num_experts; i += blockDim.x) {
-    auto expert_map = expert_map_ptr[i];
-    if (expert_map != -1) {
-      start_expert = min(start_expert, i);
-    }
-    smem_expert_map[i] = expert_map;
-  }
-  start_expert = __reduce_min_sync(-1, start_expert);
-
-  if (lidx == 0) {
-    smem_reduce[widx] = start_expert;
+    smem_expert_map[i] = expert_map_ptr[i];
   }
   __syncthreads();
 
-  start_expert = (lidx < warp_count) ? smem_reduce[lidx] : num_experts;
-  start_expert = __reduce_min_sync(-1, start_expert);
-
+  // query global expert id in expert map.
+  // if global expert id = -1 in exert map, plus n_expert
+  // else set global expert id = exert map[global expert id]
   if (offset + tidx < bound) {
     auto topk_id = topk_id_ptr[offset + tidx];
-    if (smem_expert_map[topk_id] == -1) {
+    auto local_expert_idx = smem_expert_map[topk_id];
+    if (local_expert_idx == -1) {
       topk_id += num_experts;
     } else {
-      topk_id -= start_expert;
+      topk_id = local_expert_idx;
     }
     __syncwarp();
     topk_id_ptr[offset + tidx] = topk_id;
@@ -410,7 +400,7 @@ void preprocess_topk_id_launcher(int* topk_id_ptr, int size,
                                  cudaStream_t stream) {
   int block = std::min(size, 1024);
   int grid = (size + block - 1) / block;
-  int smem_size = (num_experts + 32) * sizeof(int);
+  int smem_size = (num_experts) * sizeof(int);
   preprocess_topk_id<<<grid, block, smem_size, stream>>>(
       topk_id_ptr, size, expert_map_ptr, num_experts);
 }

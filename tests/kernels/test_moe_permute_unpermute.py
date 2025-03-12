@@ -34,7 +34,7 @@ def torch_permute(
     n_token = hidden_states.shape[0]
     ## torch sort is unstable
     # sorted_topk_ids, sorted_indices = torch.sort(topk_ids.flatten()) 
-    if expert_map != None :
+    if expert_map is not None :
         is_local_expert = (expert_map[topk_ids] != -1)
         not_local_expert = (expert_map[topk_ids] == -1)
         topk_ids = is_local_expert * (topk_ids - start_expert) + not_local_expert * (topk_ids + n_expert)
@@ -69,9 +69,12 @@ def torch_unpermute(permuted_hidden_states: torch.Tensor,
                     topk_ids: torch.Tensor,
                     token_expert_indices: torch.Tensor,
                     src_row_id2dst_row_id_map: torch.Tensor,
+                    expert_first_token_offset: torch.Tensor, 
                     topk: int,
                     n_expert: int 
 ) -> torch.Tensor:
+    # ignore token not in local expert
+    permuted_hidden_states[expert_first_token_offset[-1]:, ...] = 0 
     idx = src_row_id2dst_row_id_map.flatten()[
           token_expert_indices.flatten()].reshape(token_expert_indices.shape)
     output = permuted_hidden_states[idx, 
@@ -96,8 +99,8 @@ def test_moe_permute_unpermute(
         expert_map = expert_map.cuda()
     start_expert = n_local_expert * ep_rank
     current_platform.seed_everything(0)
-    hidden_states = torch.randn((n_token, n_hidden), device="cuda", dtype=dtype) / 10
-    gating_output = torch.randn((n_token, n_expert), device="cuda", dtype=dtype) 
+    hidden_states = torch.randn((n_token, n_hidden), device="cuda").to(dtype)
+    gating_output = torch.randn((n_token, n_expert), device="cuda").to(dtype)
     topk_weights, topk_ids, token_expert_indices = fused_topk(
         hidden_states, gating_output, topk, False
     )
@@ -127,7 +130,7 @@ def test_moe_permute_unpermute(
                                result2,
                                atol=0,
                                rtol=0)
-    # check permuted_hidden_states, only token for [0,n_local_expert-1] expert 
+    # check permuted_hidden_states, only token for [0 : n_local_expert-1] expert 
     torch.testing.assert_close(gold0[:gold1[n_local_expert], ...],
                                result0[:gold1[n_local_expert], ...],
                                atol=0,
@@ -137,15 +140,17 @@ def test_moe_permute_unpermute(
     result0 = 0.5 * result0 + torch.randn_like(result0)
 
     result3 = moe_unpermute(result0, topk_weights, topk_ids, 
-                            result2, topk,n_expert)
+                            result2,  result1, topk, n_expert, n_local_expert)
     gold3 = torch_unpermute(result0, topk_weights, topk_ids, 
-                            token_expert_indices, result2, topk,n_expert)
+                            token_expert_indices, result2, result1, topk,n_expert)
+
     # print(result3)
     # print(gold3)
+
     torch.testing.assert_close(result3,
                             gold3,
                             atol=2e-2,
                             rtol=0)
 
 
-test_moe_permute_unpermute(1024, 2048, 4, 8, 8, torch.float16)
+# test_moe_permute_unpermute(1024, 2048, 4, 8, 2, torch.float16)
