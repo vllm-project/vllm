@@ -1146,6 +1146,10 @@ def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
                    num_tokens_post_pad: torch.Tensor, top_k: int,
                    BLOCK_SIZE_M: int, BLOCK_SIZE_N: int, BLOCK_SIZE_K: int,
                    bit: int) -> torch.Tensor:
+    if not current_platform.is_cuda():
+        raise NotImplementedError(
+            "The optimized moe_wna16_gemm kernel is only "
+            "available on CUDA platforms")
     torch.ops._moe_C.moe_wna16_gemm(input, output, b_qweight, b_scales,
                                     b_qzeros, topk_weights, sorted_token_ids,
                                     experts_ids, num_tokens_post_pad, top_k,
