@@ -36,6 +36,16 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ::::
 
+::::{tab-item} IBM Z (S390X)
+:sync: s390x
+
+:::{include} cpu/s390x.inc.md
+:start-after: "# Installation"
+:end-before: "## Requirements"
+:::
+
+::::
+
 :::::
 
 ## Requirements
@@ -69,6 +79,16 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 :sync: apple
 
 :::{include} cpu/apple.inc.md
+:start-after: "## Requirements"
+:end-before: "## Set up using Python"
+:::
+
+::::
+
+::::{tab-item} IBM Z (S390X)
+:sync: s390x
+
+:::{include} cpu/s390x.inc.md
 :start-after: "## Requirements"
 :end-before: "## Set up using Python"
 :::
@@ -123,6 +143,16 @@ Currently, there are no pre-built CPU wheels.
 
 ::::
 
+::::{tab-item} IBM Z (s390x)
+:sync: s390x
+
+:::{include} cpu/s390x.inc.md
+:start-after: "### Build wheel from source"
+:end-before: "## Set up using Docker"
+:::
+
+::::
+
 :::::
 
 ## Set up using Docker
@@ -145,6 +175,10 @@ $ docker run -it \
 
 ::::{tip}
 For ARM or Apple silicon, use `Dockerfile.arm`
+::::
+
+::::{tip}
+For IBM Z (s390x), use `Dockerfile.s390x` and in `docker run` use flag `--dtype float`
 ::::
 
 ## Supported features
