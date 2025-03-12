@@ -351,10 +351,11 @@ class ModelConfig:
         if self.enforce_eager is None:
             self.enforce_eager = False
 
+        interleaved_attn_models = ["gemma2", "gemma3_text", "cohere2"]
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         has_interleaved_attention = (sliding_window is not None) and (
             isinstance(sliding_window, list) or
-            (self.hf_text_config.model_type in ["gemma2", "cohere2"]))
+            (self.hf_text_config.model_type in interleaved_attn_models))
 
         if (not self.disable_sliding_window and has_interleaved_attention):
             if (backend :=
@@ -614,7 +615,7 @@ class ModelConfig:
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
-            "compressed-tensors", "experts_int8", "quark"
+            "compressed-tensors", "experts_int8", "quark", "nvfp4"
         ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -2528,11 +2529,11 @@ def _get_and_verify_dtype(
         dtype = dtype.lower()
         if dtype == "auto":
             if config_dtype == torch.float32:
-                if config.model_type == "gemma2":
+                if config.model_type in ("gemma2", "gemma3", "gemma3_text"):
                     logger.info(
-                        "For Gemma 2, we downcast float32 to bfloat16 instead "
-                        "of float16 by default. Please specify `dtype` if you "
-                        "want to use float16.")
+                        "For Gemma 2 and 3, we downcast float32 to bfloat16 "
+                        "instead of float16 by default. Please specify `dtype` "
+                        "if you want to use float16.")
                     torch_dtype = torch.bfloat16
                 else:
                     # Following the common practice, we use float16 for float32
@@ -2664,7 +2665,9 @@ def _get_and_verify_max_len(
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    if rope_scaling is not None:
+    # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
+    # scaling, so we skip applying the scaling factor again.
+    if rope_scaling is not None and "gemma3" not in hf_config.model_type:
         # No need to consider "type" key because of patch_rope_scaling when
         # loading HF config
         rope_type = rope_scaling["rope_type"]
@@ -3556,6 +3559,11 @@ class VllmConfig:
                 not self.model_config.enforce_eager:
                 batch_size_capture_list = [1, 2, 4
                                            ] + [i for i in range(8, 513, 8)]
+                max_num_tokens = self.scheduler_config.max_num_batched_tokens
+                batch_size_capture_list = [
+                    size for size in batch_size_capture_list
+                    if size <= max_num_tokens
+                ]
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
@@ -3603,11 +3611,11 @@ _current_vllm_config: Optional[VllmConfig] = None
 @contextmanager
 def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     """
-    Temporarily set the current VLLM config.
+    Temporarily set the current vLLM config.
     Used during model initialization.
-    We save the current VLLM config in a global variable,
+    We save the current vLLM config in a global variable,
     so that all modules can access it, e.g. custom ops
-    can access the VLLM config to determine how to dispatch.
+    can access the vLLM config to determine how to dispatch.
     """
     global _current_vllm_config
     old_vllm_config = _current_vllm_config
@@ -3642,7 +3650,7 @@ def get_current_vllm_config() -> VllmConfig:
         # in ci, usually when we test custom ops/modules directly,
         # we don't set the vllm config. In that case, we set a default
         # config.
-        logger.warning("Current VLLM config is not set.")
+        logger.warning("Current vLLM config is not set.")
         from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config

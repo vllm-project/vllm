@@ -52,7 +52,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_navi
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
@@ -90,8 +89,7 @@ class LlamaMLP(nn.Module):
         self.use_fp8 = (isinstance(quant_config, Fp8Config) or
                         (isinstance(quant_config, QuarkConfig)
                          and quant_config.is_fp8_w8a8())
-                        if current_platform.is_rocm() and not is_navi() else
-                        False)
+                        if current_platform.is_fp8_fnuz() else False)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -208,8 +206,7 @@ class LlamaAttention(nn.Module):
             quant_config, Fp8Config) or (isinstance(quant_config, QuarkConfig)
                                          and quant_config.is_fp8_w8a8())
         self.attn_fp8_out = envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT \
-                        and current_platform.is_rocm() \
-                        and not is_navi() \
+                        and current_platform.is_fp8_fnuz() \
                         and use_fp8
 
         self.attn = Attention(
@@ -251,8 +248,7 @@ class LlamaDecoderLayer(nn.Module):
         self.use_fp8 = (isinstance(quant_config, Fp8Config) or
                         (isinstance(quant_config, QuarkConfig)
                          and quant_config.is_fp8_w8a8())
-                        if current_platform.is_rocm() and not is_navi() else
-                        False)
+                        if current_platform.is_fp8_fnuz() else False)
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
