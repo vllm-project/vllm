@@ -951,17 +951,20 @@ To use Qwen2.5-VL series models, you have to install Hugging Face Transformers l
 
 :::{note}
 Both V0 and V1 support `Gemma3ForConditionalGeneration` for text-only inputs.
-However, for text + image inputs, only V0 supports it correctly.
-V1 does not strictly follow the original attention in Gemma 3.
+However, there are differences in how they handle text + image inputs:
 
-Specifically, the model uses bidirectional attention between the image tokens while
-using causal attention otherwise.
-Unfortunately, this attention pattern is not supported by any of the current attention backends.
-Therefore, we temporarily use the naive PyTorch SDPA with masking tensors **in V0**.
-This could lead to significant memory usage for long prompts (w/ images).
+V0 correctly implements the model's attention pattern:
+- Uses bidirectional attention between the image tokens corresponding to the same image
+- Uses causal attention for other tokens
+- Implemented via (naive) PyTorch SDPA with masking tensors
+- Note: May use significant memory for long prompts with image
 
-In V1, we currently do not use the bidirectional attention for image tokens, and use the causal attention for all tokens.
-The model still generates reasonable outputs, but this needs to be fixed to get the full accuracy when the input includes images.
+V1 currently uses a simplified attention pattern:
+- Uses causal attention for all tokens, including image tokens
+- Generates reasonable outputs but does not match the original model's attention for text+image inputs
+- Will be updated in the future to support the correct behavior
+
+This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
 :::
 
 ### Pooling Models
