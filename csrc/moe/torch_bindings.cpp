@@ -32,7 +32,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   m.impl("sgl_moe_align_block_size", torch::kCUDA, &sgl_moe_align_block_size);
 
 #ifndef USE_ROCM
-  // this feature currently is supported on CUDA only
   m.def(
       "moe_wna16_gemm(Tensor input, Tensor! output, Tensor b_qweight, "
       "Tensor b_scales, Tensor? b_qzeros, "
