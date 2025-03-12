@@ -625,7 +625,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
             assert value is not None
@@ -716,8 +715,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             self.alibi_slopes,
                             query.dtype,
                             seq_lens,
-                            make_attn_mask=causal_mask)
-                        # make_attn_mask=False)  # type: ignore
+                            make_attn_mask=causal_mask)  # type: ignore
                     out, _ = self.attn_func(
                         query,
                         key,
@@ -743,10 +741,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             query.dtype,
                             attn_metadata.seq_lens,
                             make_attn_mask=causal_mask)  # type: ignore
-                        # For encoder-only, we don't want causal masking
-                        # make_attn_mask=(
-                        # self.attn_type != AttentionType.ENCODER_ONLY))
-                        # # type: ignore
                     query = query.movedim(0, query.dim() - 2)
                     key = key.movedim(0, key.dim() - 2)
                     value = value.movedim(0, value.dim() - 2)
@@ -772,10 +766,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         max_seqlen_q=prefill_meta.max_prefill_seq_len,
                         max_seqlen_k=key_max_seq_len,
                         softmax_scale=self.scale,
-                        # # For encoder-only, we don't want causal masking
-                        # causal=(self.attn_type !=
-                        # AttentionType.ENCODER_ONLY and
-                        #         self.attn_type != AttentionType.ENCODER),
                         causal=causal_mask,
                         window_size=self.sliding_window,
                         alibi_slopes=self.alibi_slopes,
