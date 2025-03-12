@@ -4,16 +4,7 @@ from typing import (Any, Iterable, Literal, Mapping, Optional, Sequence, Set,
 
 import torch
 from torch import nn
-from transformers import BatchFeature, ProcessorMixin
-
-try:
-    from transformers import Gemma3Config
-except ImportError as e:
-    raise ImportError(
-        "To use `Gemma3ForConditionalGeneration`, you have to install "
-        "Hugging Face Transformers library from source via `pip install "
-        "git+https://github.com/huggingface/transformers@v4.49.0-Gemma-3`."
-    ) from e
+from transformers import BatchFeature, Gemma3Config, ProcessorMixin
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger

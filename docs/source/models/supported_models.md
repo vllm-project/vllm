@@ -950,6 +950,10 @@ To use Qwen2.5-VL series models, you have to install Hugging Face Transformers l
 :::
 
 :::{note}
+To use Gemma3 series models, you have to install Hugging Face Transformers library from source via
+`pip install git+https://github.com/huggingface/transformers`.
+The earliest commit that supports this is [`50d3530aa04e7a7d003e6b255a98f79fd0447357`](https://github.com/huggingface/transformers/commit/50d3530aa04e7a7d003e6b255a98f79fd0447357).
+
 Both V0 and V1 support `Gemma3ForConditionalGeneration` for text-only inputs.
 However, there are differences in how they handle text + image inputs:
 
