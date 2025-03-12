@@ -125,7 +125,7 @@ class CpuPlatform(Platform):
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
         # MLA attention is not supported
-        os.environ["VLLM_MLA_DISABLE"] = "1"
+        # os.environ["VLLM_MLA_DISABLE"] = "1"
 
         # Intel OpenMP setting
         ld_prealod_str = os.getenv("LD_PRELOAD", "")

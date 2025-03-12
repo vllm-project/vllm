@@ -214,7 +214,6 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            get_flash_attn_version,
                                            is_block_tables_empty)
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.distributed import (get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -233,7 +232,15 @@ from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
+
+if HAS_TRITON:
+    from vllm.attention.ops.triton_flash_attention import triton_attention
+    from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
+else:
+    merge_attn_states = None
+    triton_attention = None
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -244,12 +251,7 @@ except ImportError:
         # For rocm use upstream flash attention
         from flash_attn import flash_attn_varlen_func
     except ImportError:
-        import intel_extension_for_pytorch.llm.modules as ipex_modules
-
-        flash_attn_varlen_func = ipex_modules.PagedAttention \
-                                .flash_attn_varlen_func
-
-from vllm.attention.ops.triton_flash_attention import triton_attention
+        flash_attn_varlen_func = None
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
