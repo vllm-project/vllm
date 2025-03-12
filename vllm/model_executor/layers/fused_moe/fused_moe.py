@@ -1507,7 +1507,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     assert not use_dg or block_m == 128
 
     if use_dg:
-        if False and M % 128 != 0:
+        if M % 128 != 0:
             CHUNK_SIZE = (M // 128) * 128
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
