@@ -178,6 +178,8 @@ class Fp8LinearOp:
 
         # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
         if self.cutlass_fp8_supported:
+            assert input.dtype != current_platform.fp8_dtype(
+            ), "FP8 input to cutlass is not supported"
             qinput, x_scale = ops.scaled_fp8_quant(
                 input_2d,
                 input_scale,
