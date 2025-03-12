@@ -2302,9 +2302,6 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   // Verify device and strides
   TORCH_CHECK(a.device().is_cuda(), "A is not on GPU");
   TORCH_CHECK(a.stride(1) == 1, "A.stride(1) is not 1");
-  // We use int4 (16 bytes) to load A, so A must aligned to 16 bytes
-  TORCH_CHECK(a.stride(0) % 8 == 0, "A.stride(0) must divisible by 8");
-  TORCH_CHECK(((uint64_t)a.data_ptr()) % 16 == 0, "A must aligned to 16 bytes");
 
   TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
   TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
@@ -2320,6 +2317,10 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
 
   TORCH_CHECK(perm.device().is_cuda(), "perm is not on GPU");
   TORCH_CHECK(perm.is_contiguous(), "perm is not contiguous");
+
+  // We use int4 (16 bytes) to load A, so A must aligned to 16 bytes
+  TORCH_CHECK(a.stride(0) % 8 == 0, "A.stride(0) must divisible by 8");
+  TORCH_CHECK(((uint64_t)a.data_ptr()) % 16 == 0, "A must aligned to 16 bytes");
 
   // Alloc buffers
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
