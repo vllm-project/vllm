@@ -32,7 +32,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
-                                   ImageSize, MultiModalDataItems, VideoEmbeddingItems, VideoProcessorItems)
+                                   ImageSize, MultiModalDataItems,
+                                   VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
@@ -316,7 +317,7 @@ class BaseInternVLProcessor(ABC):
     @abstractmethod
     def image_token_id(self) -> int:
         raise NotImplementedError
-    
+
     @property
     def video_token_id(self) -> int:
         return NotImplementedError
@@ -433,19 +434,20 @@ class BaseInternVLProcessor(ABC):
         self,
         videos: list[npt.NDArray],
     ) -> list[torch.Tensor]:
-        videos_pil = [
-            [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), mode="RGB") for frame in frames.astype(np.uint8)]
-            for frames in videos
-        ]
+        videos_pil = [[
+            Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), mode="RGB")
+            for frame in frames.astype(np.uint8)
+        ] for frames in videos]
         return [
-            torch.cat([image_to_pixel_values_internvl(
-                frame,
-                input_size=self.image_size,
-                min_num=1,
-                max_num=1,
-                use_thumbnail=False,
-            ) for frame in frames])
-            for frames in videos_pil
+            torch.cat([
+                image_to_pixel_values_internvl(
+                    frame,
+                    input_size=self.image_size,
+                    min_num=1,
+                    max_num=1,
+                    use_thumbnail=False,
+                ) for frame in frames
+            ]) for frames in videos_pil
         ]
 
     def __call__(
@@ -492,7 +494,7 @@ class BaseInternVLProcessor(ABC):
                 image_repl = self.get_image_repl_full(feature_size,
                                                       num_patches)
                 text = [t.replace('<image>', image_repl, 1) for t in text]
-        
+
         if len(videos) == 0:
             video_inputs = {}
         else:
@@ -500,9 +502,7 @@ class BaseInternVLProcessor(ABC):
             #     Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), mode="RGB")
             #     for frames in videos for frame in frames.astype(np.float32)
             # ]
-            pixel_values_lst = self._videos_to_pixel_values_lst(
-                videos,
-            )
+            pixel_values_lst = self._videos_to_pixel_values_lst(videos, )
             video_inputs = {
                 "pixel_values_flat_video": torch.cat(pixel_values_lst),
                 "video_num_patches": list(map(len, pixel_values_lst)),
@@ -558,7 +558,9 @@ class InternVLProcessor(BaseInternVLProcessor):
         num_frames: int,
     ) -> str:
         feature_size_per_frame = feature_size // num_frames
-        return "\n".join(f"Frame-{i+1}: {self.get_image_repl_full(feature_size_per_frame)}" for i in range(num_frames))
+        return "\n".join(
+            f"Frame-{i+1}: {self.get_image_repl_full(feature_size_per_frame)}"
+            for i in range(num_frames))
 
 
 class BaseInternVLProcessingInfo(BaseProcessingInfo):
@@ -632,7 +634,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
             raise ValueError("Cannot have a largest feature size of 0!")
 
         return largest_feature_pinpoint
-    
+
     def get_num_frames_with_most_features(self, seq_len: int):
         raise NotImplementedError
 
@@ -673,7 +675,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": 1}
-    
+
     def get_mm_max_tokens_per_item(
         self,
         seq_len: int,
@@ -683,7 +685,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
             "image": self.get_max_image_tokens(),
             "video": self.get_max_video_tokens(seq_len),
         }
-    
+
     def get_num_video_tokens(
         self,
         *,
@@ -691,17 +693,18 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
     ) -> int:
         processor = self.get_hf_processor()
         image_size = processor.image_size
-        tokens_per_frame = self.get_num_image_tokens(image_width=image_size, image_height=image_size, processor=processor)
+        tokens_per_frame = self.get_num_image_tokens(image_width=image_size,
+                                                     image_height=image_size,
+                                                     processor=processor)
         return tokens_per_frame * num_frames
-    
+
     def _get_max_video_frames(self, max_tokens: int) -> int:
         num_frames = 0
 
         while True:
             next_num_frames = num_frames + 1
             next_max_tokens = self.get_num_video_tokens(
-                num_frames=next_num_frames,
-            )
+                num_frames=next_num_frames, )
 
             if next_max_tokens > max_tokens:
                 break
@@ -726,8 +729,8 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
     def get_max_video_tokens(self, seq_len: int) -> int:
         # FIXME(Isotr0py): Fix the hardcoded debug value
         return self.get_num_video_tokens(
-            num_frames=self.get_num_frames_with_most_features(seq_len),
-        ) + 160 - 1
+            num_frames=self.get_num_frames_with_most_features(
+                seq_len), ) + 160 - 1
 
 
 class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
@@ -740,7 +743,8 @@ class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         image_size = self.info.get_hf_processor().image_size
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
-        target_num_frames = self.info.get_num_frames_with_most_features(seq_len)
+        target_num_frames = self.info.get_num_frames_with_most_features(
+            seq_len)
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
@@ -749,7 +753,8 @@ class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images),
-            "video": self._get_dummy_videos(
+            "video":
+            self._get_dummy_videos(
                 width=image_size,
                 height=image_size,
                 num_frames=target_num_frames,
@@ -853,20 +858,20 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 features=hf_processor.get_image_repl_features(
                     feature_size, num_patches),
             )
-        
+
         def get_video_replacement_internvl(item_idx: int):
-            videos = mm_items.get_items(
-                "video", VideoProcessorItems)
+            videos = mm_items.get_items("video", VideoProcessorItems)
 
             num_frames = videos.get_num_frames(item_idx)
             feature_size = self.info.get_num_video_tokens(
-                num_frames=num_frames,
-            )
+                num_frames=num_frames, )
             feature_size_per_frame = feature_size // num_frames
             feature_per_frame = hf_processor.get_image_repl_full(
-                    feature_size_per_frame, num_patches=1)
+                feature_size_per_frame, num_patches=1)
 
-            return '\n'.join([f'Frame-{i+1}: {feature_per_frame}' for i in range(num_frames)])
+            return '\n'.join([
+                f'Frame-{i+1}: {feature_per_frame}' for i in range(num_frames)
+            ])
 
         return [
             PromptReplacement(
@@ -1165,7 +1170,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                 input_ids == self.img_context_token_id).reshape(-1, 1)
         else:
             self.visual_token_mask = None
-    
+
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         modalities = {}
 
@@ -1176,7 +1181,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                              "image_embeds") and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(
                     **kwargs)
-            if input_key in ("pixel_values_flat_video",) and "videos" not in modalities:
+            if input_key in ("pixel_values_flat_video",
+                             ) and "videos" not in modalities:
                 modalities["videos"] = self._parse_and_validate_video_input(
                     **kwargs)
 
@@ -1207,7 +1213,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            assert (self.img_context_token_id is not None or self.video_context_token_id)
+            assert (self.img_context_token_id is not None
+                    or self.video_context_token_id)
             context_token_id = self.img_context_token_id or self.video_context_token_id
             self._set_visual_token_mask(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
@@ -1269,5 +1276,12 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(self)
+        # unused modules appear in OpenGVLab/InternVideo2_5_Chat_8B
+        skip_prefixes = [
+            "action_embed", "temporal_embed", "track_embed",
+            "track_embed_decoder", "box_token", "cg_criterion", "cg_model",
+            "loc_encoder", "loc_decoder", "sam", "temporal_token",
+            "track_token"
+        ]
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)
