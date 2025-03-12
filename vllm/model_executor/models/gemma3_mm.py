@@ -1,6 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import math
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import (Any, Iterable, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
@@ -33,6 +31,7 @@ from .utils import (AutoWeightsLoader, init_vllm_registered_model,
 
 logger = init_logger(__name__)
 
+# TODO(woosuk): Get these values from the model config.
 NUM_TOKENS_PER_IMAGE = 256
 BOI_TOKEN = "<start_of_image>"
 
@@ -104,7 +103,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # FIXME(woosuk): Currently, PaS is not supported.
+        # TODO(woosuk): Support pan-and-scan.
         img_kwargs = mm_kwargs.get("images_kwargs", {})
         if img_kwargs:
             img_kwargs["do_pan_and_scan"] = False
@@ -252,7 +251,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             self, **kwargs: object) -> Optional[Gemma3ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
-        assert image_embeds is None
+        assert image_embeds is None, "Gemma3 does not support image_embeds."
         if pixel_values is None:
             return None
 
@@ -302,12 +301,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         if multimodal_embeddings is None:
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         else:
-            # NOTE(woosuk): Gemma3 uses vocab_size as the image token index.
-            # To avoid out-of-range error in the embedding layer, we replace the
-            # image token index with 0.
-            safe_input_ids = torch.where(
-                input_ids == self.config.image_token_index, 0, input_ids)
-            inputs_embeds = self.language_model.get_input_embeddings(safe_input_ids)
+            inputs_embeds = self.language_model.get_input_embeddings(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.config.image_token_index)
