@@ -160,13 +160,15 @@ torch::Tensor ggml_moe_a8(torch::Tensor X, torch::Tensor W,
 int64_t ggml_moe_get_block_size(int64_t type);
 
 #ifndef USE_ROCM
+
+bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability);
+bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
+bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
+
 void cutlass_scaled_fp4_mm(torch::Tensor& D, torch::Tensor const& A,
                            torch::Tensor const& B, torch::Tensor const& A_sf,
                            torch::Tensor const& B_sf,
                            torch::Tensor const& alpha);
-
-bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
-bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 
 void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,

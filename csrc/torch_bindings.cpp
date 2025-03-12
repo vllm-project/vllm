@@ -434,6 +434,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                 Tensor! output_scale, Tensor input_scale) -> ()");
   ops.impl("scaled_fp4_quant", torch::kCUDA, &scaled_fp4_quant);
 
+  // Check if cutlass_scaled_mm_fp4 is supported for CUDA devices
+  // of the given capability
+  ops.def("cutlass_scaled_mm_supports_fp4(int cuda_device_capability) -> bool");
+  ops.impl("cutlass_scaled_mm_supports_fp4", &cutlass_scaled_mm_supports_fp4);
 #endif
 
   // Quantized GEMM for GPTQ.
