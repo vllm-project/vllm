@@ -1,15 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Type
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionType,
+from vllm._ipex_ops import ipex_ops
+from vllm.attention.backends.abstract import (AttentionMetadataBuilder,
+                                              AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.backends.mla.common import (MLACommonBackend,
                                                 MLACommonImpl,
                                                 MLACommonMetadata)
+from vllm.attention.backends.torch_sdpa import TorchSDPAMetadata
 from vllm.attention.ops.cpu_mla_decode import mla_decode_kvcache_cpu
+from vllm.utils import make_tensor_with_pad
+from vllm.worker.cpu_model_runner import ModelInputForCPUBuilder
 
 
 class CPUMLABackend(MLACommonBackend):
@@ -21,6 +27,124 @@ class CPUMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> Type["CPUMLAImpl"]:
         return CPUMLAImpl
+
+    @staticmethod
+    def get_metadata_cls() -> Type["CPUMLAMetadata"]:
+        return CPUMLAMetadata
+
+    @staticmethod
+    def get_builder_cls() -> Type["CPUMLAMetadataBuilder"]:
+        return CPUMLAMetadataBuilder
+
+
+@dataclass
+class CPUMLAMetadata(TorchSDPAMetadata):
+    # New for MLA
+    # Input positions for rotrary embeddings since for MLA the rotary
+    # position embeddings are applied inside the attention backend
+    input_positions: torch.Tensor = None
+
+
+class CPUMLAMetadataBuilder(AttentionMetadataBuilder[CPUMLAMetadata]):
+
+    def __init__(self, input_builder: ModelInputForCPUBuilder) -> None:
+        self.chunked_prefill = input_builder.chunked_prefill
+        self.input_builder = input_builder
+        assert not self.chunked_prefill
+
+    def prepare(self):
+        self.input_data = self.input_builder.input_data
+
+    def build(self, seq_lens, query_lens, cuda_graph_pad_size, batch_size):
+        input_data = self.input_data
+        prefill_seq_lens = seq_lens[0:input_data.num_prefills]
+        prefill_query_lens = query_lens[0:input_data.num_prefills]
+        slot_mapping = torch.tensor(input_data.slot_mapping,
+                                    dtype=torch.long,
+                                    device="cpu")
+
+        query_lens_tensor = torch.tensor(prefill_query_lens,
+                                         dtype=torch.int32,
+                                         device="cpu")
+        kv_lens_tensor = torch.tensor(prefill_seq_lens,
+                                      dtype=torch.int32,
+                                      device="cpu")
+        query_start_loc = torch.zeros(input_data.num_prefills + 1,
+                                      dtype=torch.int32,
+                                      device="cpu")
+        kv_start_loc = torch.zeros(input_data.num_prefills + 1,
+                                   dtype=torch.int32,
+                                   device="cpu")
+        torch.cumsum(query_lens_tensor,
+                     dim=0,
+                     dtype=torch.int32,
+                     out=query_start_loc[1:])
+        torch.cumsum(kv_lens_tensor,
+                     dim=0,
+                     dtype=torch.int32,
+                     out=kv_start_loc[1:])
+        max_query_len = max(prefill_query_lens)
+        max_kv_len = max(prefill_seq_lens)
+
+        # For chunked-prefill
+        if self.chunked_prefill and input_data.num_prefill_tokens != 0:
+            prefill_block_tables = make_tensor_with_pad(
+                self.input_data.prefill_block_tables,
+                pad=0,
+                dtype=torch.int32,
+                device="cpu",
+            )
+        else:
+            prefill_block_tables = None
+
+        # For paged attention
+        if input_data.num_decode_tokens != 0:
+            seq_lens_tensor = torch.tensor(
+                input_data.seq_lens[input_data.num_prefills:],
+                dtype=torch.int32,
+                device="cpu",
+            )
+            block_tables = make_tensor_with_pad(
+                self.input_data.decode_block_tables,
+                pad=0,
+                dtype=torch.int32,
+                device="cpu",
+            )
+        else:
+            block_tables = torch.tensor([])
+            seq_lens_tensor = torch.tensor(
+                input_data.seq_lens[:input_data.num_prefills],
+                dtype=torch.int32,
+                device="cpu",
+            )
+
+        # For multi-modal models
+        placeholder_index_maps = None
+        if len(input_data.multi_modal_inputs_list) != 0:
+            placeholder_index_maps = {
+                modality: placeholder_map.index_map()
+                for modality, placeholder_map in
+                input_data.multi_modal_placeholder_maps.items()
+            }
+
+        return CPUMLAMetadata(
+            chunked_prefill=self.chunked_prefill,
+            seq_lens=prefill_seq_lens,
+            seq_lens_tensor=seq_lens_tensor,
+            max_query_len=max_query_len,
+            max_kv_len=max_kv_len,
+            query_start_loc=query_start_loc,
+            kv_start_loc=kv_start_loc,
+            max_decode_seq_len=input_data.max_decode_seq_len,
+            num_prefills=input_data.num_prefills,
+            num_prefill_tokens=input_data.num_prefill_tokens,
+            num_decode_tokens=input_data.num_decode_tokens,
+            block_tables=block_tables,
+            prefill_block_tables=prefill_block_tables,
+            slot_mapping=slot_mapping,
+            multi_modal_placeholder_index_maps=placeholder_index_maps,
+            enable_kv_scales_calculation=False,
+            input_positions=torch.tensor([self.input_data.input_positions]))
 
 
 class CPUMLAImpl(MLACommonImpl[MLACommonMetadata]):
@@ -59,16 +183,66 @@ class CPUMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                       "are not implemented for "
                                       f"{__class__.__name__}")
 
+        # states is implemented.
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 f"{__class__.__name__} with FP8 KV cache not yet supported")
+
+    def _forward_prefill(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: CPUMLAMetadata,
+    ) -> torch.Tensor:
+
+        prefill_metadata = attn_metadata.prefill_metadata
+        assert prefill_metadata is not None
+
+        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        k_nope, v = kv_nope\
+            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+
+        # For MLA the v head dim is smaller than qk head dim so we pad out
+        # v with 0s to match the qk head dim
+        v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
+                                           value=0)
+
+        output = torch.empty_like(q)
+        ipex_ops.varlen_attention(
+            query=q,
+            key=k,
+            value=v_padded,
+            out=output,
+            seqlen_q=prefill_metadata.query_start_loc,
+            seqlen_k=prefill_metadata.query_start_loc,
+            max_seqlen_q=prefill_metadata.max_query_len,
+            max_seqlen_k=prefill_metadata.max_query_len,
+            pdropout=0.0,
+            softmax_scale=self.scale,
+            zero_tensors=False,
+            is_causal=True,
+            return_softmax=False,
+            gen_=None,
+            logits_soft_cap=0.0,
+        )
+
+        # remove padding
+        output = output.view(-1, self.num_heads,
+                             q.shape[-1])[..., :v.shape[-1]]
+        output = output.reshape(-1, self.num_heads * v.shape[-1])
+        return self.o_proj(output)[0]
 
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        attn_metadata: CPUMLAMetadata,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
 

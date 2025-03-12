@@ -194,8 +194,7 @@ class ipex_ops:
                                              max_seqlen_q, max_seqlen_k,
                                              pdropout, softmax_scale,
                                              zero_tensors, is_causal,
-                                             return_softmax, gen_,
-                                             logits_soft_cap)
+                                             return_softmax, gen_)
 
     @staticmethod
     def reshape_and_cache(
