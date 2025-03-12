@@ -284,6 +284,7 @@ def initialize_ray_cluster(
     """
     assert_ray_available()
     from vllm.platforms import current_platform
+    device_resource_request = envs.VLLM_RAY_PER_WORKER_GPUS
 
     # Connect to a ray cluster.
     if current_platform.is_rocm() or current_platform.is_xpu():
@@ -343,7 +344,7 @@ def initialize_ray_cluster(
                 device_str)
         # Create a new placement group
         placement_group_specs: List[Dict[str, float]] = ([{
-            device_str: envs.VLLM_RAY_PER_WORKER_GPUS if device_str == "GPU" else 1.0
+            device_str: device_resource_request
         } for _ in range(parallel_config.world_size)])
 
         # vLLM engine is also a worker to execute model with an accelerator,
@@ -352,12 +353,11 @@ def initialize_ray_cluster(
         current_ip = get_ip()
         current_node_id = ray.get_runtime_context().get_node_id()
         current_node_resource = available_resources_per_node()[current_node_id]
-        device_resource_threshold = envs.VLLM_RAY_PER_WORKER_GPUS if device_str == "GPU" else 1.0
-        if current_node_resource.get(device_str, 0) <= device_resource_threshold:
+        if current_node_resource.get(device_str, 0) < device_resource_request:
             raise ValueError(
                 f"Current node has no {device_str} available. "
                 f"{current_node_resource=}. vLLM engine cannot start without "
-                f"{device_str}. Make sure you have at least {device_resource_threshold} {device_str} "
+                f"{device_str}. Make sure you have at least {device_resource_request} {device_str} "
                 f"available in a node {current_node_id=} {current_ip=}.")
         # This way, at least bundle is required to be created in a current
         # node.
@@ -365,7 +365,8 @@ def initialize_ray_cluster(
 
         # By default, Ray packs resources as much as possible.
         current_placement_group = ray.util.placement_group(
-            placement_group_specs, strategy="PACK")
+            placement_group_specs,
+            strategy="PACK" if device_resource_request >= 0.5 else "STRICT_SPREAD")
         _wait_until_pg_ready(current_placement_group)
 
     assert current_placement_group is not None
