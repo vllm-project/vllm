@@ -1323,24 +1323,23 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2, config,
+    use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2,
                                                  use_fp8_w8a8)
 
     block_m = config['BLOCK_SIZE_M']
     assert not use_dg or block_m == 128
 
     if use_dg:
-        # TODO: how to test chunks?
-        if True:
-            num_chunks = 1
-            CHUNK_SIZE = num_tokens
-        else:
-            num_chunks = (num_tokens // CHUNK_SIZE) + 1
+        if M % 128 != 0:
+            CHUNK_SIZE = (M // 128) * 128
+        num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
         assert w1_scale is not None
         assert w2_scale is not None
 
-        # TODO: do this offline
+        # We attempt to do this offline in Fp8MoEMethod, in which case these
+        # calls will be nops.  Otherwise, they'll be performed every time the
+        # layer is executed.
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 
