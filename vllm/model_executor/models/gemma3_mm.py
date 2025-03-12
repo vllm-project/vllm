@@ -7,9 +7,7 @@ from typing import (Any, Iterable, Literal, Mapping, Optional, Set, Tuple,
 
 import torch
 from torch import nn
-# FIXME
-# from transformers import Gemma3Config
-from transformers.models.gemma3.configuration_gemma3 import Gemma3Config
+from transformers import Gemma3Config
 from transformers import BatchFeature, ProcessorMixin
 
 from vllm.config import VllmConfig
