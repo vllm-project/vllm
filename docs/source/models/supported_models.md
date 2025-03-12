@@ -267,6 +267,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `google/gemma-2-9b`, `google/gemma-2-27b`, etc.
   * ✅︎
   * ✅︎
+- * `Gemma3ForCausalLM`
+  * Gemma3
+  * `google/gemma-3-1b-it`, etc.
+  * ✅︎
+  * ✅︎
 - * `GlmForCausalLM`
   * GLM-4
   * `THUDM/glm-4-9b-chat-hf`, etc.
@@ -750,6 +755,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * T + I
   * `adept/fuyu-8b` etc.
   *
+  * ✅︎
+  * ✅︎
+- * `Gemma3ForConditionalGeneration`
+  * Gemma3
+  * T + I
+  * `google/gemma-3-4b-it`, `google/gemma-3-27b-it`, etc.
+  * ✅︎
   * ✅︎
   * ✅︎
 - * `GLM4VForCausalLM`<sup>^</sup>
