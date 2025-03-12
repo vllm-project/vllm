@@ -32,6 +32,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self._sampler_indices_padded = self._sampler_indices_padded.to(
             dtype=torch.int32)
         torch._dynamo.mark_dynamic(self._embeddings_indices, 1)
+        torch._dynamo.mark_dynamic(self._sampler_indices_padded, 0)
 
     @property
     def embeddings_indices(self) -> torch.Tensor:
@@ -40,6 +41,13 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         specifically for VocabParallelEmbeddingWithLoRA.
         """
         return self._embeddings_indices[:]
+
+    @property
+    def sampler_indices_padded(self) -> torch.Tensor:
+        """
+        This property provides access to padded sampler indices.
+        """
+        return self._sampler_indices_padded[:]
 
     def shrink(
         self,

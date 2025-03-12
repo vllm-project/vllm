@@ -1144,6 +1144,9 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         lora_logits = lora_logits.mT
         indices_padded = self.punica_wrapper.sampler_indices_padded
 
+        if current_platform.is_tpu():
+            indices_padded = indices_padded[:logits.size(0)]
+
         lora_logits = (lora_logits.reshape(
             lora_logits.shape[0] * lora_logits.shape[1],
             lora_logits.shape[2],
@@ -1151,8 +1154,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                                                       posinf=pos_inf,
                                                       neginf=neg_inf))
 
-        # TPU/HPU needs special handling to prune out dummy samples.
-        if current_platform.is_hpu() or current_platform.is_tpu():
+        # HPU needs special handling to prune out dummy samples.
+        if current_platform.is_hpu():
             lora_logits = lora_logits[:logits.shape[0], :]
 
         logits[:,
