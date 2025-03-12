@@ -193,10 +193,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
         activation: str = "silu",
         **kwargs,
     ):
-        assert custom_routing_function is None
         assert activation == "silu", f"{activation} is not supported."
         return layer.ipex_fusion(
             x,
@@ -206,6 +207,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             renormalize,
             topk_group,
             num_expert_group,
+            custom_routing_function,
+            scoring_func,
+            e_score_correction_bias,
         )
 
     def forward_tpu(
