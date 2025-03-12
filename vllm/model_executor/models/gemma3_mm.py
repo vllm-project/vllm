@@ -367,8 +367,11 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         global_attn_masks = []
         local_attn_masks = []
+        start_idx = 0
         for seq_len in seq_lens:
+            end_idx = start_idx + seq_len
             input_token_ids = input_ids[start_idx:end_idx]
+            start_idx = end_idx
             # Create a global causal mask.
             global_attn_mask = torch.empty(
                 1,
