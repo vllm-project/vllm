@@ -12,6 +12,9 @@ from functools import cached_property
 from typing import (List, Literal, Optional, Set, Tuple, TypedDict, TypeVar,
                     Union)
 
+import cv2
+import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
@@ -29,7 +32,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
-                                   ImageSize, MultiModalDataItems)
+                                   ImageSize, MultiModalDataItems, VideoEmbeddingItems, VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
@@ -47,6 +50,8 @@ IMG_CONTEXT = '<IMG_CONTEXT>'
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+
+MAX_FRAMES_PER_VIDEO = 32
 
 
 class InternVLImagePixelInputs(TypedDict):
@@ -390,6 +395,7 @@ class BaseInternVLProcessor(ABC):
         self,
         text: Optional[Union[str, list[str]]] = None,
         images: Optional[Union[Image.Image, list[Image.Image]]] = None,
+        videos: Optional[Union[npt.NDArray, list[npt.NDArray]]] = None,
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
@@ -403,6 +409,16 @@ class BaseInternVLProcessor(ABC):
             images = []
         if not isinstance(images, list):
             images = [images]
+        if videos is None:
+            videos = []
+        elif not isinstance(videos, list):
+            videos = [videos]
+        if videos:
+            pil_frames_flat = [
+                Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                for frames in videos for frame in frames
+            ]
+            images.extend(pil_frames_flat)
 
         if len(images) == 0:
             image_inputs = {}
@@ -530,9 +546,100 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
             raise ValueError("Cannot have a largest feature size of 0!")
 
         return largest_feature_pinpoint
+    
+    def get_num_frames_with_most_features(self, seq_len: int):
+        raise NotImplementedError
+
+    def get_num_video_tokens(
+        self,
+        *,
+        num_frames: int,
+    ) -> int:
+        raise NotImplementedError
 
 
 _I = TypeVar("_I", bound=BaseInternVLProcessingInfo)
+
+
+class InternVLProcessingInfo(BaseInternVLProcessingInfo):
+
+    def get_hf_processor(
+        self,
+        *,
+        min_dynamic_patch: Optional[int] = None,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+        **kwargs: object,
+    ) -> InternVLProcessor:
+        if min_dynamic_patch is not None:
+            kwargs["min_dynamic_patch"] = min_dynamic_patch
+        if max_dynamic_patch is not None:
+            kwargs["max_dynamic_patch"] = max_dynamic_patch
+        if dynamic_image_size is not None:
+            kwargs["dynamic_image_size"] = dynamic_image_size
+
+        return self.ctx.init_processor(
+            InternVLProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
+        )
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None, "video": 1}
+    
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {
+            "image": self.get_max_image_tokens(),
+            "video": self.get_max_video_tokens(seq_len),
+        }
+    
+    def get_num_video_tokens(
+        self,
+        *,
+        num_frames: int,
+    ) -> int:
+        image_size = self.get_hf_processor().image_size
+        tokens_per_frame = self.get_num_image_tokens(image_width=image_size, image_height=image_size)
+        return tokens_per_frame * num_frames
+    
+    def _get_max_video_frames(self, max_tokens: int) -> int:
+        num_frames = 0
+
+        while True:
+            next_num_frames = num_frames + 1
+            next_max_tokens = self.get_num_video_tokens(
+                num_frames=next_num_frames,
+            )
+
+            if next_max_tokens > max_tokens:
+                break
+
+            num_frames = next_num_frames
+
+        return num_frames
+
+    def get_num_frames_with_most_features(self, seq_len: int) -> int:
+        mm_config = self.ctx.get_mm_config()
+        max_images = mm_config.get_limit_per_prompt("image")
+        max_videos = mm_config.get_limit_per_prompt("video")
+
+        max_image_tokens = self.get_max_image_tokens() * max_images
+        max_total_frames = self._get_max_video_frames(seq_len -
+                                                      max_image_tokens)
+        max_frames_per_video = min(max_total_frames // max(max_videos, 1),
+                                   MAX_FRAMES_PER_VIDEO)
+
+        return max(max_frames_per_video, 1)
+
+    def get_max_video_tokens(self, seq_len: int) -> int:
+        return self.get_num_video_tokens(
+            num_frames=self.get_num_frames_with_most_features(seq_len),
+        )
 
 
 class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
@@ -542,19 +649,28 @@ class InternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
+        image_size = self.info.get_hf_processor().image_size
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
+        target_num_frames = self.info.get_num_frames_with_most_features(seq_len)
         num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
 
         mm_data = {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images)
+                                   num_images=num_images),
+            "video": self._get_dummy_videos(
+                width=image_size,
+                height=image_size,
+                num_frames=target_num_frames,
+                num_videos=num_videos,
+            )
         }
 
         return ProcessorInputs(
-            prompt_text="<image>" * num_images,
+            prompt_text="<image>" * num_images + "<video>" * num_videos,
             mm_data=mm_data,
         )
 
@@ -619,7 +735,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         else:
             image_num_patches = []
 
-        def get_replacement_internvl(item_idx: int):
+        def get_image_replacement_internvl(item_idx: int):
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems))
 
@@ -643,39 +759,33 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 features=hf_processor.get_image_repl_features(
                     feature_size, num_patches),
             )
+        
+        def get_video_replacement_internvl(item_idx: int):
+            videos = mm_items.get_items(
+                "video", VideoProcessorItems)
+
+            num_frames = videos.get_num_frames(item_idx)
+            feature_size = self.info.get_num_video_tokens(
+                num_frames=num_frames,
+            )
+            feature_size_per_frame = feature_size // num_frames
+            feature_per_frame = hf_processor.get_image_repl_features(
+                    feature_size_per_frame, num_patches=1)
+
+            return ''.join([f'Frame{i+1}: {feature_per_frame}\n' for i in range(num_frames)])
 
         return [
             PromptReplacement(
                 modality="image",
                 target="<image>",
-                replacement=get_replacement_internvl,
-            )
+                replacement=get_image_replacement_internvl,
+            ),
+            PromptReplacement(
+                modality="video",
+                target="<video>",
+                replacement=get_video_replacement_internvl,
+            ),
         ]
-
-
-class InternVLProcessingInfo(BaseInternVLProcessingInfo):
-
-    def get_hf_processor(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
-    ) -> InternVLProcessor:
-        if min_dynamic_patch is not None:
-            kwargs["min_dynamic_patch"] = min_dynamic_patch
-        if max_dynamic_patch is not None:
-            kwargs["max_dynamic_patch"] = max_dynamic_patch
-        if dynamic_image_size is not None:
-            kwargs["dynamic_image_size"] = dynamic_image_size
-
-        return self.ctx.init_processor(
-            InternVLProcessor,
-            config=self.get_hf_config(),
-            tokenizer=self.get_tokenizer(),
-            **kwargs,
-        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
