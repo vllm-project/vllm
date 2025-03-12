@@ -26,7 +26,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import bind_kv_cache
 from vllm.worker.cache_engine import CacheEngine
-from vllm.worker.hpu_model_runner import HPUModelRunner, HPUModelRunnerBase
+from vllm.worker.hpu_model_runner import HPUModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
@@ -74,13 +74,14 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                 not in ("medusa", "mlp_speculator", "eagle", "deepseek_mtp")) \
                     else {"return_hidden_states": True}
 
-        ModelRunnerClass: Type[HPUModelRunnerBase] = HPUModelRunner
+        ModelRunnerClass: Type[HPUModelRunner] = HPUModelRunner
         self.model_runner: HPUModelRunner = ModelRunnerClass(
             vllm_config=vllm_config,
             is_driver_worker=is_driver_worker,
             **speculative_args)
         if model_runner_cls is not None:
-            self.model_runner = model_runner_cls(self.model_runner)
+            self.model_runner = model_runner_cls(
+                self.model_runner)  # type: ignore
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[HPUCacheEngine]
