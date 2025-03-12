@@ -66,7 +66,7 @@ class AsyncLLM(EngineClient):
         self.stat_loggers: list[StatLoggerBase] = []
         if self.log_stats:
             if logger.isEnabledFor(logging.INFO):
-                self.stat_loggers.append(LoggingStatLogger())
+                self.stat_loggers.append(LoggingStatLogger(vllm_config))
             self.stat_loggers.append(PrometheusStatLogger(vllm_config))
 
         # Tokenizer (+ ensure liveness if running in another process).
