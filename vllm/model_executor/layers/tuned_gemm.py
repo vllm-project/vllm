@@ -72,6 +72,8 @@ class TunedGemm:
         self.solids = solds
 
     def query_sol(self, m, n, k, bias, dtype):
+        if envs.VLLM_USE_V1:
+            return 0, 0
         return self.solids.get((m, n, k, bias, str(dtype)), (0, 0))
 
     def apply_skinny(self, m, n, k, inp_view, weights):

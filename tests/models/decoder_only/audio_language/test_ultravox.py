@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional, Tuple, Type
+from typing import Optional
 
 import numpy as np
 import pytest
@@ -15,9 +15,9 @@ from ....conftest import HfRunner, VllmRunner
 from ....utils import RemoteOpenAIServer
 from ...utils import check_logprobs_close
 
-MODEL_NAME = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
+MODEL_NAME = "fixie-ai/ultravox-v0_4"
 
-AudioTuple = Tuple[np.ndarray, int]
+AudioTuple = tuple[np.ndarray, int]
 
 VLLM_PLACEHOLDER = "<|audio|>"
 HF_PLACEHOLDER = "<|audio|>"
@@ -78,7 +78,7 @@ def _get_prompt(audio_count, question, placeholder):
                                          add_generation_prompt=True)
 
 
-def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+def vllm_to_hf_output(vllm_output: tuple[list[int], str,
                                          Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
@@ -96,9 +96,9 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
 
 def run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
-    prompts_and_audios: List[Tuple[str, str, AudioTuple]],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    prompts_and_audios: list[tuple[str, str, AudioTuple]],
     model: str,
     *,
     dtype: str,
@@ -158,8 +158,8 @@ def run_test(
 
 
 def run_multi_audio_test(
-    vllm_runner: Type[VllmRunner],
-    prompts_and_audios: List[Tuple[str, List[AudioTuple]]],
+    vllm_runner: type[VllmRunner],
+    prompts_and_audios: list[tuple[str, list[AudioTuple]]],
     model: str,
     *,
     dtype: str,
@@ -187,7 +187,7 @@ def run_multi_audio_test(
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("vllm_kwargs", [

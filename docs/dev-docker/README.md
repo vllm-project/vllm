@@ -11,7 +11,8 @@ This documentation includes information for running the popular Llama 3.1 series
 The pre-built image includes:
 
 - ROCm™ 6.3.1
-- vLLM 0.6.6
+- HipblasLT 0.13
+- vLLM 0.7.3
 - PyTorch 2.7dev (nightly)
 
 ## Pull latest Docker Image
@@ -20,18 +21,11 @@ Pull the most recent validated docker image with `docker pull rocm/vllm-dev:main
 
 ## What is New
 
-20250207_aiter:
-- More performant AITER
-- Bug fixes
-20250205_aiter:
-- [AITER](https://github.com/ROCm/aiter) support
-- Performance improvement for custom paged attention
-- Reduced memory overhead bug fix
-20250124:
-- Fix accuracy issue with 405B FP8 Triton FA
-- Fixed accuracy issue with TP8
-20250117:
+- [Experimental AITER support](#aiter-use-cases)
 - [Experimental DeepSeek-V3 and DeepSeek-R1 support](#running-deepseek-v3-and-deepseek-r1)
+- Performance improvement for custom paged attention
+- Support for FP8 skinny GEMM
+- Bug fixes
 
 ## Performance Results
 
@@ -43,57 +37,59 @@ The table below shows performance data where a local inference client is fed req
 
 | Model | Precision | TP Size | Input | Output | Num Prompts | Max Num Seqs | Throughput (tokens/s) |
 |-------|-----------|---------|-------|--------|-------------|--------------|-----------------------|
-| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 3200 | 3200 | 15105 |
-|       |           |         | 128   | 4096   | 1500        | 1500         | 10505                 |
-|       |           |         | 500   | 2000   | 2000        | 2000         | 12664                 |
-|       |           |         | 2048  | 2048   | 1500        | 1500         | 8239                  |
-| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 1500 | 1500 | 4065 |
-|       |           |         | 128   | 4096   | 1500        | 1500         | 3171                  |
-|       |           |         | 500   | 2000   | 2000        | 2000         | 2985                  |
-|       |           |         | 2048  | 2048   | 500         | 500          | 1999                  |
+| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 3200 | 3200 | 15919.0  |
+|       |           |         | 128   | 4096   | 1500        | 1500         | 12053.3               |
+|       |           |         | 500   | 2000   | 2000        | 2000         | 13089.0               |
+|       |           |         | 2048  | 2048   | 1500        | 1500         | 8352.4                |
+| Llama 3.1 405B (amd/Llama-3.1-405B-Instruct-FP8-KV) | FP8 | 8 | 128 | 2048 | 1500 | 1500 | 4219.7 |
+|       |           |         | 128   | 4096   | 1500        | 1500         | 3328.7                |
+|       |           |         | 500   | 2000   | 2000        | 2000         | 3109.3                |
+|       |           |         | 2048  | 2048   | 500         | 500          | 2121.7                |
 
 *TP stands for Tensor Parallelism.*
 
-## Latency Measurements
+### Latency Measurements
 
 The table below shows latency measurement, which typically involves assessing the time from when the system receives an input to when the model produces a result.
 
-| Model | Precision | TP Size | Batch Size | Input | Output | MI300X Latency (ms) |
+| Model | Precision | TP Size | Batch Size | Input | Output | MI300X Latency (sec) |
 |-------|-----------|----------|------------|--------|---------|-------------------|
-| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 19088.59 |
-| | | | 2 | 128 | 2048 | 19610.46 |
-| | | | 4 | 128 | 2048 | 19911.30 |
-| | | | 8 | 128 | 2048 | 21858.80 |
-| | | | 16 | 128 | 2048 | 23537.59 |
-| | | | 32 | 128 | 2048 | 25342.94 |
-| | | | 64 | 128 | 2048 | 32548.19 |
-| | | | 128 | 128 | 2048 | 45216.37 |
-| | | | 1 | 2048 | 2048 | 19154.43 |
-| | | | 2 | 2048 | 2048 | 19670.60 |
-| | | | 4 | 2048 | 2048 | 19976.32 |
-| | | | 8 | 2048 | 2048 | 22485.63 |
-| | | | 16 | 2048 | 2048 | 25246.27 |
-| | | | 32 | 2048 | 2048 | 28967.08 |
-| | | | 64 | 2048 | 2048 | 39920.41 |
-| | | | 128 | 2048 | 2048 | 59514.25 |
-| Llama 3.1 405B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 51739.70 |
-| | | | 2 | 128 | 2048 | 52769.15 |
-| | | | 4 | 128 | 2048 | 54557.07 |
-| | | | 8 | 128 | 2048 | 56901.86 |
-| | | | 16 | 128 | 2048 | 60432.12 |
-| | | | 32 | 128 | 2048 | 67353.01 |
-| | | | 64 | 128 | 2048 | 81085.33 |
-| | | | 128 | 128 | 2048 | 116138.51 |
-| | | | 1 | 2048 | 2048 | 52217.76 |
-| | | | 2 | 2048 | 2048 | 53227.47 |
-| | | | 4 | 2048 | 2048 | 55512.44 |
-| | | | 8 | 2048 | 2048 | 59931.41 |
-| | | | 16 | 2048 | 2048 | 66890.14 |
-| | | | 32 | 2048 | 2048 | 80687.64 |
-| | | | 64 | 2048 | 2048 | 108503.12 |
-| | | | 128 | 2048 | 2048 | 168845.50 |
+| Llama 3.1 70B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 17.654 |
+| | | | 2 | 128 | 2048 | 18.269 |
+| | | | 4 | 128 | 2048 | 18.561 |
+| | | | 8 | 128 | 2048 | 20.180  |
+| | | | 16 | 128 | 2048 | 22.541 |
+| | | | 32 | 128 | 2048 | 25.454 |
+| | | | 64 | 128 | 2048 | 33.666 |
+| | | | 128 | 128 | 2048 | 48.466 |
+| | | | 1 | 2048 | 2048 | 17.771 |
+| | | | 2 | 2048 | 2048 | 18.304 |
+| | | | 4 | 2048 | 2048 | 19.173 |
+| | | | 8 | 2048 | 2048 | 21.326 |
+| | | | 16 | 2048 | 2048 | 24.375 |
+| | | | 32 | 2048 | 2048 | 29.284 |
+| | | | 64 | 2048 | 2048 | 40.200 |
+| | | | 128 | 2048 | 2048 | 62.420 |
+| Llama 3.1 405B (amd/Llama-3.1-70B-Instruct-FP8-KV) | FP8 | 8 | 1 | 128 | 2048 | 46.632 |
+| | | | 2 | 128 | 2048 | 47.370 |
+| | | | 4 | 128 | 2048 | 49.945 |
+| | | | 8 | 128 | 2048 | 53.010 |
+| | | | 16 | 128 | 2048 | 56.348 |
+| | | | 32 | 128 | 2048 | 65.222 |
+| | | | 64 | 128 | 2048 | 82.688 |
+| | | | 128 | 128 | 2048 | 115.980 |
+| | | | 1 | 2048 | 2048 | 46.918 |
+| | | | 2 | 2048 | 2048 | 48.132 |
+| | | | 4 | 2048 | 2048 | 52.281 |
+| | | | 8 | 2048 | 2048 | 55.874 |
+| | | | 16 | 2048 | 2048 | 61.822 |
+| | | | 32 | 2048 | 2048 | 76.925 |
+| | | | 64 | 2048 | 2048 | 105.400 |
+| | | | 128 | 2048 | 2048 | 162.503 |
 
 *TP stands for Tensor Parallelism.*
+
+Supermicro AS-8125GS-TNMR2 with 2x AMD EPYC 9554 Processors, 2.25 TiB RAM, 8x AMD Instinct MI300X (192GiB, 750W) GPUs, Ubuntu 22.04, and amdgpu driver 6.8.5
 
 ## Reproducing Benchmarked Results
 
@@ -357,7 +353,7 @@ docker run -it --rm --ipc=host --network=host --group-add render \
     --cap-add=CAP_SYS_ADMIN --cap-add=SYS_PTRACE \
     --device=/dev/kfd --device=/dev/dri --device=/dev/mem \
     -e VLLM_USE_TRITON_FLASH_ATTN=0 \
-    -e VLLM_FP8_PADDING=0 \
+    -e  VLLM_MLA_DISABLE=1 \
     rocm/vllm-dev:main
 # Online serving
 vllm serve deepseek-ai/DeepSeek-V3 \
@@ -441,13 +437,18 @@ python /app/vllm/benchmarks/benchmark_latency.py --model amd/Llama-3.1-405B-Inst
 
 You should see some performance improvement about the e2e latency.
 
-### AITER
+### AITER use cases
 
-To get [AITER](https://github.com/ROCm/aiter) kernels support, follow the [Docker build steps](#Docker-manifest) using the [aiter_intergration_final](https://github.com/ROCm/vllm/tree/aiter_intergration_final) branch  
-There is a published release candidate image at `rocm/vllm-dev:nightly_aiter_intergration_final_20250130`
+`rocm/vllm-dev:main` image has experimental [AITER](https://github.com/ROCm/aiter) support, and can yield siginficant performance increase for some model/input/output/batch size configurations. To enable the feature make sure the following environment is set: `VLLM_USE_AITER=1`, the default value is `0`. When building your own image follow the [Docker build steps](#Docker-manifest) using the [aiter_integration_final](https://github.com/ROCm/vllm/tree/aiter_integration_final) branch.
 
-To enable the feature make sure the following environment is set: `VLLM_USE_AITER=1`.  
-The default value is `0` in vLLM, but is set to `1` in the aiter docker.
+Some use cases include:
+- amd/Mixtral-8x7B-Instruct-v0.1-FP8-KV
+- amd/Mixtral-8x22B-Instruct-v0.1-FP8-KV
+
+```bash
+export VLLM_USE_AITER=1
+python3 /app/vllm/benchmarks/benchmark_latency.py --model amd/Mixtral-8x22B-Instruct-v0.1-FP8-KV -tp 8 --batch-size 256 --input-len 128 --output-len 2048
+```
 
 ## MMLU_PRO_Biology Accuracy Evaluation
 
@@ -482,17 +483,39 @@ To reproduce the release docker:
 ```bash
     git clone https://github.com/ROCm/vllm.git
     cd vllm
-    git checkout c24ea633f928d77582bc85aff922d07f3bca9d78
-    docker build -f Dockerfile.rocm -t <your_tag> --build-arg BUILD_HIPBLASLT=1 --build-arg USE_CYTHON=1 .
+    git checkout c0dd5adf68dd997d7d2c3f04da785d7ef9415e36
+    docker build -f Dockerfile.rocm -t <your_tag> --build-arg USE_CYTHON=1 .
 ```
 
-### AITER
+### Building AITER Image
 
-Use Aiter release candidate branch instead:
+Use AITER release candidate branch instead:
 
 ```bash
     git clone https://github.com/ROCm/vllm.git
     cd vllm
-    git checkout aiter_intergration_final
-    docker build -f Dockerfile.rocm -t <your_tag> --build-arg BUILD_HIPBLASLT=1 --build-arg USE_CYTHON=1 .
+    git checkout aiter_integration_final
+    docker build -f Dockerfile.rocm -t <your_tag> --build-arg USE_CYTHON=1 .
 ```
+
+## Changelog
+
+20250305_aiter:
+- AITER improvements
+- Support for FP8 skinny GEMM
+
+20250207_aiter:
+- More performant AITER
+- Bug fixes
+
+20250205_aiter:
+- [AITER](https://github.com/ROCm/aiter) support
+- Performance improvement for custom paged attention
+- Reduced memory overhead bug fix
+
+20250124:
+- Fix accuracy issue with 405B FP8 Triton FA
+- Fixed accuracy issue with TP8
+
+20250117:
+- [Experimental DeepSeek-V3 and DeepSeek-R1 support](#running-deepseek-v3-and-deepseek-r1)

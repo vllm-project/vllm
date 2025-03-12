@@ -38,14 +38,14 @@ FROM fetch_vllm AS build_vllm
 ARG USE_CYTHON
 # Build vLLM
 RUN cd vllm \
-    && python3 -m pip install -r requirements-rocm.txt \
+    && python3 -m pip install -r requirements/rocm.txt \
     && python3 setup.py clean --all  \
     && if [ ${USE_CYTHON} -eq "1" ]; then python3 setup_cython.py build_ext --inplace; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/dist/*.whl /
-COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements*.txt /
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements /requirements
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
@@ -60,7 +60,7 @@ RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 # Install vLLM
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
-    && pip install -U -r requirements-rocm.txt \
+    && pip install -U -r requirements/rocm.txt \
     && pip uninstall -y vllm \
     && pip install *.whl
 
@@ -99,7 +99,7 @@ RUN if [ ${BUILD_RPD} -eq "1" ]; then \
 # Install vLLM
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
-    && pip install -U -r requirements-rocm.txt \
+    && pip install -U -r requirements/rocm.txt \
     && pip uninstall -y vllm \
     && pip install *.whl
 

@@ -17,8 +17,8 @@
 # limitations under the License.
 """ PyTorch Fuyu model."""
 import math
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict)
+from collections.abc import Iterable, Mapping, Sequence
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -37,7 +37,7 @@ from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptReplacementDetails)
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -203,12 +203,12 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(image_patches=MultiModalFieldConfig.batched("image"))
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         bos_token_id = hf_config.bos_token_id
         assert isinstance(bos_token_id, int)
@@ -228,7 +228,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
             image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
                             [_NEWLINE_TOKEN_ID]) * nrows
 
-            return PromptReplacementDetails(
+            return PromptUpdateDetails(
                 full=image_tokens + [bos_token_id],
                 features=image_tokens,
             )
@@ -255,7 +255,6 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.text_config.vocab_size
         self.image_token_id = _IMAGE_TOKEN_ID
         self.image_feature_size = config.patch_size**2 * config.num_channels
@@ -327,7 +326,9 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             image_patches_flat)
         return vision_embeddings_flat.split(patches_per_image, dim=0)
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

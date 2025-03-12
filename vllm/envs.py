@@ -2,7 +2,7 @@
 
 import os
 import tempfile
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     VLLM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_USE_AITER_LINEAR: bool = True
     VLLM_USE_AITER_NORM: bool = True
-    RANK: int = 0
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -74,20 +73,20 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
-    VLLM_TEST_FORCE_FP8_MARLIN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
-    VLLM_PLUGINS: Optional[List[str]] = None
+    VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_RPD_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
-    VLLM_DISABLED_KERNELS: List[str] = []
+    VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = False
     VLLM_MOE_PADDING: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -103,7 +102,6 @@ if TYPE_CHECKING:
     VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
     VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
     VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
-    VLLM_TEST_ENABLE_EP: bool = False
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -113,6 +111,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
+    VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
 
 
 def get_default_cache_root():
@@ -140,7 +139,7 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
 
 # begin-env-vars-definition
 
-environment_variables: Dict[str, Callable[[], Any]] = {
+environment_variables: dict[str, Callable[[], Any]] = {
 
     # ================== Installation Time Env Vars ==================
 
@@ -164,6 +163,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_PRECOMPILED":
     lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
         os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+
+    # Whether to force using nightly wheel in python build.
+    # This is used for testing the nightly wheel in python build.
+    "VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL":
+    lambda: bool(int(os.getenv("VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL", "0"))
+                 ),
 
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
@@ -322,11 +327,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_USE_AITER_NORM", "True").lower() in
              ("true", "1")),
 
-    # rank of the process in the distributed setting, used to determine
-    # the driver worker
-    "RANK":
-    lambda: int(os.environ.get("RANK", "0")),
-
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":
@@ -401,6 +401,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # - "XFORMERS": use XFormers
     # - "ROCM_FLASH": use ROCmFlashAttention
     # - "FLASHINFER": use flashinfer
+    # - "FLASHMLA": use FlashMLA
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
@@ -457,21 +458,22 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_SPMD_WORKER":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", "0"))),
 
-    # If the env var is set, it uses the Ray's compiled DAG API
-    # which optimizes the control plane overhead.
+    # If the env var is set, it uses the Ray's Compiled Graph
+    # (previously known as ADAG) API which optimizes the
+    # control plane overhead.
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
     "VLLM_USE_RAY_COMPILED_DAG":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))),
 
     # If the env var is set, it uses NCCL for communication in
-    # Ray's compiled DAG. This flag is ignored if
+    # Ray's Compiled Graph. This flag is ignored if
     # VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL", "1"))
                  ),
 
     # If the env var is set, it enables GPU communication overlap
-    # (experimental feature) in Ray's compiled DAG. This flag is ignored if
+    # (experimental feature) in Ray's Compiled Graph. This flag is ignored if
     # VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
@@ -674,12 +676,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
                  ),
 
-    # If set, vLLM will use the experimental expert parallel implementation on
-    # the FusedMoE layer, using tensor parallelism size as expert parallelism
-    # size.
-    "VLLM_TEST_ENABLE_EP":
-    lambda: bool(int(os.getenv("VLLM_TEST_ENABLE_EP", "0"))),
-
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
     # so that users can colocate other actors on the same GPUs as vLLM.
@@ -732,6 +728,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
+
+    # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
+    "VLLM_MARLIN_USE_ATOMIC_ADD":
+    lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
 }
 
 # end-env-vars-definition

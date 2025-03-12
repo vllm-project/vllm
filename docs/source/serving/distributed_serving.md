@@ -81,7 +81,7 @@ Then you get a ray cluster of **containers**. Note that you need to keep the she
 Since this is a ray cluster of **containers**, all the following commands should be executed in the **containers**, otherwise you are executing the commands on the host machine, which is not connected to the ray cluster. To enter the container, you can use `docker exec -it node /bin/bash`.
 :::
 
-Then, on any node, use `docker exec -it node /bin/bash` to enter the container, execute `ray status` to check the status of the Ray cluster. You should see the right number of nodes and GPUs.
+Then, on any node, use `docker exec -it node /bin/bash` to enter the container, execute `ray status` and `ray list nodes` to check the status of the Ray cluster. You should see the right number of nodes and GPUs.
 
 After that, on any node, use `docker exec -it node /bin/bash` to enter the container again. **In the container**, you can use vLLM as usual, just as you have all the GPUs on one node. The common practice is to set the tensor parallel size to the number of GPUs in each node, and the pipeline parallel size to the number of nodes. For example, if you have 16 GPUs in 2 nodes (8 GPUs per node), you can set the tensor parallel size to 8 and the pipeline parallel size to 2:
 
@@ -111,5 +111,5 @@ When you use huggingface repo id to refer to the model, you should append your h
 :::
 
 :::{warning}
-If you keep receiving the error message `Error: No available node types can fulfill resource request` but you have enough GPUs in the cluster, chances are your nodes have multiple IP addresses and vLLM cannot find the right one, especially when you are using multi-node inference. Please make sure vLLM and ray use the same IP address. You can set the `VLLM_HOST_IP` environment variable to the right IP address in the `run_cluster.sh` script (different for each node!), and check `ray status` to see the IP address used by Ray. See <gh-issue:7815> for more information.
+If you keep receiving the error message `Error: No available node types can fulfill resource request` but you have enough GPUs in the cluster, chances are your nodes have multiple IP addresses and vLLM cannot find the right one, especially when you are using multi-node inference. Please make sure vLLM and ray use the same IP address. You can set the `VLLM_HOST_IP` environment variable to the right IP address in the `run_cluster.sh` script (different for each node!), and check `ray status` and `ray list nodes` to see the IP address used by Ray. See <gh-issue:7815> for more information.
 :::
