@@ -3,7 +3,7 @@ import pytest
 
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
+from vllm.v1.core.scheduler.output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
