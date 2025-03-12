@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -20,6 +21,16 @@ _LOCAL_LOGGING_INTERVAL_SEC = 5.0
 
 
 class StatLoggerBase(ABC):
+    """Interface for logging metrics.
+
+    API users may define custom loggers that implement this interface.
+    However, note that the `SchedulerStats` and `IterationStats` classes
+    are not considered stable interfaces and may change in future versions.
+    """
+
+    @abstractmethod
+    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
+        ...
 
     @abstractmethod
     def record(self, scheduler_stats: SchedulerStats,
@@ -32,7 +43,7 @@ class StatLoggerBase(ABC):
 
 class LoggingStatLogger(StatLoggerBase):
 
-    def __init__(self, engine_index: int = 0):
+    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
         self.engine_index = engine_index
         self._reset(time.monotonic())
         self.last_scheduler_stats = SchedulerStats()
@@ -462,3 +473,31 @@ def build_cudagraph_buckets(vllm_config: VllmConfig) -> list[int]:
         return buckets
     else:
         return [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
+
+
+def setup_default_loggers(
+    vllm_config: VllmConfig,
+    log_stats: bool,
+    engine_num: int,
+    custom_stat_loggers: Optional[list[type[StatLoggerBase]]] = None,
+) -> list[list[StatLoggerBase]]:
+    """Setup logging and prometheus metrics."""
+    if not log_stats:
+        return []
+
+    stat_loggers: list[list[StatLoggerBase]] = []
+    for i in range(engine_num):
+        per_engine_stat_loggers: list[StatLoggerBase] = []
+        if custom_stat_loggers is not None:
+            for logger_cls in custom_stat_loggers:
+                per_engine_stat_loggers.append(
+                    logger_cls(vllm_config, engine_index=i))
+        else:
+            per_engine_stat_loggers.append(
+                PrometheusStatLogger(vllm_config, engine_index=i))
+            if logger.isEnabledFor(logging.INFO):
+                per_engine_stat_loggers.append(
+                    LoggingStatLogger(vllm_config, engine_index=i))
+        stat_loggers.append(per_engine_stat_loggers)
+
+    return stat_loggers

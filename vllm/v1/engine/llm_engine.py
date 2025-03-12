@@ -43,7 +43,7 @@ class LLMEngine:
         executor_class: type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[list[type[StatLoggerBase]]] = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
@@ -54,6 +54,11 @@ class LLMEngine:
                 "This should not happen. As a workaround, try using "
                 "LLMEngine.from_vllm_config(...) or explicitly set "
                 "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+
+        if stat_loggers is not None:
+            raise NotImplementedError(
+                "Passing StatLoggers to LLMEngine in V1 is not yet supported. "
+                "Set VLLM_USE_V1=0 and file and issue on Github.")
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -101,14 +106,9 @@ class LLMEngine:
         cls,
         vllm_config: VllmConfig,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[list[type[StatLoggerBase]]] = None,
         disable_log_stats: bool = False,
     ) -> "LLMEngine":
-        if stat_loggers is not None:
-            raise NotImplementedError(
-                "Passing StatLoggers to V1 is not yet supported. "
-                "Set VLLM_USE_V1=0 and file and issue on Github.")
-
         return cls(vllm_config=vllm_config,
                    executor_class=Executor.get_class(vllm_config),
                    log_stats=(not disable_log_stats),
@@ -121,7 +121,7 @@ class LLMEngine:
         cls,
         engine_args: EngineArgs,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        stat_loggers: Optional[list[type[StatLoggerBase]]] = None,
         enable_multiprocessing: bool = False,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
