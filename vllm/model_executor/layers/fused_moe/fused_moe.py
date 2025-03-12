@@ -1210,8 +1210,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
-    assert w1.stride(-1) == 1, "Stride of last dimension must 1"
-    assert w2.stride(-1) == 1, "Stride of last dimension must 1"
+    assert w1.stride(-1) == 1, "Stride of last dimension must be 1"
+    assert w2.stride(-1) == 1, "Stride of last dimension must be 1"
     assert hidden_states.dtype in [
         torch.float32, torch.float16, torch.bfloat16
     ]
