@@ -8,8 +8,6 @@ import torch_xla.core.xla_model as xm
 from vllm.v1.sample.metadata import SamplingMetadata
 
 
-# TODO (NickLucche) keep in sync with SamplingMetadata until we can drop
-# this class and support most options.
 @dataclass
 class TPUSupportedSamplingMetadata:
     # This class exposes a more xla-friendly interface than SamplingMetadata

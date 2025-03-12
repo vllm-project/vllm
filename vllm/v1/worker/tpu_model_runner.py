@@ -23,16 +23,16 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
-from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
+from vllm.v1.attention.backends.pallas import (NUM_KV_PAGES_PER_BLOCK,
+                                               PallasAttentionBackend,
                                                PallasMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput, SamplerOutput)
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.sampler import Sampler
-from vllm.v1.sample.tpu_metadata import TPUSupportedSamplingMetadata
+from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
+from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -142,9 +142,10 @@ class TPUModelRunner:
                                             dtype=torch.int64,
                                             device="cpu")
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
-
+        padded_max_num_blocks_per_req = _get_padded_number(
+            self.max_num_blocks_per_req, NUM_KV_PAGES_PER_BLOCK)
         self.block_table_cpu = torch.zeros(
-            (self.max_num_tokens, self.max_num_blocks_per_req),
+            (self.max_num_tokens, padded_max_num_blocks_per_req),
             dtype=self.input_batch.block_table.get_cpu_tensor().dtype,
             device="cpu")
 
@@ -595,8 +596,6 @@ class TPUModelRunner:
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_sampling_metadata(sampling_metadata, logits_indices,
                                     num_reqs, self.device)
-        # Make mypy happy
-        sampling_metadata = cast(SamplingMetadata, tpu_sampling_metadata)
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
@@ -605,9 +604,8 @@ class TPUModelRunner:
                 kv_caches=self.kv_caches,
                 inputs_embeds=inputs_embeds,
             )
-        xm.mark_step()  # break model graph
         selected_token_ids = self.model.sample_from_hidden(
-            hidden_states, sampling_metadata)
+            hidden_states, tpu_sampling_metadata)
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
@@ -780,11 +778,21 @@ class TPUModelRunner:
         # n_tokens x max_num_reqs. Graph is really small so this is fine.
         while True:
             num_reqs_to_sample = MIN_NUM_SEQS
-            dummy_hidden = torch.randn((num_tokens, hsize), device=device)
+            dummy_hidden = torch.randn((num_tokens, hsize),
+                                       device=device,
+                                       dtype=torch.bfloat16)
             while True:
-                # To allow sampling, trace with all supported sampling args.
+                # Default metadata is an all_greedy setup. But since the
+                # `do_argmax` flag is a tensor, we still compile the full graph
+                meta = self.input_batch.sampling_metadata
+                indices = torch.zeros(
+                    num_reqs_to_sample,
+                    dtype=torch.int32,
+                    device=device,
+                )
                 sampling_meta = TPUSupportedSamplingMetadata.\
-                    get_default_sampling_params(num_reqs_to_sample, device)
+                    from_sampling_metadata(meta, indices,
+                                           num_reqs_to_sample, device)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs_to_sample)
                 self.model.sample_from_hidden(dummy_hidden, sampling_meta)
@@ -843,7 +851,7 @@ class ModelWrapperV1(nn.Module):
     def __init__(self, model: nn.Module):
         super().__init__()
         self.model = model
-        self.sampler = Sampler()
+        self.sampler = TPUSampler()
 
     def sample(
             self, logits: torch.Tensor,
@@ -910,6 +918,10 @@ class ModelWrapperV1(nn.Module):
 
     def get_input_embeddings(self, *args, **kwargs):
         return self.model.get_input_embeddings(*args, **kwargs)
+
+
+def _get_padded_number(n: int, multiple: int) -> int:
+    return ((n + multiple - 1) // multiple) * multiple
 
 
 def _get_padded_token_len(x: int) -> int:
