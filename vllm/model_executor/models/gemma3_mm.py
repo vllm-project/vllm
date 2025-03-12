@@ -102,10 +102,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
     ) -> BatchFeature:
         # TODO(woosuk): Support pan-and-scan.
         img_kwargs = mm_kwargs.get("images_kwargs", {})
-        if img_kwargs:
-            img_kwargs["do_pan_and_scan"] = False
-        else:
-            img_kwargs = {"do_pan_and_scan": False}
+        img_kwargs["do_pan_and_scan"] = False
         mm_kwargs["images_kwargs"] = img_kwargs
         return super()._call_hf_processor(
             prompt=prompt,
