@@ -3450,9 +3450,9 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         if self.model_config and self.model_config.use_mla and \
-            not current_platform.is_cuda():
+            not (current_platform.is_cuda() or current_platform.is_rocm()):
             logger.info(
-                "MLA is enabled on a non-cuda platform; forcing chunked "
+                "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
             self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.chunked_prefill_enabled = False
