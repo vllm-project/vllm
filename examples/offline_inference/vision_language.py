@@ -121,7 +121,9 @@ def run_fuyu(questions: list[str], modality: str):
 # Gemma 3
 def run_gemma3(questions: list[str], modality: str):
     assert modality == "image"
-    prompts = [f"<start_of_image> {question}" for question in questions]
+    prompts = [("<bos><start_of_turn>user\n"
+                f"<start_of_image>{question}<end_of_turn>\n"
+                "<start_of_turn>model\n") for question in questions]
     model_name = "google/gemma-3-4b-it"
     llm = LLM(model=model_name,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)

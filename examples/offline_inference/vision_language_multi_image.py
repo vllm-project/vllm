@@ -86,7 +86,24 @@ def load_gemma3(question, image_urls: list[str]) -> ModelRequestData:
               max_model_len=8192,
               max_num_seqs=2,
               limit_mm_per_prompt={"image": len(image_urls)})
-    prompt = "<start_of_image> " * len(image_urls) + question
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            *placeholders,
+            {
+                "type": "text",
+                "text": question
+            },
+        ],
+    }]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
     return ModelRequestData(
         llm=llm,
         prompt=prompt,
