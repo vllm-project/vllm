@@ -21,25 +21,11 @@ Pull the most recent validated docker image with `docker pull rocm/vllm-dev:main
 
 ## What is New
 
-20250305_aiter:
-- AITER improvements
-- Support for FP8 skinny GEMM
-
-20250207_aiter:
-- More performant AITER
-- Bug fixes
-
-20250205_aiter:
-- [AITER](https://github.com/ROCm/aiter) support
-- Performance improvement for custom paged attention
-- Reduced memory overhead bug fix
-
-20250124:
-- Fix accuracy issue with 405B FP8 Triton FA
-- Fixed accuracy issue with TP8
-
-20250117:
+- [Experimental AITER support](#aiter-use-cases)
 - [Experimental DeepSeek-V3 and DeepSeek-R1 support](#running-deepseek-v3-and-deepseek-r1)
+- Performance improvement for custom paged attention
+- Support for FP8 skinny GEMM
+- Bug fixes
 
 ## Performance Results
 
@@ -62,7 +48,7 @@ The table below shows performance data where a local inference client is fed req
 
 *TP stands for Tensor Parallelism.*
 
-## Latency Measurements
+### Latency Measurements
 
 The table below shows latency measurement, which typically involves assessing the time from when the system receives an input to when the model produces a result.
 
@@ -102,6 +88,8 @@ The table below shows latency measurement, which typically involves assessing th
 | | | | 128 | 2048 | 2048 | 162.503 |
 
 *TP stands for Tensor Parallelism.*
+
+Supermicro AS-8125GS-TNMR2 with 2x AMD EPYC 9554 Processors, 2.25 TiB RAM, 8x AMD Instinct MI300X (192GiB, 750W) GPUs, Ubuntu 22.04, and amdgpu driver 6.8.5
 
 ## Reproducing Benchmarked Results
 
@@ -459,7 +447,7 @@ Some use cases include:
 
 ```bash
 export VLLM_USE_AITER=1
-python3 /app/vllm/benchmarks/benchmark_latency.py --model amd/Mixtral-8x22B-Instruct-v0.1-FP8-KV -tp 8 --batch-size 256 --input-len 1024 --output-len 128
+python3 /app/vllm/benchmarks/benchmark_latency.py --model amd/Mixtral-8x22B-Instruct-v0.1-FP8-KV -tp 8 --batch-size 256 --input-len 128 --output-len 2048
 ```
 
 ## MMLU_PRO_Biology Accuracy Evaluation
@@ -509,3 +497,25 @@ Use AITER release candidate branch instead:
     git checkout aiter_integration_final
     docker build -f Dockerfile.rocm -t <your_tag> --build-arg USE_CYTHON=1 .
 ```
+
+## Changelog
+
+20250305_aiter:
+- AITER improvements
+- Support for FP8 skinny GEMM
+
+20250207_aiter:
+- More performant AITER
+- Bug fixes
+
+20250205_aiter:
+- [AITER](https://github.com/ROCm/aiter) support
+- Performance improvement for custom paged attention
+- Reduced memory overhead bug fix
+
+20250124:
+- Fix accuracy issue with 405B FP8 Triton FA
+- Fixed accuracy issue with TP8
+
+20250117:
+- [Experimental DeepSeek-V3 and DeepSeek-R1 support](#running-deepseek-v3-and-deepseek-r1)
