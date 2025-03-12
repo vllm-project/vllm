@@ -293,6 +293,7 @@ class TPUModelRunner:
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
+        # TODO This slices tensors to copy to device, triggering recompilation.
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
@@ -558,9 +559,6 @@ class TPUModelRunner:
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
-        # TODO (NickLucche) something before this point (likely _update_state)
-        # is causing a small recompilation on 2nd runs. Optimize.
-        # xm.mark_step()
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -589,7 +587,6 @@ class TPUModelRunner:
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids
             inputs_embeds = None
-
         sampling_metadata = self.input_batch.sampling_metadata
         num_reqs = self.input_batch.num_reqs
         # NOTE (NickLucche) here we sync with TPU: if there's any shape
@@ -777,12 +774,12 @@ class TPUModelRunner:
         logger.info("Compiling sampling with different input shapes.")
         start = time.perf_counter()
         num_tokens = 16
-        num_reqs_to_sample = MIN_NUM_SEQS
         hsize = self.model_config.get_hidden_size()
         device = self.device
         # Compile sampling step for different model+sampler outputs in bucketed
         # n_tokens x max_num_reqs. Graph is really small so this is fine.
         while True:
+            num_reqs_to_sample = MIN_NUM_SEQS
             dummy_hidden = torch.randn((num_tokens, hsize), device=device)
             while True:
                 # To allow sampling, trace with all supported sampling args.
