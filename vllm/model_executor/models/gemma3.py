@@ -190,9 +190,38 @@ class Gemma3Attention(nn.Module):
         attn_output = self.attn(q, k, v)
 
         if not kwargs.get("has_images", False):
+            # Fast path for text-only inputs. The performance for the text-only
+            # inputs are not affected by the naive attention below.
             output, _ = self.o_proj(attn_output)
             return output
 
+        # NOTE(woosuk): Gemma3 uses bidirectional attention between image tokens
+        # that correspond to the same image while using causal attention
+        # otherwise. Current attention backends cannot handle this pattern, so
+        # we temporarily use a naive attention implementation with mask tensors.
+
+        # We intentionally keep the attention backend as-is and only override
+        # `attn_output` with the naive implementation's output. This minimizes
+        # changes to existing model runners and attention backends. The call to
+        # `self.attn(q, k, v)` is only used to populate the KV cache - its
+        # output is discarded and overwritten below. While this duplicates
+        # computation, it maintains compatibility.
+        # TODO(woosuk): Optimize by implementing custom attention kernels.
+        attn_output = self.naive_attn_with_masks(
+            q, k, v, out=attn_output, **kwargs)
+        output, _ = self.o_proj(attn_output)
+        return output
+
+    def naive_attn_with_masks(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        out: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        # NOTE(woosuk): As described in the comment above, this code is not
+        # meant to be performant. It is only meant to be correct.
         q = q.view(-1, self.num_heads, self.head_dim)
         # Expand the key and value to handle GQA.
         num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -219,16 +248,13 @@ class Gemma3Attention(nn.Module):
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
 
-            out = F.scaled_dot_product_attention(
+            output = F.scaled_dot_product_attention(
                 query, key, value, attn_mask, self.scaling,
             )
-
-            out = out.transpose(1, 2).flatten(-2, -1)
-            attn_output[start_idx:end_idx] = out
+            output = output.transpose(1, 2).flatten(-2, -1)
+            out[start_idx:end_idx] = output
             start_idx = end_idx
-
-        output, _ = self.o_proj(attn_output)
-        return output
+        return out
 
 
 class Gemma3DecoderLayer(nn.Module):
