@@ -68,12 +68,40 @@ vllm serve ${MODEL_NAME} --disable-log-requests
 Then run the benchmarking script
 
 ```bash
+# download dataset
+# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 MODEL_NAME="NousResearch/Hermes-3-Llama-3.1-8B"
 NUM_PROMPTS=10
 BACKEND="openai-chat"
-DATASET_NAME="sonnet"
-DATASET_PATH="benchmarks/sonnet.txt"
+DATASET_NAME="sharegpt"
+DATASET_PATH="/home/jovyan/data/vllm_benchmark_datasets/ShareGPT_V3_unfiltered_cleaned_split.json"
 python3 benchmarks/benchmark_serving.py --backend ${BACKEND} --model ${MODEL_NAME} --endpoint /v1/chat/completions --dataset-name ${DATASET_NAME} --dataset-path ${DATASET_PATH} --num-prompts ${NUM_PROMPTS}
+```
+
+If successful, you will see the following output
+
+```
+============ Serving Benchmark Result ============
+Successful requests:                     10        
+Benchmark duration (s):                  5.78      
+Total input tokens:                      1369      
+Total generated tokens:                  2212      
+Request throughput (req/s):              1.73      
+Output token throughput (tok/s):         382.89    
+Total Token throughput (tok/s):          619.85    
+---------------Time to First Token----------------
+Mean TTFT (ms):                          71.54     
+Median TTFT (ms):                        73.88     
+P99 TTFT (ms):                           79.49     
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          7.91      
+Median TPOT (ms):                        7.96      
+P99 TPOT (ms):                           8.03      
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           7.74      
+Median ITL (ms):                         7.70      
+P99 ITL (ms):                            8.39      
+==================================================
 ```
 
 ### VisionArena Benchmark for Vision Language Models
@@ -116,6 +144,12 @@ python3 benchmarks/benchmark_throughput.py \
   --dataset-path "${DATASET_PATH}" \
   --num-prompts "${NUM_PROMPTS}"
   ```
+
+If successful, you will see the following output
+
+```
+Throughput: 7.35 requests/s, 4789.20 total tokens/s, 1102.83 output tokens/s
+```
 
 ### Benchmark with LoRA Adapters
 
