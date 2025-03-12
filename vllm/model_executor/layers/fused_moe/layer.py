@@ -104,7 +104,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
                     layer.w13_weight,
                     layer.w2_weight,
-                    use_prepack=True,
+                    use_prepack=ipex._C.onednn_has_bf16_support(),
                 )
             else:
                 raise NotImplementedError("CPU MOE only supports x86 arch.")
