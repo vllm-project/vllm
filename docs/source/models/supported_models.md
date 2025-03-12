@@ -759,7 +759,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
 - * `Gemma3ForConditionalGeneration`
   * Gemma3
-  * T + I
+  * T + I<sup>+</sup>
   * `google/gemma-3-4b-it`, `google/gemma-3-27b-it`, etc.
   * ✅︎
   * ✅︎
