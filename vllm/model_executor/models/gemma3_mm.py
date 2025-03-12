@@ -4,7 +4,16 @@ from typing import (Any, Iterable, Literal, Mapping, Optional, Sequence, Set,
 
 import torch
 from torch import nn
-from transformers import BatchFeature, Gemma3Config, ProcessorMixin
+from transformers import BatchFeature, ProcessorMixin
+
+try:
+    from transformers import Gemma3Config
+except ImportError as e:
+    raise ImportError(
+        "To use `Gemma3ForConditionalGeneration`, you have to install "
+        "Hugging Face Transformers library from source via "
+        "`pip install git+https://github.com/huggingface/transformers`."
+    ) from e
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -215,11 +224,11 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                   prefix, "vision_tower"))
         self.multi_modal_projector = Gemma3MultiModalProjector(config)
 
-        config.text_config.architectures = ["Gemma3ForCausalLM"]
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
+            architectures=["Gemma3ForCausalLM"],
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.language_model.logits_processor.scale *= logit_scale
