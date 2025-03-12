@@ -54,7 +54,7 @@ torch::Tensor context_attention_forward_v2(
     torch::Tensor value,  // [num_tokens, num_kv_heads * head_size]
     torch::Tensor block_tables, torch::Tensor query_start_loc,
     torch::Tensor seq_lens, torch::Tensor context_lens, int max_input_length,
-    int max_context_length);
+    int max_context_length, int max_q_length);
 
 void copy_blocks(
     std::vector<torch::Tensor> &key_caches,

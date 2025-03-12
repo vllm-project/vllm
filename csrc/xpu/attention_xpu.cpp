@@ -883,7 +883,7 @@ void context_attention_kernel_v2(
     const int out_stride_tokens, const int out_stride_head,
     const int num_queries_per_kv, const int max_input_length,
     const int batch_size, const int num_heads, const int num_tokens,
-    const int max_context_len) {
+    const int max_context_len, const int max_q_len) {
   constexpr int BLOCK_SIZE = 8;
   constexpr int NUM_THREADS = 128;
   // Each wrap handles one context block, therefore, each thread_group_size is
@@ -908,7 +908,7 @@ void context_attention_kernel_v2(
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   int padded_max_context_len =
-      DIVIDE_ROUND_UP(max_context_len + 1 + max_input_length, BLOCK_SIZE) * BLOCK_SIZE;
+      DIVIDE_ROUND_UP(max_context_len + 1 + max_q_len, BLOCK_SIZE) * BLOCK_SIZE;
   int logits_size = padded_max_context_len * sizeof(float);
   int outputs_size = (NUM_WARPS / 2) * HD * sizeof(float);
   // Python-side check in
@@ -916,7 +916,7 @@ void context_attention_kernel_v2(
   // sync with the logic here!
   int shared_mem_size = std::max(logits_size, outputs_size);
   // WARN: we have changed this...
-  sycl::range<3> grid(batch_size, num_heads, max_input_length);
+  sycl::range<3> grid(batch_size, num_heads, max_q_len);
   // One work-group that is executing on the device
   sycl::range<3> block(1, 1, NUM_THREADS);
   sycl::queue& queue = vllm::xpu::vllmGetQueue();
@@ -2498,7 +2498,7 @@ torch::Tensor context_attention_forward_v2(
     torch::Tensor value,  // [num_tokens, num_kv_heads * head_size]
     torch::Tensor block_tables, torch::Tensor query_start_loc,
     torch::Tensor seq_lens, torch::Tensor context_lens, int max_input_length,
-    int max_context_length) {
+    int max_context_length, int max_q_length) {
   // Currently, only support fp16 here
   int64_t num_tokens = query.size(0);
   int64_t num_heads = query.size(1);
@@ -2556,7 +2556,7 @@ torch::Tensor context_attention_forward_v2(
         v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
         output.stride(0), output.stride(1), num_queries_per_kv,
         max_input_length, batch_size, num_heads, query.size(0),
-        max_context_length);
+        max_context_length, max_q_length);
       break;
     case 64:
       vllm::context_attention_kernel_v2<sycl::half, 32, 64>(
@@ -2570,7 +2570,7 @@ torch::Tensor context_attention_forward_v2(
         v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
         output.stride(0), output.stride(1), num_queries_per_kv,
         max_input_length, batch_size, num_heads, query.size(0),
-        max_context_length);
+        max_context_length, max_q_length);
       break;
     case 80:
       vllm::context_attention_kernel_v2<sycl::half, 32, 80>(
@@ -2584,7 +2584,7 @@ torch::Tensor context_attention_forward_v2(
         v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
         output.stride(0), output.stride(1), num_queries_per_kv,
         max_input_length, batch_size, num_heads, query.size(0),
-        max_context_length);
+        max_context_length, max_q_length);
       break;
     case 96:
       vllm::context_attention_kernel_v2<sycl::half, 32, 96>(
@@ -2598,7 +2598,7 @@ torch::Tensor context_attention_forward_v2(
         v_cache_stride_head, v_cache_stride_head_dim, v_cache_stride_block,
         output.stride(0), output.stride(1), num_queries_per_kv,
         max_input_length, batch_size, num_heads, query.size(0),
-        max_context_length);
+        max_context_length, max_q_length);
       break;
     default: throw std::runtime_error("unsupported head_dim");
   }
