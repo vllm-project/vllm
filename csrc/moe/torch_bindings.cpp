@@ -32,29 +32,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   m.impl("sgl_moe_align_block_size", torch::kCUDA, &sgl_moe_align_block_size);
 
 #ifndef USE_ROCM
-    // this feature currently is supported on CUDA only
-    m.def(
-        "moe_wna16_gemm(Tensor input, Tensor! output, Tensor b_qweight, "
-        "Tensor b_scales, Tensor? b_qzeros, "
-        "Tensor? topk_weights, Tensor sorted_token_ids, "
-        "Tensor expert_ids, Tensor num_tokens_post_pad, "
-        "int top_k, int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, "
-        "int bit) -> Tensor");
+  // this feature currently is supported on CUDA only
+  m.def(
+      "moe_wna16_gemm(Tensor input, Tensor! output, Tensor b_qweight, "
+      "Tensor b_scales, Tensor? b_qzeros, "
+      "Tensor? topk_weights, Tensor sorted_token_ids, "
+      "Tensor expert_ids, Tensor num_tokens_post_pad, "
+      "int top_k, int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, "
+      "int bit) -> Tensor");
 
-    m.impl("moe_wna16_gemm", torch::kCUDA, &moe_wna16_gemm);
+  m.impl("moe_wna16_gemm", torch::kCUDA, &moe_wna16_gemm);
 
-    m.def(
-        "marlin_gemm_moe(Tensor! a, Tensor! b_q_weights, Tensor! sorted_ids, "
-        "Tensor! topk_weights, Tensor! topk_ids, Tensor! b_scales, Tensor! "
-        "b_zeros, Tensor! g_idx, Tensor! perm, Tensor! workspace, "
-        "int b_q_type, SymInt size_m, "
-        "SymInt size_n, SymInt size_k, bool is_k_full, int num_experts, int "
-        "topk, "
-        "int moe_block_size, bool replicate_input, bool apply_weights)"
-        " -> Tensor");
-    // conditionally compiled so impl registration is in source file
-
+  m.def(
+      "marlin_gemm_moe(Tensor! a, Tensor! b_q_weights, Tensor! sorted_ids, "
+      "Tensor! topk_weights, Tensor! topk_ids, Tensor! b_scales, Tensor! "
+      "b_zeros, Tensor! g_idx, Tensor! perm, Tensor! workspace, "
+      "int b_q_type, SymInt size_m, "
+      "SymInt size_n, SymInt size_k, bool is_k_full, int num_experts, int "
+      "topk, "
+      "int moe_block_size, bool replicate_input, bool apply_weights)"
+      " -> Tensor");
+  // conditionally compiled so impl registration is in source file
 #endif
+
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
