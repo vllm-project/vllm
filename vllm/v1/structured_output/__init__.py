@@ -152,6 +152,8 @@ class StructuredOutputManager:
         cumulative_index = 0
         ordered_seq = sorted(structured_output_request_ids.items(),
                              key=lambda x: x[1])
+        # NOTE: This outer loop can likely be parallelized to improve
+        # performance of bitmask generation for large batches.
         for req_id, _ in ordered_seq:
             request = requests[req_id].structured_output_request
             assert request is not None and request.grammar is not None
