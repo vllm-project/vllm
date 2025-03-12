@@ -76,7 +76,7 @@ DATASET_PATH="benchmarks/sonnet.txt"
 python3 benchmarks/benchmark_serving.py --backend ${BACKEND} --model ${MODEL_NAME} --endpoint /v1/chat/completions --dataset-name ${DATASET_NAME} --dataset-path ${DATASET_PATH} --num-prompts ${NUM_PROMPTS}
 ```
 
-VisionArena example
+### VisionArena Benchmark for Vision Language Models
 
 ```bash
 # need a model with vision capability here
