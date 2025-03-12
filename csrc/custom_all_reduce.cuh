@@ -27,7 +27,20 @@ namespace vllm {
     }                                                               \
   } while (0)
 
+// Maximal number of blocks in allreduce kernel.
 constexpr int kMaxBlocks = 36;
+
+// Default number of blocks in allreduce kernel.
+#ifndef USE_ROCM
+const int defaultBlockLimit = 36;
+CUpointer_attribute rangeStartAddrAttr =
+    CUDA_POINTER_ATTRIBUTE_RANGE_START_ADDR;
+#else
+const int defaultBlockLimit = 16;
+hipPointer_attribute rangeStartAddrAttr =
+    HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR;
+#endif
+
 // Counter may overflow, but it's fine since unsigned int overflow is
 // well-defined behavior.
 using FlagType = uint32_t;
@@ -305,8 +318,7 @@ DINLINE P* get_tmp_buf(Signal* sg) {
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_2stage(RankData* _dp, RankSignals sg, Signal* self_sg,
-                               T* __restrict__ result, int rank, int size,
-                               int compression_factor = 1) {
+                               T* __restrict__ result, int rank, int size) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
   using P = typename packed_t<T>::P;
@@ -336,7 +348,7 @@ __global__ void __launch_bounds__(512, 1)
   // the two stages, because visibility across devices is only guaranteed
   // between threads that have the same tid. If thread i computes the sum of
   // start + i in the first stage, then thread i also gathers start + i from
-  // all ranks. largest_part /= compression_factor;
+  // all ranks.
 
   for (int idx = tid; idx < largest_part; idx += stride) {
 #pragma unroll
@@ -433,12 +445,7 @@ class CustomAllreduce {
       void* base_ptr;
       // note: must share the base address of each allocation, or we get wrong
       // address
-      if (cuPointerGetAttribute(&base_ptr,
-#if defined(USE_ROCM)
-                                HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-#else
-                                CU_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-#endif
+      if (cuPointerGetAttribute(&base_ptr, rangeStartAddrAttr,
                                 (CUdeviceptr)ptr) != CUDA_SUCCESS)
         throw std::runtime_error("failed to get pointer attr");
       CUDACHECK(cudaIpcGetMemHandle(
@@ -515,12 +522,7 @@ class CustomAllreduce {
    */
   template <typename T>
   void allreduce(cudaStream_t stream, T* input, T* output, int size,
-#if !defined(USE_ROCM)
-                 int threads = 512, int block_limit = 36)
-#else
-                 int threads = 512, int block_limit = 16)
-#endif
-  {
+                 int threads = 512, int block_limit = defaultBlockLimit) {
     auto d = packed_t<T>::P::size;
     if (size % d != 0)
       throw std::runtime_error(

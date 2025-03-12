@@ -274,6 +274,18 @@ class BaseCustomAllreduce:
     def __del__(self):
         self.close()
 
+    @staticmethod
+    def create_shared_buffer(size_in_bytes: int,
+                             group: Optional[ProcessGroup] = None,
+                             uncached: Optional[bool] = False) -> List[int]:
+        raise NotImplementedError()
+
+    @staticmethod
+    def free_shared_buffer(pointers: List[int],
+                           group: Optional[ProcessGroup] = None,
+                           rank: Optional[int] = 0) -> None:
+        raise NotImplementedError()
+
 
 class CudaCustomAllreduce(BaseCustomAllreduce):
 
