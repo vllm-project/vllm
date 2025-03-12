@@ -337,10 +337,11 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
             if vision_embeddings is not None:
-                self.prepare_attn_masks(input_ids,
-                                        positions,
-                                        mask_dtype=vision_embeddings.dtype,
-                                        **kwargs)
+                kwargs = self.prepare_attn_masks(
+                    input_ids,
+                    positions,
+                    mask_dtype=vision_embeddings.dtype,
+                    **kwargs)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
@@ -357,7 +358,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         positions: torch.Tensor,
         mask_dtype: torch.dtype,
         **kwargs,
-    ) -> None:
+    ):
         kwargs["has_images"] = True
         # NOTE(woosuk): Here, we distinguish the sequences by the position id 0.
         # This is a HACK. Fix this.
@@ -401,12 +402,13 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             # Create a local causal mask with sliding window (1024).
             local_attn_mask = torch.ones_like(global_attn_mask)
             local_attn_mask = torch.tril(local_attn_mask,
-                                         diagonal=-self.sliding_window_size)
+                                         diagonal=-self.sliding_window)
             local_attn_mask = torch.where(local_attn_mask == 0,
                                           global_attn_mask, float("-inf"))
             local_attn_masks.append(local_attn_mask)
         kwargs["global_attn_masks"] = global_attn_masks
         kwargs["local_attn_masks"] = local_attn_masks
+        return kwargs
 
     def compute_logits(
         self,
