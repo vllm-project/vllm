@@ -76,6 +76,7 @@ class RemoteOpenAIServer:
                  vllm_serve_args: list[str],
                  *,
                  env_dict: Optional[dict[str, str]] = None,
+                 seed: Optional[int] = 0,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None) -> None:
         if auto_port:
@@ -87,6 +88,12 @@ class RemoteOpenAIServer:
             vllm_serve_args = vllm_serve_args + [
                 "--port", str(get_open_port())
             ]
+        if seed is not None:
+            if "--seed" in vllm_serve_args:
+                raise ValueError("You have manually specified the seed "
+                                 f"when `seed={seed}`.")
+
+            vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
 
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")
@@ -698,7 +705,7 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
     without enough resources, or called when filtering tests to run directly.
     """
     try:
-        if current_platform.is_cpu():
+        if current_platform.is_cpu() or current_platform.is_openvino():
             memory_gb = 0
         else:
             memory_gb = current_platform.get_device_total_memory() / GB_bytes
