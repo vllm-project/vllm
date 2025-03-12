@@ -1520,23 +1520,12 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 
-        # TODO: this could be smarter
-        num_tokens = top_k_num * M
+        # TODO: computing new_M could be smarter
         sorted_token_ids, _, _ = (moe_align_block_size(topk_ids, block_m,
                                                        global_num_experts,
                                                        expert_map))
 
-        pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) *
-                    block_m) - sorted_token_ids.numel()
-        if pad_size > 0:
-            sorted_token_ids = torch.nn.functional.pad(sorted_token_ids,
-                                                       (0, pad_size),
-                                                       "constant", num_tokens)
-        sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
-        new_S = torch.repeat_interleave(hidden_states, top_k_num,
-                                        dim=0)[sorted_token_ids, ...].shape
-        #new_M = hidden_states.shape[0] * top_k_num * global_num_experts
-        new_M = new_S[0]
+        new_M = ((sorted_token_ids.numel() + block_m - 1) // block_m) * block_m
 
         intermediate_cache1 = torch.empty((new_M, N),
                                           device=hidden_states.device,
@@ -1559,6 +1548,9 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                           dtype=hidden_states.dtype)
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
+
+    # TODO: modify CHUNK_SIZE to be % 128 == 0 and check if each chunk is
+    # valid dg.  fall back to old kernel if not
 
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
