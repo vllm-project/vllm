@@ -247,6 +247,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         # TODO: Use AutoModelForVision2Seq once transformers supports this
         auto_cls=AutoModelForPreTraining,
+        dtype="bfloat16",
     ),
     "glm4v": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
