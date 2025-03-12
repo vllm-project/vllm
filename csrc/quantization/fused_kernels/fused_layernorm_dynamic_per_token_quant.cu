@@ -144,6 +144,9 @@ void rms_norm_dynamic_per_token_quant(
     torch::Tensor& scales,        // [num_tokens]
     double const var_epsilon,     // Variance epsilon used in norm calculation
     std::optional<at::Tensor> scale_ub, std::optional<at::Tensor> residual) {
+  static c10::ScalarType kFp8Type = is_fp8_ocp()
+                                        ? c10::ScalarType::Float8_e4m3fn
+                                        : c10::ScalarType::Float8_e4m3fnuz;
   TORCH_CHECK(out.dtype() == kFp8Type || out.dtype() == torch::kInt8);
   TORCH_CHECK(out.is_contiguous() && input.is_contiguous());
 

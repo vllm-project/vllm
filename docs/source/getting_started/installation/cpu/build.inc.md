@@ -18,7 +18,7 @@ Third, install Python packages for vLLM CPU backend building:
 ```console
 pip install --upgrade pip
 pip install "cmake>=3.26" wheel packaging ninja "setuptools-scm>=8" numpy
-pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
 Finally, build and install vLLM CPU backend:
