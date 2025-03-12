@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM team.
 # Copyright 2025 Google Inc. HuggingFace Inc. team. All rights reserved.
 #
@@ -16,9 +17,9 @@
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
-from torch import nn
 import torch.nn.functional as F
-from transformers.models.gemma3.configuration_gemma3 import Gemma3TextConfig
+from torch import nn
+from transformers import Gemma3TextConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -138,7 +139,6 @@ class Gemma3Attention(nn.Module):
         # TODO(woosuk): Add reference to the original HF implementation.
         layer_idx = extract_layer_index(prefix)
         self.is_sliding = bool((layer_idx + 1) % config.sliding_window_pattern)
-
         # Initialize the rotary embedding.
         if self.is_sliding:
             # Local attention. Override the values in config.json.
@@ -207,8 +207,11 @@ class Gemma3Attention(nn.Module):
         # output is discarded and overwritten below. While this duplicates
         # computation, it maintains compatibility.
         # TODO(woosuk): Optimize by implementing custom attention kernels.
-        attn_output = self.naive_attn_with_masks(
-            q, k, v, out=attn_output, **kwargs)
+        attn_output = self.naive_attn_with_masks(q,
+                                                 k,
+                                                 v,
+                                                 out=attn_output,
+                                                 **kwargs)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -249,7 +252,11 @@ class Gemma3Attention(nn.Module):
             value = value.transpose(1, 2)
 
             output = F.scaled_dot_product_attention(
-                query, key, value, attn_mask, self.scaling,
+                query,
+                key,
+                value,
+                attn_mask,
+                self.scaling,
             )
             output = output.transpose(1, 2).flatten(-2, -1)
             out[start_idx:end_idx] = output

@@ -1,33 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
-from collections.abc import Iterable, Mapping, Sequence
-from typing import (Any, Iterable, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, Union)
+from typing import (Any, Iterable, Literal, Mapping, Optional, Sequence, Set,
+                    Tuple, TypedDict, Union)
 
 import torch
 from torch import nn
-from transformers import Gemma3Config
-from transformers import BatchFeature, ProcessorMixin
+from transformers import BatchFeature, Gemma3Config, ProcessorMixin
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
                                     NestedTensors)
-from vllm.multimodal.parse import (ImageSize, MultiModalDataItems)
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo,
-                                        PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings, flatten_bn)
+from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
+                    maybe_prefix, merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 
@@ -149,29 +146,32 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
 
 
 class Gemma3MultiModalProjector(nn.Module):
+
     def __init__(self, config: Gemma3Config):
         super().__init__()
 
         self.mm_input_projection_weight = nn.Parameter(
-            torch.zeros(config.vision_config.hidden_size, config.text_config.hidden_size)
-        )
+            torch.zeros(config.vision_config.hidden_size,
+                        config.text_config.hidden_size))
 
         self.mm_soft_emb_norm = GemmaRMSNorm(
-            config.vision_config.hidden_size, eps=config.vision_config.layer_norm_eps
-        )
+            config.vision_config.hidden_size,
+            eps=config.vision_config.layer_norm_eps)
 
-        self.patches_per_image = int(config.vision_config.image_size // config.vision_config.patch_size)
+        self.patches_per_image = int(config.vision_config.image_size //
+                                     config.vision_config.patch_size)
         self.tokens_per_side = int(config.mm_tokens_per_image**0.5)
         self.kernel_size = self.patches_per_image // self.tokens_per_side
-        self.avg_pool = nn.AvgPool2d(kernel_size=self.kernel_size, stride=self.kernel_size)
+        self.avg_pool = nn.AvgPool2d(kernel_size=self.kernel_size,
+                                     stride=self.kernel_size)
 
     def forward(self, vision_outputs: torch.Tensor):
         batch_size, _, seq_length = vision_outputs.shape
 
         reshaped_vision_outputs = vision_outputs.transpose(1, 2)
         reshaped_vision_outputs = reshaped_vision_outputs.reshape(
-            batch_size, seq_length, self.patches_per_image, self.patches_per_image
-        )
+            batch_size, seq_length, self.patches_per_image,
+            self.patches_per_image)
         reshaped_vision_outputs = reshaped_vision_outputs.contiguous()
 
         pooled_vision_outputs = self.avg_pool(reshaped_vision_outputs)
@@ -180,7 +180,8 @@ class Gemma3MultiModalProjector(nn.Module):
 
         normed_vision_outputs = self.mm_soft_emb_norm(pooled_vision_outputs)
 
-        projected_vision_outputs = torch.matmul(normed_vision_outputs, self.mm_input_projection_weight)
+        projected_vision_outputs = torch.matmul(
+            normed_vision_outputs, self.mm_input_projection_weight)
         return projected_vision_outputs.type_as(vision_outputs)
 
 
@@ -258,7 +259,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         if not isinstance(pixel_values, torch.Tensor):
             raise ValueError("Incorrect type of pixel values. "
-                                f"Got type: {type(pixel_values)}")
+                             f"Got type: {type(pixel_values)}")
 
         pixel_values = flatten_bn(pixel_values)
         return Gemma3ImagePixelInputs(
@@ -325,7 +326,8 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
             if vision_embeddings is not None:
-                self.prepare_attn_masks(input_ids, positions,
+                self.prepare_attn_masks(input_ids,
+                                        positions,
                                         mask_dtype=vision_embeddings.dtype,
                                         **kwargs)
             input_ids = None
@@ -346,6 +348,8 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         **kwargs,
     ) -> None:
         kwargs["has_images"] = True
+        # NOTE(woosuk): Here, we distinguish the sequences by the position id 0.
+        # This is a HACK. Fix this.
         start_idices = (positions == 0).cpu().nonzero()
         num_seqs = len(start_idices)
         seq_lens = []
@@ -362,8 +366,12 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         local_attn_masks = []
         for seq_len in seq_lens:
             input_token_ids = input_ids[start_idx:end_idx]
+            # Create a global causal mask.
             global_attn_mask = torch.empty(
-                1, 1, seq_len, seq_len,
+                1,
+                1,
+                seq_len,
+                seq_len,
                 dtype=mask_dtype,
                 device=input_ids.device,
             )
@@ -371,6 +379,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             # Fill the lower triangle with 0.
             global_attn_mask = global_attn_mask.triu(diagonal=1)
 
+            # Consider the bidirectional attention between image tokens.
             img_mask = torch.zeros_like(global_attn_mask)
             img_pos = (input_token_ids == self.config.image_token_index)
             img_mask[:, :, :, img_pos] += 1
@@ -378,11 +387,13 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             global_attn_mask = torch.where(img_mask == 2, 0, global_attn_mask)
             global_attn_masks.append(global_attn_mask)
 
+            # Create a local causal mask with sliding window (1024).
             local_attn_mask = torch.ones_like(global_attn_mask)
-            local_attn_mask = torch.tril(local_attn_mask, diagonal=-self.sliding_window_size)
-            local_attn_mask = torch.where(local_attn_mask == 0, global_attn_mask, float("-inf"))
+            local_attn_mask = torch.tril(local_attn_mask,
+                                         diagonal=-self.sliding_window_size)
+            local_attn_mask = torch.where(local_attn_mask == 0,
+                                          global_attn_mask, float("-inf"))
             local_attn_masks.append(local_attn_mask)
-
         kwargs["global_attn_masks"] = global_attn_masks
         kwargs["local_attn_masks"] = local_attn_masks
 
