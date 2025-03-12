@@ -763,7 +763,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `google/gemma-3-4b-it`, `google/gemma-3-27b-it`, etc.
   * ✅︎
   * ✅︎
-  * ✅︎
+  * ✅︎\*
 - * `GLM4VForCausalLM`<sup>^</sup>
   * GLM-4V
   * T + I
@@ -947,6 +947,20 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 
 :::{note}
 To use Qwen2.5-VL series models, you have to install Hugging Face Transformers library from source via `pip install git+https://github.com/huggingface/transformers`.
+:::
+
+:::{note}
+Both V0 and V1 support `Gemma3ForConditionalGeneration` for text-only inputs.
+However, for text + image inputs, only V0 supports it correctly.
+V1 does not strictly follow the original attention in Gemma 3.
+
+Specifically, the model uses bidirectional attention only for the image tokens.
+Unfortunately, this attention pattern is not supported by any of the current attention backends.
+Therefore, we temporarily use the naive PyTorch SDPA with masking tensors **in V0**.
+This could lead to significant memory usage for long prompts (w/ images).
+
+In V1, we currently do not use the bidirectional attention for image tokens, and use the causal attention for all tokens.
+The model still generates reasonable outputs, but this needs to be fixed to get the full accuracy when the input includes images.
 :::
 
 ### Pooling Models
