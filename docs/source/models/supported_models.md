@@ -969,9 +969,6 @@ V1 currently uses a simplified attention pattern:
 - Will be updated in the future to support the correct behavior
 
 This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
-
-Additionally, vLLM's current Gemma 3 implementation does not support the pan-and-scan image pre-processing algorithm, which helps handle images with skewed aspect ratios by intelligently cropping them into multiple views.
-Without this feature, model performance may degrade when processing images that deviate significantly from square dimensions.
 :::
 
 ### Pooling Models

@@ -124,6 +124,8 @@ def run_gemma3(questions: list[str], modality: str):
     prompts = [f"<start_of_image> {question}" for question in questions]
     model_name = "google/gemma-3-4b-it"
     llm = LLM(model=model_name,
+              max_model_len=2048,
+              max_num_seqs=2,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompts, stop_token_ids
