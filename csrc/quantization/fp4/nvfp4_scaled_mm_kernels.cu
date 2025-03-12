@@ -201,10 +201,11 @@ void runGemm(at::Tensor& D, at::Tensor const& A, at::Tensor const& B,
 #endif  // defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
 
 #define CHECK_TYPE(x, st, m) \
-  TORCH_CHECK(x.scalar_type() == st, "Inconsistency of Tensor type:", m)
-#define CHECK_TH_CUDA(x, m) TORCH_CHECK(x.is_cuda(), m, "must be a CUDA tensor")
+  TORCH_CHECK(x.scalar_type() == st, ": Inconsistency of Tensor type:", m)
+#define CHECK_TH_CUDA(x, m) \
+  TORCH_CHECK(x.is_cuda(), m, ": must be a CUDA tensor")
 #define CHECK_CONTIGUOUS(x, m) \
-  TORCH_CHECK(x.is_contiguous(), m, "must be contiguous")
+  TORCH_CHECK(x.is_contiguous(), m, ": must be contiguous")
 #define CHECK_INPUT(x, st, m) \
   CHECK_TH_CUDA(x, m);        \
   CHECK_CONTIGUOUS(x, m);     \

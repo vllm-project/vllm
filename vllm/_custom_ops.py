@@ -467,6 +467,10 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
 
 
 # cutlass
+def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
+
+
 def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
                           block_scale_a: torch.Tensor,
                           block_scale_b: torch.Tensor, alpha: torch.Tensor,
