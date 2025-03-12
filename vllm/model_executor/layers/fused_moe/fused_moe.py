@@ -679,9 +679,9 @@ def valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     if not has_deep_gemm or not use_fp8_w8a8:
         return False
 
-    M, K = hidden_states.shape
+    _, K = hidden_states.shape
     N = w2.shape[-1]
-    if M % 128 != 0 or N % 128 != 0 or K % 128 != 0:
+    if N % 128 != 0 or K % 128 != 0: #M % 128 != 0 or 
         return False
 
     return (hidden_states.is_contiguous() and w1.is_contiguous()
@@ -711,7 +711,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
-    inv_perm: Optional[torch.Tensor] = None
+    #inv_perm: Optional[torch.Tensor] = None
 
     if use_fp8_w8a8 or use_dg:
         assert B_scale is not None
@@ -727,7 +727,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             assert triton.cdiv(B.shape[-1], block_k) == B_scale.shape[-1]
 
         if use_dg:
-            inv_perm = torch.argsort(sorted_token_ids)
+            #inv_perm = torch.argsort(sorted_token_ids)
             if not mul_routed_weight:
                 # Replicate activations
                 A = A.view(A.shape[0], -1,
@@ -737,6 +737,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                                        -1, A_scale.shape[1]).repeat(
                                            1, top_k,
                                            1).reshape(-1, A_scale.shape[1])
+
+                #print(f"A.shape = {A.shape}, max={sorted_token_ids.max()}, st={sorted_token_ids}")
 
                 # Permute according to sorted token ids.
                 A = A.view(dtype=torch.uint8)[sorted_token_ids,
@@ -1506,10 +1508,16 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     block_m = config['BLOCK_SIZE_M']
     assert not use_dg or block_m == 128
 
+    chunked_dg = False
     if use_dg:
+        #print("USE_DG")
+        #CHUNK_SIZE = 128
         if M % 128 != 0:
             CHUNK_SIZE = (M // 128) * 128
+            #print(f"DG_CHUNK {CHUNK_SIZE}")
+
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
+        chunked_dg = num_chunks > 1
 
         assert w1_scale is not None
         assert w2_scale is not None
@@ -1559,20 +1567,12 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_hidden_states = hidden_states[begin_chunk_idx:end_chunk_idx]
         tokens_in_chunk, _ = curr_hidden_states.shape
 
+        skip_dg = tokens_in_chunk % 128 != 0
+
         if tokens_in_chunk == 0:
             break
 
-        if tokens_in_chunk < CHUNK_SIZE and chunk > 0:
-            assert not use_dg  # for now
-            # Adjust the intermediate cache size and config for the last
-            # chunk. Note that in most cases we only have one chunk
-            # so the cache size and config are already set correctly and
-            # do not need to be adjusted.
-            intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
-            intermediate_cache2 = intermediate_cache2[:tokens_in_chunk *
-                                                      topk_ids.shape[1]]
-            intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
-            config = get_config_func(tokens_in_chunk)
+        #print(f"LOOP skip={skip_dg} tic={tokens_in_chunk}, chunk={chunk}")
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
@@ -1581,15 +1581,36 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             moe_align_block_size(curr_topk_ids, block_m, global_num_experts,
                                  expert_map))
 
-        if use_dg:
-            num_tokens = top_k_num * M
+        if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or chunked_dg:
+            if chunked_dg:
+                slice_size = ((sorted_token_ids.numel() + block_m - 1) // block_m) * block_m
+                slice_topk = 1
+            else:
+                slice_size = tokens_in_chunk
+                slice_topk = topk_ids.shape[1]
+
+            # Adjust the intermediate cache size and config for the last
+            # chunk. Note that in most cases we only have one chunk
+            # so the cache size and config are already set correctly and
+            # do not need to be adjusted.
+            intermediate_cache1 = intermediate_cache1[:slice_size]
+            intermediate_cache2 = intermediate_cache2[:slice_size * slice_topk]
+            intermediate_cache3 = intermediate_cache3[:slice_size]
+            config = get_config_func(slice_size)
+
+        inv_perm: Optional[torch.Tensor] = None
+
+        if use_dg and not skip_dg:
+            inv_perm = torch.argsort(sorted_token_ids)
+
+            max_token_id = top_k_num * tokens_in_chunk
             pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) *
                         block_m) - sorted_token_ids.numel()
             if pad_size > 0:
                 sorted_token_ids = torch.nn.functional.pad(
-                    sorted_token_ids, (0, pad_size), "constant", num_tokens)
+                    sorted_token_ids, (0, pad_size), "constant", max_token_id)
 
-            sorted_token_ids = sorted_token_ids.clamp(max=num_tokens - 1)
+            sorted_token_ids = sorted_token_ids.clamp(max=max_token_id - 1)
             expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
 
         invoke_fused_moe_kernel(curr_hidden_states,
@@ -1610,7 +1631,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_fp8_w8a8=use_fp8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
-                                use_dg=use_dg,
+                                use_dg=use_dg and not skip_dg,
                                 block_shape=block_shape)
 
         if activation == "silu":
@@ -1640,11 +1661,23 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_fp8_w8a8=use_fp8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16,
                                 use_int4_w4a16=use_int4_w4a16,
-                                use_dg=use_dg,
+                                use_dg=use_dg and not skip_dg,
                                 block_shape=block_shape)
 
-        ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+        if use_dg and not skip_dg:
+            assert inv_perm is not None
+            M = curr_topk_weights.shape[0]
+            out_C = intermediate_cache3[inv_perm, ...]
+            out_C = out_C[:(M * top_k_num), ...]
+            out_C = out_C.view(-1, top_k_num, w2.shape[1])
+            out_C.mul_(curr_topk_weights.view(M, -1, 1))
+            tmp_cache3 = out_C
+        else:
+            tmp_cache3 = intermediate_cache3.view(*intermediate_cache3.shape)
+
+        ops.moe_sum(tmp_cache3,
                     out_hidden_states[begin_chunk_idx:end_chunk_idx])
+
     return out_hidden_states
 
 
