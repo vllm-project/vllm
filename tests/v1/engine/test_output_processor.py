@@ -470,13 +470,6 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
     assert not output_processor.has_unfinished_requests()
 
 
-# @pytest.mark.parametrize("stop_token_type",
-#                          ["eos_token_id","stop_token_ids"])
-# @pytest.mark.parametrize("include_stop_str_in_output", [True, False])
-# @pytest.mark.parametrize("ignore_eos", [True, False])
-# @pytest.mark.parametrize("num_sample_logprobs",
-#                          [None,
-#                           NUM_SAMPLE_LOGPROBS_UNDER_TEST])
 @pytest.mark.parametrize(
     "include_stop_str_in_output,stop_token_type,ignore_eos,num_sample_logprobs",
     [(False, "stop_token_ids", False, None),
@@ -488,12 +481,53 @@ def test_logprobs_processor(request_output_kind: RequestOutputKind,
 def test_stop_token(include_stop_str_in_output: bool,
                     num_sample_logprobs: Optional[int], stop_token_type: str,
                     ignore_eos: bool, dummy_test_vectors):
+    """Test output processor EOS/stop token handling.
+
+    Send mock engine core request to mock engine core and pass core outputs
+    to output processor. Validate output processor tokens, text and
+    (if enabled) sample logprobs. Batch-size one.
+
+    The test emulates a scenario where a model outputs text tokens followed
+    by two identical control tokens:
+    <token><token>...<token><control><control>
+
+    If EOS is under test, the control tokens are EOS; otherwise, they are
+    some other token id.
+
+    Test behavior:
+
+    * If EOS is under test and `ignore_eos=True`, the detokenized string
+      should be <token><token>...<token><control><control> and the finish
+      reason should be "length" (i.e. no stop occurs)
+
+    * else, if `include_stop_str_in_output==True`, the detokenized
+      string should be <token><token>...<token><control> and the finish
+      reason should be "stop" (i.e. first control token causes stop
+      and is represented in output text)
+
+    * else, the detokenized string should be 
+      <token><token>...<token> and the finish reason should be "stop"
+      (i.e. first control token causes stop but is not represented
+      in output text.)
+
+    Note: some test details are tuned for meta-llama/Llama-3.2-1B,
+    another model should work only if the test is modified.
+
+    Args:
+        include_stop_str_in_output: stop token str appears in output text
+        num_sample_logprobs: number of sample logprobs (`None` for no logprobs)
+        stop_token_type: "eos_token_id" for EOS, "stop_token_ids" for stop token
+        ignore_eos: if True, EOS stops are disabled
+        dummy_test_vectors: dummy engine core outputs and other data structures
+    """
     model_id = dummy_test_vectors.tokenizer.name_or_path
     if model_id != 'meta-llama/Llama-3.2-1B':
         raise AssertionError("Test requires meta-llama/Llama-3.2-1B but "
                              f"{model_id} is in use.")
     do_logprobs = num_sample_logprobs is not None
+    # EOS under test; if False, stop_token_ids under test
     is_eos_test = stop_token_type == "eos_token_id"
+    # EOS under test but ignore_eos enabled
     is_eos_ignore_test = is_eos_test and ignore_eos
     eos_token_id = (dummy_test_vectors.tokenizer.eos_token_id
                     if is_eos_test else None)
@@ -501,6 +535,7 @@ def test_stop_token(include_stop_str_in_output: bool,
 
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
                                        log_stats=False)
+    # Dummy engine core outputs, with control tokens suffixed to test stops
     generation_string = dummy_test_vectors.generation_strings[0]
     generation_tokens = (dummy_test_vectors.generation_tokens[0] + 2 *
                          ([eos_token_id] if is_eos_test else stop_token_ids))
@@ -518,7 +553,7 @@ def test_stop_token(include_stop_str_in_output: bool,
         stop_token_ids=stop_token_ids,
         ignore_eos=ignore_eos)
 
-    # Make N requests.
+    # Make request.
     request_id = "request-0"
     request = EngineCoreRequest(
         request_id=request_id,
@@ -545,6 +580,7 @@ def test_stop_token(include_stop_str_in_output: bool,
     # Add request to the detokenizer.
     output_processor.add_request(request)
 
+    # Loop over engine core steps; run output processor
     gen_string = ""
     gen_tokens = []
     gen_logprobs = []
@@ -585,8 +621,8 @@ def test_stop_token(include_stop_str_in_output: bool,
         ref_str = generation_string
     assert gen_string == ref_str, (f"{gen_string=}, {ref_str=}")
 
-    # Validate number of sample logprobs
     if do_logprobs:
+        # Validate number of sample logprobs
         num_tokens = len(gen_tokens)
         num_logprobs = len(gen_logprobs)
         assert num_tokens == num_logprobs, (
