@@ -160,12 +160,14 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=hidden_states,
                 router_logits=router_logits) * self.routed_scaling_factor
         else:
+            # This is a special case to avoid FP16 overflow
             final_hidden_states = self.experts(hidden_states=hidden_states,
                                                router_logits=router_logits)
         if shared_output is not None:
             if hidden_states.dtype != torch.float16:
                 final_hidden_states = final_hidden_states + shared_output
             else:
+                # This is a special case to avoid FP16 overflow
                 final_hidden_states = final_hidden_states + shared_output \
                     * (1. / self.routed_scaling_factor)
         if self.tp_size > 1:
@@ -562,12 +564,14 @@ class DeepseekV2DecoderLayer(nn.Module):
         # Fully Connected
         if isinstance(self.mlp, DeepseekV2MoE) and \
             hidden_states.dtype == torch.float16:
-            hidden_states *= 1. / self.mlp.routed_scaling_factor
+            # This is a special case to avoid FP16 overflow
+            hidden_states *= 1. / self.routed_scaling_factor
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         if isinstance(self.mlp, DeepseekV2MLP) and \
             hidden_states.dtype == torch.float16:
+            # This is a special case to avoid FP16 overflow
             hidden_states *= 1. / self.routed_scaling_factor
             residual *= 1. / self.routed_scaling_factor
         return hidden_states, residual

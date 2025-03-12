@@ -121,6 +121,9 @@ class CpuPlatform(Platform):
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
+        # MLA attention is not supported
+        os.environ["VLLM_MLA_DISABLE"] = "1"
+
         # Intel OpenMP setting
         ld_prealod_str = os.getenv("LD_PRELOAD", "")
         if "libiomp5.so" in ld_prealod_str:

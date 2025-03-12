@@ -7,7 +7,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.platforms import current_platform
-from vllm.utils import is_navi
 
 logger = init_logger(__name__)
 
@@ -52,7 +51,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             # We prefer to use separate k_scale and v_scale if present
             k_scale = layer.k_scale.to("cpu").tolist()
             v_scale = layer.v_scale.to("cpu").tolist()
-            if current_platform.is_rocm() and not is_navi():
+            if current_platform.is_fp8_fnuz():
                 k_scale *= 2
                 v_scale *= 2
             layer.calculate_kv_scales = False
@@ -69,7 +68,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             scale_to_duplicate = max(layer.k_scale, layer.v_scale)
             k_scale = scale_to_duplicate.to("cpu").tolist()
             v_scale = scale_to_duplicate.to("cpu").tolist()
-            if current_platform.is_rocm() and not is_navi():
+            if current_platform.is_fp8_fnuz():
                 k_scale *= 2
                 v_scale *= 2
             layer.calculate_kv_scales = False
@@ -94,14 +93,14 @@ class BaseKVCacheMethod(QuantizeMethodBase):
 
         if layer.q_scale > 0.0:
             q_scale = layer.q_scale.to("cpu").tolist()
-            if current_platform.is_rocm() and not is_navi():
+            if current_platform.is_fp8_fnuz():
                 q_scale *= 2
             layer.calculate_kv_scales = False
         else:
             q_scale = 1.0
         if layer.prob_scale > 0.0:
             prob_scale = layer.prob_scale.to("cpu").tolist()
-            if current_platform.is_rocm() and not is_navi():
+            if current_platform.is_fp8_fnuz():
                 prob_scale *= 2
         else:
             prob_scale = 1.0
