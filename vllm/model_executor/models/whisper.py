@@ -49,10 +49,7 @@ class WhisperAudioInputs(TypedDict):
 
 class WhisperPositionalEmbedding(nn.Embedding):
 
-    def __init__(self,
-                 num_positions: int,
-                 embedding_dim: int,
-                 padding_idx: Optional[int] = None):
+    def __init__(self, num_positions: int, embedding_dim: int):
         super().__init__(num_positions, embedding_dim)
 
     def forward(self, position_ids):
@@ -359,7 +356,6 @@ class WhisperEncoder(nn.Module):
         config = vllm_config.model_config.hf_config
         embed_dim = config.d_model
         self.num_mel_bins = config.num_mel_bins
-        self.padding_idx = config.pad_token_id
         self.max_source_positions = config.max_source_positions
         self.embed_scale = (math.sqrt(embed_dim)
                             if config.scale_embedding else 1.0)
@@ -692,7 +688,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         )
         return decoder_outputs
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         # TODO: This method does not obey the interface for SupportsMultiModal.
         # Refactor this once encoder/decoder support is implemented in V1.
         audio_input = self._parse_and_validate_audio_input(**kwargs)
