@@ -286,9 +286,7 @@ class JAISModel(nn.Module):
 
 
 class JAISLMHeadModel(nn.Module, SupportsPP, SupportsQuant):
-    packed_modules_mapping = {
-        "c_attn": ["c_attn"]
-    }
+    packed_modules_mapping = {"c_attn": ["c_attn"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

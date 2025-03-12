@@ -245,7 +245,8 @@ class GPTBigCodeModel(nn.Module):
         return hidden_states
 
 
-class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
+class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
+                            SupportsQuant):
     packed_modules_mapping = {"c_attn": ["c_attn"]}
 
     # LoRA specific attributes

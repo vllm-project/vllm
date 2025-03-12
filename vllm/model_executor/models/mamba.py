@@ -20,7 +20,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (HasInnerState,
                                                    IsAttentionFree, SupportsPP,
-                                                   SupportsQuant, SupportsV0Only)
+                                                   SupportsQuant,
+                                                   SupportsV0Only)
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -157,7 +158,7 @@ class MambaModel(nn.Module):
 
 class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP,
                        SupportsQuant, SupportsV0Only):
-    # Mamba doesn't use the packed_modules_mapping pattern as it doesn't use 
+    # Mamba doesn't use the packed_modules_mapping pattern as it doesn't use
     # stacked parameters in the same way as attention-based models
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

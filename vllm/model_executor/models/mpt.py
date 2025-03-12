@@ -268,9 +268,7 @@ class MPTModel(nn.Module):
 
 
 class MPTForCausalLM(nn.Module, SupportsPP, SupportsQuant):
-    packed_modules_mapping = {
-        "Wqkv": ["q_proj", "k_proj", "v_proj"]
-    }
+    packed_modules_mapping = {"Wqkv": ["q_proj", "k_proj", "v_proj"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

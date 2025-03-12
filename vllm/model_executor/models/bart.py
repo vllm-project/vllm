@@ -764,9 +764,7 @@ class BartModel(nn.Module, SupportsQuant):
 
 
 class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"]
-    }
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
     base_model_prefix = "model"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
