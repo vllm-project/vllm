@@ -375,7 +375,7 @@ class Scheduler:
         grammar_bitmask = self.structured_output_manager.grammar_bitmask(
             self.requests,
             structured_output_request_ids,
-            len(self.running),
+            scheduled_spec_decode_tokens,
         )
         # Construct the scheduler output.
         new_reqs_data = [

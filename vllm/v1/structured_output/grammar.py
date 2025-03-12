@@ -87,7 +87,9 @@ class Grammar:
 
     def __copy__(self):
         return Grammar(
-            matcher=xgr.GrammarMatcher(self.ctx),
+            matcher=xgr.GrammarMatcher(
+                self.ctx,
+                max_rollback_tokens=self.matcher.max_rollback_tokens),
             vocab_size=self.vocab_size,
             ctx=self.ctx,
         )
