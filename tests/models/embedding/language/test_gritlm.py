@@ -15,8 +15,8 @@ import vllm.config
 from ....utils import RemoteOpenAIServer
 
 # GritLM embedding implementation is only supported by XFormers backend.
-pytest.mark.skipif(not importlib.util.find_spec("xformers"),
-                   reason="GritLM requires XFormers")
+pytestmark = pytest.mark.skipif(not importlib.util.find_spec("xformers"),
+                                reason="GritLM requires XFormers")
 
 MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
 MAX_MODEL_LEN = 4000
