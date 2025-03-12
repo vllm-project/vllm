@@ -110,6 +110,25 @@ class RocmPlatform(Platform):
         "fbgemm_fp8", "gguf", "quark", "ptpc_fp8"
     ]
 
+    def is_rocm_aiter_moe_enabled(self) -> bool:
+        return envs.VLLM_ROCM_USE_AITER_MOE
+
+    def is_rocm_aiter_paged_attn_enabled(self) -> bool:
+        return envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
+
+    def is_rocm_aiter_linear_enabled(self) -> bool:
+        return envs.VLLM_ROCM_USE_AITER_LINEAR
+
+    def is_rocm_aiter_rmsnorm_enabled(self) -> bool:
+        return envs.VLLM_ROCM_USE_AITER_RMSNORM
+
+    def is_rocm_aiter_fp8_block_scaled_moe_enabled(self) -> bool:
+        return self.is_rocm_aiter_moe_enabled(
+        ) and envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
+
+    def is_rocm_aiter_w8a8_block_gemm_enabled(self) -> bool:
+        return envs.VLLM_ROCM_USE_AITER_W8A8_BLOCK_GEMM
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1,
@@ -173,7 +192,7 @@ class RocmPlatform(Platform):
                 if envs.VLLM_USE_V1:
                     raise NotImplementedError(
                         "Multi-step scheduling is not supported (and not "
-                        "needed) on VLLM V1. Please launch without "
+                        "needed) on vLLM V1. Please launch without "
                         "--num-scheduler-steps.")
                 else:
                     parallel_config.worker_cls = \
@@ -181,7 +200,7 @@ class RocmPlatform(Platform):
             elif vllm_config.speculative_config:
                 if envs.VLLM_USE_V1:
                     raise NotImplementedError(
-                        "Speculative decoding is not yet supported on VLLM V1."
+                        "Speculative decoding is not yet supported on vLLM V1."
                     )
                 else:
                     parallel_config.worker_cls = \
@@ -232,21 +251,19 @@ class RocmPlatform(Platform):
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
 
-    def is_rocm_aiter_moe_enabled(self) -> bool:
-        return envs.VLLM_ROCM_USE_AITER_MOE
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
+        return any(gfx in gcn_arch for gfx in ['gfx94', 'gfx95', 'gfx12'])
 
-    def is_rocm_aiter_paged_attn_enabled(self) -> bool:
-        return envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
+    @classmethod
+    def is_fp8_fnuz(cls) -> bool:
+        # only device 0 is checked, this assumes MI300 platforms are homogeneous
+        return 'gfx94' in torch.cuda.get_device_properties(0).gcnArchName
 
-    def is_rocm_aiter_linear_enabled(self) -> bool:
-        return envs.VLLM_ROCM_USE_AITER_LINEAR
-
-    def is_rocm_aiter_rmsnorm_enabled(self) -> bool:
-        return envs.VLLM_ROCM_USE_AITER_RMSNORM
-
-    def is_rocm_aiter_fp8_block_scaled_moe_enabled(self) -> bool:
-        return self.is_rocm_aiter_moe_enabled(
-        ) and envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
-
-    def is_rocm_aiter_w8a8_block_gemm_enabled(self) -> bool:
-        return envs.VLLM_ROCM_USE_AITER_W8A8_BLOCK_GEMM
+    @classmethod
+    def fp8_dtype(cls) -> torch.dtype:
+        if cls.is_fp8_fnuz():
+            return torch.float8_e4m3fnuz
+        else:
+            return torch.float8_e4m3fn
