@@ -470,7 +470,6 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.vision_tower,
             pixel_values,
         )
-
         return self.multi_modal_projector(vision_outputs)
 
     def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:

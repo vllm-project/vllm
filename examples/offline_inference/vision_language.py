@@ -121,7 +121,6 @@ def run_fuyu(questions: list[str], modality: str):
 # Gemma 3
 def run_gemma3(questions: list[str], modality: str):
     assert modality == "image"
-
     model_name = "google/gemma-3-4b-it"
 
     llm = LLM(model=model_name,
