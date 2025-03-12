@@ -1335,6 +1335,15 @@ class GGUFModelLoader(BaseModelLoader):
                 model = _initialize_model(vllm_config=vllm_config)
             model.load_weights(
                 self._get_weights_iterator(local_model_path, gguf_weights_map))
+        # Currently only used by MLA.
+        # NOTE: This intentionally happens after other modules so we can easily
+        # decompress the weights for MLA.
+        for _, module in model.named_modules():
+            if isinstance(module, Attention) and \
+                hasattr(module, "process_weights_after_loading"):
+                # TODO(lucas): see if there is a way to unify the signatures
+                # of process_weights_after_loading
+                module.process_weights_after_loading(model_config.dtype)
         return model
 
 
