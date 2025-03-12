@@ -293,6 +293,10 @@ class CudaPlatformBase(Platform):
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
 
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        return cls.has_device_capability(89)
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
