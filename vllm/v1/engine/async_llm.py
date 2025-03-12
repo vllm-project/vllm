@@ -33,10 +33,7 @@ from vllm.v1.engine.output_processor import (OutputProcessor,
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (PROMETHEUS_LOGGING_LOGGER_NAME,
-                                     STANDARD_LOGGING_LOGGER_NAME,
-                                     LoggingStatLogger, PrometheusStatLogger,
-                                     StatLoggerBase)
+from vllm.v1.metrics.loggers import StatLoggerBase, setup_default_loggers
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
@@ -74,11 +71,9 @@ class AsyncLLM(EngineClient):
             if stat_loggers is not None:
                 self.stat_loggers = stat_loggers
             else:
-                if logger.isEnabledFor(logging.INFO):
-                    self.stat_loggers[STANDARD_LOGGING_LOGGER_NAME] = (
-                        LoggingStatLogger())
-                self.stat_loggers[PROMETHEUS_LOGGING_LOGGER_NAME] = (
-                    PrometheusStatLogger(vllm_config))
+                setup_default_loggers(vllm_config,
+                                      logger.isEnabledFor(logging.INFO),
+                                      self.stat_loggers)
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
