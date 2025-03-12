@@ -142,6 +142,7 @@ class TPUModelRunner:
                                             dtype=torch.int64,
                                             device="cpu")
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
+
         padded_max_num_blocks_per_req = _get_padded_number(
             self.max_num_blocks_per_req, NUM_KV_PAGES_PER_BLOCK)
         self.block_table_cpu = torch.zeros(
