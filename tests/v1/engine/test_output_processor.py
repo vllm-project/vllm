@@ -529,9 +529,10 @@ def test_stop_token(include_stop_str_in_output: bool,
     is_eos_test = stop_token_type == "eos_token_id"
     # EOS under test but ignore_eos enabled
     is_eos_ignore_test = is_eos_test and ignore_eos
-    eos_token_id = (dummy_test_vectors.tokenizer.eos_token_id
-                    if is_eos_test else None)
-    stop_token_ids = [128009] if not is_eos_test else None
+    eos_token_id = (
+        dummy_test_vectors.tokenizer.eos_token_id if is_eos_test else None
+    )  # '<|end_of_text|>'
+    stop_token_ids = [128009] if not is_eos_test else None  # '<|eot_id|>'
 
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
                                        log_stats=False)
