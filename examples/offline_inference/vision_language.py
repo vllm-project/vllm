@@ -118,14 +118,15 @@ def run_fuyu(questions: list[str], modality: str):
     return llm, prompts, stop_token_ids
 
 
-def run_gemma3(question: str, modality: str):
+# Gemma 3
+def run_gemma3(questions: list[str], modality: str):
     assert modality == "image"
-    prompt = f"<start_of_image> {question}"
+    prompts = [f"<start_of_image> {question}" for question in questions]
     model_name = "google/gemma-3-4b-it"
     llm = LLM(model=model_name,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
-    return llm, prompt, stop_token_ids
+    return llm, prompts, stop_token_ids
 
 
 # GLM-4v
