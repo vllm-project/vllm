@@ -263,12 +263,12 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
 - * `Gemma2ForCausalLM`
-  * Gemma2
+  * Gemma 2
   * `google/gemma-2-9b`, `google/gemma-2-27b`, etc.
   * ✅︎
   * ✅︎
 - * `Gemma3ForCausalLM`
-  * Gemma3
+  * Gemma 3
   * `google/gemma-3-1b-it`, etc.
   * ✅︎
   * ✅︎
@@ -509,7 +509,7 @@ you should explicitly specify the task type to ensure that the model is used in 
   *
   *
 - * `Gemma2Model`
-  * Gemma2-based
+  * Gemma 2-based
   * `BAAI/bge-multilingual-gemma2`, etc.
   *
   * ✅︎
@@ -758,7 +758,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
 - * `Gemma3ForConditionalGeneration`
-  * Gemma3
+  * Gemma 3
   * T + I<sup>+</sup>
   * `google/gemma-3-4b-it`, `google/gemma-3-27b-it`, etc.
   * ✅︎
