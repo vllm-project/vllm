@@ -1374,9 +1374,6 @@ class ParallelConfig:
     # Config for the tokenizer pool. If None, will use synchronous tokenization.
     tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
 
-    # ray cluster namespace.
-    ray_namespace: Optional[str] = None
-
     # Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
     ray_workers_use_nsight: bool = False
 

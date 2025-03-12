@@ -167,7 +167,6 @@ class EngineArgs:
     multi_step_stream_outputs: bool = True
     ray_workers_use_nsight: bool = False
     ray_placement_group: Optional[Any] = None
-    ray_namespace: Optional[str] = None
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
     model_loader_extra_config: Optional[dict] = None
@@ -1253,7 +1252,6 @@ class EngineArgs:
                 self.tokenizer_pool_type,
                 self.tokenizer_pool_extra_config,
             ),
-            ray_namespace=self.ray_namespace,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             placement_group=self.ray_placement_group,
             distributed_executor_backend=self.distributed_executor_backend,

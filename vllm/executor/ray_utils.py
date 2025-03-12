@@ -297,9 +297,7 @@ def initialize_ray_cluster(
                      ignore_reinit_error=True,
                      num_gpus=parallel_config.world_size)
     else:
-        ray.init(address=ray_address,
-                 ignore_reinit_error=True,
-                 namespace=parallel_config.ray_namespace)
+        ray.init(address=ray_address, ignore_reinit_error=True)
 
     if parallel_config.placement_group:
         # Placement group is already set.
