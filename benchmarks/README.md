@@ -74,7 +74,7 @@ MODEL_NAME="NousResearch/Hermes-3-Llama-3.1-8B"
 NUM_PROMPTS=10
 BACKEND="openai-chat"
 DATASET_NAME="sharegpt"
-DATASET_PATH="/home/jovyan/data/vllm_benchmark_datasets/ShareGPT_V3_unfiltered_cleaned_split.json"
+DATASET_PATH="<your data path>/ShareGPT_V3_unfiltered_cleaned_split.json"
 python3 benchmarks/benchmark_serving.py --backend ${BACKEND} --model ${MODEL_NAME} --endpoint /v1/chat/completions --dataset-name ${DATASET_NAME} --dataset-path ${DATASET_PATH} --num-prompts ${NUM_PROMPTS}
 ```
 
