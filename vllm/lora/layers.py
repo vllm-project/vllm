@@ -242,12 +242,12 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         embeddings_indices = torch.narrow(
             self.punica_wrapper._embeddings_indices, 1, 0, x.size(0))
 
-        indices = embeddings_indices[1].view_as(x)
+        indices = embeddings_indices[1]
         full_lora_a_embeddings = F.embedding(
             x + indices,
             self.lora_a_stacked_2d,
         )
-        indices = embeddings_indices[0].view_as(x)
+        indices = embeddings_indices[0]
         full_output = self.base_layer.forward(x +
                                               (indices * added_tokens_mask))
 
