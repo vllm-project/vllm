@@ -3108,6 +3108,12 @@ class CompilationConfig(BaseModel):
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
 
+        # TODO(zou3519): I promise we'll fix this asap in PyTorch core,
+        # so you can just guard on 2.6
+        if torch.__version__.startswith("2.6"):
+            self.inductor_compile_config[
+                'enable_auto_functionalized_v2'] = False
+
         if self.splitting_ops is None:
             if envs.VLLM_USE_V1:
                 # v1 must split the graph on attention ops
