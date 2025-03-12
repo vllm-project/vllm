@@ -10,7 +10,6 @@
 
 #define MOE_DISPATCH_CASE(enum_type, ...)                  \
   case enum_type: {                                        \
-    std::cout << "switch:" << enum_type << std::endl;      \
     using scalar_t = ScalarType2CudaType<enum_type>::type; \
     return __VA_ARGS__();                                  \
   }

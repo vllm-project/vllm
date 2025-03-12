@@ -4,14 +4,16 @@
 #include "permute_unpermute_kernels/moe_permute_unpermute_kernel.h"
 #include "core/registration.h"
 
-void moe_permute(torch::Tensor& input,                  // [n_token, hidden]
-                 torch::Tensor& topk_weights,           //[n_token, topk]
-                 torch::Tensor& topk_ids,               // [n_token, topk]
-                 torch::Tensor& token_expert_indicies,  // [n_token, topk]
-                 int64_t n_expert, int64_t topk,
-                 torch::Tensor& permuted_input,  // [topk * n_token, hidden]
-                 torch::Tensor& expert_first_token_offset,    // [expert + 1]
-                 torch::Tensor& src_row_id2dst_row_id_map) {  // [n_token, topk]
+void moe_permute(
+    torch::Tensor& input,                            // [n_token, hidden]
+    torch::Tensor& topk_weights,                     //[n_token, topk]
+    torch::Tensor& topk_ids,                         // [n_token, topk]
+    torch::Tensor& token_expert_indicies,            // [n_token, topk]
+    const std::optional<torch::Tensor>& expert_map,  // [n_expert]
+    int64_t n_expert, int64_t n_local_expert, int64_t topk,
+    torch::Tensor& permuted_input,               // [topk * n_token, hidden]
+    torch::Tensor& expert_first_token_offset,    // [n_local_expert + 1]
+    torch::Tensor& src_row_id2dst_row_id_map) {  // [n_token, topk]
 
   TORCH_CHECK(topk_weights.scalar_type() == at::ScalarType::Float,
               "topk_weights must be float32");
@@ -23,8 +25,8 @@ void moe_permute(torch::Tensor& input,                  // [n_token, hidden]
               "token_expert_indicies must be int32");
   TORCH_CHECK(src_row_id2dst_row_id_map.scalar_type() == at::ScalarType::Int,
               "src_row_id2dst_row_id_map must be int32");
-  TORCH_CHECK(expert_first_token_offset.size(0) == n_expert + 1,
-              "expert_first_token_offset shape != n_expert+1")
+  TORCH_CHECK(expert_first_token_offset.size(0) == n_local_expert + 1,
+              "expert_first_token_offset shape != n_local_expert+1")
   TORCH_CHECK(
       src_row_id2dst_row_id_map.sizes() == token_expert_indicies.sizes(),
       "token_expert_indicies shape must be same as src_row_id2dst_row_id_map");
@@ -40,12 +42,24 @@ void moe_permute(torch::Tensor& input,                  // [n_token, hidden]
   auto dst_row_id2src_row_id_map = torch::empty_like(src_row_id2dst_row_id_map);
 
   CubKeyValueSorter sorter{};
-  // sort topk expert id and scan expert id get expert_first_token_offset
+  int64_t* valid_num_ptr = nullptr;
+  // pre-process kernel for expert-parallelism:
+  // no local expert id plus "n_expert" offset for priority to local expert
+  // map lacal expert id [n, .., n+n_local_expert-1] to [0, n_local_expert -1]
+  if (expert_map.has_value()) {
+    int* expert_map_ptr = reinterpret_cast<int*>(expert_map.value().data_ptr());
+    valid_num_ptr =
+        get_ptr<int64_t>(expert_first_token_offset) + n_local_expert;
+    preprocess_topk_id_launcher(get_ptr<int>(topk_ids), n_token * topk,
+                                expert_map_ptr, n_expert, stream);
+  }
+  // std::cout << "tops id " << topk_ids << std::endl;
+  // expert sort topk expert id and scan expert id get expert_first_token_offset
   sortAndScanExpert(get_ptr<int>(topk_ids), get_ptr<int>(token_expert_indicies),
                     get_ptr<int>(permuted_experts_id),
                     get_ptr<int>(dst_row_id2src_row_id_map),
                     get_ptr<int64_t>(expert_first_token_offset), n_token,
-                    n_expert, n_expert, topk, sorter,
+                    n_expert, n_local_expert, topk, sorter,
                     get_ptr<int>(sort_workspace), stream);
   // std::cout << "permuted_experts_id" << permuted_experts_id << std::endl;
   // std::cout << "dst_row_id2src_row_id_map" << dst_row_id2src_row_id_map
@@ -56,8 +70,8 @@ void moe_permute(torch::Tensor& input,                  // [n_token, hidden]
         get_ptr<scalar_t>(input), get_ptr<scalar_t>(permuted_input),
         get_ptr<float>(topk_weights), nullptr,
         get_ptr<int>(dst_row_id2src_row_id_map),
-        get_ptr<int>(src_row_id2dst_row_id_map), n_token, nullptr, n_hidden,
-        topk, stream);
+        get_ptr<int>(src_row_id2dst_row_id_map), n_token, valid_num_ptr,
+        n_hidden, topk, stream);
   });
 }
 
