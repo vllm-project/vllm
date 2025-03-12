@@ -460,8 +460,29 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         batch = X.size(0)
         return torch.empty((batch, row), dtype=X.dtype, device=W.device)
 
+    @register_fake("_C::ggml_moe_a8")
+    def _ggml_moe_a8_fake(
+        X: torch.Tensor,
+        W: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        quant_type: int,
+        row: torch.SymInt,
+        top_k: torch.SymInt,
+        tokens: torch.SymInt,
+    ) -> torch.Tensor:
+        tokens = X.size(0)
+        return torch.empty((tokens * top_k, row),
+                           dtype=torch.float16,
+                           device=W.device)
+
 
 # cutlass
+def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
+
+
 def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
                           block_scale_a: torch.Tensor,
                           block_scale_b: torch.Tensor, alpha: torch.Tensor,
@@ -490,16 +511,16 @@ def cutlass_scaled_mm(a: torch.Tensor,
                       out_dtype: torch.dtype,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     """
-    `cutlass_scaled_mm` implements a fused version of 
+    `cutlass_scaled_mm` implements a fused version of
         `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
-    where scale_a * a and scale_b * b are implemented using numpy-style 
-    broadcasting. 
-    
-    In order to support blockwise scaling like found in DeepSeek V3 we also 
-    support extended "group" broadcast rules. We extend the numpy-style 
-    broadcasting rules with the following rule: 
-        "if the extent of a dimension in the source shape is between 1 and 
-        corresponding extent in the target shape we repeat each element along 
+    where scale_a * a and scale_b * b are implemented using numpy-style
+    broadcasting.
+
+    In order to support blockwise scaling like found in DeepSeek V3 we also
+    support extended "group" broadcast rules. We extend the numpy-style
+    broadcasting rules with the following rule:
+        "if the extent of a dimension in the source shape is between 1 and
+        corresponding extent in the target shape we repeat each element along
         that dimension  src_shape[dim] // target_shape[dim] times consecutively"
     example if we have:
           a = [[1, 2], and target_shape = (2, 4)
@@ -576,7 +597,7 @@ def cutlass_sparse_compress(a: torch.Tensor) \
     with Cutlass sparse kernels.
 
     Args:
-        a (torch.Tensor): 
+        a (torch.Tensor):
             The input tensor to be compressed. Must have one of the following data types:
             - `torch.int8`
             - `torch.float8_e4m3fn`
@@ -584,7 +605,7 @@ def cutlass_sparse_compress(a: torch.Tensor) \
             - `torch.float16`
 
     Returns:
-        tuple[torch.Tensor, torch.Tensor]: 
+        tuple[torch.Tensor, torch.Tensor]:
             A tuple containing:
             - `a_nzs` (torch.Tensor): A tensor containing non-zero elements of `a`.
             - `a_meta` (torch.Tensor): A tensor containing metadata for the sparse representation.
@@ -887,9 +908,8 @@ def scaled_fp8_quant(
     # This code assumes batch_dim and num_tokens are flattened
     assert (input.ndim == 2)
     shape: Union[tuple[int, int], torch.Size] = input.shape
-    # For rocm, the output fp8 dtype is torch.float_e3m3fnuz
-    out_dtype: torch.dtype = torch.float8_e4m3fnuz \
-            if current_platform.is_rocm() else torch.float8_e4m3fn
+    # For ROCm on MI300, the output fp8 dtype is torch.float_e3m3fnuz
+    out_dtype: torch.dtype = current_platform.fp8_dtype()
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
     output = torch.empty(shape, device=input.device, dtype=out_dtype)
@@ -920,7 +940,7 @@ def allspark_repack_weight(
         has_zp: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Rearrange qweight, scale, and zero_point(if asymmetric) to n32k16 format 
+    Rearrange qweight, scale, and zero_point(if asymmetric) to n32k16 format
     for Ampere W8A16 Fused Gemm kernel
 
     Args:
@@ -929,10 +949,10 @@ def allspark_repack_weight(
         zero_point: fp16/bf16 weight zero_point tensor, 1 x n format.
             Must be provided for asymmetric quantization.
         has_zp: if use symmetric quantization, has_zp = False.
-            if use asymmetric quantization, has_zp = True.  
-    
+            if use asymmetric quantization, has_zp = True.
+
     Returns:
-        tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : 
+        tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] :
             rearranged weight, scale, and optionally zero_point.
     """
     K = qweight.shape[0]
@@ -1045,6 +1065,26 @@ def ggml_mul_mat_a8(
     row: int,
 ) -> torch.Tensor:
     return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
+
+
+def ggml_moe_a8(
+    X: torch.Tensor,
+    W: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    quant_type: int,
+    row: int,
+    top_k: int,
+    tokens: int,
+) -> torch.Tensor:
+    return torch.ops._C.ggml_moe_a8(X, W, sorted_token_ids, expert_ids,
+                                    num_tokens_post_padded, quant_type, row,
+                                    top_k, tokens)
+
+
+def ggml_moe_get_block_size(quant_type: int) -> int:
+    return torch.ops._C.ggml_moe_get_block_size(quant_type)
 
 
 # mamba
