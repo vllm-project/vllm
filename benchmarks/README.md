@@ -117,7 +117,7 @@ python3 benchmarks/benchmark_throughput.py \
   --num-prompts "${NUM_PROMPTS}"
   ```
 
-With LoRA
+### Benchmark with LoRA Adapters
 
 ``` bash
 MODEL_NAME="meta-llama/Llama-2-7b-hf"
