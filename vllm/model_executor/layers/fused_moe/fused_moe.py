@@ -1584,6 +1584,7 @@ def cutlass_moe(
     c_strides1: torch.Tensor,
     ab_strides2: torch.Tensor,
     c_strides2: torch.Tensor,
+    intermediate_scale: Optional[torch.Tensor] = None,
 ):
     topk = topk_ids.shape[1]
     per_act_token = a_scale.numel() != 1
@@ -1620,7 +1621,9 @@ def cutlass_moe(
     torch.ops._C.silu_and_mul(intermediate, c1)
 
     intemediate_q, intermediate_scales = ops.scaled_fp8_quant(
-        intermediate, use_per_token_if_dynamic=per_act_token)
+        intermediate,
+        intermediate_scale,
+        use_per_token_if_dynamic=per_act_token)
 
     torch.ops._C.cutlass_grouped_mm(c2, intemediate_q, w2_q,
                                     intermediate_scales, w2_scale,

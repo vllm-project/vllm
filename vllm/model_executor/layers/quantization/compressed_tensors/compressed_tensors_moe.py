@@ -374,33 +374,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w2_input_scale = torch.nn.Parameter(
                 layer.w2_input_scale.max(), requires_grad=False)
 
-        # If rocm, normalize the weights and scales to e4m3fnuz
-        if current_platform.is_rocm():
-            # Normalize the weights and scales
-            w13_weight, w13_weight_scale, w13_input_scale = \
-                normalize_e4m3fn_to_e4m3fnuz(
-                    layer.w13_weight, layer.w13_weight_scale,
-                    layer.w13_input_scale)
-            w2_weight, w2_weight_scale, w2_input_scale = \
-                normalize_e4m3fn_to_e4m3fnuz(
-                    layer.w2_weight, layer.w2_weight_scale,
-                    layer.w2_input_scale)
-            # Reset the parameter
-            layer.w13_weight = torch.nn.Parameter(w13_weight,
-                                                  requires_grad=False)
-            layer.w13_weight_scale = torch.nn.Parameter(w13_weight_scale,
-                                                        requires_grad=False)
-            if w13_input_scale is not None:
-                layer.w13_input_scale = torch.nn.Parameter(w13_input_scale,
-                                                           requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(w2_weight,
-                                                 requires_grad=False)
-            layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale,
-                                                       requires_grad=False)
-            if w2_input_scale is not None:
-                layer.w2_input_scale = torch.nn.Parameter(w2_input_scale,
-                                                          requires_grad=False)
-
         # Fp8 moe kernel needs single weight scale for w13 per expert.
         # We take the max then dequant and requant each expert.
         assert layer.w13_weight_scale is not None
@@ -438,42 +411,83 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         activation: str = "silu",
     ) -> torch.Tensor:
 
-        assert global_num_experts == layer.w13_weight.shape[0]
-        assert expert_map is None
-        assert activation == "silu"
+        if (global_num_experts == layer.w13_weight.shape[0]
+                and expert_map is None and activation == "silu"):
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias)
 
-        from vllm.model_executor.layers.fused_moe import cutlass_moe
-        x_q, x_scale = ops.scaled_fp8_quant(x, use_per_token_if_dynamic=False)
-        return cutlass_moe(
-            x_q,
-            x_scale,
-            layer.w13_weight.transpose(1, 2),
-            layer.w2_weight.transpose(1, 2),
-            layer.w13_weight_scale,
-            layer.w2_weight_scale,
-            topk_weights,
-            topk_ids,
-            x.shape[0],
-            layer.w2_weight.shape[2],
-            x.shape[1],
-            layer.w13_weight.shape[0],
-            self.ab_strides1,
-            self.c_strides1,
-            self.ab_strides2,
-            self.c_strides2,
-        ).to(x.dtype)
+            from vllm.model_executor.layers.fused_moe import cutlass_moe
+            x_q, x_scale = ops.scaled_fp8_quant(x,
+                                                layer.w13_input_scale,
+                                                use_per_token_if_dynamic=False)
+            return cutlass_moe(
+                x_q,
+                x_scale,
+                layer.w13_weight.transpose(1, 2),
+                layer.w2_weight.transpose(1, 2),
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                topk_weights,
+                topk_ids,
+                x.shape[0],
+                layer.w2_weight.shape[2],
+                x.shape[1],
+                layer.w13_weight.shape[0],
+                self.ab_strides1,
+                self.c_strides1,
+                self.ab_strides2,
+                self.c_strides2,
+                intermediate_scale=layer.w2_input_scale,
+            ).to(x.dtype)
+
+        else:
+            if expert_map is not None:
+                logger.info_once("Expert map support has not been implemented "
+                                 "in CUTLASS MoE kernel yet. Falling back to "
+                                 "Triton kernel.")
+            elif activation != "silu":
+                logger.info_once(
+                    "CUTLASS MoE kernel currently does not "
+                    "support %s. Falling back to Triton kernel.", activation)
+
+            from vllm.model_executor.layers.fused_moe import fused_experts
+
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias)
+
+            return fused_experts(x,
+                                 layer.w13_weight,
+                                 layer.w2_weight,
+                                 topk_weights=topk_weights,
+                                 topk_ids=topk_ids,
+                                 inplace=True,
+                                 activation=activation,
+                                 use_fp8_w8a8=True,
+                                 global_num_experts=global_num_experts,
+                                 expert_map=expert_map,
+                                 w1_scale=layer.w13_weight_scale,
+                                 w2_scale=layer.w2_weight_scale,
+                                 a1_scale=layer.w13_input_scale,
+                                 a2_scale=layer.w2_input_scale)
 
 
 class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
