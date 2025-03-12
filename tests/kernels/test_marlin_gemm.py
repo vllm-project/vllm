@@ -266,7 +266,7 @@ def test_gptq_marlin_gemm(
 
     check_for_input(a_input=rand_data((size_m, size_k)))
     # check for non-contiguous input
-    check_for_input(a_input=rand_data((size_m, size_k + 7))[:, 3:size_k + 3])
+    check_for_input(a_input=rand_data((size_m, size_k + 8))[:, 4:size_k + 4])
 
 
 # TODO: find better way to test this?
