@@ -434,7 +434,7 @@ class BaseInternVLProcessor(ABC):
         videos: list[npt.NDArray],
     ) -> list[torch.Tensor]:
         videos_pil = [
-            [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), mode="RGB") for frame in frames.astype(np.float32)]
+            [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), mode="RGB") for frame in frames.astype(np.uint8)]
             for frames in videos
         ]
         return [
@@ -724,6 +724,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         return max(max_frames_per_video, 1)
 
     def get_max_video_tokens(self, seq_len: int) -> int:
+        # FIXME(Isotr0py): Fix the hardcoded debug value
         return self.get_num_video_tokens(
             num_frames=self.get_num_frames_with_most_features(seq_len),
         ) + 160 - 1
@@ -1197,7 +1198,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                 video_input = modalities["videos"]
                 video_embeddings = self._process_video_input(video_input)
                 multimodal_embeddings.append(video_embeddings)
-        print(multimodal_embeddings, multimodal_embeddings[0].shape)
         return multimodal_embeddings
 
     def get_input_embeddings(
