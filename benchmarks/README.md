@@ -1,5 +1,9 @@
 # Benchmarking vLLM
 
+This README guides you through running benchmark tests with the extensive
+datasets supported on vLLM. It’s a living document, updated as new features and datasets
+become available.
+
 ## Dataset Overview
 
 <table style="width:100%; border-collapse: collapse;">
