@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer ROCm GPUs."""
+import itertools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
@@ -358,16 +359,11 @@ def _get_seq_len_block_table_args(
     * Causal masking flag
     '''
 
-    partial_prefix_sum = 0
-
     if attn_type == AttentionType.ENCODER:
         assert attn_metadata.encoder_seq_lens is not None
         assert attn_metadata.encoder_seq_lens_tensor is not None
         query_seq_start_loc = torch.tensor(
-            [0] + [
-                partial_prefix_sum := partial_prefix_sum + i
-                for i in attn_metadata.encoder_seq_lens
-            ],
+            list(itertools.accumulate([0] + attn_metadata.encoder_seq_lens)),
             device=attn_metadata.encoder_seq_lens_tensor.device,
             dtype=attn_metadata.encoder_seq_lens_tensor.dtype)
         causal_mask = False
@@ -382,10 +378,7 @@ def _get_seq_len_block_table_args(
         assert attn_metadata.seq_lens is not None
         assert attn_metadata.seq_lens_tensor is not None
         query_seq_start_loc = torch.tensor(
-            [0] + [
-                partial_prefix_sum := partial_prefix_sum + i
-                for i in attn_metadata.seq_lens
-            ],
+            list(itertools.accumulate([0] + attn_metadata.seq_lens)),
             device=attn_metadata.seq_lens_tensor.device,
             dtype=attn_metadata.seq_lens_tensor.dtype)
         max_seq_len = attn_metadata.max_prefill_seq_len
@@ -401,10 +394,7 @@ def _get_seq_len_block_table_args(
         assert attn_metadata.seq_lens is not None
         assert attn_metadata.seq_lens_tensor is not None
         query_seq_start_loc = torch.tensor(
-            [0] + [
-                partial_prefix_sum := partial_prefix_sum + i
-                for i in attn_metadata.seq_lens
-            ],
+            list(itertools.accumulate([0] + attn_metadata.seq_lens)),
             device=attn_metadata.seq_lens_tensor.device,
             dtype=attn_metadata.seq_lens_tensor.dtype)
         max_seq_len = attn_metadata.max_prefill_seq_len
@@ -416,21 +406,14 @@ def _get_seq_len_block_table_args(
         assert attn_metadata.seq_lens is not None
         assert attn_metadata.encoder_seq_lens_tensor is not None
         query_start_loc = torch.tensor(
-            [0] + [
-                partial_prefix_sum := partial_prefix_sum + i
-                for i in attn_metadata.seq_lens
-            ],
+            list(itertools.accumulate([0] + attn_metadata.seq_lens)),
             device=attn_metadata.encoder_seq_lens_tensor.device,
             dtype=attn_metadata.encoder_seq_lens_tensor.dtype)
 
-        partial_prefix_sum = 0
         assert attn_metadata.encoder_seq_lens is not None
         assert attn_metadata.seq_lens_tensor is not None
         key_seq_start_loc = torch.tensor(
-            [0] + [
-                partial_prefix_sum := partial_prefix_sum + i
-                for i in attn_metadata.encoder_seq_lens
-            ],
+            list(itertools.accumulate([0] + attn_metadata.encoder_seq_lens)),
             device=attn_metadata.seq_lens_tensor.device,
             dtype=attn_metadata.seq_lens_tensor.dtype)
         causal_mask = False

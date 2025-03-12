@@ -54,9 +54,6 @@ def test_models(
     if model == "Alibaba-NLP/gte-Qwen2-1.5B-instruct":
         vllm_extra_kwargs["hf_overrides"] = {"is_causal": True}
 
-    if model == "Alibaba-NLP/gte-Qwen2-7B-instruct":
-        vllm_extra_kwargs["hf_overrides"] = {"is_causal": False}
-
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
     # sentence_transformers will strip the input texts, see:
