@@ -700,7 +700,7 @@ class Scheduler:
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
 
-    def has_requests(self):
+    def has_requests(self) -> bool:
         """Returns True if there are unfinished requests, or finished requests
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
