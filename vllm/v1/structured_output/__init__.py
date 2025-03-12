@@ -38,7 +38,11 @@ class StructuredOutputManager:
         tokenizer_group.ping()
         self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.vllm_config = vllm_config
-        self.speculative_config = vllm_config.speculative_config
+
+        self.num_speculative_tokens = 0
+        if vllm_config.speculative_config is not None:
+            self.num_speculative_tokens = \
+                vllm_config.speculative_config.num_speculative_tokens
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         tokenizer_info = xgr.TokenizerInfo.from_huggingface(
@@ -121,9 +125,7 @@ class StructuredOutputManager:
 
         return Grammar(
             matcher=xgr.GrammarMatcher(
-                ctx,
-                max_rollback_tokens=self.speculative_config.
-                num_speculative_tokens),
+                ctx, max_rollback_tokens=self.num_speculative_tokens),
             vocab_size=self.vocab_size,
             ctx=ctx,
         )
@@ -141,8 +143,7 @@ class StructuredOutputManager:
         if self._grammar_bitmask is None:
             self._grammar_bitmask = xgr.allocate_token_bitmask(
                 self.vllm_config.scheduler_config.max_num_seqs *
-                (1 + self.speculative_config.num_speculative_tokens),
-                self.vocab_size)
+                (1 + self.num_speculative_tokens), self.vocab_size)
 
         # Generate a batched bitmask for all structured output requests.
         # When speculative decoding is enabled, we need to include multiple
