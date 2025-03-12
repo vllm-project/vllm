@@ -137,8 +137,8 @@ class LLMEngine:
     def abort_request(self, request_ids: list[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
+        request_ids = self.output_processor.abort_requests(request_ids)
         self.engine_core.abort_requests(request_ids)
-        self.output_processor.abort_requests(request_ids)
 
     def add_request(
         self,
