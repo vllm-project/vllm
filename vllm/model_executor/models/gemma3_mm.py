@@ -11,8 +11,8 @@ try:
 except ImportError as e:
     raise ImportError(
         "To use `Gemma3ForConditionalGeneration`, you have to install "
-        "Hugging Face Transformers library from source via "
-        "`pip install git+https://github.com/huggingface/transformers`."
+        "Hugging Face Transformers library from source via `pip install "
+        "git+https://github.com/huggingface/transformers@v4.49.0-Gemma-3`."
     ) from e
 
 from vllm.config import VllmConfig
