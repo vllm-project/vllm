@@ -2522,7 +2522,7 @@ torch::Tensor moe_wna16_marlin_gemm(
       torch::TensorOptions().dtype(at::kFloat).device(a.device());
   if (use_fp32_reduce && !use_atomic_add) {
     const long max_c_tmp_size =
-        min(((long) size_n * sorted_token_ids.size(0)),
+        min(((long)size_n * sorted_token_ids.size(0)),
             (long)(sms * moe_block_size * MARLIN_NAMESPACE_NAME::max_thread_n));
     c_tmp = torch::empty({max_c_tmp_size}, options_fp32);
   } else {
@@ -2681,3 +2681,7 @@ torch::Tensor moe_wna16_marlin_gemm(
 }
 
 #endif
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("moe_wna16_marlin_gemm", &moe_wna16_marlin_gemm);
+}
