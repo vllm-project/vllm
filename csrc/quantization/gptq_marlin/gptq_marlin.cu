@@ -2304,7 +2304,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   TORCH_CHECK(a.stride(1) == 1, "A.stride(1) is not 1");
   // We use int4 (16 bytes) to load A, so A must aligned to 16 bytes
   TORCH_CHECK(a.stride(0) % 8 == 0, "A.stride(0) must divisable by 8");
-  TORCH_CHECK(((uint64_t) a.data_ptr()) % 16 == 0, "A must aligned to 16 bytes");
+  TORCH_CHECK(((uint64_t)a.data_ptr()) % 16 == 0, "A must aligned to 16 bytes");
 
   TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
   TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
