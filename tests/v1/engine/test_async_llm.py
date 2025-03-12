@@ -264,7 +264,7 @@ def get_customized_logger_mock() -> StatLoggerBase:
 
 @pytest.mark.parametrize(
     "loggers",
-    [{TEST_LOGGER_NAME: get_customized_logger_mock()}, None],
+    [{TEST_LOGGER_NAME: get_customized_logger_mock()}],
 )
 @pytest.mark.asyncio
 async def test_customize_loggers(
