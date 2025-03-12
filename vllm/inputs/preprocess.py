@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Mapping
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Any, Optional, Union, cast
 
 from typing_extensions import assert_never
 
@@ -184,8 +184,8 @@ class InputPreprocessor:
         prompt: str,
         request_id: str,
         lora_request: Optional[LoRARequest],
-        tokenization_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> List[int]:
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+    ) -> list[int]:
         """
         Apply the model's tokenizer to a text prompt, returning the
         corresponding token IDs.
@@ -312,7 +312,7 @@ class InputPreprocessor:
         self,
         prompt: SingletonPrompt,
         request_id: str,
-        tokenization_kwargs: Optional[Dict[str, Any]] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> SingletonInputs:
@@ -705,7 +705,7 @@ class InputPreprocessor:
         self,
         prompt: SingletonPrompt,
         request_id: str,
-        tokenization_kwargs: Optional[Dict[str, Any]] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
@@ -730,6 +730,7 @@ class InputPreprocessor:
         prompt_comps = self._prompt_to_llm_inputs(
             prompt,
             request_id=request_id,
+            tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
         )
 
@@ -762,7 +763,7 @@ class InputPreprocessor:
         self,
         prompt: PromptType,
         request_id: str,
-        tokenization_kwargs: Optional[Dict[str, Any]] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
