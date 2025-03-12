@@ -59,6 +59,10 @@ llm.apply_model(lambda model: print(type(model)))
 
 If it is `TransformersModel` then it means it's based on Transformers!
 
+:::{tip}
+You can force the use of `TransformersModel` by setting `model_impl="transformers"` for <project:#offline-inference> or `--model-impl transformers` for the <project:#openai-compatible-server>.
+:::
+
 :::{note}
 vLLM may not fully optimise the Transformers implementation so you may see degraded performance if comparing a native model to a Transformers model in vLLM.
 :::
@@ -537,14 +541,11 @@ You should manually set mean pooling by passing `--override-pooler-config '{"poo
 :::
 
 :::{note}
-Unlike base Qwen2, `Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
-You can set `--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
+The HF implementation of `Alibaba-NLP/gte-Qwen2-1.5B-instruct` is hardcoded to use causal attention despite what is shown in `config.json`. To compare vLLM vs HF results,
+you should set `--hf-overrides '{"is_causal": true}'` in vLLM so that the two implementations are consistent with each other.
 
-On the other hand, its 1.5B variant (`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
-despite being described otherwise on its model card.
-
-Regardless of the variant, you need to enable `--trust-remote-code` for the correct tokenizer to be
-loaded. See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
+For both the 1.5B and 7B variants, you also need to enable `--trust-remote-code` for the correct tokenizer to be loaded.
+See [relevant issue on HF Transformers](https://github.com/huggingface/transformers/issues/34882).
 :::
 
 If your model is not in the above list, we will try to automatically convert the model using
@@ -843,7 +844,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
 - * `PaliGemmaForConditionalGeneration`
-  * PaliGemma (see note), PaliGemma 2 (see note)
+  * PaliGemma ⚠️, PaliGemma 2 ⚠️
   * T + I<sup>E</sup>
   * `google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, `google/paligemma2-3b-ft-docci-448`, etc.
   *
@@ -913,6 +914,12 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
+:::{warning}
+vLLM does not currently support PrefixLM attention mask, so our PaliGemma implementation uses regular causal attention, which causes the model output to be unstable.
+
+We may deprecate this model series in a future release.
+:::
+
 :::{note}
 `h2oai/h2ovl-mississippi-2b` will be available in V1 once we support backends other than FlashAttention.
 :::
@@ -924,10 +931,6 @@ To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"
 :::{note}
 The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
 For more details, please see: <gh-pr:4087#issuecomment-2250397630>
-:::
-
-:::{note}
-Currently the PaliGemma model series is implemented without PrefixLM attention mask. This model series may be deprecated in a future release.
 :::
 
 :::{note}
