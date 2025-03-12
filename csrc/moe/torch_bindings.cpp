@@ -54,7 +54,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       " -> Tensor");
   // conditionally compiled so impl registration is in source file
 #endif
-
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
