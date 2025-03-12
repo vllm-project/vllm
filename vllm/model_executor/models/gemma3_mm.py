@@ -37,10 +37,6 @@ from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
 
 logger = init_logger(__name__)
 
-# TODO(woosuk): Get these values from the model config.
-NUM_TOKENS_PER_IMAGE = 256
-BOI_TOKEN = "<start_of_image>"
-
 
 class Gemma3ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
@@ -61,7 +57,8 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        return {"image": NUM_TOKENS_PER_IMAGE}
+        hf_config = self.ctx.get_hf_config()
+        return {"image": hf_config.mm_tokens_per_image}
 
     def get_num_image_tokens(
         self,
@@ -70,7 +67,8 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Optional[ProcessorMixin],
     ) -> int:
-        return NUM_TOKENS_PER_IMAGE
+        hf_config = self.ctx.get_hf_config()
+        return hf_config.mm_tokens_per_image
 
     def get_image_size_with_most_features(self) -> ImageSize:
         # Result in the max possible feature size (h:w = 16:1)
@@ -84,8 +82,10 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> ProcessorInputs:
-        num_images = mm_counts.get("image", 0)
+        tokenizer = self.info.get_tokenizer()
+        boi_token = tokenizer.boi_token
 
+        num_images = mm_counts.get("image", 0)
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
@@ -96,7 +96,7 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
                                    num_images=num_images)
         }
         return ProcessorInputs(
-            prompt_text=" ".join([BOI_TOKEN] * num_images),
+            prompt_text=" ".join([boi_token] * num_images),
             mm_data=mm_data,
         )
 
@@ -132,9 +132,14 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
+        tokenizer = self.info.get_tokenizer()
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_token = hf_processor.tokenizer.image_token
-        image_tokens_expanded = "".join([image_token] * NUM_TOKENS_PER_IMAGE)
+        hf_config = self.info.get_hf_config()
+
+        boi_token = tokenizer.boi_token
+        image_token = tokenizer.image_token
+        mm_tokens_per_image = hf_config.mm_tokens_per_image
+        image_tokens_expanded = "".join([image_token] * mm_tokens_per_image)
 
         def get_replacement_gemma3(item_idx: int):
             return PromptUpdateDetails(
@@ -145,7 +150,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=BOI_TOKEN,
+                target=boi_token,
                 replacement=get_replacement_gemma3,
             )
         ]
