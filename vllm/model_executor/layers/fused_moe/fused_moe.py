@@ -23,14 +23,12 @@ from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
 
 logger = init_logger(__name__)
 
-use_deep_gemm = False
-if envs.VLLM_USE_DEEP_GEMM:
-    try:
-        import deep_gemm as dg
-        logger.info("Using DeepGemm for fused MoE.")
-        use_deep_gemm = True
-    except ImportError:
-        logger.warning("Failed to import DeepGemm kernels.")
+has_deep_gemm = False
+try:
+    import deep_gemm as dg
+    has_deep_gemm = True
+except ImportError:
+    pass
 
 
 @triton.jit
@@ -678,7 +676,7 @@ def moe_align_block_size(
 
 def valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
                     w2: torch.Tensor, use_fp8_w8a8: bool) -> bool:
-    if not use_deep_gemm or not use_fp8_w8a8:
+    if not has_deep_gemm or not use_fp8_w8a8:
         return False
 
     M, K = hidden_states.shape
@@ -1006,6 +1004,7 @@ def get_default_config(
     dtype: Optional[str],
     is_marlin: bool,
     block_shape: Optional[List[int]] = None,
+    use_deep_gemm: bool = False,
 ) -> Dict[str, int]:
     if dtype == "fp8_w8a8" and block_shape is not None:
         # Block-wise quant: BLOCK_SIZE_N must be divisible by block_shape[0]
@@ -1072,6 +1071,7 @@ def try_get_optimal_moe_config(
     M: int,
     is_marlin: bool = False,
     block_shape: Optional[List[int]] = None,
+    use_deep_gemm: bool = False,
 ):
     from vllm.model_executor.layers.fused_moe import get_config
     override_config = get_config()
@@ -1093,7 +1093,7 @@ def try_get_optimal_moe_config(
         else:
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
-                                        is_marlin, block_shape)
+                                        is_marlin, block_shape, use_deep_gemm)
     return config
 
 
@@ -1453,6 +1453,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                         use_int4_w4a16=use_int4_w4a16,
                                         dtype=hidden_states.dtype)
 
+    # move up valid_deep_gemm?
+
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
         w1.shape,
@@ -1460,6 +1462,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         top_k_num,
         config_dtype,
         block_shape=block_shape,
+        use_deep_gemm=has_deep_gemm and allow_deep_gemm,  # hacky
     )
 
     config = get_config_func(M)
@@ -1504,8 +1507,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     assert not use_dg or block_m == 128
 
     if use_dg:
-        #print("USE_DG")
-        if M % 128 != 0:
+        if False and M % 128 != 0:
             CHUNK_SIZE = (M // 128) * 128
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
