@@ -513,9 +513,9 @@ class FalconMamba2ForCausalLM(
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
         )
-        # self.tie_word_embeddings = config.tie_word_embeddings
+        self.tie_word_embeddings = config.tie_word_embeddings
+        self.lm_head_multiplier = config.lm_head_multiplier
         # TODO: what is going on here?
-        self.tie_word_embeddings = True
         if self.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(
                 self.model.embed_tokens)
@@ -572,7 +572,7 @@ class FalconMamba2ForCausalLM(
 
         conv_state_shape, temporal_state_shape = None, None
 
-        intermediate_size = int(self.config.mamba_expand * self.config.hidden_size) if self.config.mamba_d_ssm is None else self.config.mamba_d_ssm
+        intermediate_size = int(self.config.mamba_expand * hidden_size) if self.config.mamba_d_ssm is None else self.config.mamba_d_ssm
 
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
