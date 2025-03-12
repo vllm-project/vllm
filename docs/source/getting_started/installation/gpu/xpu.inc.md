@@ -9,7 +9,7 @@ There are no pre-built wheels or images for this device, so you must build vLLM 
 ## Requirements
 
 - Supported Hardware: Intel Data Center GPU, Intel ARC GPU
-- OneAPI requirements: oneAPI 2024.2
+- OneAPI requirements: oneAPI 2025.0
 
 ## Set up using Python
 
@@ -19,19 +19,25 @@ Currently, there are no pre-built XPU wheels.
 
 ### Build wheel from source
 
-- First, install required driver and intel OneAPI 2024.2 or later.
+- First, install required driver and Intel OneAPI 2025.0 or later.
 - Second, install Python packages for vLLM XPU backend building:
 
 ```console
-source /opt/intel/oneapi/setvars.sh
 pip install --upgrade pip
-pip install -v -r requirements-xpu.txt
+pip install -v -r requirements/xpu.txt
 ```
 
-- Finally, build and install vLLM XPU backend:
+- Then, build and install vLLM XPU backend:
 
 ```console
 VLLM_TARGET_DEVICE=xpu python setup.py install
+```
+
+- Finally, due to a known issue of conflict dependency(oneapi related) in torch-xpu 2.6 and ipex-xpu 2.6, we install ipex here. This will be fixed in the ipex-xpu 2.7.
+
+```console
+pip install intel-extension-for-pytorch==2.6.10+xpu \
+    --extra-index-url=https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
 ```
 
 :::{note}
@@ -59,7 +65,7 @@ $ docker run -it \
 
 ## Supported features
 
-XPU platform supports tensor-parallel inference/serving and also supports pipeline parallel as a beta feature for online serving. We requires Ray as the distributed runtime backend. For example, a reference execution likes following:
+XPU platform supports **tensor parallel** inference/serving and also supports **pipeline parallel** as a beta feature for online serving. We requires Ray as the distributed runtime backend. For example, a reference execution likes following:
 
 ```console
 python -m vllm.entrypoints.openai.api_server \
@@ -73,3 +79,5 @@ python -m vllm.entrypoints.openai.api_server \
 ```
 
 By default, a ray instance will be launched automatically if no existing one is detected in system, with `num-gpus` equals to `parallel_config.world_size`. We recommend properly starting a ray cluster before execution, referring to the <gh-file:examples/online_serving/run_cluster.sh> helper script.
+
+There are some new features coming with ipex-xpu 2.6, eg: **chunked prefill**, **V1 engine support**, **lora**, **MoE**, etc.

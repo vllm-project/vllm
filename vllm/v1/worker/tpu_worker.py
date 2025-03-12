@@ -76,6 +76,9 @@ class TPUWorker:
                         self.profile_dir)
             self.profiler = xp.start_server(9012)
 
+        if self.model_config.seed is None:
+            self.model_config.seed = 0
+
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
         torch.set_grad_enabled(False)
@@ -94,7 +97,8 @@ class TPUWorker:
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        xm.set_rng_state(self.model_config.seed, self.device)
+        if self.model_config.seed is not None:
+            xm.set_rng_state(self.model_config.seed, self.device)
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
