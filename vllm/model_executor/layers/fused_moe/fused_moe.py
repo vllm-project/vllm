@@ -1330,10 +1330,16 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     block_m = config['BLOCK_SIZE_M']
     assert not use_dg or block_m == 128
 
+    chunked_dg = False
     if use_dg:
+        #print("USE_DG")
+        #CHUNK_SIZE = 128
         if M % 128 != 0:
             CHUNK_SIZE = (M // 128) * 128
+            #print(f"DG_CHUNK {CHUNK_SIZE}")
+
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
+        chunked_dg = num_chunks > 1
 
         assert w1_scale is not None
         assert w2_scale is not None
@@ -1383,20 +1389,12 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_hidden_states = hidden_states[begin_chunk_idx:end_chunk_idx]
         tokens_in_chunk, _ = curr_hidden_states.shape
 
+        skip_dg = tokens_in_chunk % 128 != 0
+
         if tokens_in_chunk == 0:
             break
 
-        if tokens_in_chunk < CHUNK_SIZE and chunk > 0:
-            assert not use_dg  # for now
-            # Adjust the intermediate cache size and config for the last
-            # chunk. Note that in most cases we only have one chunk
-            # so the cache size and config are already set correctly and
-            # do not need to be adjusted.
-            intermediate_cache1 = intermediate_cache1[:tokens_in_chunk]
-            intermediate_cache2 = intermediate_cache2[:tokens_in_chunk *
-                                                      topk_ids.shape[1]]
-            intermediate_cache3 = intermediate_cache3[:tokens_in_chunk]
-            config = get_config_func(tokens_in_chunk)
+        #print(f"LOOP skip={skip_dg} tic={tokens_in_chunk}, chunk={chunk}")
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
@@ -1470,8 +1468,20 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
 
-        ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+        if use_dg and not skip_dg:
+            assert inv_perm is not None
+            M = curr_topk_weights.shape[0]
+            out_C = intermediate_cache3[inv_perm, ...]
+            out_C = out_C[:(M * top_k_num), ...]
+            out_C = out_C.view(-1, top_k_num, w2.shape[1])
+            out_C.mul_(curr_topk_weights.view(M, -1, 1))
+            tmp_cache3 = out_C
+        else:
+            tmp_cache3 = intermediate_cache3.view(*intermediate_cache3.shape)
+
+        ops.moe_sum(tmp_cache3,
                     out_hidden_states[begin_chunk_idx:end_chunk_idx])
+
     return out_hidden_states
 
 

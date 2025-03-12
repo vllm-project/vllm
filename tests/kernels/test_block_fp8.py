@@ -427,15 +427,16 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed,test_baseline",
-    itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES,
-                      SEEDS, [True, False]))
+    itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS, [True, False]))
+    #itertools.product([254],[128],[256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS, [True]))
+    #itertools.product([512],[128],[256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS, [True, False]))
 @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed, test_baseline):
 
     # only aligned sizes
-    if ((M % 128 != 0 and test_baseline) or N % 128 != 0 or K % 128 != 0
+    if ((M % 128 != 0 and not test_baseline) or N % 128 != 0 or K % 128 != 0
             or topk > E):
         pytest.skip(
             f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
@@ -487,7 +488,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
     w2_s = w2_sa
 
     with set_current_vllm_config(vllm_config):
-        if not test_baseline:
+        if test_baseline:
             ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score,
                                                topk, block_size)
 
