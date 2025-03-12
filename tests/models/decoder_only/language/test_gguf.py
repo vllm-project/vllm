@@ -16,12 +16,7 @@ from tests.quantization.utils import is_quant_method_supported
 from ....conftest import VllmRunner
 from ...utils import check_logprobs_close
 
-@pytest.fixture(scope="module", autouse=True)
-#All the tests in this file to use TOKENIZERS_PARALLELISM="true"
-def enable_tokenizers_parallelism(monkeypatch):
-    monkeypatch.setenv("TOKENIZERS_PARALLELISM", "true")
-    yield
-    monkeypatch.delenv("TOKENIZERS_PARALLELISM", raising=False)
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
 
