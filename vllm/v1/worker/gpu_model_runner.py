@@ -1154,20 +1154,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         sampled_token_ids: list[list[int]],
         sampling_metadata: SamplingMetadata,
-    ) -> list[list[int]]:
+    ) -> list[Optional[list[int]]]:
         # TODO(woosuk): Optimize.
-        draft_token_ids: list[list[int]] = []
+        draft_token_ids: list[Optional[list[int]]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
                 # Skip speculative decoding.
-                draft_token_ids.append([])
+                draft_token_ids.append(None)
                 continue
 
             # Skip requests that require top-p, top-k, etc.
             req_id = self.input_batch.req_ids[i]
             if not is_spec_decode_supported(req_id, self.input_batch):
-                draft_token_ids.append([])
+                draft_token_ids.append(None)
                 continue
 
             # Add sampled_token_ids to token_ids_cpu.

@@ -74,7 +74,8 @@ class AsyncLLM(EngineClient):
             for i in range(vllm_config.parallel_config.data_parallel_size):
                 loggers: list[StatLoggerBase] = []
                 if logger.isEnabledFor(logging.INFO):
-                    loggers.append(LoggingStatLogger(engine_index=i))
+                    loggers.append(
+                        LoggingStatLogger(vllm_config, engine_index=i))
                 loggers.append(
                     PrometheusStatLogger(vllm_config, engine_index=i))
                 self.stat_loggers.append(loggers)
