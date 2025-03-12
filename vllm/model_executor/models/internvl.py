@@ -784,6 +784,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         # we need to pass the image token ID to the model to select the
         # tokens to merge from the vision encoder outputs
         processed_outputs["image_token_id"] = torch.tensor(image_token_id)
+        processed_outputs["video_token_id"] = torch.tensor(image_token_id)
 
         return processed_outputs
 
@@ -805,6 +806,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_patches),
             video_num_patches=MultiModalFieldConfig.batched("video"),
+            video_token_id=MultiModalFieldConfig.shared("video", 1),
         )
 
     def _get_prompt_updates(
@@ -1076,7 +1078,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         if pixel_values_flat is None:
             return None
 
-        video_token_id = kwargs["image_token_id"]
+        video_token_id = kwargs["video_token_id"]
         assert isinstance(video_token_id, torch.Tensor)
         self.video_context_token_id = video_token_id.flatten().unique().item()
 
@@ -1173,7 +1175,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
                              "image_embeds") and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(
                     **kwargs)
-            if input_key in ("pixel_values_flat_videos",) and "videos" not in modalities:
+            if input_key in ("pixel_values_flat_video",) and "videos" not in modalities:
                 modalities["videos"] = self._parse_and_validate_video_input(
                     **kwargs)
 
@@ -1183,17 +1185,19 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         self, **kwargs
     ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
+        multimodal_embeddings: list[torch.Tensor, ...] = []
         if not modalities:
             return None
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
                 vision_embeddings = self._process_image_input(image_input)
-                multimodal_embeddings += vision_embeddings
+                multimodal_embeddings.append(vision_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
                 video_embeddings = self._process_video_input(video_input)
-                multimodal_embeddings += video_embeddings
+                multimodal_embeddings.append(video_embeddings)
+        print(multimodal_embeddings, multimodal_embeddings[0].shape)
         return multimodal_embeddings
 
     def get_input_embeddings(
@@ -1203,11 +1207,12 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            assert self.img_context_token_id is not None
+            assert (self.img_context_token_id is not None or self.video_context_token_id)
+            context_token_id = self.img_context_token_id or self.video_context_token_id
             self._set_visual_token_mask(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
-                self.img_context_token_id)
+                context_token_id)
         return inputs_embeds
 
     def forward(
