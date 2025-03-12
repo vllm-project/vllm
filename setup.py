@@ -294,26 +294,14 @@ class repackage_wheel(build_ext):
             ]).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
 
-            # Check if the local main branch is up-to-date. This is to ensure
-            # the base commit we found is the most recent commit on the main
-            # branch.
-            local_main_commit = subprocess.check_output(
-                ["git", "rev-parse", "main"]).decode("utf-8").strip()
-            if local_main_commit != upstream_main_commit:
-                raise ValueError(
-                    f"Local main branch ({local_main_commit}) is not "
-                    "up-to-date with upstream main branch "
-                    f"({upstream_main_commit}). Please pull the latest "
-                    "changes from upstream main branch first.")
-
             # Then get the commit hash of the current branch that is the same as
             # the upstream main commit.
             current_branch = subprocess.check_output(
                 ["git", "branch", "--show-current"]).decode("utf-8").strip()
 
-            base_commit = subprocess.check_output(
-                ["git", "merge-base", "main",
-                 current_branch]).decode("utf-8").strip()
+            base_commit = subprocess.check_output([
+                "git", "merge-base", f"{upstream_main_commit}", current_branch
+            ]).decode("utf-8").strip()
             return base_commit
         except ValueError as err:
             raise ValueError(err) from None
