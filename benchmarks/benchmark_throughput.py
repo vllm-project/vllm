@@ -8,6 +8,7 @@ import random
 import time
 import warnings
 from typing import Any, Optional, Union
+from vllm.outputs import RequestOutput
 
 import torch
 import uvloop
@@ -27,13 +28,12 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
 
-
 def run_vllm(
     requests: list[SampleRequest],
     n: int,
     engine_args: EngineArgs,
     disable_detokenize: bool = False,
-) -> float:
+) -> tuple[float, Optional[list[RequestOutput]]]:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
     assert all(
@@ -67,9 +67,10 @@ def run_vllm(
 
     use_beam_search = False
 
+    outputs = None
     if not use_beam_search:
         start = time.perf_counter()
-        llm.generate(prompts,
+        outputs = llm.generate(prompts,
                      sampling_params,
                      lora_request=lora_requests,
                      use_tqdm=True)
@@ -90,33 +91,24 @@ def run_vllm(
                 ignore_eos=True,
             ))
         end = time.perf_counter()
-    return end - start
+    return end - start, outputs
 
 
 def run_vllm_chat(requests: list[SampleRequest],
                   n: int,
                   engine_args: EngineArgs,
-                  disable_detokenize: bool = False) -> float:
-    import dataclasses
-    import time
-
+                  disable_detokenize: bool = False) -> tuple[float, list[RequestOutput]]:
     from vllm import LLM, SamplingParams
-    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-
-    # Initialize the LLM.
     llm = LLM(**dataclasses.asdict(engine_args))
 
-    # Verify that each request's prompt and expected output lengths do not
-    # exceed the model limit.
     assert all(
         llm.llm_engine.model_config.max_model_len >= (
             request.prompt_len + request.expected_output_len)
         for request in requests), (
             "Please ensure that max_model_len is greater than the sum of "
-            "prompt_len and expected_output_len for all requests.")
+            f"prompt_len and expected_output_len for all requests.")
 
-    # Prepare prompts and corresponding sampling parameters.
-    prompts: list[ChatCompletionMessageParam] = []
+    prompts = []
     sampling_params: list[SamplingParams] = []
     for request in requests:
         prompts.append(request.prompt)
@@ -129,13 +121,10 @@ def run_vllm_chat(requests: list[SampleRequest],
                 max_tokens=request.expected_output_len,
                 detokenize=not disable_detokenize,
             ))
-
-    # Run the chat session and measure the execution time.
     start = time.perf_counter()
-    llm.chat(prompts, sampling_params, use_tqdm=True)
+    outputs = llm.chat(prompts, sampling_params, use_tqdm=True)
     end = time.perf_counter()
-
-    return end - start
+    return end - start, outputs
 
 
 async def run_vllm_async(
@@ -348,6 +337,7 @@ def main(args: argparse.Namespace):
     requests = get_requests(args, tokenizer)
     is_multi_modal = any(request.multi_modal_data is not None
                          for request in requests)
+    request_outputs: Optional[list[RequestOutput]]= None
     if args.backend == "vllm":
         if args.async_engine:
             elapsed_time = uvloop.run(
@@ -359,7 +349,7 @@ def main(args: argparse.Namespace):
                     args.disable_detokenize,
                 ))
         else:
-            elapsed_time = run_vllm(requests, args.n,
+            elapsed_time, request_outputs = run_vllm(requests, args.n,
                                     EngineArgs.from_cli_args(args),
                                     args.disable_detokenize)
     elif args.backend == "hf":
@@ -371,25 +361,39 @@ def main(args: argparse.Namespace):
         elapsed_time = run_mii(requests, args.model, args.tensor_parallel_size,
                                args.output_len)
     elif args.backend == "vllm-chat":
-        elapsed_time = run_vllm_chat(requests, args.n,
+        elapsed_time, request_outputs = run_vllm_chat(requests, args.n,
                                      EngineArgs.from_cli_args(args),
                                      args.disable_detokenize)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
-    total_prompt_tokens = sum(request.prompt_len for request in requests)
-    total_num_tokens = sum(request.prompt_len + request.expected_output_len
-                           for request in requests)
-    total_output_tokens = sum(request.expected_output_len
-                              for request in requests)
+
+    if request_outputs:
+        total_prompt_tokens = 0
+        total_output_tokens = 0
+        for ro in request_outputs:
+            if not isinstance(ro, RequestOutput):
+                continue
+            total_prompt_tokens += len(ro.prompt_token_ids) if ro.prompt_token_ids else 0
+            total_output_tokens += sum(len(o.token_ids) for o in ro.outputs if o)
+        total_num_tokens = total_prompt_tokens + total_output_tokens
+    else:
+        total_num_tokens = sum(r.prompt_len + r.expected_output_len for r in requests)
+        total_output_tokens = sum(r.expected_output_len for r in requests)
+        total_prompt_tokens = total_num_tokens - total_output_tokens
+
     if is_multi_modal and args.backend != "vllm-chat":
-        print("\033[91mWARNING\033[0m: Multi-modal request detected. The "
+        print("\033[91mWARNING\033[0m: Multi-modal request with "
+             f"{args.backend} backend detected. The "
               "following metrics are not accurate because image tokens are not"
               " counted. See vllm-project/vllm/issues/9778 for details.")
         # TODO(vllm-project/vllm/issues/9778): Count multi-modal token length.
+        # vllm-chat backend counts the image tokens now
+
     print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
           f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
           f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
-    print(f"Total prompt tokens: {total_prompt_tokens}")
+    print(f"Total num prompt tokens:  {total_prompt_tokens}")
+    print(f"Total num output tokens:  {total_output_tokens}")
 
     # Output JSON results if specified
     if args.output_json:

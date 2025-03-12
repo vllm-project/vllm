@@ -30,7 +30,7 @@ from datasets import load_dataset
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, ChatCompletionContentPartTextParam, ChatCompletionContentPartImageParam
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
@@ -47,9 +47,9 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: Union[str, ChatCompletionMessageParam]
+    prompt: Union[str, Any]
     prompt_len: int
-    expected_output_len: int
+    expected_output_len: int = 0
     multi_modal_data: Optional[Union[MultiModalDataDict, dict]] = None
     lora_request: Optional[LoRARequest] = None
 
@@ -643,23 +643,17 @@ class VisionArenaDataset(BenchmarkDataset):
         )
         self.data = dataset.shuffle(seed=self.random_seed)
 
-    def apply_chat_transformation(self, tokenizer, prompt, mm_content):
-        conversations: ChatCompletionMessageParam = [{
-            "role":
-            "user",
-            "content": [{
+    def apply_chat_transformation(self, prompt: str, mm_content):
+        textpart =  {
                 "text": prompt,
                 "type": "text"
-            }, mm_content]
-        }, {
+            }
+        conversations = [{
             "role":
-            "system",
-            "content":
-            "You are a helpful assistant"
+            "user",
+            "content": [textpart, mm_content]
         }]
-        formatted_conversations = tokenizer.apply_chat_template(
-            conversations, add_generation_prompt=True, tokenize=False)
-        return conversations, len(tokenizer(formatted_conversations).input_ids)
+        return conversations
 
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
@@ -675,11 +669,12 @@ class VisionArenaDataset(BenchmarkDataset):
                 break
             prompt = item["turns"][0][0]["content"]
             mm_content = process_image(item["images"][0])
+            prompt_len = len(tokenizer(prompt).input_ids)
             if enable_chat:
-                prompt, prompt_len = self.apply_chat_transformation(
-                    tokenizer, prompt, mm_content)
-            else:
-                prompt_len = len(tokenizer(prompt).input_ids)
+                # Note: when chat is enabled the request prompt_len is no longer
+                # accurate and we will be using request output to count the
+                # actual prompt len
+                prompt = self.apply_chat_transformation(prompt, mm_content)
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
