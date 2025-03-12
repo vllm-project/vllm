@@ -259,11 +259,11 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         if pixel_values is None:
             return None
 
-        if not isinstance(pixel_values, torch.Tensor):
+        if not isinstance(pixel_values, (torch.Tensor, list[torch.Tensor])):
             raise ValueError("Incorrect type of pixel values. "
                              f"Got type: {type(pixel_values)}")
 
-        pixel_values = flatten_bn(pixel_values)
+        pixel_values = flatten_bn(pixel_values, concat=True)
         return Gemma3ImagePixelInputs(
             type="pixel_values",
             data=self._validate_pixel_values(pixel_values),
