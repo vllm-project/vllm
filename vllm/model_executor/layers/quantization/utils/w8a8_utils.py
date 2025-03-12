@@ -196,11 +196,7 @@ class Fp8LinearOp:
         # torch.scaled_mm supports per tensor weights + activations only
         # so fallback to naive if per channel or per token
         else:
-            if input.dtype != (torch.float8_e4m3fnuz
-                               if current_platform.is_rocm() else
-                               torch.float8_e4m3fn):
-                # TODO: Change to current_platform.fp8_dype() once #14245 lands
-
+            if input.dtype != current_platform.fp8_dtype():
                 # Maybe apply padding to output, see comment in __init__
                 qinput, x_scale = ops.scaled_fp8_quant(
                     input_2d,
