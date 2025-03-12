@@ -677,16 +677,8 @@ def moe_align_block_size(
 
 
 def valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
-                    w2: torch.Tensor, config: Dict[str, Any],
-                    use_fp8_w8a8: bool) -> bool:
+                    w2: torch.Tensor, use_fp8_w8a8: bool) -> bool:
     if not use_deep_gemm or not use_fp8_w8a8:
-        return False
-
-    block_m = config["BLOCK_SIZE_M"]
-    block_n = config["BLOCK_SIZE_N"]
-    block_k = config["BLOCK_SIZE_K"]
-
-    if block_m % 128 != 0 or block_n % 128 != 0 or block_k % 128 != 0:
         return False
 
     M, K = hidden_states.shape
@@ -694,11 +686,8 @@ def valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     if M % 128 != 0 or N % 128 != 0 or K % 128 != 0:
         return False
 
-    if not hidden_states.is_contiguous() or not w1.is_contiguous(
-    ) or not w2.is_contiguous():
-        return False
-
-    return True
+    return (hidden_states.is_contiguous() and w1.is_contiguous()
+            and w2.is_contiguous())
 
 
 def invoke_fused_moe_kernel(A: torch.Tensor,
@@ -1508,24 +1497,23 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2, config,
+    use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2,
                                                  use_fp8_w8a8)
 
     block_m = config['BLOCK_SIZE_M']
     assert not use_dg or block_m == 128
 
     if use_dg:
-        # TODO: how to test chunks?
-        if True:
-            num_chunks = 1
-            CHUNK_SIZE = num_tokens
-        else:
-            num_chunks = (num_tokens // CHUNK_SIZE) + 1
+        if M % 128 != 0:
+            CHUNK_SIZE = (M // 128) * 128
+        num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
         assert w1_scale is not None
         assert w2_scale is not None
 
-        # TODO: do this offline
+        # We attempt to do this offline in Fp8MoEMethod, in which case these
+        # calls will be nops.  Otherwise, they'll be performed every time the
+        # layer is executed.
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 

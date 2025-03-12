@@ -37,6 +37,21 @@ ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
 
+use_deep_gemm = False
+if envs.VLLM_USE_DEEP_GEMM:
+    try:
+        import deep_gemm as dg
+        logger.info("Using DeepGemm for fused MoE.")
+        use_deep_gemm = True
+    except ImportError:
+        logger.warning("Failed to import DeepGemm kernels.")
+
+
+def is_col_major(x: torch.Tensor) -> bool:
+    assert x.dim() == 3
+    b, m, n = x.shape
+    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
+
 
 class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
@@ -423,6 +438,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
+        self.allow_deep_gemm = use_deep_gemm
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -585,6 +601,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                       requires_grad=False)
                 layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                      requires_grad=False)
+
+            # DeepGemm scales need to be transposed and aligned.  We try to do
+            # it ahead of time for performance reasons.
+            if self.allow_deep_gemm:
+                if is_col_major(layer.w13_weight_scale_inv):
+                    layer.w13_weight_scale_inv = \
+                        dg.get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
+                if is_col_major(layer.w2_weight_scale_inv):
+                    layer.w2_weight_scale_inv = \
+                        dg.get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous()
+
             return
 
         # If checkpoint is fp16, quantize in place.
@@ -773,6 +800,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             block_shape=self.quant_config.weight_block_size,
+            allow_deep_gemm=self.allow_deep_gemm,
         )
 
 
