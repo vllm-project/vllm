@@ -30,7 +30,6 @@ from datasets import load_dataset
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, ChatCompletionContentPartTextParam, ChatCompletionContentPartImageParam
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
@@ -644,15 +643,8 @@ class VisionArenaDataset(BenchmarkDataset):
         self.data = dataset.shuffle(seed=self.random_seed)
 
     def apply_chat_transformation(self, prompt: str, mm_content):
-        textpart =  {
-                "text": prompt,
-                "type": "text"
-            }
-        conversations = [{
-            "role":
-            "user",
-            "content": [textpart, mm_content]
-        }]
+        textpart = {"text": prompt, "type": "text"}
+        conversations = [{"role": "user", "content": [textpart, mm_content]}]
         return conversations
 
     def sample(self,

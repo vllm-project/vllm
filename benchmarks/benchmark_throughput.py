@@ -8,7 +8,6 @@ import random
 import time
 import warnings
 from typing import Any, Optional, Union
-from vllm.outputs import RequestOutput
 
 import torch
 import uvloop
@@ -25,8 +24,10 @@ from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args)
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
+from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
+
 
 def run_vllm(
     requests: list[SampleRequest],
@@ -71,9 +72,9 @@ def run_vllm(
     if not use_beam_search:
         start = time.perf_counter()
         outputs = llm.generate(prompts,
-                     sampling_params,
-                     lora_request=lora_requests,
-                     use_tqdm=True)
+                               sampling_params,
+                               lora_request=lora_requests,
+                               use_tqdm=True)
         end = time.perf_counter()
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
@@ -94,10 +95,11 @@ def run_vllm(
     return end - start, outputs
 
 
-def run_vllm_chat(requests: list[SampleRequest],
-                  n: int,
-                  engine_args: EngineArgs,
-                  disable_detokenize: bool = False) -> tuple[float, list[RequestOutput]]:
+def run_vllm_chat(
+        requests: list[SampleRequest],
+        n: int,
+        engine_args: EngineArgs,
+        disable_detokenize: bool = False) -> tuple[float, list[RequestOutput]]:
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
 
@@ -106,7 +108,7 @@ def run_vllm_chat(requests: list[SampleRequest],
             request.prompt_len + request.expected_output_len)
         for request in requests), (
             "Please ensure that max_model_len is greater than the sum of "
-            f"prompt_len and expected_output_len for all requests.")
+            "prompt_len and expected_output_len for all requests.")
 
     prompts = []
     sampling_params: list[SamplingParams] = []
@@ -337,7 +339,7 @@ def main(args: argparse.Namespace):
     requests = get_requests(args, tokenizer)
     is_multi_modal = any(request.multi_modal_data is not None
                          for request in requests)
-    request_outputs: Optional[list[RequestOutput]]= None
+    request_outputs: Optional[list[RequestOutput]] = None
     if args.backend == "vllm":
         if args.async_engine:
             elapsed_time = uvloop.run(
@@ -349,9 +351,9 @@ def main(args: argparse.Namespace):
                     args.disable_detokenize,
                 ))
         else:
-            elapsed_time, request_outputs = run_vllm(requests, args.n,
-                                    EngineArgs.from_cli_args(args),
-                                    args.disable_detokenize)
+            elapsed_time, request_outputs = run_vllm(
+                requests, args.n, EngineArgs.from_cli_args(args),
+                args.disable_detokenize)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -361,9 +363,9 @@ def main(args: argparse.Namespace):
         elapsed_time = run_mii(requests, args.model, args.tensor_parallel_size,
                                args.output_len)
     elif args.backend == "vllm-chat":
-        elapsed_time, request_outputs = run_vllm_chat(requests, args.n,
-                                     EngineArgs.from_cli_args(args),
-                                     args.disable_detokenize)
+        elapsed_time, request_outputs = run_vllm_chat(
+            requests, args.n, EngineArgs.from_cli_args(args),
+            args.disable_detokenize)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
 
@@ -373,17 +375,20 @@ def main(args: argparse.Namespace):
         for ro in request_outputs:
             if not isinstance(ro, RequestOutput):
                 continue
-            total_prompt_tokens += len(ro.prompt_token_ids) if ro.prompt_token_ids else 0
-            total_output_tokens += sum(len(o.token_ids) for o in ro.outputs if o)
+            total_prompt_tokens += len(
+                ro.prompt_token_ids) if ro.prompt_token_ids else 0
+            total_output_tokens += sum(
+                len(o.token_ids) for o in ro.outputs if o)
         total_num_tokens = total_prompt_tokens + total_output_tokens
     else:
-        total_num_tokens = sum(r.prompt_len + r.expected_output_len for r in requests)
+        total_num_tokens = sum(r.prompt_len + r.expected_output_len
+                               for r in requests)
         total_output_tokens = sum(r.expected_output_len for r in requests)
         total_prompt_tokens = total_num_tokens - total_output_tokens
 
     if is_multi_modal and args.backend != "vllm-chat":
         print("\033[91mWARNING\033[0m: Multi-modal request with "
-             f"{args.backend} backend detected. The "
+              f"{args.backend} backend detected. The "
               "following metrics are not accurate because image tokens are not"
               " counted. See vllm-project/vllm/issues/9778 for details.")
         # TODO(vllm-project/vllm/issues/9778): Count multi-modal token length.
