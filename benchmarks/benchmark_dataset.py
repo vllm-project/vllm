@@ -30,6 +30,7 @@ from datasets import load_dataset
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
@@ -46,7 +47,7 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: str
+    prompt: Union[str, ChatCompletionMessageParam]
     prompt_len: int
     expected_output_len: int
     multi_modal_data: Optional[Union[MultiModalDataDict, dict]] = None
@@ -642,12 +643,30 @@ class VisionArenaDataset(BenchmarkDataset):
         )
         self.data = dataset.shuffle(seed=self.random_seed)
 
+    def apply_chat_transformation(self, tokenizer, prompt, mm_content):
+        conversations: ChatCompletionMessageParam = [{
+            "role":
+            "user",
+            "content": [{
+                "text": prompt,
+                "type": "text"
+            }, mm_content]
+        }, {
+            "role":
+            "system",
+            "content":
+            "You are a helpful assistant"
+        }]
+        formatted_conversations = tokenizer.apply_chat_template(
+            conversations, add_generation_prompt=True, tokenize=False)
+        return conversations, len(tokenizer(formatted_conversations).input_ids)
+
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
                num_requests: int,
                output_len: int = DEFAULT_OUTPUT_LEN,
+               enable_chat: bool = False,
                **kwargs) -> list:
-        # TODO (jenniferzhao): Add support for offline benchmark sampling
         output_len = (output_len
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests = []
@@ -655,8 +674,12 @@ class VisionArenaDataset(BenchmarkDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["turns"][0][0]["content"]
-            prompt_len = len(tokenizer(prompt).input_ids)
             mm_content = process_image(item["images"][0])
+            if enable_chat:
+                prompt, prompt_len = self.apply_chat_transformation(
+                    tokenizer, prompt, mm_content)
+            else:
+                prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,

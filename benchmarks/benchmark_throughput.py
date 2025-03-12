@@ -11,8 +11,9 @@ from typing import Any, Optional, Union
 
 import torch
 import uvloop
-from benchmark_dataset import (BurstGPTDataset, RandomDataset, SampleRequest,
-                               ShareGPTDataset, SonnetDataset)
+from benchmark_dataset import (BurstGPTDataset, HuggingFaceDataset,
+                               RandomDataset, SampleRequest, ShareGPTDataset,
+                               SonnetDataset, VisionArenaDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -89,6 +90,51 @@ def run_vllm(
                 ignore_eos=True,
             ))
         end = time.perf_counter()
+    return end - start
+
+
+def run_vllm_chat(requests: list[SampleRequest],
+                  n: int,
+                  engine_args: EngineArgs,
+                  disable_detokenize: bool = False) -> float:
+    import dataclasses
+    import time
+
+    from vllm import LLM, SamplingParams
+    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+
+    # Initialize the LLM.
+    llm = LLM(**dataclasses.asdict(engine_args))
+
+    # Verify that each request's prompt and expected output lengths do not
+    # exceed the model limit.
+    assert all(
+        llm.llm_engine.model_config.max_model_len >= (
+            request.prompt_len + request.expected_output_len)
+        for request in requests), (
+            "Please ensure that max_model_len is greater than the sum of "
+            "prompt_len and expected_output_len for all requests.")
+
+    # Prepare prompts and corresponding sampling parameters.
+    prompts: list[ChatCompletionMessageParam] = []
+    sampling_params: list[SamplingParams] = []
+    for request in requests:
+        prompts.append(request.prompt)
+        sampling_params.append(
+            SamplingParams(
+                n=n,
+                temperature=1.0,
+                top_p=1.0,
+                ignore_eos=True,
+                max_tokens=request.expected_output_len,
+                detokenize=not disable_detokenize,
+            ))
+
+    # Run the chat session and measure the execution time.
+    start = time.perf_counter()
+    llm.chat(prompts, sampling_params, use_tqdm=True)
+    end = time.perf_counter()
+
     return end - start
 
 
@@ -272,6 +318,18 @@ def get_requests(args, tokenizer):
         sample_kwargs["return_prompt_formatted"] = True
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
+    elif args.dataset_name == "hf":
+        if args.backend != "vllm-chat":
+            ValueError("hf datasets only are supported by vllm-chat backend")
+        # Choose between VisionArenaDataset and HuggingFaceDataset based on
+        # provided parameters.
+        dataset_cls = (VisionArenaDataset if args.dataset_path
+                       == VisionArenaDataset.VISION_ARENA_DATASET_PATH
+                       and args.hf_subset is None else HuggingFaceDataset)
+        common_kwargs['dataset_subset'] = args.hf_subset
+        common_kwargs['dataset_split'] = args.hf_split
+        sample_kwargs["enable_chat"] = True
+
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
     # Remove None values
@@ -290,7 +348,7 @@ def main(args: argparse.Namespace):
     requests = get_requests(args, tokenizer)
     is_multi_modal = any(request.multi_modal_data is not None
                          for request in requests)
-    if args.backend == "vllm":
+    if args.backend in "vllm":
         if args.async_engine:
             elapsed_time = uvloop.run(
                 run_vllm_async(
@@ -312,13 +370,18 @@ def main(args: argparse.Namespace):
     elif args.backend == "mii":
         elapsed_time = run_mii(requests, args.model, args.tensor_parallel_size,
                                args.output_len)
+    elif args.backend == "vllm-chat":
+        elapsed_time = run_vllm_chat(requests, args.n,
+                                     EngineArgs.from_cli_args(args),
+                                     args.disable_detokenize)
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
+    total_prompt_tokens = sum(request.prompt_len for request in requests)
     total_num_tokens = sum(request.prompt_len + request.expected_output_len
                            for request in requests)
     total_output_tokens = sum(request.expected_output_len
                               for request in requests)
-    if is_multi_modal:
+    if is_multi_modal and args.backend != "vllm-chat":
         print("\033[91mWARNING\033[0m: Multi-modal request detected. The "
               "following metrics are not accurate because image tokens are not"
               " counted. See vllm-project/vllm/issues/9778 for details.")
@@ -326,6 +389,7 @@ def main(args: argparse.Namespace):
     print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
           f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
           f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
+    print(f"Total prompt tokens: {total_prompt_tokens}")
 
     # Output JSON results if specified
     if args.output_json:
@@ -341,17 +405,99 @@ def main(args: argparse.Namespace):
         save_to_pytorch_benchmark_format(args, results)
 
 
+def validate_args(args):
+    """
+    Validate command-line arguments.
+    """
+
+    # === Deprecation and Defaulting ===
+    if args.dataset is not None:
+        warnings.warn(
+            "The '--dataset' argument will be deprecated in the next release. "
+            "Please use '--dataset-name' and '--dataset-path' instead.",
+            stacklevel=2)
+        args.dataset_path = args.dataset
+
+    if not getattr(args, "tokenizer", None):
+        args.tokenizer = args.model
+
+    # === Backend Validation ===
+    valid_backends = {"vllm", "hf", "mii", "vllm-chat"}
+    if args.backend not in valid_backends:
+        raise ValueError(f"Unsupported backend: {args.backend}")
+
+    # === Dataset Configuration ===
+    if not args.dataset and not args.dataset_path:
+        print(
+            "When dataset path is not set, it will default to random dataset")
+        args.dataset_name = 'random'
+        if args.input_len is None:
+            raise ValueError("input_len must be provided for a random dataset")
+
+    # === Dataset Name Specific Checks === --hf-subset and --hf-split: only used
+    # when dataset_name is 'hf'
+    if args.dataset_name != "hf" and (
+            getattr(args, "hf_subset", None) is not None
+            or getattr(args, "hf_split", None) is not None):
+        warnings.warn("--hf-subset and --hf-split will be ignored \
+                since --dataset-name is not 'hf'.",
+                      stacklevel=2)
+    elif args.dataset_name == "hf" and args.backend != "vllm-chat":
+        raise ValueError(
+            "When --dataset-name is 'hf', backend must be 'vllm-chat'")
+
+    # --random-range-ratio: only used when dataset_name is 'random'
+    if args.dataset_name != 'random' and args.random_range_ratio is not None:
+        warnings.warn("--random-range-ratio will be ignored since \
+                --dataset-name is not 'random'.",
+                      stacklevel=2)
+
+    # --prefix-len: only used when dataset_name is 'random', 'sonnet', or not
+    # set.
+    if args.dataset_name not in {"random", "sonnet", None
+                                 } and args.prefix_len is not None:
+        warnings.warn("--prefix-len will be ignored since --dataset-name\
+                 is not 'random', 'sonnet', or not set.",
+                      stacklevel=2)
+
+    # === LoRA Settings ===
+    if getattr(args, "enable_lora", False) and args.backend != "vllm":
+        raise ValueError(
+            "LoRA benchmarking is only supported for vLLM backend")
+    if getattr(args, "enable_lora", False) and args.lora_path is None:
+        raise ValueError("LoRA path must be provided when enable_lora is True")
+
+    # === Backend-specific Validations ===
+    if args.backend == "hf" and args.hf_max_batch_size is None:
+        raise ValueError("HF max batch size is required for HF backend")
+    if args.backend != "hf" and args.hf_max_batch_size is not None:
+        raise ValueError("HF max batch size is only for HF backend.")
+
+    if args.backend in {"hf", "mii"} and getattr(args, "quantization",
+                                                 None) is not None:
+        raise ValueError("Quantization is only for vLLM backend.")
+
+    if args.backend == "mii" and args.dtype != "auto":
+        raise ValueError("dtype must be auto for MII backend.")
+    if args.backend == "mii" and args.n != 1:
+        raise ValueError("n must be 1 for MII backend.")
+    if args.backend == "mii" and args.tokenizer != args.model:
+        raise ValueError(
+            "Tokenizer must be the same as the model for MII backend.")
+
+
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="Benchmark the throughput.")
     parser.add_argument("--backend",
                         type=str,
-                        choices=["vllm", "hf", "mii"],
+                        choices=["vllm", "hf", "mii", "vllm-chat"],
                         default="vllm")
-    parser.add_argument("--dataset-name",
-                        type=str,
-                        choices=["sharegpt", "random", "sonnet", "burstgpt"],
-                        help="Name of the dataset to benchmark on.",
-                        default="sharegpt")
+    parser.add_argument(
+        "--dataset-name",
+        type=str,
+        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
+        help="Name of the dataset to benchmark on.",
+        default="sharegpt")
     parser.add_argument(
         "--dataset",
         type=str,
@@ -419,55 +565,24 @@ if __name__ == "__main__":
     parser.add_argument(
         "--random-range-ratio",
         type=float,
-        default=1.0,
+        default=None,
         help="Range of sampled ratio of input/output length, "
         "used only for RandomDataSet.",
     )
+
+    # hf dtaset
+    parser.add_argument("--hf-subset",
+                        type=str,
+                        default=None,
+                        help="Subset of the HF dataset.")
+    parser.add_argument("--hf-split",
+                        type=str,
+                        default=None,
+                        help="Split of the HF dataset.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
-    if args.dataset is not None:
-        warnings.warn(
-            "The '--dataset' argument will be deprecated in the next "
-            "release. Please use '--dataset-name' and "
-            "'--dataset-path' in the future runs.",
-            stacklevel=2)
-        args.dataset_path = args.dataset
-    if args.dataset is None and args.dataset_path is None:
-        # for random dataset, the default sampling setting is in
-        # benchmark_dataset.RandomDataset
-        print("When dataset is not set, it will default to random dataset")
-    else:
-        assert args.input_len is None
-    if args.enable_lora:
-        assert args.lora_path is not None
-
-    if args.backend == "vllm":
-        if args.hf_max_batch_size is not None:
-            raise ValueError("HF max batch size is only for HF backend.")
-    elif args.backend == "hf":
-        if args.hf_max_batch_size is None:
-            raise ValueError("HF max batch size is required for HF backend.")
-        if args.quantization is not None:
-            raise ValueError("Quantization is only for vLLM backend.")
-        if args.enable_lora is not None:
-            raise ValueError("LoRA benchmarking is only supported for vLLM"
-                             " backend")
-    elif args.backend == "mii":
-        if args.dtype != "auto":
-            raise ValueError("dtype must be auto for MII backend.")
-        if args.n != 1:
-            raise ValueError("n must be 1 for MII backend.")
-        if args.quantization is not None:
-            raise ValueError("Quantization is only for vLLM backend.")
-        if args.hf_max_batch_size is not None:
-            raise ValueError("HF max batch size is only for HF backend.")
-        if args.tokenizer != args.model:
-            raise ValueError("Tokenizer must be the same as the model for MII "
-                             "backend.")
-        if args.enable_lora is not None:
-            raise ValueError("LoRA benchmarking is only supported for vLLM"
-                             " backend")
+    validate_args(args)
     main(args)
