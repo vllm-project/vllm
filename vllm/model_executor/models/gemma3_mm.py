@@ -209,6 +209,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
+        self.sliding_window = config.text_config.interleaved_sliding_window
 
         self.vision_tower = SiglipVisionModel(config.vision_config,
                                               quant_config,
@@ -315,59 +316,18 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                 **kwargs: object) -> Union[SamplerOutput, IntermediateTensors]:
         if intermediate_tensors is not None:
             inputs_embeds = None
-            kwargs.clear()
 
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            kwargs.clear()
 
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
             if vision_embeddings is not None:
-                kwargs["has_images"] = True
-                start_idices = (positions == 0).cpu().nonzero()
-                num_seqs = len(start_idices)
-                seq_lens = []
-                for i in range(num_seqs):
-                    start_idx = start_idices[i].item()
-                    if i < num_seqs - 1:
-                        end_idx = start_idices[i + 1].item()
-                    else:
-                        end_idx = len(input_ids)
-                    seq_lens.append(end_idx - start_idx)
-                kwargs["seq_lens"] = seq_lens
-
-                global_attn_masks = []
-                local_attn_masks = []
-                for seq_len in seq_lens:
-                    input_token_ids = input_ids[start_idx:end_idx]
-                    global_attn_mask = torch.empty(
-                        1, 1, seq_len, seq_len,
-                        dtype=vision_embeddings.dtype,
-                        device=vision_embeddings.device,
-                    )
-                    global_attn_mask.fill_(float("-inf"))
-                    # Fill the lower triangle with 0.
-                    global_attn_mask = global_attn_mask.triu(diagonal=1)
-
-                    img_mask = torch.zeros_like(global_attn_mask)
-                    img_pos = (input_token_ids == self.config.image_token_index)
-                    img_mask[:, :, :, img_pos] += 1
-                    img_mask[:, :, img_pos, :] += 1
-                    global_attn_mask = torch.where(img_mask == 2, 0, global_attn_mask)
-                    global_attn_masks.append(global_attn_mask)
-
-                    SLIDING_WINDOW_SIZE = 1024
-                    local_attn_mask = torch.ones_like(global_attn_mask)
-                    local_attn_mask = torch.tril(local_attn_mask, diagonal=-SLIDING_WINDOW_SIZE)
-                    local_attn_mask = torch.where(local_attn_mask == 0, global_attn_mask, float("-inf"))
-                    local_attn_masks.append(local_attn_mask)
-
-                kwargs["global_attn_masks"] = global_attn_masks
-                kwargs["local_attn_masks"] = local_attn_masks
-
+                self.prepare_attn_masks(input_ids, positions,
+                                        mask_dtype=vision_embeddings.dtype,
+                                        **kwargs)
             input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
@@ -377,6 +337,54 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                   **kwargs)
 
         return hidden_states
+
+    def prepare_attn_masks(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        mask_dtype: torch.dtype,
+        **kwargs,
+    ) -> None:
+        kwargs["has_images"] = True
+        start_idices = (positions == 0).cpu().nonzero()
+        num_seqs = len(start_idices)
+        seq_lens = []
+        for i in range(num_seqs):
+            start_idx = start_idices[i].item()
+            if i < num_seqs - 1:
+                end_idx = start_idices[i + 1].item()
+            else:
+                end_idx = len(input_ids)
+            seq_lens.append(end_idx - start_idx)
+        kwargs["seq_lens"] = seq_lens
+
+        global_attn_masks = []
+        local_attn_masks = []
+        for seq_len in seq_lens:
+            input_token_ids = input_ids[start_idx:end_idx]
+            global_attn_mask = torch.empty(
+                1, 1, seq_len, seq_len,
+                dtype=mask_dtype,
+                device=input_ids.device,
+            )
+            global_attn_mask.fill_(float("-inf"))
+            # Fill the lower triangle with 0.
+            global_attn_mask = global_attn_mask.triu(diagonal=1)
+
+            img_mask = torch.zeros_like(global_attn_mask)
+            img_pos = (input_token_ids == self.config.image_token_index)
+            img_mask[:, :, :, img_pos] += 1
+            img_mask[:, :, img_pos, :] += 1
+            global_attn_mask = torch.where(img_mask == 2, 0, global_attn_mask)
+            global_attn_masks.append(global_attn_mask)
+
+            local_attn_mask = torch.ones_like(global_attn_mask)
+            local_attn_mask = torch.tril(local_attn_mask, diagonal=-self.sliding_window_size)
+            local_attn_mask = torch.where(local_attn_mask == 0, global_attn_mask, float("-inf"))
+            local_attn_masks.append(local_attn_mask)
+
+        kwargs["global_attn_masks"] = global_attn_masks
+        kwargs["local_attn_masks"] = local_attn_masks
 
     def compute_logits(
         self,
