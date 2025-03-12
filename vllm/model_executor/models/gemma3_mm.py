@@ -6,7 +6,6 @@ from typing import (Any, Iterable, Literal, Mapping, Optional, Sequence, Set,
 import torch
 from torch import nn
 from transformers import BatchFeature, Gemma3Config, Gemma3Processor
-from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -64,21 +63,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         keys: set[str],
     ) -> dict[str, Any]:
         image_processor = processor.image_processor
-        kwargs = processor._merge_kwargs(
-            Gemma3ProcessorKwargs,
-            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
-        )
-
-        images_kwargs = kwargs["images_kwargs"]
-
-        def _resolve_kw(key: str):
-            val = images_kwargs[key]
-            if val is None:
-                val = getattr(image_processor, key)
-
-            return val
-
-        return {k: _resolve_kw(k) for k in keys}
+        return {k: getattr(image_processor, k) for k in keys}
 
     def get_num_crops(
         self,
