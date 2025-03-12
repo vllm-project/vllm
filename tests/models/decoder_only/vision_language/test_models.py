@@ -29,7 +29,6 @@ from .vlm_utils.types import (CustomTestOptions, ExpandableVLMTestArgs,
 # ROCm Triton FA can run into shared memory issues with these models,
 # use other backends in the meantime
 # FIXME (mattwong, gshtrasb, hongxiayan)
-
 if current_platform.is_rocm():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
