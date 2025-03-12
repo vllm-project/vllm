@@ -2154,7 +2154,32 @@ def _check_multiproc_method():
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
-def get_mp_context():
+def get_mp_context(
+    override_mp_method: Optional[str] = None,
+    override_reason: Optional[str] = None,
+):
+    """Get a multiprocessing context.
+    If override_mp_method is provided, it will be used instead of the
+    VLLM_WORKER_MULTIPROC_METHOD environment variable.
+
+    Args:
+        override_mp_method: If provided, it will be used instead of the
+            VLLM_WORKER_MULTIPROC_METHOD environment variable.
+        override_reason: If provided, it will be logged as a warning.
+
+    Returns:
+        A multiprocessing context.
+    """
+    if override_mp_method is not None:
+        current_method = os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
+        if current_method != override_mp_method:
+            logger.warning(
+                "VLLM_WORKER_MULTIPROC_METHOD is overridden to %s. %s",
+                override_mp_method,
+                override_reason,
+            )
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = override_mp_method
+
     _check_multiproc_method()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
     return multiprocessing.get_context(mp_method)
