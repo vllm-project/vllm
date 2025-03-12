@@ -36,6 +36,11 @@ os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
 # see https://github.com/vllm-project/vllm/issues/10619
 torch._inductor.config.compile_threads = 1
 
+# see https://github.com/vllm-project/vllm/issues/14680
+if _mpol_spec := os.getenv("MPOL_INTERLEAVE", ""):
+    from vllm import mpolset
+    mpolset.configure_memory_policy(f"interleave:{_mpol_spec}", override=False)
+
 __all__ = [
     "__version__",
     "__version_tuple__",
