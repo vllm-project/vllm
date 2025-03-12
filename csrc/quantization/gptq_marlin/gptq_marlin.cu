@@ -537,6 +537,7 @@ __global__ void Marlin(
     int prob_m,           // batch dimension m
     int prob_n,           // output dimension n
     int prob_k,           // reduction dimension k
+    int stride_am,        // A.stride(0), equal to prob_k is A is contiguous
     int* locks,           // extra global storage for barrier synchronization
     bool use_atomic_add,  // whether to use atomic add to reduce
     bool use_fp32_reduce  // whether to use fp32 global reduce
@@ -600,7 +601,7 @@ __global__ void Marlin(
   // We can easily implement parallel problem execution by just remapping
   // indices and advancing global pointers
   if (slice_col_par >= n_tiles) {
-    A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_k / 8;
+    A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * stride_am / 8;
     C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
     locks += (slice_col_par / n_tiles) * n_tiles;
     slice_col = slice_col_par % n_tiles;
@@ -631,7 +632,7 @@ __global__ void Marlin(
       }
     }
     if (slice_col == n_tiles) {
-      A += 16 * thread_m_blocks * prob_k / 8;
+      A += 16 * thread_m_blocks * stride_am / 8;
       C += 16 * thread_m_blocks * prob_n / 8;
       locks += n_tiles;
       slice_col = 0;
@@ -643,7 +644,7 @@ __global__ void Marlin(
   // A sizes/strides
 
   // stride of the A matrix in global memory
-  int a_gl_stride = prob_k / 8;
+  int a_gl_stride = stride_am / 8;
   // stride of an A matrix tile in shared memory
   constexpr int a_sh_stride = 16 * thread_k_blocks / 8;
   // delta between subsequent A tiles in global memory
@@ -1780,8 +1781,8 @@ __global__ void Marlin(
                HAS_ZP, GROUP_BLOCKS, IS_ZP_FLOAT>                              \
             <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                 \
                 A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,      \
-                num_groups, prob_m, prob_n, prob_k, locks, use_atomic_add,     \
-                use_fp32_reduce);                                              \
+                num_groups, prob_m, prob_n, prob_k, stride_am, locks,          \
+                use_atomic_add, use_fp32_reduce);                              \
       }                                                                        \
     }
 
@@ -2071,7 +2072,7 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
                void* zp, void* g_idx, void* perm, void* a_tmp, int prob_m,
-               int prob_n, int prob_k, void* workspace,
+               int prob_n, int prob_k, int stride_am, void* workspace,
                vllm::ScalarType const& q_type, bool has_act_order,
                bool is_k_full, bool has_zp, int num_groups, int group_size,
                int dev, cudaStream_t stream, int thread_k, int thread_n,
@@ -2300,7 +2301,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
 
   // Verify device and strides
   TORCH_CHECK(a.device().is_cuda(), "A is not on GPU");
-  TORCH_CHECK(a.is_contiguous(), "A is not contiguous");
+  TORCH_CHECK(a.stride(1) == 1, "A.stride(1) is not 1");
 
   TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
   TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
@@ -2432,7 +2433,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
         c_tmp.data_ptr<float>(), b_scales.data_ptr<at::Half>(),
         b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
-        a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k,
+        a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k, a.stride(0),
         workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, marlin::max_par, use_atomic_add,
@@ -2443,10 +2444,10 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
         c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
         b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
         perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
-        workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
-        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-        thread_k, thread_n, sms, marlin::max_par, use_atomic_add,
-        use_fp32_reduce, is_zp_float);
+        a.stride(0), workspace.data_ptr(), b_q_type, has_act_order, is_k_full,
+        has_zp, num_groups, group_size, dev,
+        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
+        marlin::max_par, use_atomic_add, use_fp32_reduce, is_zp_float);
   } else {
     TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
   }
