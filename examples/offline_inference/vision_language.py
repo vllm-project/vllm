@@ -121,12 +121,17 @@ def run_fuyu(questions: list[str], modality: str):
 # Gemma 3
 def run_gemma3(questions: list[str], modality: str):
     assert modality == "image"
-    prompts = [f"<start_of_image> {question}" for question in questions]
+
     model_name = "google/gemma-3-4b-it"
+
     llm = LLM(model=model_name,
               max_model_len=2048,
               max_num_seqs=2,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+
+    prompts = [("<bos><start_of_turn>user\n"
+                f"<start_of_image>{question}<end_of_turn>\n"
+                "<start_of_turn>model\n") for question in questions]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -418,7 +423,7 @@ def run_mllama(questions: list[str], modality: str):
             "type": "image"
         }, {
             "type": "text",
-            "text": f"{question}"
+            "text": question
         }]
     }] for question in questions]
     prompts = tokenizer.apply_chat_template(messages,
