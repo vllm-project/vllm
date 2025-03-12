@@ -299,18 +299,18 @@ def initialize_ray_cluster(
     else:
         ray.init(address=ray_address, ignore_reinit_error=True)
 
-    if parallel_config.placement_group:
-        # Placement group is already set.
-        return
-
     device_str = current_platform.ray_device_key
     if not device_str:
         raise ValueError(
             f"current platform {current_platform.device_name} does not "
             "support ray.")
 
-    # Create placement group for worker processes
-    current_placement_group = ray.util.get_current_placement_group()
+    # Create or get the placement group for worker processes
+    if parallel_config.placement_group:
+        current_placement_group = parallel_config.placement_group
+    else:
+        current_placement_group = ray.util.get_current_placement_group()
+
     if current_placement_group:
         # We are in a placement group
         bundles = current_placement_group.bundle_specs
