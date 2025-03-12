@@ -1,16 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
-
 import itertools
 from typing import Tuple
-
-dg_available = False
-try:
-    import deep_gemm
-    dg_available = True
-except:
-    pass
 
 import pytest
 import torch
@@ -23,6 +15,13 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
+
+dg_available = False
+try:
+    import deep_gemm
+    dg_available = True
+except ImportError:
+    pass
 
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher",
@@ -39,7 +38,7 @@ K = [256, 4096, 5120, 3884, 13824, 16384]
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
 M_moe = [1, 2, 7, 83, 128, 512, 2048]
-M_moe_dg = [128, 512, 2048]
+M_moe_dg = [128, 192, 512, 2048]
 N_moe = [128, 256, 4608]  # [13824]
 K_moe = [256, 512, 7168]  # [13824]
 BLOCK_SIZE = [[128, 128]]
@@ -358,7 +357,6 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
     """Fused moe with block-wise quantization using DeepGemm grouped gemm."""
     num_groups = w1.shape[0]
     M, K = a.shape
-    N = w2.shape[-1]
 
     topk_weight, topk_ids = fused_topk(a, score.float(), topk, False)
 
@@ -437,10 +435,10 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
                                             dtype, seed, test_baseline):
 
     # only aligned sizes
-    if (M % 128 != 0 or N % 128 != 0 or K % 128 != 0 or topk > E):
+    if ((M % 128 != 0 and test_baseline) or N % 128 != 0 or K % 128 != 0
+            or topk > E):
         pytest.skip(
-            f"Skipping test; invalid size m={M}, n={N}, k={K}, topk={topk}, E={E}"
-        )
+            f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
 
     vllm_config = VllmConfig()
 
