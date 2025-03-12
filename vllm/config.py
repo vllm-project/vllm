@@ -350,7 +350,12 @@ class ModelConfig:
         if self.enforce_eager is None:
             self.enforce_eager = False
 
-        interleaved_attn_models = ["gemma2", "gemma3", "gemma3_text", "cohere2"]
+        interleaved_attn_models = [
+            "gemma2",
+            "gemma3",  # Gemma3 1B
+            "gemma3_text",  # Gemma3 4/9/12/27B
+            "cohere2",
+        ]
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         has_interleaved_attention = (sliding_window is not None) and (
             isinstance(sliding_window, list) or
