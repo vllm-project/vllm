@@ -56,6 +56,7 @@ def create_sampling_metadata(
         min_tokens={},
         logit_bias=[None],
         allowed_token_ids_mask=None,
+        bad_words_token_ids={},
     )
 
 
