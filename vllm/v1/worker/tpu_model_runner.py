@@ -437,8 +437,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             padded_num_scheduled_tokens_per_req = np.copy(
                 num_scheduled_tokens_per_req
             )  # Copying to avoid accidental state corruption bugs
-            padded_num_scheduled_tokens_per_req[
-                -1] += padded_total_num_scheduled_tokens - total_num_scheduled_tokens
+            padded_num_scheduled_tokens_per_req[-1] += \
+                padded_total_num_scheduled_tokens - total_num_scheduled_tokens
 
             self.set_active_loras(self.input_batch,
                                   padded_num_scheduled_tokens_per_req)
