@@ -1094,7 +1094,7 @@ class MiniMaxText01Model(nn.Module):
         self.embed_scale = 1.0
         return
 
-    def _clear_prefill_cache(self, attn_metadata: AttentionMetadata,
+    def _clear_prefill_cache(self, attn_metadata,
                              minimax_cache_tensors: torch.Tensor, **kwargs):
         """
         clear the minimax cache before new prefill requests computing
