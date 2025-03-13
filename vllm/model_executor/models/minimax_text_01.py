@@ -1108,12 +1108,13 @@ class MiniMaxText01Model(nn.Module):
                 self.minimax_cache.cache_indices_mapping.items()):
             seq_to_slot_maps.update(seq_to_slot_map)
         for _prefill_id in range(attn_metadata.num_prefills):
-            seq_id = seq_id_map[_prefill_id]
-            # no computed context means this is a new prefill request
-            if attn_metadata.context_lens_tensor[
-                    _prefill_id] == 0 and seq_id in seq_to_slot_maps:
-                cache_slot_id = seq_to_slot_maps[seq_id]
-                minimax_cache_tensors[:, cache_slot_id, ...].zero_()
+            if _prefill_id < len(seq_id_map):
+                seq_id = seq_id_map[_prefill_id]
+                # no computed context means this is a new prefill request
+                if attn_metadata.context_lens_tensor[
+                        _prefill_id] == 0 and seq_id in seq_to_slot_maps:
+                    cache_slot_id = seq_to_slot_maps[seq_id]
+                    minimax_cache_tensors[:, cache_slot_id, ...].zero_()
 
     def forward(self,
                 input_ids: Optional[torch.Tensor],
