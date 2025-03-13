@@ -842,16 +842,21 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         image_width: int,
         image_height: int,
     ) -> int:
-        grid_length = self.get_patch_grid_length()
+        ncols, nrows = self.get_patch_grid_size(
+            image_width=image_width,
+            image_height=image_height,
+        )
 
         # Consider the image_break_token
-        return (grid_length + 1) * grid_length
+        return (ncols + 1) * nrows
 
     def get_max_image_tokens(self) -> int:
-        grid_length = self.get_patch_grid_length()
+        image_size = self.get_image_size()
 
-        # Consider the image_break_token
-        return (grid_length + 1) * grid_length
+        return self.get_num_image_tokens(
+            image_width=image_size,
+            image_height=image_size,
+        )
 
     def get_image_size(self) -> int:
         return self.vision_config.image_size
