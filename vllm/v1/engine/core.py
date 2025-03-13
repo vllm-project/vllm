@@ -7,7 +7,7 @@ import time
 from concurrent.futures import Future
 from inspect import isclass, signature
 from multiprocessing.connection import Connection
-from typing import Any, List, Optional, Set, Tuple, Type
+from typing import Any, Optional
 
 import msgspec
 import psutil
@@ -19,9 +19,11 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import get_exception_traceback, zmq_socket_ctx
+from vllm.utils import (get_exception_traceback, resolve_obj_by_qualname,
+                        zmq_socket_ctx)
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
-from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
+from vllm.v1.core.scheduler import Scheduler as V1Scheduler
+from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
@@ -29,6 +31,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -42,7 +45,7 @@ class EngineCore:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
     ):
         assert vllm_config.model_config.runner_type != "pooling"
@@ -61,7 +64,25 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
+        self.structured_output_manager = StructuredOutputManager(vllm_config)
+
         # Setup scheduler.
+        if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
+            Scheduler = resolve_obj_by_qualname(
+                vllm_config.scheduler_config.scheduler_cls)
+        else:
+            Scheduler = vllm_config.scheduler_config.scheduler_cls
+
+        # This warning can be removed once the V1 Scheduler interface is
+        # finalized and we can maintain support for scheduler classes that
+        # implement it
+        if Scheduler is not V1Scheduler:
+            logger.warning(
+                "Using configured V1 scheduler class %s. "
+                "This scheduler interface is not public and "
+                "compatibility may not be maintained.",
+                vllm_config.scheduler_config.scheduler_cls)
+
         self.scheduler = Scheduler(
             scheduler_config=vllm_config.scheduler_config,
             model_config=vllm_config.model_config,
@@ -69,6 +90,7 @@ class EngineCore:
             lora_config=vllm_config.lora_config,
             speculative_config=vllm_config.speculative_config,
             log_stats=self.log_stats,
+            structured_output_manager=self.structured_output_manager,
         )
 
         # Setup MM Input Mapper.
@@ -80,7 +102,7 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
-        self.batch_queue: Optional[queue.Queue[Tuple[Future[ModelRunnerOutput],
+        self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
                                                      SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d",
@@ -88,7 +110,7 @@ class EngineCore:
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
     def _initialize_kv_caches(self,
-                              vllm_config: VllmConfig) -> Tuple[int, int]:
+                              vllm_config: VllmConfig) -> tuple[int, int]:
         start = time.time()
 
         # Get all kv cache needed by the model
@@ -131,10 +153,13 @@ class EngineCore:
                 request.mm_inputs, request.mm_hashes)
 
         req = Request.from_engine_core_request(request)
+        if req.use_structured_output:
+            # Start grammar compilation asynchronously
+            self.structured_output_manager.grammar_init(req)
 
         self.scheduler.add_request(req)
 
-    def abort_requests(self, request_ids: List[str]):
+    def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
 
         # TODO: The scheduler doesn't really need to know the
@@ -146,14 +171,28 @@ class EngineCore:
     def step(self) -> EngineCoreOutputs:
         """Schedule, execute, and make output."""
 
-        if not self.scheduler.has_unfinished_requests():
+        # Check for any requests remaining in the scheduler - unfinished,
+        # or finished and not yet removed from the batch.
+        if not self.scheduler.has_requests():
             return EngineCoreOutputs(
-                outputs=[], scheduler_stats=self.scheduler.make_stats())
-
+                outputs=[],
+                scheduler_stats=self.scheduler.make_stats(),
+            )
         scheduler_output = self.scheduler.schedule()
+
+        # This case may occur when the only unfinished requests are
+        # structured output requests where the grammar has not finished
+        # compiling yet, so there's nothing to run.
+        if scheduler_output.total_num_scheduled_tokens == 0:
+            return EngineCoreOutputs(
+                outputs=[],
+                scheduler_stats=self.scheduler.make_stats(),
+            )
+
         output = self.model_executor.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
+
         return engine_core_outputs
 
     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:
@@ -184,23 +223,18 @@ class EngineCore:
                 self.batch_queue.put_nowait(
                     (future, scheduler_output))  # type: ignore
 
-        # If all requests are scheduled or the job queue is full,
+        scheduled_batch = (scheduler_output is not None
+                           and scheduler_output.total_num_scheduled_tokens > 0)
+
+        # If no more requests can be scheduled and the job queue is not empty,
         # block until the first batch in the job queue is finished.
-        if (scheduler_output is None
-                or scheduler_output.total_num_scheduled_tokens == 0):
-            try:
-                future, scheduler_output = self.batch_queue.get(
-                    timeout=POLLING_TIMEOUT_S)
-                # Blocking until the first result is available.
-                model_output = future.result()
-                self.batch_queue.task_done()
-                engine_core_outputs = self.scheduler.update_from_output(
-                    scheduler_output, model_output)
-            except queue.Empty:
-                # If the queue is empty (timeout at .get), return
-                # an empty EngineCoreOutputs for logging.
-                engine_core_outputs = EngineCoreOutputs(
-                    outputs=[], scheduler_stats=self.scheduler.make_stats())
+        if not scheduled_batch and not self.batch_queue.empty():
+            future, scheduler_output = self.batch_queue.get_nowait()
+            # Blocking until the first result is available.
+            model_output = future.result()
+            self.batch_queue.task_done()
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output)
 
         return engine_core_outputs
 
@@ -228,7 +262,7 @@ class EngineCore:
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_executor.remove_lora(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self.model_executor.list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
@@ -244,7 +278,7 @@ class EngineCoreProc(EngineCore):
         output_path: str,
         ready_pipe: Connection,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
     ):
         super().__init__(vllm_config, executor_class, log_stats)
@@ -254,7 +288,7 @@ class EngineCoreProc(EngineCore):
         # and to overlap some serialization/deserialization with the
         # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-        self.input_queue: queue.Queue[Tuple[EngineCoreRequestType,
+        self.input_queue: queue.Queue[tuple[EngineCoreRequestType,
                                             Any]] = queue.Queue()
         self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
         threading.Thread(target=self.process_input_socket,
@@ -316,19 +350,10 @@ class EngineCoreProc(EngineCore):
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
-            if not self.scheduler.has_unfinished_requests():
-                while True:
-                    try:
-                        req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
-                        self._handle_client_request(*req)
-                        break
-                    except queue.Empty:
-                        logger.debug("EngineCore busy loop waiting.")
-                        # Break out the loop so we can log_stats in step().
-                        if self.log_stats:
-                            break
-                    except BaseException:
-                        raise
+            while not self.scheduler.has_requests():
+                logger.debug("EngineCore busy loop waiting.")
+                req = self.input_queue.get()
+                self._handle_client_request(*req)
 
             # 2) Handle any new client requests.
             while not self.input_queue.empty():

@@ -5,7 +5,6 @@
 Note: these tests will only pass on H100
 """
 import os
-from typing import List
 
 import pytest
 from transformers import AutoTokenizer
@@ -65,7 +64,7 @@ def test_models(example_prompts, model_name) -> None:
         for prompt in example_prompts
     ]
     params = SamplingParams(max_tokens=20, temperature=0)
-    generations: List[str] = []
+    generations: list[str] = []
     # Note: these need to be run 1 at a time due to numerical precision,
     # since the expected strs were generated this way.
     for prompt in formatted_prompts:
