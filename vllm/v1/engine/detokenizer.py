@@ -7,7 +7,7 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
-from vllm.v1.engine import EngineCoreRequest, FinishReason
+from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
@@ -94,24 +94,78 @@ class IncrementalDetokenizer:
             eos_token_id=request.eos_token_id,
         )
 
-    def _check_stop_string(
-        self,
-        step_decoded_text,
-    ) -> Optional[str]:
-        """Check for stop-string; truncate if triggered.
-        
-        Args:
-          step_decoded_text: all decoded text in this step
-
-        Returns:
-          stop string if triggered, otherwise `None`
+    def update(self, new_token_ids: list[int],
+               stop_terminated: bool) -> Optional[str]:
         """
-        # 3) Evaluate stop-string criteria.
+        Update RequestState for the request_id by:
+            1) Detokenize the new token ids incrementally.
+            2) Evaluate stop criteria.
+
+        Return matched stop string or None.
+        """
+        if self.tokenizer is None:
+            # Skip detokenization if no tokenizer
+            self.token_ids.extend(new_token_ids)
+            return None
+        if not new_token_ids:
+            # Skip detokenization if no new token ids
+            return None
+
+        # If stop-terminated, exclude last token from detokenization
+        # based on include_stop_str_in_output parameter.
+        stop_token_id = None
+        if stop_terminated:
+            stop_token_id = new_token_ids[-1]
+            # EOS or stop token must have triggered engine stop
+            if ((stop_token_id != self.eos_token_id or self.ignore_eos)
+                    and stop_token_id not in (self.stop_token_ids or ())):
+                raise AssertionError(
+                    f"Engine core finish reason is STOP but "
+                    f"{stop_token_id} is not in stop_token_ids "
+                    f"= {self.stop_token_ids}")
+            if not self.include_stop_str_in_output:
+                # Skip stop-token detokenization
+                new_token_ids = new_token_ids[:-1]
+
+        # 1) Detokenize the new token ids incrementally.
+        # TODO(woosuk): This method becomes very inefficient when the number of
+        # new_token_ids is more than 1. We need to optimize this.
+        decoded_text = ""
+        for new_token_id in new_token_ids:
+            self.token_ids.append(new_token_id)
+            (new_tokens, new_decoded_token_text, prefix_offset,
+             read_offset) = detokenize_incrementally(
+                 tokenizer=self.tokenizer,
+                 all_input_ids=self.token_ids,
+                 prev_tokens=self.tokens,
+                 prefix_offset=self.prefix_offset,
+                 read_offset=self.read_offset,
+                 skip_special_tokens=self.skip_special_tokens,
+                 spaces_between_special_tokens=self.
+                 spaces_between_special_tokens,
+             )
+
+            self.tokens.extend(new_tokens)
+            self.prefix_offset = prefix_offset
+            self.read_offset = read_offset
+
+            decoded_text += new_decoded_token_text
+
+        self.output_text += decoded_text
+
+        if stop_terminated:
+            if not self.include_stop_str_in_output:
+                # Cleanup after skipping detokenization
+                assert stop_token_id is not None
+                self.token_ids.append(stop_token_id)
+            return None
+
+        # 2) Evaluate stop strings.
         stop_string = None
         if self.stop:
             stop = StopChecker.check_stop_strings(
                 output_text=self.output_text,
-                new_char_count=len(step_decoded_text),
+                new_char_count=len(decoded_text),
                 stop=self.stop,
                 include_in_output=self.include_stop_str_in_output,
             )
@@ -121,73 +175,6 @@ class IncrementalDetokenizer:
                     self.output_text = self.output_text[:truncate_to]
 
         return stop_string
-
-    def _detokenize(self) -> str:
-        """One pass of incremental detokenization."""
-        (new_tokens, new_decoded_token_text, prefix_offset,
-         read_offset) = detokenize_incrementally(
-             tokenizer=self.tokenizer,
-             all_input_ids=self.token_ids,
-             prev_tokens=self.tokens,
-             prefix_offset=self.prefix_offset,
-             read_offset=self.read_offset,
-             skip_special_tokens=self.skip_special_tokens,
-             spaces_between_special_tokens=self.spaces_between_special_tokens,
-         )
-        self.tokens.extend(new_tokens)
-        self.prefix_offset = prefix_offset
-        self.read_offset = read_offset
-        return new_decoded_token_text
-
-    def _assert_valid_stop_token(self, stop_token_id: int) -> None:
-        """Token must be EOS (if not ignoring) or stop token"""
-        if ((stop_token_id != self.eos_token_id or self.ignore_eos)
-                and stop_token_id not in (self.stop_token_ids or ())):
-            raise AssertionError(f"Engine core finish reason is STOP but "
-                                 f"{stop_token_id} is not in stop_token_ids "
-                                 f"= {self.stop_token_ids}")
-
-    def update(self, new_token_ids: list[int],
-               core_finish_reason: Optional[FinishReason]) -> Optional[str]:
-        """
-        Update RequestState for the request_id by:
-            1) Detokenize the new token ids incrementally.
-            2) Evaluate stop criteria.
-
-        Return matched stop string or None.
-        """
-        # Skip detokenization
-        if self.tokenizer is None:
-            self.token_ids.extend(new_token_ids)
-            return None
-        if not new_token_ids:
-            return None
-
-        # 1) Detokenize the new token ids incrementally.
-        # TODO(woosuk): This method becomes very inefficient when the number of
-        # new_token_ids is more than 1. We need to optimize this.
-        decoded_text = ""
-        for new_token_id in new_token_ids[0:-1]:
-            self.token_ids.append(new_token_id)
-            decoded_text += self._detokenize()
-
-        # 2) Deferred text truncation for engine core EOS/stop-token checks.
-        #    Skip detokenization of last token if it is a stop-token.
-        new_token_id = new_token_ids[-1]
-        self.token_ids.append(new_token_id)
-        if is_stop_token := core_finish_reason == FinishReason.STOP:
-            self._assert_valid_stop_token(new_token_id)
-        if not is_stop_token or self.include_stop_str_in_output:
-            decoded_text += self._detokenize()
-
-        self.output_text += decoded_text
-
-        if is_stop_token:
-            # EOS/stop-token triggered
-            return None
-
-        # 3) Evaluate stop-string criteria.
-        return self._check_stop_string(decoded_text)
 
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         """If delta is True, only new text since the last call to
