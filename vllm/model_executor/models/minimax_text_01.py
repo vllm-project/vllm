@@ -895,10 +895,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 self.shared_moe_coefficient_loader)
             self.shared_moe_mode = getattr(config, 'shared_moe_mode',
                                            'softmax')
-        self.kv_cache = [
-            torch.tensor([]) for _ in range(get_current_vllm_config(
-            ).parallel_config.pipeline_parallel_size)
-        ]
         return
 
     def forward(
@@ -913,7 +909,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
 
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
-        kv_caches = self.kv_cache[forward_context.virtual_engine]
         # MiniMaxText01 post-norm
         layernorm_input = hidden_states
         layernorm_output = self.input_layernorm(layernorm_input)
