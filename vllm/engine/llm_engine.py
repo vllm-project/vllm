@@ -887,7 +887,8 @@ class LLMEngine:
             >>> engine.abort_request(request_id)
         """
         for scheduler in self.scheduler:
-            scheduler.abort_seq_group(request_id)
+            scheduler.abort_seq_group(
+                request_id, seq_id_to_seq_group=self.seq_id_to_seq_group)
 
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
@@ -1354,6 +1355,11 @@ class LLMEngine:
 
             finished_requests_ids = self.scheduler[
                 virtual_engine].get_and_reset_finished_requests_ids()
+            # When n>1, elements in self.seq_id_to_seq_group should be deleted
+            # here, otherwise memory leaks.
+            for finished_request_id in finished_requests_ids:
+                if finished_request_id in self.seq_id_to_seq_group:
+                    del self.seq_id_to_seq_group[finished_request_id]
 
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
@@ -2048,10 +2054,15 @@ class LLMEngine:
             guided_decoding.backend = guided_decoding.backend or \
                 self.decoding_config.guided_decoding_backend
 
+            logger.debug("Reasoning backend: %s",
+                         self.decoding_config.reasoning_backend)
+
             processor = get_local_guided_decoding_logits_processor(
                 guided_params=guided_decoding,
                 tokenizer=tokenizer,
-                model_config=self.model_config)
+                model_config=self.model_config,
+                reasoning_backend=self.decoding_config.reasoning_backend,
+            )
             if processor:
                 logits_processors.append(processor)
 

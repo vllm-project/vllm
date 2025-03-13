@@ -15,12 +15,17 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
-We are excited to invite you to our Menlo Park meetup with Meta, evening of Thursday, February 27! Meta engineers will discuss the improvements on top of vLLM, and vLLM contributors will share updates from the v0.7.x series of releases. [Register Now](https://lu.ma/h7g3kuj9)
+We’re excited to invite you to the first **vLLM China Meetup** on **March 16** in **Beijing**!  
+
+Join us to connect with the **vLLM team** and explore how vLLM is leveraged in **post-training, fine-tuning, and deployment**, including [verl](https://github.com/volcengine/verl), [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory), and [vllm-ascend](https://github.com/vllm-project/vllm-ascend).
+
+👉 **[Register Now](https://mp.weixin.qq.com/s/n77GibL2corAtQHtVEAzfg)** to be part of the discussion!  
 
 ---
 
 *Latest News* 🔥
 
+- [2025/02] We hosted [the ninth vLLM meetup](https://lu.ma/h7g3kuj9) with Meta! Please find the meetup slides from vLLM team [here](https://docs.google.com/presentation/d/1jzC_PZVXrVNSFVCW-V4cFXb6pn7zZ2CyP_Flwo05aqg/edit?usp=sharing) and AMD [here](https://drive.google.com/file/d/1Zk5qEJIkTmlQ2eQcXQZlljAx3m9s7nwn/view?usp=sharing). The slides from Meta will not be posted.
 - [2025/01] We are excited to announce the alpha release of vLLM V1: A major architectural upgrade with 1.7x speedup! Clean code, optimized execution loop, zero-overhead prefix caching, enhanced multimodal support, and more. Please check out our blog post [here](https://blog.vllm.ai/2025/01/27/v1-alpha-release.html).
 - [2025/01] We hosted [the eighth vLLM meetup](https://lu.ma/zep56hui) with Google Cloud! Please find the meetup slides from vLLM team [here](https://docs.google.com/presentation/d/1epVkt4Zu8Jz_S5OhEHPc798emsYh2BwYfRuDDVEF7u4/edit?usp=sharing), and Google Cloud team [here](https://drive.google.com/file/d/1h24pHewANyRL11xy5dXUbvRC9F9Kkjix/view?usp=sharing).
 - [2024/12] vLLM joins [pytorch ecosystem](https://pytorch.org/blog/vllm-joins-pytorch)! Easy, Fast, and Cheap LLM Serving for Everyone!
@@ -86,7 +91,7 @@ pip install vllm
 ```
 
 Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
-- [Installation](https://docs.vllm.ai/en/latest/getting_started/installation/index.html)
+- [Installation](https://docs.vllm.ai/en/latest/getting_started/installation.html)
 - [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
 - [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
 
@@ -146,9 +151,9 @@ If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs
 
 ## Contact Us
 
-- For technical questions and feature requests, please use Github issues or discussions.
+- For technical questions and feature requests, please use GitHub issues or discussions.
 - For discussing with fellow users and coordinating contributions and development, please use Slack.
-- For security disclosures, please use Github's security advisory feature.
+- For security disclosures, please use GitHub's security advisory feature.
 - For collaborations and partnerships, please contact us at vllm-questions AT lists.berkeley.edu.
 
 ## Media Kit

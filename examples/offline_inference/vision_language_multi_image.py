@@ -4,13 +4,16 @@ This example shows how to use vLLM for running offline inference with
 multi-image input on vision language models for text generation,
 using the chat template defined by the model.
 """
+import os
 from argparse import Namespace
-from typing import List, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
+from huggingface_hub import snapshot_download
 from PIL.Image import Image
 from transformers import AutoProcessor, AutoTokenizer
 
 from vllm import LLM, SamplingParams
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.utils import fetch_image
 from vllm.utils import FlexibleArgumentParser
 
@@ -24,8 +27,8 @@ IMAGE_URLS = [
 class ModelRequestData(NamedTuple):
     llm: LLM
     prompt: str
-    stop_token_ids: Optional[List[int]]
-    image_data: List[Image]
+    stop_token_ids: Optional[list[int]]
+    image_data: list[Image]
     chat_template: Optional[str]
 
 
@@ -34,7 +37,7 @@ class ModelRequestData(NamedTuple):
 # Unless specified, these settings have been tested to work on a single L4.
 
 
-def load_aria(question, image_urls: List[str]) -> ModelRequestData:
+def load_aria(question, image_urls: list[str]) -> ModelRequestData:
     model_name = "rhymes-ai/Aria"
     llm = LLM(model=model_name,
               tokenizer_mode="slow",
@@ -55,7 +58,7 @@ def load_aria(question, image_urls: List[str]) -> ModelRequestData:
     )
 
 
-def load_deepseek_vl2(question: str, image_urls: List[str]):
+def load_deepseek_vl2(question: str, image_urls: list[str]):
     model_name = "deepseek-ai/deepseek-vl2-tiny"
 
     llm = LLM(model=model_name,
@@ -77,7 +80,47 @@ def load_deepseek_vl2(question: str, image_urls: List[str]):
     )
 
 
-def load_h2ovl(question: str, image_urls: List[str]) -> ModelRequestData:
+def load_gemma3(question, image_urls: list[str]) -> ModelRequestData:
+    model_name = "google/gemma-3-4b-it"
+
+    llm = LLM(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        # Default is False; setting it to True is not supported in V1 yet
+        mm_processor_kwargs={"do_pan_and_scan": True},
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            *placeholders,
+            {
+                "type": "text",
+                "text": question
+            },
+        ],
+    }]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=None,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
+def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "h2oai/h2ovl-mississippi-800m"
 
     llm = LLM(
@@ -111,7 +154,7 @@ def load_h2ovl(question: str, image_urls: List[str]) -> ModelRequestData:
     )
 
 
-def load_idefics3(question, image_urls: List[str]) -> ModelRequestData:
+def load_idefics3(question, image_urls: list[str]) -> ModelRequestData:
     model_name = "HuggingFaceM4/Idefics3-8B-Llama3"
 
     # The configuration below has been confirmed to launch on a single L40 GPU.
@@ -142,7 +185,7 @@ def load_idefics3(question, image_urls: List[str]) -> ModelRequestData:
     )
 
 
-def load_internvl(question: str, image_urls: List[str]) -> ModelRequestData:
+def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL2-2B"
 
     llm = LLM(
@@ -179,7 +222,7 @@ def load_internvl(question: str, image_urls: List[str]) -> ModelRequestData:
     )
 
 
-def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
+def load_mllama(question, image_urls: list[str]) -> ModelRequestData:
     model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 
     # The configuration below has been confirmed to launch on a single L40 GPU.
@@ -201,7 +244,7 @@ def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
     )
 
 
-def load_nvlm_d(question: str, image_urls: List[str]):
+def load_nvlm_d(question: str, image_urls: list[str]):
     model_name = "nvidia/NVLM-D-72B"
 
     # Adjust this as necessary to fit in GPU
@@ -234,7 +277,7 @@ def load_nvlm_d(question: str, image_urls: List[str]):
     )
 
 
-def load_pixtral_hf(question: str, image_urls: List[str]) -> ModelRequestData:
+def load_pixtral_hf(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "mistral-community/pixtral-12b"
 
     # Adjust this as necessary to fit in GPU
@@ -259,7 +302,7 @@ def load_pixtral_hf(question: str, image_urls: List[str]) -> ModelRequestData:
     )
 
 
-def load_phi3v(question: str, image_urls: List[str]) -> ModelRequestData:
+def load_phi3v(question: str, image_urls: list[str]) -> ModelRequestData:
     # num_crops is an override kwarg to the multimodal image processor;
     # For some models, e.g., Phi-3.5-vision-instruct, it is recommended
     # to use 16 for single frame scenarios, and 4 for multi-frame.
@@ -294,8 +337,48 @@ def load_phi3v(question: str, image_urls: List[str]) -> ModelRequestData:
     )
 
 
+def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
+    """
+    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    show how to process multi images inputs.
+    """
+
+    model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
+    # Since the vision-lora and speech-lora co-exist with the base model,
+    # we have to manually specify the path of the lora weights.
+    vision_lora_path = os.path.join(model_path, "vision-lora")
+    llm = LLM(
+        model=model_path,
+        trust_remote_code=True,
+        max_model_len=10000,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        enable_lora=True,
+        max_lora_rank=320,
+        lora_extra_vocab_size=0,
+    )
+    lora_request = LoRARequest("vision", 1, vision_lora_path)
+    # To maintain code compatibility in this script, we add LoRA here.
+    llm.llm_engine.add_lora(lora_request=lora_request)
+    # You can also add LoRA using:
+    # llm.generate(prompts, lora_request=lora_request,...)
+
+    placeholders = "".join(f"<|image_{i}|>"
+                           for i, _ in enumerate(image_urls, start=1))
+    prompt = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
+    stop_token_ids = None
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
 def load_qwen_vl_chat(question: str,
-                      image_urls: List[str]) -> ModelRequestData:
+                      image_urls: list[str]) -> ModelRequestData:
     model_name = "Qwen/Qwen-VL-Chat"
     llm = LLM(
         model=model_name,
@@ -336,7 +419,7 @@ def load_qwen_vl_chat(question: str,
     )
 
 
-def load_qwen2_vl(question, image_urls: List[str]) -> ModelRequestData:
+def load_qwen2_vl(question, image_urls: list[str]) -> ModelRequestData:
     try:
         from qwen_vl_utils import process_vision_info
     except ModuleNotFoundError:
@@ -393,7 +476,7 @@ def load_qwen2_vl(question, image_urls: List[str]) -> ModelRequestData:
     )
 
 
-def load_qwen2_5_vl(question, image_urls: List[str]) -> ModelRequestData:
+def load_qwen2_5_vl(question, image_urls: list[str]) -> ModelRequestData:
     try:
         from qwen_vl_utils import process_vision_info
     except ModuleNotFoundError:
@@ -453,12 +536,14 @@ def load_qwen2_5_vl(question, image_urls: List[str]) -> ModelRequestData:
 model_example_map = {
     "aria": load_aria,
     "deepseek_vl_v2": load_deepseek_vl2,
+    "gemma3": load_gemma3,
     "h2ovl_chat": load_h2ovl,
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
     "mllama": load_mllama,
     "NVLM_D": load_nvlm_d,
     "phi3_v": load_phi3v,
+    "phi4_mm": load_phi4mm,
     "pixtral_hf": load_pixtral_hf,
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
@@ -466,7 +551,7 @@ model_example_map = {
 }
 
 
-def run_generate(model, question: str, image_urls: List[str]):
+def run_generate(model, question: str, image_urls: list[str]):
     req_data = model_example_map[model](question, image_urls)
 
     sampling_params = SamplingParams(temperature=0.0,
@@ -487,7 +572,7 @@ def run_generate(model, question: str, image_urls: List[str]):
         print(generated_text)
 
 
-def run_chat(model: str, question: str, image_urls: List[str]):
+def run_chat(model: str, question: str, image_urls: list[str]):
     req_data = model_example_map[model](question, image_urls)
 
     sampling_params = SamplingParams(temperature=0.0,
