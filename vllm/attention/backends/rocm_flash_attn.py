@@ -557,7 +557,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
-        fp8_out_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -703,8 +702,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     full_scales = (
                         layer._q_scale.item(), layer._k_scale.item(),
                         layer._v_scale.item(), layer._prob_scale.item(),
-                        fp8_out_scale.item()) if (
-                            fp8_out_scale and layer._q_scale
+                        layer._fp8_out_scale.item()) if (
+                            layer._fp8_out_scale and layer._q_scale
                             and layer._prob_scale
                             and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN) else None
                     out, _ = self.attn_func(
