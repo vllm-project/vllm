@@ -24,6 +24,7 @@ Currently only the forward kernel is supported, and contains these features:
 import torch
 import triton
 import triton.language as tl
+
 from vllm.platforms import current_platform
 
 SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
