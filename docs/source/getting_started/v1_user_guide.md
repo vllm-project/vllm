@@ -96,7 +96,7 @@ to handle request preemptions.
 
 Although we have re-implemented and partially optimized many features and models from V0 in vLLM V1, optimization work is still ongoing for some, and others remain unsupported.
 
-#### Features to be Optimized
+#### Features to Be Optimized
 
 These features are already supported in vLLM V1, but their optimization is still
 in progress.
