@@ -1237,10 +1237,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
-        self.kv_cache = [
-            torch.tensor([]) for _ in range(get_current_vllm_config(
-            ).parallel_config.pipeline_parallel_size)
-        ]
         return
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
@@ -1257,12 +1253,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
-
-        forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-        kv_caches = self.kv_cache[forward_context.virtual_engine]
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                attn_metadata, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                 inputs_embeds, **kwargs)
 
         return hidden_states
