@@ -111,21 +111,13 @@ class IncrementalDetokenizer:
             # Skip detokenization if no new token ids
             return None
 
-        # If stop-terminated, exclude last token from detokenization
-        # based on include_stop_str_in_output parameter.
-        stop_token_id = None
-        if stop_terminated:
+        if stop_terminated and not self.include_stop_str_in_output:
+            # If stop-terminated, exclude last token from detokenization
+            # based on include_stop_str_in_output parameter.
             stop_token_id = new_token_ids[-1]
-            # EOS or stop token must have triggered engine stop
-            if ((stop_token_id != self.eos_token_id or self.ignore_eos)
-                    and stop_token_id not in (self.stop_token_ids or ())):
-                raise AssertionError(
-                    f"Engine core finish reason is STOP but "
-                    f"{stop_token_id} is not in stop_token_ids "
-                    f"= {self.stop_token_ids}")
-            if not self.include_stop_str_in_output:
-                # Skip stop-token detokenization
-                new_token_ids = new_token_ids[:-1]
+            new_token_ids = new_token_ids[:-1]
+        else:
+            stop_token_id = None
 
         # 1) Detokenize the new token ids incrementally.
         # TODO(woosuk): This method becomes very inefficient when the number of
@@ -158,6 +150,7 @@ class IncrementalDetokenizer:
                 # Cleanup after skipping detokenization
                 assert stop_token_id is not None
                 self.token_ids.append(stop_token_id)
+            # Stop token triggered; skip stop string check
             return None
 
         # 2) Evaluate stop strings.
