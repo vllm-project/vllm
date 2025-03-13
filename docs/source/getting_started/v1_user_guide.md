@@ -24,7 +24,7 @@ This living user guide outlines a few known **important changes and limitations*
 
 ### Feature / Model Supports Overview
 
-| Feature / Model                           | Status / PR/RFC                                                                              | Notes                                                            |
+| Feature / Model                           | Status                                                                           | Notes                                                            |
 |-------------------------------------------|----------------------------------------------------------------------------------------------|------------------------------------------------------------------|
 | **Logprobs Calculation**                  | <nobr>🟢 Functional</nobr>                                                                   | Returns raw logprobs; post-adjustments logprobs support pending. |
 | **Prompt Logprobs with Prefix Caching**   | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>    | Computes prompt logprobs without caching; caching to be added.   |
@@ -42,10 +42,11 @@ This living user guide outlines a few known **important changes and limitations*
 <details>
   <summary><strong>Legend</strong></summary>
 
-- **🟢 Functional**: Fully operational; minor tuning may be required.  
-- **🚧 In Development**: Actively being developed.  
-- **🟡 Planned**: Scheduled for future work (some may have active PRs/RFCs).  
-- **🔴 Deprecated**: No further updates planned.
+- **🚀 Optimized**: Nearly fully optimized, with no further work currently planned.
+- **🟢 Functional**: Fully operational, with ongoing optimizations.  
+- **🚧 WIP**: Under active development.  
+- **🟡 Planned**: Scheduled for future implementation (some may have open PRs/RFCs).  
+- **🔴 Deprecated**: Not planned for v1 unless there is strong demand.
 
 </details>
 
