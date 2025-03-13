@@ -13,7 +13,7 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
 from vllm.distributed.parallel_state import (
@@ -472,6 +472,11 @@ class MiniMaxText01LinearAttention(nn.Module):
         self.tp_slope = self.slope_rate[self.tp_rank *
                                         self.tp_heads:(self.tp_rank + 1) *
                                         self.tp_heads].contiguous()
+        
+        self.kv_cache = [
+            torch.tensor([]) for _ in range(get_current_vllm_config(
+            ).parallel_config.pipeline_parallel_size)
+        ]
 
     @staticmethod
     def weight_direct_load(param: torch.Tensor,
@@ -692,6 +697,10 @@ class MiniMaxText01Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
+        self.kv_cache = [
+            torch.tensor([]) for _ in range(get_current_vllm_config(
+            ).parallel_config.pipeline_parallel_size)
+        ]
         return
 
     @staticmethod
@@ -890,6 +899,10 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 self.shared_moe_coefficient_loader)
             self.shared_moe_mode = getattr(config, 'shared_moe_mode',
                                            'softmax')
+        self.kv_cache = [
+            torch.tensor([]) for _ in range(get_current_vllm_config(
+            ).parallel_config.pipeline_parallel_size)
+        ]
         return
 
     def forward(
@@ -1092,6 +1105,10 @@ class MiniMaxText01Model(nn.Module):
             norm_kwargs["eps"] = config.rms_norm_eps
         self.norm = RMSNorm(config.hidden_size, **norm_kwargs)
         self.embed_scale = 1.0
+        self.kv_cache = [
+            torch.tensor([]) for _ in range(get_current_vllm_config(
+            ).parallel_config.pipeline_parallel_size)
+        ]
         return
 
     def _clear_prefill_cache(self, attn_metadata,
@@ -1220,7 +1237,10 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
-
+        self.kv_cache = [
+            torch.tensor([]) for _ in range(get_current_vllm_config(
+            ).parallel_config.pipeline_parallel_size)
+        ]
         return
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
