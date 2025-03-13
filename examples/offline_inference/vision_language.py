@@ -6,13 +6,16 @@ the correct prompt format on vision language models for text generation.
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
+import os
 import random
 
+from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
+from vllm.lora.request import LoRARequest
 from vllm.utils import FlexibleArgumentParser
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -111,6 +114,27 @@ def run_fuyu(questions: list[str], modality: str):
               max_model_len=2048,
               max_num_seqs=2,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    stop_token_ids = None
+    return llm, prompts, stop_token_ids
+
+
+# Gemma 3
+def run_gemma3(questions: list[str], modality: str):
+    assert modality == "image"
+    model_name = "google/gemma-3-4b-it"
+
+    llm = LLM(
+        model=model_name,
+        max_model_len=2048,
+        max_num_seqs=2,
+        # Default is False; setting it to True is not supported in V1 yet
+        mm_processor_kwargs={"do_pan_and_scan": True},
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
+
+    prompts = [("<bos><start_of_turn>user\n"
+                f"<start_of_image>{question}<end_of_turn>\n"
+                "<start_of_turn>model\n") for question in questions]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -402,7 +426,7 @@ def run_mllama(questions: list[str], modality: str):
             "type": "image"
         }, {
             "type": "text",
-            "text": f"{question}"
+            "text": question
         }]
     }] for question in questions]
     prompts = tokenizer.apply_chat_template(messages,
@@ -519,6 +543,40 @@ def run_phi3v(questions: list[str], modality: str):
     return llm, prompts, stop_token_ids
 
 
+# Phi-4-multimodal-instruct
+def run_phi4mm(questions: list[str], modality: str):
+    """
+    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    show how to process image inputs.
+    """
+    assert modality == "image"
+    model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
+    # Since the vision-lora and speech-lora co-exist with the base model,
+    # we have to manually specify the path of the lora weights.
+    vision_lora_path = os.path.join(model_path, "vision-lora")
+    prompts = [
+        f"<|user|><|image_1|>{question}<|end|><|assistant|>"
+        for question in questions
+    ]
+    llm = LLM(
+        model=model_path,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=2,
+        enable_lora=True,
+        max_lora_rank=320,
+        lora_extra_vocab_size=0,
+    )
+    lora_request = LoRARequest("vision", 1, vision_lora_path)
+    # To maintain code compatibility in this script, we add LoRA here.
+    llm.llm_engine.add_lora(lora_request=lora_request)
+    # You can also add LoRA using:
+    # llm.generate(prompts, lora_request=lora_request,...)
+
+    stop_token_ids = None
+    return llm, prompts, stop_token_ids
+
+
 # Pixtral HF-format
 def run_pixtral_hf(questions: list[str], modality: str):
     assert modality == "image"
@@ -627,6 +685,7 @@ model_example_map = {
     "deepseek_vl_v2": run_deepseek_vl2,
     "florence2": run_florence2,
     "fuyu": run_fuyu,
+    "gemma3": run_gemma3,
     "glm4v": run_glm4v,
     "h2ovl_chat": run_h2ovl,
     "idefics3": run_idefics3,
@@ -644,6 +703,7 @@ model_example_map = {
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
+    "phi4_mm": run_phi4mm,
     "pixtral_hf": run_pixtral_hf,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,

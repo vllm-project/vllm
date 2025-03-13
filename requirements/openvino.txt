@@ -1,5 +1,5 @@
 # Common dependencies
--r requirements-common.txt
+-r common.txt
 
 torch == 2.5.1 #  should be aligned with "common" vLLM torch version
 openvino >= 2024.4.0 # since 2024.4.0 both CPU and GPU support Paged Attention

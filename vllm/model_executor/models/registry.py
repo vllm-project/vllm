@@ -53,6 +53,7 @@ _TEXT_GENERATION_MODELS = {
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
+    "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
     "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
@@ -161,6 +162,7 @@ _MULTIMODAL_MODELS = {
     "ChameleonForConditionalGeneration": ("chameleon", "ChameleonForConditionalGeneration"),  # noqa: E501
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
+    "Gemma3ForConditionalGeneration": ("gemma3_mm", "Gemma3ForConditionalGeneration"),  # noqa: E501
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
