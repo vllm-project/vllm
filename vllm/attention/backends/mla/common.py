@@ -163,17 +163,17 @@ for chunk_idx in range(cdiv(C, MCC)):
     cache_k_pe_chunk   = cache_k_pe[chunk_start:chunk_end]
     cache_k_nope_chunk = (cache_kv_c_chunk @ W_UK).view(-1, N, P)
     cache_v_chunk      = (cache_kv_c_chunk @ W_UV).view(-1, N, V)
-    
+
     chunk_o, chunk_lse = scaled_dot_product_attention(
         torch.cat([q_nope, q_pe], dim=-1),
-        torch.cat([cache_k_nope_chunk, 
-                   cache_k_pe_chunk.unsqueeze(1).expand(-1, N, -1)], 
+        torch.cat([cache_k_nope_chunk,
+                   cache_k_pe_chunk.unsqueeze(1).expand(-1, N, -1)],
                    dim=-1),
         cache_v_chunk,
         casual=False,
         return_softmax_lse=True
     )
-    
+
     curr_o, curr_lse = merge_attn_states(
         suffix_output=curr_o,
         suffix_lse=curr_lse,
