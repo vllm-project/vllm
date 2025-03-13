@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
+from vllm.scalar_type import scalar_types
 
 from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
                                    rocm_aiter_fused_experts,
@@ -1435,3 +1436,4 @@ def fused_moe(
                          a1_scale=a1_scale,
                          a2_scale=a2_scale,
                          block_shape=block_shape)
+
