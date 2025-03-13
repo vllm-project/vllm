@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -13,7 +13,8 @@ import vllm.envs as envs
 from vllm.inputs import DummyData
 from vllm.logger import init_logger
 
-from .inputs import MultiModalDataDict, MultiModalInputs
+from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
+                     MultiModalInputs)
 from .processing import BaseMultiModalProcessor, BaseProcessingInfo
 
 logger = init_logger(__name__)
@@ -110,12 +111,10 @@ class MultiModalProfiler(Generic[_I]):
 
     def get_mm_limits(self) -> Mapping[str, int]:
         mm_config = self.processing_info.ctx.get_mm_config()
-        mm_limit_per_prompt = mm_config.limit_per_prompt
-
         supported_mm_limits = self.processing_info.get_supported_mm_limits()
 
         mm_limits = {
-            modality: mm_limit_per_prompt.get(modality, 1)
+            modality: mm_config.get_limit_per_prompt(modality)
             for modality in supported_mm_limits
         }
 
@@ -144,14 +143,10 @@ class MultiModalProfiler(Generic[_I]):
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         )
 
-    def get_dummy_data(
+    def get_and_validate_mm_inputs(
         self,
         seq_len: int,
-        is_encoder_data: bool = False,
-    ) -> DummyData:
-        # Avoid circular import
-        from vllm.sequence import SequenceData
-
+    ) -> tuple[MultiModalInputs, Mapping[str, int]]:
         mm_counts = self.get_mm_limits()
 
         info = self.processing_info
@@ -160,13 +155,12 @@ class MultiModalProfiler(Generic[_I]):
 
         if mm_counts.keys() != mm_max_tokens_per_item.keys():
             raise AssertionError(
-                "The keys returned by `get_supported_mm_limits`"
+                "The keys returned by `get_supported_mm_limits` "
                 f"({set(mm_counts.keys())}) should be the same as those "
                 "returned by `get_mm_max_tokens_per_item` "
                 f"({set(mm_max_tokens_per_item.keys())})")
 
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
-        prompt_token_ids = mm_inputs["prompt_token_ids"]
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
         total_placeholders_by_modality = {
@@ -183,22 +177,57 @@ class MultiModalProfiler(Generic[_I]):
                 f"{total_placeholders_by_modality} placeholder tokens, which "
                 f"is not the expected {expected_placeholders_by_modality} "
                 "tokens.")
+        return mm_inputs, total_placeholders_by_modality
 
+    def get_encoder_dummy_data(
+        self,
+        seq_len: int,
+    ) -> DummyData:
+        # Avoid circular import
+        from vllm.sequence import SequenceData
+
+        mm_inputs, _ = self.get_and_validate_mm_inputs(seq_len)
+        mm_inputs = cast(MultiModalEncDecInputs, mm_inputs)
+
+        # For encoder-decoder models, use encoder prompt token ids instead of
+        # decoder prompt to construct dummy seq_data for encoder profiling.
+        encoder_prompt_token_ids = mm_inputs["encoder_prompt_token_ids"]
+
+        total_len = len(encoder_prompt_token_ids)
+        num_tokens_to_pad = max(total_len, seq_len) - total_len
+        encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
+
+        return DummyData(
+            seq_data=SequenceData.from_seqs(encoder_prompt_token_ids),
+            multi_modal_data=None,
+            multi_modal_placeholders=None,
+        )
+
+    def get_decoder_dummy_data(
+        self,
+        seq_len: int,
+    ) -> DummyData:
+        # Avoid circular import
+        from vllm.sequence import SequenceData
+
+        (mm_inputs, total_placeholders_by_modality
+         ) = self.get_and_validate_mm_inputs(seq_len)
+
+        prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)
 
         # V0 does not support chunked prefill.
-        if (total_len > seq_len and not envs.VLLM_USE_V1) or is_encoder_data:
-            if total_len > seq_len:
-                logger.warning(
-                    "The context length (%d) of the model is too short "
-                    "to hold the multi-modal embeddings in the worst case "
-                    "(%d tokens in total, out of which %s are reserved for "
-                    "multi-modal embeddings). This may cause certain "
-                    "multi-modal inputs to fail during inference, even when "
-                    "the input text is short. To avoid this, you should "
-                    "increase `max_model_len`, reduce `max_num_seqs`, "
-                    "and/or reduce `mm_counts`.", seq_len, total_len,
-                    total_placeholders_by_modality)
+        if total_len > seq_len and not envs.VLLM_USE_V1:
+            logger.warning(
+                "The context length (%d) of the model is too short "
+                "to hold the multi-modal embeddings in the worst case "
+                "(%d tokens in total, out of which %s are reserved for "
+                "multi-modal embeddings). This may cause certain "
+                "multi-modal inputs to fail during inference, even when "
+                "the input text is short. To avoid this, you should "
+                "increase `max_model_len`, reduce `max_num_seqs`, "
+                "and/or reduce `mm_counts`.", seq_len, total_len,
+                total_placeholders_by_modality)
 
             return DummyData(
                 seq_data=SequenceData.from_prompt_token_counts((0, seq_len)),
@@ -211,5 +240,5 @@ class MultiModalProfiler(Generic[_I]):
         return DummyData(
             seq_data=SequenceData.from_seqs(prompt_token_ids),
             multi_modal_data=mm_inputs["mm_kwargs"],
-            multi_modal_placeholders=placeholders_by_modality,
+            multi_modal_placeholders=mm_inputs["mm_placeholders"],
         )

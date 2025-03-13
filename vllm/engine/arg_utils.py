@@ -10,6 +10,7 @@ from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
 import torch
 
 import vllm.envs as envs
+from vllm import version
 from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          DecodingConfig, DeviceConfig, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
@@ -21,6 +22,7 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
+from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, StoreBoolean
@@ -91,6 +93,7 @@ class EngineArgs:
     model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[str, List[str]]] = None
     tokenizer: Optional[str] = None
+    hf_config_path: Optional[str] = None
     task: TaskOption = "auto"
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
@@ -101,7 +104,7 @@ class EngineArgs:
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
-    seed: int = 0
+    seed: Optional[int] = None
     max_model_len: Optional[int] = None
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
@@ -111,6 +114,7 @@ class EngineArgs:
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
+    enable_expert_parallel: bool = False
     max_parallel_loading_workers: Optional[int] = None
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
@@ -188,6 +192,7 @@ class EngineArgs:
     qlora_adapter_name_or_path: Optional[str] = None
     disable_logprobs_during_spec_decoding: Optional[bool] = None
 
+    show_hidden_metrics_for_version: Optional[str] = None
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
@@ -198,10 +203,11 @@ class EngineArgs:
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
     worker_cls: str = "auto"
+    worker_extension_cls: str = ""
 
     kv_transfer_config: Optional[KVTransferConfig] = None
 
-    generation_config: Optional[str] = None
+    generation_config: Optional[str] = "auto"
     override_generation_config: Optional[Dict[str, Any]] = None
     enable_sleep_mode: bool = False
     model_impl: str = "auto"
@@ -209,6 +215,9 @@ class EngineArgs:
     calculate_kv_scales: Optional[bool] = None
 
     additional_config: Optional[Dict[str, Any]] = None
+    enable_reasoning: Optional[bool] = None
+    reasoning_parser: Optional[str] = None
+    use_tqdm_on_load: bool = True
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -260,9 +269,17 @@ class EngineArgs:
             help='Name or path of the huggingface tokenizer to use. '
             'If unspecified, model name or path will be used.')
         parser.add_argument(
+            "--hf-config-path",
+            type=nullable_str,
+            default=EngineArgs.hf_config_path,
+            help='Name or path of the huggingface config to use. '
+            'If unspecified, model name or path will be used.')
+        parser.add_argument(
             '--skip-tokenizer-init',
             action='store_true',
-            help='Skip initialization of tokenizer and detokenizer.')
+            help='Skip initialization of tokenizer and detokenizer. '
+            'Expects valid prompt_token_ids and None for prompt from '
+            'the input. The generated output will contain token ids.')
         parser.add_argument(
             '--revision',
             type=nullable_str,
@@ -379,9 +396,10 @@ class EngineArgs:
             'https://github.com/noamgat/lm-format-enforcer.'
             ' Can be overridden per request via guided_decoding_backend'
             ' parameter.\n'
-            'Backend-sepcific options can be supplied in a comma-separated '
+            'Backend-specific options can be supplied in a comma-separated '
             'list following a colon after the backend name. Valid backends and '
             'all available options are: [xgrammar:no-fallback, '
+            'xgrammar:disable-any-whitespace, '
             'outlines:no-fallback, lm-format-enforcer:no-fallback]')
         parser.add_argument(
             '--logits-processor-pattern',
@@ -426,6 +444,11 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.tensor_parallel_size,
                             help='Number of tensor parallel replicas.')
+        parser.add_argument(
+            '--enable-expert-parallel',
+            action='store_true',
+            help='Use expert parallelism instead of tensor parallelism '
+            'for MoE layers.')
         parser.add_argument(
             '--max-parallel-loading-workers',
             type=int,
@@ -729,6 +752,14 @@ class EngineArgs:
                             default=1,
                             help=('Maximum number of forward steps per '
                                   'scheduler call.'))
+        parser.add_argument(
+            '--use-tqdm-on-load',
+            dest='use_tqdm_on_load',
+            action=argparse.BooleanOptionalAction,
+            default=EngineArgs.use_tqdm_on_load,
+            help='Whether to enable/disable progress bar '
+            'when loading model weights.',
+        )
 
         parser.add_argument(
             '--multi-step-stream-outputs',
@@ -909,6 +940,18 @@ class EngineArgs:
                             default=None,
                             help='Name or path of the QLoRA adapter.')
 
+        parser.add_argument('--show-hidden-metrics-for-version',
+                            type=str,
+                            default=None,
+                            help='Enable deprecated Prometheus metrics that '
+                            'have been hidden since the specified version. '
+                            'For example, if a previously deprecated metric '
+                            'has been hidden since the v0.7.0 release, you '
+                            'use --show-hidden-metrics-for-version=0.7 as a '
+                            'temporary escape hatch while you migrate to new '
+                            'metrics. The metric is likely to be removed '
+                            'completely in an upcoming release.')
+
         parser.add_argument(
             '--otlp-traces-endpoint',
             type=str,
@@ -991,15 +1034,22 @@ class EngineArgs:
             default="auto",
             help='The worker class to use for distributed execution.')
         parser.add_argument(
+            '--worker-extension-cls',
+            type=str,
+            default="",
+            help='The worker extension class on top of the worker cls, '
+            'it is useful if you just want to add new functions to the worker '
+            'class without changing the existing functions.')
+        parser.add_argument(
             "--generation-config",
             type=nullable_str,
-            default=None,
+            default="auto",
             help="The folder path to the generation config. "
-            "Defaults to None, no generation config is loaded, vLLM defaults "
-            "will be used. If set to 'auto', the generation config will be "
-            "loaded from model path. If set to a folder path, the generation "
-            "config will be loaded from the specified folder path. If "
-            "`max_new_tokens` is specified in generation config, then "
+            "Defaults to 'auto', the generation config will be loaded from "
+            "model path. If set to 'vllm', no generation config is loaded, "
+            "vLLM defaults will be used. If set to a folder path, the "
+            "generation config will be loaded from the specified folder path. "
+            "If `max_new_tokens` is specified in generation config, then "
             "it sets a server-wide limit on the number of output tokens "
             "for all requests.")
 
@@ -1036,6 +1086,25 @@ class EngineArgs:
             "Different platforms may support different configs. Make sure the "
             "configs are valid for the platform you are using. The input format"
             " is like '{\"config_key\":\"config_value\"}'")
+
+        parser.add_argument(
+            "--enable-reasoning",
+            action="store_true",
+            default=False,
+            help="Whether to enable reasoning_content for the model. "
+            "If enabled, the model will be able to generate reasoning content."
+        )
+
+        parser.add_argument(
+            "--reasoning-parser",
+            type=str,
+            choices=["deepseek_r1"],
+            default=None,
+            help=
+            "Select the reasoning parser depending on the model that you're "
+            "using. This is used to parse the reasoning content into OpenAI "
+            "API format. Required for ``--enable-reasoning``.")
+
         return parser
 
     @classmethod
@@ -1047,8 +1116,20 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
+        # gguf file needs a specific model loader and doesn't use hf_repo
+        if check_gguf_file(self.model):
+            self.quantization = self.load_format = "gguf"
+
+        # NOTE: This is to allow model loading from S3 in CI
+        if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
+                and self.model in MODELS_ON_S3
+                and self.load_format == LoadFormat.AUTO):  # noqa: E501
+            self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
+            self.load_format = LoadFormat.RUNAI_STREAMER
+
         return ModelConfig(
             model=self.model,
+            hf_config_path=self.hf_config_path,
             task=self.task,
             # We know this is not None because we set it in __post_init__
             tokenizer=cast(str, self.tokenizer),
@@ -1086,26 +1167,6 @@ class EngineArgs:
         )
 
     def create_load_config(self) -> LoadConfig:
-        return LoadConfig(
-            load_format=self.load_format,
-            download_dir=self.download_dir,
-            model_loader_extra_config=self.model_loader_extra_config,
-            ignore_patterns=self.ignore_patterns,
-        )
-
-    def create_engine_config(self,
-                             usage_context: Optional[UsageContext] = None
-                             ) -> VllmConfig:
-        from vllm.platforms import current_platform
-        current_platform.pre_register_and_update()
-
-        if envs.VLLM_USE_V1:
-            self._override_v1_engine_args(usage_context)
-
-        # gguf file needs a specific model loader and doesn't use hf_repo
-        if check_gguf_file(self.model):
-            self.quantization = self.load_format = "gguf"
-
         # bitsandbytes quantization needs a specific model loader
         # so we make sure the quant method and the load format are consistent
         if (self.quantization == "bitsandbytes" or
@@ -1122,9 +1183,22 @@ class EngineArgs:
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
 
-        assert self.cpu_offload_gb >= 0, (
-            "CPU offload space must be non-negative"
-            f", but got {self.cpu_offload_gb}")
+        return LoadConfig(
+            load_format=self.load_format,
+            download_dir=self.download_dir,
+            model_loader_extra_config=self.model_loader_extra_config,
+            ignore_patterns=self.ignore_patterns,
+            use_tqdm_on_load=self.use_tqdm_on_load,
+        )
+
+    def create_engine_config(self,
+                             usage_context: Optional[UsageContext] = None
+                             ) -> VllmConfig:
+        from vllm.platforms import current_platform
+        current_platform.pre_register_and_update()
+
+        if envs.VLLM_USE_V1:
+            self._override_v1_engine_args(usage_context)
 
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
@@ -1151,6 +1225,7 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
+            enable_expert_parallel=self.enable_expert_parallel,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             tokenizer_pool_config=TokenizerPoolConfig.create_config(
@@ -1161,6 +1236,7 @@ class EngineArgs:
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
+            worker_extension_cls=self.worker_extension_cls,
         )
 
         max_model_len = model_config.max_model_len
@@ -1170,9 +1246,9 @@ class EngineArgs:
             # long context (> 32K) models. This is to avoid OOM errors in the
             # initial memory profiling phase.
 
-            # For multimodal models, chunked prefill is disabled by default in
-            # V0, but enabled by design in V1
-            if model_config.is_multimodal_model:
+            # For multimodal models and models with MLA, chunked prefill is
+            # disabled by default in V0, but enabled by design in V1
+            if model_config.is_multimodal_model or model_config.use_mla:
                 self.enable_chunked_prefill = bool(envs.VLLM_USE_V1)
 
             elif use_long_context:
@@ -1206,7 +1282,6 @@ class EngineArgs:
               and model_config.runner_type == "pooling"):
             msg = "Chunked prefill is not supported for pooling models"
             raise ValueError(msg)
-
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
@@ -1259,16 +1334,6 @@ class EngineArgs:
             if speculative_config is None \
             else speculative_config.num_lookahead_slots
 
-        if not self.use_v2_block_manager:
-            logger.warning(
-                "[DEPRECATED] Block manager v1 has been removed, "
-                "and setting --use-v2-block-manager to True or False has "
-                "no effect on vLLM behavior. Please remove "
-                "--use-v2-block-manager in your engine argument. "
-                "If your use case is not supported by "
-                "SelfAttnBlockSpaceManager (i.e. block manager v2),"
-                " please file an issue with detailed information.")
-
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
@@ -1316,7 +1381,15 @@ class EngineArgs:
                                         if self.enable_prompt_adapter else None
 
         decoding_config = DecodingConfig(
-            guided_decoding_backend=self.guided_decoding_backend)
+            guided_decoding_backend=self.guided_decoding_backend,
+            reasoning_backend=self.reasoning_parser
+            if self.enable_reasoning else None,
+        )
+
+        show_hidden_metrics = False
+        if self.show_hidden_metrics_for_version is not None:
+            show_hidden_metrics = version._prev_minor_version_was(
+                self.show_hidden_metrics_for_version)
 
         detailed_trace_modules = []
         if self.collect_detailed_traces is not None:
@@ -1327,6 +1400,7 @@ class EngineArgs:
                     f"Invalid module {m} in collect_detailed_traces. "
                     f"Valid modules are {ALLOWED_DETAILED_TRACE_MODULES}")
         observability_config = ObservabilityConfig(
+            show_hidden_metrics=show_hidden_metrics,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_model_forward_time="model" in detailed_trace_modules
             or "all" in detailed_trace_modules,
@@ -1363,11 +1437,27 @@ class EngineArgs:
 
         # V1 always uses chunked prefills.
         self.enable_chunked_prefill = True
+        # V1 should use the new scheduler by default.
+        # Swap it only if this arg is set to the original V0 default
+        if self.scheduler_cls == EngineArgs.scheduler_cls:
+            self.scheduler_cls = "vllm.v1.core.scheduler.Scheduler"
+
         # When no user override, set the default values based on the usage
         # context.
         # Use different default values for different hardware.
-        from vllm.platforms import current_platform
-        device_name = current_platform.get_device_name().lower()
+
+        # Try to query the device name on the current platform. If it fails,
+        # it may be because the platform that imports vLLM is not the same
+        # as the platform that vLLM is running on (e.g. the case of scaling
+        # vLLM with Ray) and has no GPUs. In this case we use the default
+        # values for non-H100/H200 GPUs.
+        try:
+            from vllm.platforms import current_platform
+            device_name = current_platform.get_device_name().lower()
+        except Exception:
+            # This is only used to set default_max_num_batched_tokens
+            device_name = "no-device"
+
         if "h100" in device_name or "h200" in device_name:
             # For H100 and H200, we use larger default values.
             default_max_num_batched_tokens = {
@@ -1404,15 +1494,15 @@ class AsyncEngineArgs(EngineArgs):
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser,
                      async_args_only: bool = False) -> FlexibleArgumentParser:
+        # Initialize plugin to update the parser, for example, The plugin may
+        # adding a new kind of quantization method to --quantization argument or
+        # a new device to --device argument.
+        load_general_plugins()
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
-        # Initialize plugin to update the parser, for example, The plugin may
-        # adding a new kind of quantization method to --quantization argument or
-        # a new device to --device argument.
-        load_general_plugins()
         from vllm.platforms import current_platform
         current_platform.pre_register_and_update(parser)
         return parser

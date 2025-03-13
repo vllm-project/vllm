@@ -30,4 +30,5 @@ class CpuCommunicator(DeviceCommunicatorBase):
             pass
 
     def all_reduce(self, input_):
-        return self.dist_module.all_reduce(input_, group=self.device_group)
+        self.dist_module.all_reduce(input_, group=self.device_group)
+        return input_

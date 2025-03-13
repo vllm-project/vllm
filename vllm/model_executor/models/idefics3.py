@@ -16,8 +16,8 @@
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
 import math
-from typing import (Dict, Iterable, List, Literal, Mapping, Optional, Set,
-                    Tuple, TypedDict, Union)
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Dict, List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.utils.checkpoint
@@ -25,7 +25,6 @@ from torch import nn
 from transformers import (BatchFeature, Idefics3Config, Idefics3ImageProcessor,
                           Idefics3Processor)
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -42,7 +41,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo,
                                         MultiModalDataItems,
                                         MultiModalFieldConfig,
-                                        PromptReplacement)
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -275,12 +274,12 @@ class Idefics3MultimodalProcessor(
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         image_token = hf_processor.image_token.content
@@ -405,7 +404,6 @@ class Idefics3Model(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        self.padding_idx = self.config.text_config.pad_token_id
         self.vocab_size = self.config.text_config.vocab_size
         self.vision_model = Idefics3VisionTransformer(
             config.vision_config,
@@ -563,8 +561,6 @@ class Idefics3Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -572,8 +568,6 @@ class Idefics3Model(nn.Module):
         hidden_states = self.text_model(
             input_ids,
             positions,
-            kv_caches,
-            attn_metadata,
             intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
@@ -597,21 +591,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        # vision_model
-        "fc1",
-        "fc2",
-        "out_proj",
-        # text_model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -637,7 +616,9 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
         self.sampler = get_sampler()
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input = self.model._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -660,8 +641,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -679,8 +658,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         hidden_states = self.model.text_model(input_ids,
                                               positions,
-                                              kv_caches,
-                                              attn_metadata,
                                               intermediate_tensors,
                                               inputs_embeds=inputs_embeds)
 

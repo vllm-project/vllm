@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from itertools import product
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Optional
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -23,6 +23,7 @@ from vllm.lora.ops.triton_ops.bgmv_shrink import bgmv_shrink
 from vllm.lora.ops.triton_ops.sgmv_expand import sgmv_expand
 from vllm.lora.ops.triton_ops.sgmv_shrink import sgmv_shrink
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
+from vllm.lora.ops.triton_ops.v1 import V1KernelMeta, v1_expand, v1_shrink
 from vllm.utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
@@ -61,15 +62,15 @@ def make_rand_lora_weight_tensor(k: int,
 
 
 def make_rand_tensors(
-    a_shape: Tuple[int],
-    b_shape: Tuple[int],
-    c_shape: Tuple[int],
+    a_shape: tuple[int],
+    b_shape: tuple[int],
+    c_shape: tuple[int],
     a_dtype: torch.dtype,
     b_dtype: torch.dtype,
     c_dtype: torch.dtype,
     num_slices: int,
     device: str = "cuda",
-) -> Tuple[torch.Tensor, List[torch.Tensor], torch.Tensor]:
+) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]:
     """
     Make LoRA input/output matrices.
     """
@@ -89,7 +90,7 @@ def make_prompt_lora_mapping(num_prompts: int, num_active_loras: int,
                              sort_by_lora_id: bool,
                              device: str) -> torch.Tensor:
     """
-    All prompts are mapped to a Lora ID in range [0, num_active_loras).
+    All prompts are mapped to a LoRA ID in range [0, num_active_loras).
     where 0 refers to first lora, 1 refers to second lora and so on.
     """
     assert num_active_loras > 0
@@ -135,7 +136,7 @@ def make_token_lora_mapping(num_tokens: int, num_prompts: int,
 
 
 def ref_group_gemm(ref_out: torch.Tensor, input: torch.Tensor,
-                   lora_weights: List[torch.Tensor],
+                   lora_weights: list[torch.Tensor],
                    seq_lens_cpu: torch.Tensor,
                    prompt_lora_mapping_cpu: torch.Tensor, scaling: float,
                    add_inputs: Optional[bool]):
@@ -153,7 +154,6 @@ def ref_group_gemm(ref_out: torch.Tensor, input: torch.Tensor,
         result = torch.nn.functional.linear(x, w)
         result *= scaling
         out_list.append(result)
-    torch.cat(out_list, dim=0)
 
     cat_result = torch.cat(out_list, dim=0)
 
@@ -172,6 +172,8 @@ class OpType(Enum):
     SGMV_EXPAND = auto()
     BGMV_EXPAND = auto()
     BGMV_EXPAND_SLICE = auto()
+    V1_SHRINK = auto()
+    V1_EXPAND = auto()
 
     @staticmethod
     def from_str(s: str) -> "OpType":
@@ -185,28 +187,43 @@ class OpType(Enum):
             return OpType.BGMV_EXPAND
         if s.lower() == "bgmv_expand_slice":
             return OpType.BGMV_EXPAND_SLICE
+        if s.lower() == "v1_shrink":
+            return OpType.V1_SHRINK
+        if s.lower() == "v1_expand":
+            return OpType.V1_EXPAND
         raise ValueError(f"Unrecognized str {s} to convert to OpType")
 
     def is_shrink_fn(self) -> bool:
-        return self in [OpType.SGMV_SHRINK, OpType.BGMV_SHRINK]
+        return self in [
+            OpType.SGMV_SHRINK, OpType.BGMV_SHRINK, OpType.V1_SHRINK
+        ]
 
     def is_expand_fn(self) -> bool:
-        return self in [OpType.SGMV_EXPAND, OpType.BGMV_EXPAND]
+        return self in [
+            OpType.SGMV_EXPAND, OpType.BGMV_EXPAND, OpType.V1_EXPAND
+        ]
 
     def is_prefill_op(self) -> bool:
-        return self in [OpType.SGMV_SHRINK, OpType.SGMV_EXPAND]
+        return self in [
+            OpType.SGMV_SHRINK, OpType.SGMV_EXPAND, OpType.V1_SHRINK,
+            OpType.V1_EXPAND
+        ]
 
     def is_decode_op(self) -> bool:
         return self in [
-            OpType.BGMV_SHRINK, OpType.BGMV_EXPAND, OpType.BGMV_EXPAND_SLICE
+            OpType.BGMV_SHRINK, OpType.BGMV_EXPAND, OpType.BGMV_EXPAND_SLICE,
+            OpType.V1_SHRINK, OpType.V1_EXPAND
         ]
 
     def is_expand_slice_fn(self) -> bool:
         return self in [OpType.BGMV_EXPAND_SLICE]
 
-    def num_slices(self) -> List[int]:
-        if self in [OpType.SGMV_EXPAND, OpType.SGMV_SHRINK]:
-            # SGMV kernels supports slices
+    def num_slices(self) -> list[int]:
+        if self in [
+                OpType.SGMV_EXPAND, OpType.SGMV_SHRINK, OpType.V1_SHRINK,
+                OpType.V1_EXPAND
+        ]:
+            # SGMV kernels and v1 kernels supports slices
             return [1, 2, 3]
         if self in [OpType.BGMV_SHRINK, OpType.BGMV_EXPAND]:
             return [1]
@@ -215,7 +232,7 @@ class OpType(Enum):
         raise ValueError(f"Unrecognized OpType {self}")
 
     def mkn(self, batch_size: int, seq_length: int, hidden_size: int,
-            lora_rank: int) -> Tuple[int, int, int]:
+            lora_rank: int) -> tuple[int, int, int]:
         num_tokens = batch_size * seq_length
         if self.is_shrink_fn():
             m = num_tokens
@@ -230,7 +247,7 @@ class OpType(Enum):
 
     def matmul_dtypes(
             self, op_dtype: torch.dtype
-    ) -> Tuple[torch.dtype, torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, torch.dtype, torch.dtype]:
         """
         return a type, b type and c type for A x B = C
         """
@@ -243,7 +260,7 @@ class OpType(Enum):
     def matmul_shapes(
             self, batch_size: int, seq_length: int, hidden_size: int,
             lora_rank: int, num_loras: int,
-            num_slices: int) -> Tuple[Tuple[int], Tuple[int], Tuple[int]]:
+            num_slices: int) -> tuple[tuple[int], tuple[int], tuple[int]]:
         """
         Given num_slices, return the shapes of the A, B, and C matrices
         in A x B = C, for the op_type
@@ -251,11 +268,13 @@ class OpType(Enum):
         m, k, n = self.mkn(batch_size, seq_length, hidden_size, lora_rank)
 
         b_shape = (num_loras, n, k)  # col-major
-        if self == OpType.SGMV_SHRINK:
-            # SGMV shrink supports num_slices inherently in the kernel
+        if self in [OpType.SGMV_SHRINK, OpType.V1_SHRINK]:
+            # SGMV shrink and V1 shrink kernels support num_slices inherently
+            # in the kernel.
             return ((m, k), b_shape, (num_slices, m, n))
-        if self == OpType.SGMV_EXPAND:
-            # SGMV expand supports num_slices inherently in the kernel
+        if self in [OpType.SGMV_EXPAND, OpType.V1_EXPAND]:
+            # SGMV expand and V1 expand kernels support num_slices inherently
+            # in the kernel
             return ((num_slices, m, k), b_shape, (m, n * num_slices))
         if self == OpType.BGMV_SHRINK:
             return ((m, k), b_shape, (m, n))
@@ -268,7 +287,7 @@ class OpType(Enum):
 
     def bench_fn(self) -> Callable:
 
-        def emulate_bgmv_expand_slice(kwargs_list: List[Dict[str, Any]]):
+        def emulate_bgmv_expand_slice(kwargs_list: list[dict[str, Any]]):
             for x in kwargs_list:
                 bgmv_expand_slice(**x)
 
@@ -282,25 +301,30 @@ class OpType(Enum):
             return bgmv_expand
         if self == OpType.BGMV_EXPAND_SLICE:
             return emulate_bgmv_expand_slice
+        if self == OpType.V1_SHRINK:
+            return v1_shrink
+        if self == OpType.V1_EXPAND:
+            return v1_expand
+
         raise ValueError(f"Unrecognized optype {self}")
 
     def run_ref_group_gemm(self, output: torch.Tensor, input: torch.Tensor,
-                           lora_weights: List[torch.Tensor],
+                           lora_weights: list[torch.Tensor],
                            **kwargs) -> Callable:
-        """Each benchmark operation expected the input, lora_weights and outputs
+        """Each benchmark operation expects the input, lora_weights and outputs
            in a slightly different format. Refer to self.matmul_shapes().
            run_ref_group_gemm accounts for those differences in executing a
            reference group gemm for correctness testing.
         """
         w_dtype = lora_weights[0].dtype
         num_slices = len(lora_weights)
-        if self == OpType.SGMV_SHRINK:
+        if self in [OpType.SGMV_SHRINK, OpType.V1_SHRINK]:
             for slice_idx in range(num_slices):
                 ref_group_gemm(ref_out=output[slice_idx, :],
                                input=input,
                                lora_weights=lora_weights[slice_idx],
                                **kwargs)
-        if self == OpType.SGMV_EXPAND:
+        elif self in [OpType.SGMV_EXPAND, OpType.V1_EXPAND]:
             hidden_size = lora_weights[0].shape[1]
             for slice_idx in range(num_slices):
                 slice_offset = slice_idx * hidden_size
@@ -309,19 +333,19 @@ class OpType(Enum):
                     input=input[slice_idx].clone().to(dtype=w_dtype),
                     lora_weights=lora_weights[slice_idx],
                     **kwargs)
-        if self == OpType.BGMV_SHRINK:
+        elif self == OpType.BGMV_SHRINK:
             assert num_slices == 1
             ref_group_gemm(ref_out=output,
                            input=input,
                            lora_weights=lora_weights[0],
                            **kwargs)
-        if self == OpType.BGMV_EXPAND:
+        elif self == OpType.BGMV_EXPAND:
             assert num_slices == 1
             ref_group_gemm(ref_out=output,
                            input=input.clone().to(dtype=w_dtype),
                            lora_weights=lora_weights[0],
                            **kwargs)
-        if self == OpType.BGMV_EXPAND_SLICE:
+        elif self == OpType.BGMV_EXPAND_SLICE:
             hidden_size = lora_weights[0].shape[1]
             for slice_idx in range(num_slices):
                 slice_offset = slice_idx * hidden_size
@@ -330,7 +354,8 @@ class OpType(Enum):
                     input=input[slice_idx].clone().to(dtype=w_dtype),
                     lora_weights=lora_weights[slice_idx],
                     **kwargs)
-        raise ValueError(f"Unrecognized optype {self}")
+        else:
+            raise ValueError(f"Unrecognized optype {self}")
 
 
 @dataclass
@@ -384,13 +409,15 @@ class BenchmarkTensors:
     """
     # matmul tensors
     input: torch.Tensor
-    lora_weights_lst: List[torch.Tensor]
+    lora_weights_lst: list[torch.Tensor]
     output: torch.Tensor
     # metadata tensors
     seq_lens: torch.Tensor
     seq_start_loc: torch.Tensor
     prompt_lora_mapping: torch.Tensor
     token_lora_mapping: torch.Tensor
+    # v1 kernel metadata
+    v1_kernel_meta: Optional[V1KernelMeta] = None
 
     def io_types(self) -> str:
         return (f"{dtype_to_str(self.input.dtype)}x"
@@ -433,10 +460,19 @@ class BenchmarkTensors:
             total_tokens, ctx.batch_size, prompt_lora_indices_tensor,
             seq_len_tensor, "cpu")
 
+        v1_kernel_meta = None
+        if op_type in [OpType.V1_SHRINK, OpType.V1_EXPAND]:
+            v1_kernel_meta = V1KernelMeta.make(
+                max_loras=ctx.num_loras,
+                max_num_tokens=token_lora_indices_tensor.size(0),
+                device="cpu")
+            v1_kernel_meta.prepare_tensors(
+                token_lora_mapping=token_lora_indices_tensor)
+
         return BenchmarkTensors(input_tensor, lora_weights, output_tensor,
                                 seq_len_tensor, seq_start_loc_tensor,
                                 prompt_lora_indices_tensor,
-                                token_lora_indices_tensor)
+                                token_lora_indices_tensor, v1_kernel_meta)
 
     def sanity_check(self) -> None:
         """
@@ -469,7 +505,14 @@ class BenchmarkTensors:
         for i in range(len(self.lora_weights_lst)):
             self.lora_weights_lst[i] = to_device(self.lora_weights_lst[i])
 
-    def metadata(self) -> Tuple[int, int, int]:
+        # v1 meta
+        if self.v1_kernel_meta:
+            for field_name in V1KernelMeta.__dataclass_fields__:
+                field = getattr(self.v1_kernel_meta, field_name)
+                assert isinstance(field, torch.Tensor)
+                setattr(self.v1_kernel_meta, field_name, to_device(field))
+
+    def metadata(self) -> tuple[int, int, int]:
         """
         Return num_seqs, num_tokens and max_seq_len
         """
@@ -505,7 +548,7 @@ class BenchmarkTensors:
         self.seq_lens = seq_lens.to(dtype=self.seq_lens.dtype)
         self.seq_start_loc = seq_start_loc.to(dtype=self.seq_start_loc.dtype)
 
-    def as_sgmv_shrink_kwargs(self) -> Dict[str, Any]:
+    def as_sgmv_shrink_kwargs(self) -> dict[str, Any]:
         self.convert_to_sgmv_benchmark_tensors()
         self.sanity_check()
         self.to_device(self.input.device)
@@ -540,7 +583,7 @@ class BenchmarkTensors:
             'scaling': 1.0,
         }
 
-    def as_sgmv_expand_kwargs(self, add_inputs: bool) -> Dict[str, Any]:
+    def as_sgmv_expand_kwargs(self, add_inputs: bool) -> dict[str, Any]:
 
         self.convert_to_sgmv_benchmark_tensors()
         self.sanity_check()
@@ -578,7 +621,7 @@ class BenchmarkTensors:
             'add_inputs': add_inputs,
         }
 
-    def as_bgmv_shrink_kwargs(self) -> Dict[str, Any]:
+    def as_bgmv_shrink_kwargs(self) -> dict[str, Any]:
         assert len(self.lora_weights_lst) == 1
         self.to_device(self.input.device)
 
@@ -634,7 +677,7 @@ class BenchmarkTensors:
             'add_inputs': add_inputs
         }
 
-    def as_bgmv_expand_slice_kwargs(self, add_inputs: bool) -> Dict[str, Any]:
+    def as_bgmv_expand_slice_kwargs(self, add_inputs: bool) -> dict[str, Any]:
 
         _, num_tokens, _, num_slices = self.metadata()
         # Sanity check shapes
@@ -668,9 +711,81 @@ class BenchmarkTensors:
             })
         return {'kwargs_list': kwargs_list}
 
+    def as_v1_shrink_kwargs(self) -> dict[str, Any]:
+        assert self.v1_kernel_meta is not None
+        self.sanity_check()
+        self.to_device(self.input.device)
+
+        _, num_tokens, _, num_slices = self.metadata()
+
+        # Sanity check matrix shapes.
+        i_shape, lw_shape, o_shape = self.input.shape, self.lora_weights_lst[
+            0].shape, self.output.shape
+        # Expected input shape [num_tokens, hidden_size]
+        assert len(i_shape) == 2
+        assert i_shape[0] == num_tokens
+        hidden_size = i_shape[1]
+        # Expected lora weight shape [num_loras, lora_rank, hidden_size]
+        assert len(lw_shape) == 3
+        assert lw_shape[2] == hidden_size
+        lora_rank = lw_shape[1]
+        # Expected output shape [num_slices, num_tokens, lora_rank]
+        assert len(o_shape) == 3
+        assert o_shape == (num_slices, num_tokens, lora_rank)
+
+        return {
+            'inputs': self.input,
+            'lora_a_weights': self.lora_weights_lst,
+            'output_tensor': self.output,
+            'token_lora_mapping': self.v1_kernel_meta.token_lora_mapping,
+            'token_indices_sorted_by_lora_ids':
+            self.v1_kernel_meta.token_indices_sorted_by_lora_ids,
+            'num_tokens_per_lora': self.v1_kernel_meta.num_tokens_per_lora,
+            'lora_token_start_loc': self.v1_kernel_meta.lora_token_start_loc,
+            'lora_ids': self.v1_kernel_meta.active_lora_ids,
+            'scaling': 1.0,
+        }
+
+    def as_v1_expand_kwargs(self, add_inputs: bool) -> dict[str, Any]:
+        assert self.v1_kernel_meta is not None
+        self.sanity_check()
+        self.to_device(self.input.device)
+
+        _, num_tokens, _, num_slices = self.metadata()
+
+        # Sanity check matrix shapes.
+        i_shape, lw_shape, o_shape = self.input.shape, self.lora_weights_lst[
+            0].shape, self.output.shape
+        # Expected input shape : [num_slices, num_tokens, lora_rank]
+        assert len(i_shape) == 3
+        assert i_shape[0] == num_slices
+        assert i_shape[1] == num_tokens
+        lora_rank = i_shape[2]
+        # Expected lora weight shape : [num_lora, hidden_size, lora_rank]
+        assert len(lw_shape) == 3
+        assert lw_shape[2] == lora_rank
+        hidden_size = lw_shape[1]
+        # Expected output shape : [num_tokens, hidden_size * num_slices]
+        assert len(o_shape) == 2
+        assert o_shape == (num_tokens, hidden_size * num_slices)
+
+        return {
+            'inputs': self.input,
+            'lora_b_weights': self.lora_weights_lst,
+            'output_tensor': self.output,
+            'token_lora_mapping': self.v1_kernel_meta.token_lora_mapping,
+            'token_indices_sorted_by_lora_ids':
+            self.v1_kernel_meta.token_indices_sorted_by_lora_ids,
+            'num_tokens_per_lora': self.v1_kernel_meta.num_tokens_per_lora,
+            'lora_token_start_loc': self.v1_kernel_meta.lora_token_start_loc,
+            'lora_ids': self.v1_kernel_meta.active_lora_ids,
+            'offset_start': 0,
+            'add_inputs': add_inputs,
+        }
+
     def bench_fn_kwargs(self,
                         op_type: OpType,
-                        add_inputs: Optional[bool] = None) -> Dict[str, Any]:
+                        add_inputs: Optional[bool] = None) -> dict[str, Any]:
         if op_type.is_shrink_fn():
             assert add_inputs is None
         else:
@@ -686,6 +801,10 @@ class BenchmarkTensors:
             return self.as_bgmv_expand_kwargs(add_inputs)
         if op_type == OpType.BGMV_EXPAND_SLICE:
             return self.as_bgmv_expand_slice_kwargs(add_inputs)
+        if op_type == OpType.V1_SHRINK:
+            return self.as_v1_shrink_kwargs()
+        if op_type == OpType.V1_EXPAND:
+            return self.as_v1_expand_kwargs(add_inputs)
         raise ValueError(f"Unrecognized optype {self}")
 
     def test_correctness(self, op_type: OpType,
@@ -734,7 +853,7 @@ def bench_optype(ctx: BenchmarkContext,
         assert expand_fn_add_inputs is not None
 
     # BenchmarkContext -> BenchmarkTensors
-    bench_tensors : List[BenchmarkTensors] = \
+    bench_tensors : list[BenchmarkTensors] = \
         [BenchmarkTensors.make(ctx, op_type) for _ in range(arg_pool_size)]
     for bt in bench_tensors:
         bt.sanity_check()
@@ -746,7 +865,7 @@ def bench_optype(ctx: BenchmarkContext,
             for bt in bench_tensors
         ])
 
-    # BenchmarkTensors -> Dict (kwargs)
+    # BenchmarkTensors -> dict (kwargs)
     kwargs_list = [
         bt.bench_fn_kwargs(op_type, add_inputs=expand_fn_add_inputs)
         for bt in bench_tensors
@@ -841,7 +960,7 @@ def use_cuda_graph_recommendation() -> str:
             """
 
 
-def print_timers(timers: List[TMeasurement],
+def print_timers(timers: list[TMeasurement],
                  args: Optional[argparse.Namespace] = None):
     compare = TBenchmark.Compare(timers)
     compare.print()
@@ -861,7 +980,7 @@ def print_timers(timers: List[TMeasurement],
           "small num_loras the goal should be to match the torch.mm numbers.")
 
 
-def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
+def run(args: argparse.Namespace, bench_ctxs: list[BenchmarkContext]):
 
     if args.cuda_graph_nops is not None:
         assert args.cuda_graph_nops > 0
@@ -873,12 +992,9 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
     timers = []
     for bench_ctx in bench_ctxs:
         for seq_len in args.seq_lengths:
-            bench_ops: List[OpType] = []
-            if seq_len == 1:
-                # bench all decode ops
-                bench_ops = [op for op in args.op_types if op.is_decode_op()]
-            else:
-                # bench all prefill ops
+            bench_ops: list[OpType] = args.op_types
+            if seq_len > 1:
+                # bench only prefill ops
                 bench_ops = [op for op in args.op_types if op.is_prefill_op()]
 
             seq_len_timers = []
@@ -921,10 +1037,10 @@ def run(args: argparse.Namespace, bench_ctxs: List[BenchmarkContext]):
             pickle.dump(timers, f)
 
 
-def as_benchmark_contexts(hidden_sizes: List[int], lora_ranks: List[int],
-                          args: argparse.Namespace) -> List[BenchmarkContext]:
+def as_benchmark_contexts(hidden_sizes: list[int], lora_ranks: list[int],
+                          args: argparse.Namespace) -> list[BenchmarkContext]:
 
-    ctxs: List[BenchmarkContext] = []
+    ctxs: list[BenchmarkContext] = []
     for batch_size, hidden_size, lora_rank, num_loras, sort_by_lora_id in product(  # noqa
             args.batch_sizes, list(hidden_sizes), lora_ranks, args.num_loras,
             args.sort_by_lora_id):
@@ -954,7 +1070,7 @@ def run_list_bench(args: argparse.Namespace):
           f"  LoRA Ranks {args.lora_ranks}")
 
     # Get all benchmarking contexts
-    bench_contexts: List[BenchmarkContext] = as_benchmark_contexts(
+    bench_contexts: list[BenchmarkContext] = as_benchmark_contexts(
         hidden_sizes=args.hidden_sizes, lora_ranks=args.lora_ranks, args=args)
 
     run(args, bench_contexts)
@@ -975,7 +1091,7 @@ def run_range_bench(args: argparse.Namespace):
           f" LoRA Ranks {lora_ranks}")
 
     # Get all benchmarking contexts
-    bench_contexts: List[BenchmarkContext] = as_benchmark_contexts(
+    bench_contexts: list[BenchmarkContext] = as_benchmark_contexts(
         hidden_sizes=hidden_sizes, lora_ranks=lora_ranks, args=args)
 
     run(args, bench_contexts)
@@ -1002,7 +1118,7 @@ def run_model_bench(args: argparse.Namespace):
           f" LoRA Ranks {args.lora_ranks}")
 
     # Get all benchmarking contexts
-    bench_contexts: List[BenchmarkContext] = as_benchmark_contexts(
+    bench_contexts: list[BenchmarkContext] = as_benchmark_contexts(
         hidden_sizes=hidden_sizes, lora_ranks=args.lora_ranks, args=args)
 
     run(args, bench_contexts)

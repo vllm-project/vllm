@@ -3,10 +3,9 @@
 import asyncio
 import json
 import time
-from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, Final, List,
-                    Optional)
-from typing import Sequence as GenericSequence
-from typing import Union
+from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import Sequence as GenericSequence
+from typing import Callable, Final, Optional, Union
 
 from fastapi import Request
 
@@ -25,7 +24,8 @@ from vllm.entrypoints.openai.protocol import (
     RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.reasoning_parsers import (ReasoningParser,
                                                        ReasoningParserManager)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
+                                                    clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
@@ -106,10 +106,13 @@ class OpenAIServingChat(OpenAIServing):
                                 "been registered") from e
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        diff_sampling_param = self.model_config.get_diff_sampling_param()
-        if diff_sampling_param:
-            logger.info("Overwriting default chat sampling param with: %s",
-                        diff_sampling_param)
+        self.default_sampling_params = (
+            self.model_config.get_diff_sampling_param())
+        if self.default_sampling_params:
+            source = self.model_config.generation_config
+            source = "model" if source == "auto" else source
+            logger.info("Using default chat sampling params from %s: %s",
+                        source, self.default_sampling_params)
 
     async def create_chat_completion(
         self,
@@ -141,7 +144,7 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            model_name = self.models.model_name(lora_request)
+            model_name = self._get_model_name(request.model, lora_request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
@@ -205,23 +208,20 @@ class OpenAIServingChat(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[RequestOutput, None]] = []
+        generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
-                # Build default sampling params
-                default_sampling_params = (
-                    self.model_config.get_diff_sampling_param())
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens, default_sampling_params)
+                        default_max_tokens, self.default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
                         default_max_tokens,
                         self.model_config.logits_processor_pattern,
-                        default_sampling_params)
+                        self.default_sampling_params)
 
                 self._log_inputs(request_id,
                                  request_prompts[i],
@@ -282,7 +282,7 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         model_name: str,
-        conversation: List[ConversationMessage],
+        conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
@@ -310,7 +310,7 @@ class OpenAIServingChat(OpenAIServing):
         should_stream_with_reasoning_parsing = (
             self._should_stream_with_reasoning_parsing(request))
 
-        all_previous_token_ids: Optional[List[List[int]]]
+        all_previous_token_ids: Optional[list[list[int]]]
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
@@ -339,7 +339,7 @@ class OpenAIServingChat(OpenAIServing):
         # Prepare the tool parser if it's needed
         try:
             if tool_choice_auto and self.tool_parser:
-                tool_parsers: List[Optional[ToolParser]] = [
+                tool_parsers: list[Optional[ToolParser]] = [
                     self.tool_parser(tokenizer)
                 ] * num_choices
             else:
@@ -406,7 +406,7 @@ class OpenAIServingChat(OpenAIServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
-                        last_msg_content: Union[str, List[Dict[str, str]]] = ""
+                        last_msg_content: Union[str, list[dict[str, str]]] = ""
                         if conversation and "content" in conversation[
                                 -1] and conversation[-1].get("role") == role:
                             last_msg_content = conversation[-1]["content"] or ""
@@ -452,6 +452,8 @@ class OpenAIServingChat(OpenAIServing):
                             top_logprobs=output.logprobs,
                             tokenizer=tokenizer,
                             num_output_top_logprobs=request.top_logprobs,
+                            return_as_token_id=request.
+                            return_tokens_as_token_ids,
                         )
                     else:
                         logprobs = None
@@ -674,7 +676,7 @@ class OpenAIServingChat(OpenAIServing):
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         model_name: str,
-        conversation: List[ConversationMessage],
+        conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
@@ -693,7 +695,7 @@ class OpenAIServingChat(OpenAIServing):
 
         assert final_res is not None
 
-        choices: List[ChatCompletionResponseChoice] = []
+        choices: list[ChatCompletionResponseChoice] = []
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
@@ -707,6 +709,7 @@ class OpenAIServingChat(OpenAIServing):
                     top_logprobs=out_logprobs,
                     num_output_top_logprobs=request.top_logprobs,
                     tokenizer=tokenizer,
+                    return_as_token_id=request.return_tokens_as_token_ids,
                 )
             else:
                 logprobs = None
@@ -812,7 +815,7 @@ class OpenAIServingChat(OpenAIServing):
             choices.append(choice_data)
 
         if request.echo:
-            last_msg_content: Union[str, List[Dict[str, str]]] = ""
+            last_msg_content: Union[str, list[dict[str, str]]] = ""
             if conversation and "content" in conversation[-1] and conversation[
                     -1].get("role") == role:
                 last_msg_content = conversation[-1]["content"] or ""
@@ -847,20 +850,21 @@ class OpenAIServingChat(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
-            prompt_logprobs=final_res.prompt_logprobs,
+            prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
         )
 
         return response
 
     def _get_top_logprobs(
-            self, logprobs: Dict[int, Logprob], top_logprobs: Optional[int],
-            tokenizer: AnyTokenizer) -> List[ChatCompletionLogProb]:
+            self, logprobs: dict[int, Logprob], top_logprobs: Optional[int],
+            tokenizer: AnyTokenizer,
+            should_return_as_token_id: bool) -> list[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(token=(token := self._get_decoded_token(
                 p[1],
                 p[0],
                 tokenizer,
-                return_as_token_id=self.return_tokens_as_token_ids)),
+                return_as_token_id=should_return_as_token_id)),
                                   logprob=max(p[1].logprob, -9999.0),
                                   bytes=list(
                                       token.encode("utf-8", errors="replace")))
@@ -871,18 +875,21 @@ class OpenAIServingChat(OpenAIServing):
     def _create_chat_logprobs(
         self,
         token_ids: GenericSequence[int],
-        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
+        top_logprobs: GenericSequence[Optional[dict[int, Logprob]]],
         tokenizer: AnyTokenizer,
         num_output_top_logprobs: Optional[int] = None,
+        return_as_token_id: Optional[bool] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
-        logprobs_content: List[ChatCompletionLogProbsContent] = []
+        logprobs_content: list[ChatCompletionLogProbsContent] = []
 
+        should_return_as_token_id = return_as_token_id if \
+            return_as_token_id is not None else self.return_tokens_as_token_ids
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 token = tokenizer.decode(token_id)
-                if self.return_tokens_as_token_ids:
+                if should_return_as_token_id:
                     token = f"token_id:{token_id}"
 
                 logprobs_content.append(
@@ -900,16 +907,14 @@ class OpenAIServingChat(OpenAIServing):
                             step_token,
                             token_id,
                             tokenizer,
-                            self.return_tokens_as_token_ids,
+                            should_return_as_token_id,
                         ),
                         logprob=max(step_token.logprob, -9999.0),
                         bytes=None if step_decoded is None else list(
                             step_decoded.encode("utf-8", errors="replace")),
                         top_logprobs=self._get_top_logprobs(
-                            step_top_logprobs,
-                            num_output_top_logprobs,
-                            tokenizer,
-                        ),
+                            step_top_logprobs, num_output_top_logprobs,
+                            tokenizer, should_return_as_token_id),
                     ))
 
         return ChatCompletionLogProbs(content=logprobs_content)

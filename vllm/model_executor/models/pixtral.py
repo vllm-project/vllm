@@ -16,7 +16,6 @@ from transformers.models.pixtral.image_processing_pixtral import (
 from transformers.models.pixtral.modeling_pixtral import (
     PixtralRotaryEmbedding, apply_rotary_pos_emb, position_ids_in_meshgrid)
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
@@ -69,7 +68,7 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     image_token_id = mm_encoder.special_ids.img
 
     mm_config = ctx.get_mm_config()
-    num_images = mm_config.limit_per_prompt.get("image", 1)
+    num_images = mm_config.get_limit_per_prompt("image")
 
     # dummy size
     size = 256
@@ -221,7 +220,9 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return get_sampler()
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input, image_tokens = self._parse_and_validate_image_input(
             **kwargs)
         if image_input is None:
@@ -270,8 +271,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
@@ -291,8 +290,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
-                                                  kv_caches,
-                                                  attn_metadata,
                                                   intermediate_tensors,
                                                   inputs_embeds=inputs_embeds)
 
@@ -1045,9 +1042,13 @@ class PixtralHFVisionModel(nn.Module):
             for img in pixel_values
         ]
 
+        patch_embeds = [
+            p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list
+        ]
+        embed_sizes = [p.shape[1] for p in patch_embeds]
+
         # flatten to a single sequence
-        patch_embeds = torch.cat(
-            [p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list], dim=1)
+        patch_embeds = torch.cat(patch_embeds, dim=1)
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
@@ -1078,6 +1079,8 @@ class PixtralHFVisionModel(nn.Module):
         out = resolve_visual_encoder_outputs(out, feature_sample_layers, None,
                                              self.config.num_hidden_layers)
 
+        # squeeze dim 0 and split into separate tensors for each image
+        out = torch.split(torch.squeeze(out), embed_sizes)
         return out
 
     # (TODO) Add prefix argument for filtering out weights to be loaded

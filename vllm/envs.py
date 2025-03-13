@@ -2,7 +2,7 @@
 
 import os
 import tempfile
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -60,20 +60,21 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
-    VLLM_TEST_FORCE_FP8_MARLIN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
-    VLLM_PLUGINS: Optional[List[str]] = None
+    VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
-    VLLM_DISABLED_KERNELS: List[str] = []
+    VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = False
+    VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -90,6 +91,11 @@ if TYPE_CHECKING:
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
+    VLLM_DP_RANK: int = 0
+    VLLM_DP_SIZE: int = 1
+    VLLM_DP_MASTER_IP: str = ""
+    VLLM_DP_MASTER_PORT: int = 0
+    VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
 
 
 def get_default_cache_root():
@@ -117,7 +123,7 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
 
 # begin-env-vars-definition
 
-environment_variables: Dict[str, Callable[[], Any]] = {
+environment_variables: dict[str, Callable[[], Any]] = {
 
     # ================== Installation Time Env Vars ==================
 
@@ -142,6 +148,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
         os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
 
+    # Whether to force using nightly wheel in python build.
+    # This is used for testing the nightly wheel in python build.
+    "VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL":
+    lambda: bool(int(os.getenv("VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL", "0"))
+                 ),
+
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
     # Available options: "Debug", "Release", "RelWithDebInfo"
@@ -152,7 +164,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VERBOSE":
     lambda: bool(int(os.getenv('VERBOSE', '0'))),
 
-    # Root directory for VLLM configuration files
+    # Root directory for vLLM configuration files
     # Defaults to `~/.config/vllm` unless `XDG_CONFIG_HOME` is set
     # Note that this not only affects how vllm finds its configuration files
     # during runtime, but also affects how vllm installs its configuration
@@ -166,7 +178,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # ================== Runtime Env Vars ==================
 
-    # Root directory for VLLM cache files
+    # Root directory for vLLM cache files
     # Defaults to `~/.cache/vllm` unless `XDG_CACHE_HOME` is set
     "VLLM_CACHE_ROOT":
     lambda: os.path.expanduser(
@@ -248,7 +260,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENGINE_ITERATION_TIMEOUT_S":
     lambda: int(os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60")),
 
-    # API key for VLLM API server
+    # API key for vLLM API server
     "VLLM_API_KEY":
     lambda: os.environ.get("VLLM_API_KEY", None),
 
@@ -309,6 +321,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # - "XFORMERS": use XFormers
     # - "ROCM_FLASH": use ROCmFlashAttention
     # - "FLASHINFER": use flashinfer
+    # - "FLASHMLA": use FlashMLA
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
@@ -355,8 +368,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Enables weights compression during model export via HF Optimum
     # default is False
     "VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS":
-    lambda: bool(os.getenv("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", False)),
-
+    lambda:
+    (os.environ.get("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", "0").lower() in
+     ("on", "true", "1")),
     # If the env var is set, then all workers will execute as separate
     # processes from the engine, and we use the same mechanism to trigger
     # execution on all workers.
@@ -364,21 +378,22 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_SPMD_WORKER":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", "0"))),
 
-    # If the env var is set, it uses the Ray's compiled DAG API
-    # which optimizes the control plane overhead.
+    # If the env var is set, it uses the Ray's Compiled Graph
+    # (previously known as ADAG) API which optimizes the
+    # control plane overhead.
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
     "VLLM_USE_RAY_COMPILED_DAG":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))),
 
     # If the env var is set, it uses NCCL for communication in
-    # Ray's compiled DAG. This flag is ignored if
+    # Ray's Compiled Graph. This flag is ignored if
     # VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL", "1"))
                  ),
 
     # If the env var is set, it enables GPU communication overlap
-    # (experimental feature) in Ray's compiled DAG. This flag is ignored if
+    # (experimental feature) in Ray's Compiled Graph. This flag is ignored if
     # VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
@@ -503,6 +518,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 
+    # Pad the fp8 weights to 256 bytes for ROCm
+    "VLLM_ROCM_FP8_PADDING":
+    lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Divisor for dynamic key scale factor calculation for FP8 KV Cache
     "K_SCALE_CONSTANT":
     lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
@@ -593,6 +611,30 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
     lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
     ("1", "true"),
+
+    # Rank of the process in the data parallel setting
+    "VLLM_DP_RANK":
+    lambda: int(os.getenv("VLLM_DP_RANK", "0")),
+
+    # World size of the data parallel setting
+    "VLLM_DP_SIZE":
+    lambda: int(os.getenv("VLLM_DP_SIZE", "1")),
+
+    # IP address of the master node in the data parallel setting
+    "VLLM_DP_MASTER_IP":
+    lambda: os.getenv("VLLM_DP_MASTER_IP", "127.0.0.1"),
+
+    # Port of the master node in the data parallel setting
+    "VLLM_DP_MASTER_PORT":
+    lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
+
+    # Whether to use S3 path for model loading in CI via RunAI Streamer
+    "VLLM_CI_USE_S3":
+    lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
+
+    # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
+    "VLLM_MARLIN_USE_ATOMIC_ADD":
+    lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
 }
 
 # end-env-vars-definition

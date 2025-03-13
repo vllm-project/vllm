@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 from functools import partial
+from typing import Optional
 
 import numpy as np
 import pytest
@@ -21,6 +23,7 @@ def _test_processing_correctness(
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
+    ignore_mm_keys: Optional[list[str]] = None,
 ):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
@@ -29,8 +32,8 @@ def _test_processing_correctness(
     model_config = ModelConfig(
         model_id,
         task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
+        tokenizer=model_info.tokenizer or model_id,
+        tokenizer_mode=model_info.tokenizer_mode,
         trust_remote_code=model_info.trust_remote_code,
         seed=0,
         dtype="float16",
@@ -83,11 +86,11 @@ def _test_processing_correctness(
     }
 
     tokenizer_encode_kwargs = {}
-    if model_config.hf_config.model_type == "mllama":
-        # For Mllama, tokenizer will always add bos_token at the beginning of
-        # prompt by default, causing hf_processor outputs incorrect token ids.
-        # So we need use `add_special_tokens=False` here to leave bos_token
-        # to be added by the processor.
+    if model_config.hf_config.model_type in ("mllama", "whisper", "ultravox"):
+        # For some multimodal models, tokenizer will always add bos_token
+        # at the beginning of prompt by default, causing hf_processor outputs
+        # incorrect token ids. So we need use `add_special_tokens=False` here
+        # to leave bos_token to be added by the processor.
         tokenizer_encode_kwargs = {"add_special_tokens": False}
 
     for batch_idx in range(num_batches):
@@ -123,8 +126,10 @@ def _test_processing_correctness(
             hf_processor_mm_kwargs={},
         )
 
-        assert baseline_result == cached_result, (
-            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+        assert _drop_mm_kwargs_keys(
+            baseline_result, ignore_mm_keys) == _drop_mm_kwargs_keys(
+                cached_result, ignore_mm_keys), (
+                    f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
 
         baseline_tokenized_result = baseline_processor.apply(
             tokenizer.encode(prompt, **tokenizer_encode_kwargs),
@@ -132,8 +137,10 @@ def _test_processing_correctness(
             hf_processor_mm_kwargs={},
         )
 
-        assert baseline_result == baseline_tokenized_result, (
-            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+        assert _drop_mm_kwargs_keys(
+            baseline_result, ignore_mm_keys) == _drop_mm_kwargs_keys(
+                baseline_tokenized_result, ignore_mm_keys), (
+                    f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
 
         cached_tokenized_result = cached_processor.apply(
             tokenizer.encode(prompt, **tokenizer_encode_kwargs),
@@ -141,8 +148,10 @@ def _test_processing_correctness(
             hf_processor_mm_kwargs={},
         )
 
-        assert cached_result == cached_tokenized_result, (
-            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+        assert _drop_mm_kwargs_keys(
+            cached_result, ignore_mm_keys) == _drop_mm_kwargs_keys(
+                cached_tokenized_result, ignore_mm_keys), (
+                    f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
 
 
 # yapf: disable
@@ -151,7 +160,9 @@ def _test_processing_correctness(
     "Salesforce/blip2-opt-2.7b",
     "facebook/chameleon-7b",
     "deepseek-ai/deepseek-vl2-tiny",
+    "microsoft/Florence-2-base",
     "adept/fuyu-8b",
+    "google/gemma-3-4b-it",
     "THUDM/glm-4v-9b",
     "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",
@@ -173,6 +184,9 @@ def _test_processing_correctness(
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
+    "openai/whisper-large-v3",
+    "google/paligemma-3b-mix-224",
+    "google/paligemma2-3b-ft-docci-448",
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
@@ -184,11 +198,19 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
+    ignore_mm_keys = None
+    if 'ultravox' in model_id:
+        # In Ultravox, the audio_features can be different depending on padding
+        # The slight difference should not be a problem though, since
+        # attention_mask lets us ignore the difference.
+        ignore_mm_keys = ['audio_features']
+
     _test_processing_correctness(
         model_id,
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
+        ignore_mm_keys=ignore_mm_keys,
     )
 
 
@@ -217,3 +239,29 @@ def test_processing_correctness_phi3v(
         num_batches=num_batches,
         simplify_rate=simplify_rate,
     )
+
+
+def _drop_mm_kwargs_keys(result: dict,
+                         ignore_mm_keys: Optional[list[str]] = None) -> dict:
+    """Drop specified keys from result['mm_kwargs'].
+
+    This is mainly to avoid doing exact match of audio_features in ultravox.
+
+    Args:
+        result: Result to drop keys from
+        ignore_mm_keys: List of keys to ignore, e.g. ['audio_features']
+    """
+    if not ignore_mm_keys:
+        return result
+
+    if 'mm_kwargs' in result:
+        result = copy.deepcopy(result)
+        mm_kwargs = result['mm_kwargs']
+        for key in ignore_mm_keys:
+            mm_kwargs.pop(key, None)
+        for items in mm_kwargs._items_by_modality.values():
+            for item in items:
+                for key in ignore_mm_keys:
+                    item.pop(key, None)
+
+    return result

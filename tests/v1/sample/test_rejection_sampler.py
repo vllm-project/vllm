@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import List
 
 import pytest
 import torch
@@ -13,7 +12,7 @@ def sampler():
     return RejectionSampler()
 
 
-def create_logits_tensor(token_ids: List[int],
+def create_logits_tensor(token_ids: list[int],
                          vocab_size: int = 100) -> torch.Tensor:
     """Helper function to create logits tensor that 
        will produce desired token ids on argmax"""
@@ -23,13 +22,12 @@ def create_logits_tensor(token_ids: List[int],
     return logits
 
 
-def create_sampling_metadata(spec_tokens: List[List[int]]) -> SamplingMetadata:
+def create_sampling_metadata(spec_tokens: list[list[int]]) -> SamplingMetadata:
     batch_size = len(spec_tokens)
     return SamplingMetadata(
         temperature=torch.tensor([]),
         all_greedy=True,
         all_random=False,
-        spec_token_ids=spec_tokens,
         top_p=None,
         top_k=None,
         min_p=torch.empty(batch_size, ),
@@ -43,6 +41,8 @@ def create_sampling_metadata(spec_tokens: List[List[int]]) -> SamplingMetadata:
         output_token_ids=[],
         min_tokens={},
         logit_bias=[None] * batch_size,
+        allowed_token_ids_mask=None,
+        bad_words_token_ids={},
     )
 
 
@@ -54,7 +54,7 @@ def test_perfect_match(sampler):
     metadata = create_sampling_metadata(spec_tokens)
     logits = create_logits_tensor(output_tokens)
 
-    output = sampler(logits, metadata)
+    output = sampler(spec_tokens, logits, metadata)
     expected = torch.tensor([[1, 2, 3, 4]],
                             dtype=torch.int,
                             device=logits.device)
@@ -69,7 +69,7 @@ def test_early_mismatch(sampler):
     metadata = create_sampling_metadata(spec_tokens)
     logits = create_logits_tensor(output_tokens)
 
-    output = sampler(logits, metadata)
+    output = sampler(spec_tokens, logits, metadata)
     expected = torch.tensor([[1, 5, INVALID_TOKEN_ID, INVALID_TOKEN_ID]],
                             dtype=torch.int,
                             device=logits.device)
@@ -84,7 +84,7 @@ def test_multiple_sequences(sampler):
     metadata = create_sampling_metadata(spec_tokens)
     logits = create_logits_tensor(output_tokens)
 
-    output = sampler(logits, metadata)
+    output = sampler(spec_tokens, logits, metadata)
     expected = torch.tensor([[1, 2, 5], [3, 4, INVALID_TOKEN_ID]],
                             dtype=torch.int,
                             device=logits.device)
@@ -99,20 +99,20 @@ def test_single_token_sequence(sampler):
     metadata = create_sampling_metadata(spec_tokens)
     logits = create_logits_tensor(output_tokens)
 
-    output = sampler(logits, metadata)
+    output = sampler(spec_tokens, logits, metadata)
     expected = torch.tensor([[1, 2]], dtype=torch.int, device=logits.device)
     assert torch.equal(output.sampled_token_ids, expected)
 
 
 def test_empty_sequence(sampler):
     """Test handling empty sequence of speculated tokens"""
-    spec_tokens: List[List[int]] = [[]]
+    spec_tokens: list[list[int]] = [[]]
     output_tokens = [5]  # Just the bonus token
 
     metadata = create_sampling_metadata(spec_tokens)
     logits = create_logits_tensor(output_tokens)
 
-    output = sampler(logits, metadata)
+    output = sampler(spec_tokens, logits, metadata)
     expected = torch.tensor([[5]], dtype=torch.int, device=logits.device)
     assert torch.equal(output.sampled_token_ids, expected)
 
@@ -125,7 +125,7 @@ def test_multiple_mismatches(sampler):
     metadata = create_sampling_metadata(spec_tokens)
     logits = create_logits_tensor(output_tokens)
 
-    output = sampler(logits, metadata)
+    output = sampler(spec_tokens, logits, metadata)
     expected = torch.tensor([[1, 2, 7, INVALID_TOKEN_ID],
                              [4, 8, INVALID_TOKEN_ID, INVALID_TOKEN_ID]],
                             dtype=torch.int,
@@ -146,7 +146,7 @@ def test_parametrized_cases(sampler, spec_tokens, output_tokens, expected):
     metadata = create_sampling_metadata(spec_tokens)
     logits = create_logits_tensor(output_tokens)
 
-    output = sampler(logits, metadata)
+    output = sampler(spec_tokens, logits, metadata)
     expected_tensor = torch.tensor(expected,
                                    dtype=torch.int,
                                    device=logits.device)
@@ -162,7 +162,7 @@ def test_logits_shape_handling(sampler):
     metadata = create_sampling_metadata(spec_tokens)
     logits = create_logits_tensor(output_tokens, vocab_size)
 
-    output = sampler(logits, metadata)
+    output = sampler(spec_tokens, logits, metadata)
     expected = torch.tensor([[1, 2, 3]], dtype=torch.int, device=logits.device)
     assert torch.equal(output.sampled_token_ids, expected)
     assert logits.shape[-1] == vocab_size

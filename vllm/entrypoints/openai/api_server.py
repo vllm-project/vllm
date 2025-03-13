@@ -13,10 +13,11 @@ import socket
 import tempfile
 import uuid
 from argparse import Namespace
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, AsyncIterator, Dict, Optional, Set, Tuple, Union
+from typing import Annotated, Optional, Union
 
 import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
@@ -53,7 +54,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse,
-                                              LoadLoraAdapterRequest,
+                                              LoadLoRAAdapterRequest,
                                               PoolingChatRequest,
                                               PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
@@ -63,7 +64,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
-                                              UnloadLoraAdapterRequest)
+                                              UnloadLoRAAdapterRequest)
 from vllm.entrypoints.openai.reasoning_parsers import ReasoningParserManager
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -73,8 +74,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
-from vllm.entrypoints.openai.serving_rerank import JinaAIServingRerank
-from vllm.entrypoints.openai.serving_score import OpenAIServingScores
+from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.entrypoints.openai.serving_transcription import (
@@ -94,7 +94,7 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
-_running_tasks: Set[asyncio.Task] = set()
+_running_tasks: set[asyncio.Task] = set()
 
 
 @asynccontextmanager
@@ -320,12 +320,12 @@ def embedding(request: Request) -> Optional[OpenAIServingEmbedding]:
     return request.app.state.openai_serving_embedding
 
 
-def score(request: Request) -> Optional[OpenAIServingScores]:
+def score(request: Request) -> Optional[ServingScores]:
     return request.app.state.openai_serving_scores
 
 
-def rerank(request: Request) -> Optional[JinaAIServingRerank]:
-    return request.app.state.jinaai_serving_reranking
+def rerank(request: Request) -> Optional[ServingScores]:
+    return request.app.state.openai_serving_scores
 
 
 def tokenization(request: Request) -> OpenAIServingTokenization:
@@ -576,7 +576,7 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
 async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     logger.warning_once(
         "To indicate that the rerank API is not part of the standard OpenAI"
-        " API, we have located it at `/rerank`. Please update your client"
+        " API, we have located it at `/rerank`. Please update your client "
         "accordingly. (Note: Conforms to JinaAI rerank API)")
 
     return await do_rerank(request, raw_request)
@@ -588,7 +588,7 @@ async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
 
 
-TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
+TASK_HANDLERS: dict[str, dict[str, tuple]] = {
     "generate": {
         "messages": (ChatCompletionRequest, create_chat_completion),
         "default": (CompletionRequest, create_completion),
@@ -691,12 +691,12 @@ if envs.VLLM_TORCH_PROFILER_DIR:
 
 if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
     logger.warning(
-        "Lora dynamic loading & unloading is enabled in the API server. "
+        "LoRA dynamic loading & unloading is enabled in the API server. "
         "This should ONLY be used for local development!")
 
     @router.post("/v1/load_lora_adapter",
                  dependencies=[Depends(validate_json_request)])
-    async def load_lora_adapter(request: LoadLoraAdapterRequest,
+    async def load_lora_adapter(request: LoadLoRAAdapterRequest,
                                 raw_request: Request):
         handler = models(raw_request)
         response = await handler.load_lora_adapter(request)
@@ -708,7 +708,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
 
     @router.post("/v1/unload_lora_adapter",
                  dependencies=[Depends(validate_json_request)])
-    async def unload_lora_adapter(request: UnloadLoraAdapterRequest,
+    async def unload_lora_adapter(request: UnloadLoRAAdapterRequest,
                                   raw_request: Request):
         handler = models(raw_request)
         response = await handler.unload_lora_adapter(request)
@@ -866,13 +866,13 @@ async def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
     ) if model_config.task == "embed" else None
-    state.openai_serving_scores = OpenAIServingScores(
+    state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
-        request_logger=request_logger
-    ) if model_config.task == "score" else None
-    state.jinaai_serving_reranking = JinaAIServingRerank(
+        request_logger=request_logger) if model_config.task in (
+            "score", "embed", "pooling") else None
+    state.jinaai_serving_reranking = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
@@ -895,7 +895,7 @@ async def init_app_state(
     state.task = model_config.task
 
 
-def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
+def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     family = socket.AF_INET
     if is_valid_ipv6_address(addr[0]):
         family = socket.AF_INET6
@@ -961,6 +961,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         shutdown_task = await serve_http(
             app,
             sock=sock,
+            enable_ssl_refresh=args.enable_ssl_refresh,
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,

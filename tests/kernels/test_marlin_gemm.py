@@ -34,6 +34,7 @@ from vllm.scalar_type import scalar_types
 
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
+USE_ATOMIC_ADD_OPTS = [False, True]
 USE_FP32_REDUCE_OPTS = [False, True]
 
 MARLIN_K_CHUNKS = [128]
@@ -194,6 +195,7 @@ def test_awq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
 @pytest.mark.parametrize("is_k_full", K_FULL_OPTS)
+@pytest.mark.parametrize("use_atomic_add", USE_ATOMIC_ADD_OPTS)
 @pytest.mark.parametrize("use_fp32_reduce", USE_FP32_REDUCE_OPTS)
 def test_gptq_marlin_gemm(
     k_chunk,
@@ -203,6 +205,7 @@ def test_gptq_marlin_gemm(
     mnk_factors,
     act_order,
     is_k_full,
+    use_atomic_add,
     use_fp32_reduce,
 ):
     m_factor, n_factor, k_factor = mnk_factors
@@ -228,12 +231,12 @@ def test_gptq_marlin_gemm(
     workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
                                 GPTQ_MARLIN_MAX_PARALLEL)
 
-    opcheck(
-        torch.ops._C.gptq_marlin_gemm,
-        (a_input, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
-         workspace.scratch, quant_type.id, a_input.shape[0], b_weight.shape[1],
-         a_input.shape[1], is_k_full, False, use_fp32_reduce, False),
-        test_utils=DEFAULT_OPCHECK_TEST_UTILS)
+    opcheck(torch.ops._C.gptq_marlin_gemm,
+            (a_input, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
+             workspace.scratch, quant_type.id, a_input.shape[0],
+             b_weight.shape[1], a_input.shape[1], is_k_full, False,
+             use_atomic_add, use_fp32_reduce, False),
+            test_utils=DEFAULT_OPCHECK_TEST_UTILS)
 
     output = ops.gptq_marlin_gemm(
         a_input,
@@ -249,6 +252,7 @@ def test_gptq_marlin_gemm(
         a_input.shape[1],
         is_k_full=is_k_full,
         has_zp=False,
+        use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
         is_zp_float=False,
     )

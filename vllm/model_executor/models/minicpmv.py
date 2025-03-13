@@ -25,9 +25,10 @@
 import math
 import re
 from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property, partial
-from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Set, Tuple, TypedDict, Union)
+from typing import (Any, Callable, Dict, List, Literal, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import numpy as np
 import torch
@@ -37,7 +38,6 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 from typing_extensions import TypeVar
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (BaseResampler, Resampler2,
@@ -59,10 +59,12 @@ from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem, ImageSize,
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .idefics2_vision_model import Idefics2VisionTransformer
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
+                         SupportsV0Only)
 from .utils import AutoWeightsLoader, maybe_prefix
 
 CPU_DEVICE = torch.device("cpu")
@@ -444,8 +446,8 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
     def get_num_frames_with_most_features(self, seq_len: int) -> int:
         mm_config = self.ctx.get_mm_config()
-        max_images = mm_config.limit_per_prompt.get("image", 1)
-        max_videos = mm_config.limit_per_prompt.get("video", 1)
+        max_images = mm_config.get_limit_per_prompt("image")
+        max_videos = mm_config.get_limit_per_prompt("video")
 
         # count <image_idx></image_idx> tokens
         # which are not in get_max_image_tokens
@@ -673,7 +675,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         for modality, count in counts.items():
             if modality not in inputs or not inputs[modality]:
                 raise ValueError(f"None input data of {modality}."
-                                 "But prompt requires.")
+                                 " But prompt requires.")
             counter_key = self.get_modality_num_counter(modality)
             if len(inputs[modality][counter_key]) != count:
                 raise ValueError(f"The prompt requires {count} "
@@ -732,7 +734,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             }
         }
 
-    def _hf_processor_applies_repl(
+    def _hf_processor_applies_updates(
         self,
         prompt_text: str,
         mm_items: MultiModalDataItems,
@@ -740,10 +742,10 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
     ) -> bool:
         return False
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
             self, mm_items: MultiModalDataItems,
             hf_processor_mm_kwargs: Mapping[str, Any],
-            out_mm_kwargs: MultiModalKwargs) -> List[PromptReplacement]:
+            out_mm_kwargs: MultiModalKwargs) -> Sequence[PromptReplacement]:
         placeholder = {
             "image": self.info.image_pattern,
             "video": self.info.video_pattern,
@@ -778,6 +780,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: Union[str, List[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         supported_mm_modalities = self.info.get_supported_mm_modalities()
         if isinstance(prompt, list):
@@ -789,7 +792,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 [index for index, m in enumerate(matches) if m == modality])
             for modality in supported_mm_modalities
         }
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
+        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
+                               return_mm_hashes)
         # Exclude <image_id>x</image_id> from placeholders
         if "image" in result["mm_placeholders"] and \
             self.info.get_model_version() == (2, 6):
@@ -803,7 +807,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         return result
 
 
-class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
+class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP,
+                        SupportsV0Only):
     """
     The abstract class of MiniCPMV can only be inherited, but cannot be
     instantiated.
@@ -1029,8 +1034,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: Any,
     ) -> torch.Tensor:
@@ -1050,8 +1053,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         output = self.llm.model(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=vlm_embeddings,
         )
@@ -1184,7 +1185,8 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
                                    quant_config=quant_config,
                                    prefix=prefix)
 
-        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
+        return resampler.to(device=current_platform.device_type,
+                            dtype=torch.get_default_dtype())
 
     def get_vision_embedding(
         self,
@@ -1228,23 +1230,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        # vision encoder
-        "fc1",
-        "fc2",
-        "out_proj",
-        # language model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        # resampler
-        "kv_proj",
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -1283,7 +1268,8 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
                                      quant_config=quant_config,
                                      prefix=prefix)
 
-        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
+        return resampler.to(device=current_platform.device_type,
+                            dtype=torch.get_default_dtype())
 
     def get_vision_embedding(
         self,
@@ -1338,23 +1324,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             "up_proj",
         ],
     }
-    # LoRA specific attributes
-    supported_lora_modules = [
-        # vision encoder
-        "fc1",
-        "fc2",
-        "out_proj",
-        # language model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
-        "gate_up_proj",
-        "down_proj",
-        # resampler
-        "kv_proj",
-    ]
-
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -1394,7 +1363,8 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
                                      quant_config=quant_config,
                                      prefix=prefix)
 
-        return resampler.to(device="cuda", dtype=torch.get_default_dtype())
+        return resampler.to(device=current_platform.device_type,
+                            dtype=torch.get_default_dtype())
 
     def get_vision_embedding(
         self,
@@ -1460,13 +1430,6 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
     which is not conducive to the current integration logic of LoRA and
     bitsandbytes in vLLM. Therefore, it is necessary to separate them.
     """
-    # Ensure that the LoRA support check passes when the class is not
-    # initialized, but set all these attributes to empty.
-    # These will be updated when an instance class is selected
-    packed_modules_mapping = {}
-    supported_lora_modules = []
-    embedding_modules = {}
-    embedding_padding_modules = []
 
     def __new__(cls, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
@@ -1487,7 +1450,6 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
         # quant_config references base class members,
         # so update values before init is called
         cls.packed_modules_mapping.update(instance_cls.packed_modules_mapping)
-        cls.supported_lora_modules += instance_cls.supported_lora_modules
         cls.embedding_modules.update(instance_cls.embedding_modules)
         cls.embedding_padding_modules += instance_cls.embedding_padding_modules
         return instance_cls(vllm_config=vllm_config, prefix=prefix)

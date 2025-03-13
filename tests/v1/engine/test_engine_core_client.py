@@ -3,8 +3,7 @@
 import asyncio
 import time
 import uuid
-from contextlib import ExitStack
-from typing import Dict, List, Optional
+from typing import Optional
 
 import pytest
 from transformers import AutoTokenizer
@@ -45,13 +44,13 @@ def make_request(params: SamplingParams) -> EngineCoreRequest:
     )
 
 
-def loop_until_done(client: EngineCoreClient, outputs: Dict):
+def loop_until_done(client: EngineCoreClient, outputs: dict):
 
     while True:
         engine_core_outputs = client.get_output().outputs
 
         if len(engine_core_outputs) == 0:
-            break
+            continue
 
         all_finished = True
         for out in engine_core_outputs:
@@ -63,13 +62,13 @@ def loop_until_done(client: EngineCoreClient, outputs: Dict):
             break
 
 
-async def loop_until_done_async(client: EngineCoreClient, outputs: Dict):
+async def loop_until_done_async(client: EngineCoreClient, outputs: dict):
 
     while True:
         engine_core_outputs = (await client.get_output_async()).outputs
 
         if len(engine_core_outputs) == 0:
-            break
+            continue
 
         all_finished = True
         for out in engine_core_outputs:
@@ -122,7 +121,7 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
             client.add_request(request)
             time.sleep(0.01)
 
-        outputs: Dict[str, List] = {req_id: [] for req_id in request_ids}
+        outputs: dict[str, list] = {req_id: [] for req_id in request_ids}
         loop_until_done(client, outputs)
 
         for req_id in request_ids:
@@ -178,7 +177,7 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_asyncio(monkeypatch):
 
-    with monkeypatch.context() as m, ExitStack() as after:
+    with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
         # Monkey-patch core engine utility function to test.
@@ -195,7 +194,6 @@ async def test_engine_core_client_asyncio(monkeypatch):
             executor_class=executor_class,
             log_stats=True,
         )
-        after.callback(client.shutdown)
 
         MAX_TOKENS = 20
         params = SamplingParams(max_tokens=MAX_TOKENS)
@@ -209,7 +207,7 @@ async def test_engine_core_client_asyncio(monkeypatch):
             await client.add_request_async(request)
             await asyncio.sleep(0.01)
 
-        outputs: Dict[str, List] = {req_id: [] for req_id in request_ids}
+        outputs: dict[str, list] = {req_id: [] for req_id in request_ids}
         await loop_until_done_async(client, outputs)
 
         for req_id in request_ids:

@@ -23,7 +23,7 @@ Check out the [building from source](#build-from-source) documentation for detai
 ## Testing
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements/dev.txt
 
 # Linting, formatting and static type checking
 pre-commit install --hook-type pre-commit --hook-type commit-msg
@@ -145,6 +145,9 @@ review process:
 - Please respond to all comments within a reasonable time frame. If a comment
   isn't clear or you disagree with a suggestion, feel free to ask for
   clarification or discuss the suggestion.
+- Note that not all CI checks will be executed due to limited computational
+  resources. The reviewer will add `ready` label to the PR when the PR is
+  ready to merge or a full CI run is needed.
 
 ## Thank You
 

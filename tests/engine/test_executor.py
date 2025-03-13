@@ -2,20 +2,15 @@
 
 import asyncio
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import pytest
 
-from vllm.config import LoadFormat
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
 from vllm.executor.uniproc_executor import UniProcExecutor
 from vllm.sampling_params import SamplingParams
-
-from ..conftest import MODEL_WEIGHTS_S3_BUCKET
-
-RUNAI_STREAMER_LOAD_FORMAT = LoadFormat.RUNAI_STREAMER
 
 
 class Mock:
@@ -27,8 +22,8 @@ class CustomUniExecutor(UniProcExecutor):
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       args: tuple = (),
+                       kwargs: Optional[dict] = None) -> list[Any]:
         # Drop marker to show that this was ran
         with open(".marker", "w"):
             ...
@@ -38,12 +33,10 @@ class CustomUniExecutor(UniProcExecutor):
 CustomUniExecutorAsync = CustomUniExecutor
 
 
-@pytest.mark.parametrize("model",
-                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
+@pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 def test_custom_executor_type_checking(model):
     with pytest.raises(ValueError):
         engine_args = EngineArgs(model=model,
-                                 load_format=RUNAI_STREAMER_LOAD_FORMAT,
                                  distributed_executor_backend=Mock)
         LLMEngine.from_engine_args(engine_args)
     with pytest.raises(ValueError):
@@ -52,8 +45,7 @@ def test_custom_executor_type_checking(model):
         AsyncLLMEngine.from_engine_args(engine_args)
 
 
-@pytest.mark.parametrize("model",
-                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
+@pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 def test_custom_executor(model, tmp_path):
     cwd = os.path.abspath(".")
     os.chdir(tmp_path)
@@ -62,7 +54,6 @@ def test_custom_executor(model, tmp_path):
 
         engine_args = EngineArgs(
             model=model,
-            load_format=RUNAI_STREAMER_LOAD_FORMAT,
             distributed_executor_backend=CustomUniExecutor,
             enforce_eager=True,  # reduce test time
         )
@@ -77,8 +68,7 @@ def test_custom_executor(model, tmp_path):
         os.chdir(cwd)
 
 
-@pytest.mark.parametrize("model",
-                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
+@pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 def test_custom_executor_async(model, tmp_path):
     cwd = os.path.abspath(".")
     os.chdir(tmp_path)
@@ -87,7 +77,6 @@ def test_custom_executor_async(model, tmp_path):
 
         engine_args = AsyncEngineArgs(
             model=model,
-            load_format=RUNAI_STREAMER_LOAD_FORMAT,
             distributed_executor_backend=CustomUniExecutorAsync,
             enforce_eager=True,  # reduce test time
         )
@@ -106,8 +95,7 @@ def test_custom_executor_async(model, tmp_path):
         os.chdir(cwd)
 
 
-@pytest.mark.parametrize("model",
-                         [f"{MODEL_WEIGHTS_S3_BUCKET}/distilbert/distilgpt2"])
+@pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 def test_respect_ray(model):
     # even for TP=1 and PP=1,
     # if users specify ray, we should use ray.
@@ -116,7 +104,6 @@ def test_respect_ray(model):
     engine_args = EngineArgs(
         model=model,
         distributed_executor_backend="ray",
-        load_format=RUNAI_STREAMER_LOAD_FORMAT,
         enforce_eager=True,  # reduce test time
     )
     engine = LLMEngine.from_engine_args(engine_args)

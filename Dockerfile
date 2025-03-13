@@ -14,22 +14,21 @@ ARG PYTHON_VERSION=3.12
 ARG TARGETPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python and other dependencies
-RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
-    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
-    && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl sudo \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
-    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
-    && python3 --version && python3 -m pip --version
-# Install uv for faster pip installs
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install uv
+# Install minimal dependencies and uv
+RUN apt-get update -y \
+    && apt-get install -y ccache git curl wget sudo \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Add uv to PATH
+ENV PATH="/root/.local/bin:$PATH"
+# Create venv with specified Python and activate by placing at the front of path
+ENV VIRTUAL_ENV="/opt/venv"
+RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
 
 # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
 # as it was causing spam when compiling the CUTLASS kernels
@@ -47,21 +46,19 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 WORKDIR /workspace
 
-# install build and runtime dependencies
-
 # arm64 (GH200) build follows the practice of "use existing pytorch" build,
 # we need to install torch and torchvision from the nightly builds first,
 # pytorch will not appear as a vLLM dependency in all of the following steps
 # after this step
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --system --index-url https://download.pytorch.org/whl/nightly/cu126 "torch==2.7.0.dev20250121+cu126" "torchvision==0.22.0.dev20250121";  \
+        uv pip install --index-url https://download.pytorch.org/whl/nightly/cu126 "torch==2.7.0.dev20250121+cu126" "torchvision==0.22.0.dev20250121";  \
     fi
 
-COPY requirements-common.txt requirements-common.txt
-COPY requirements-cuda.txt requirements-cuda.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    uv pip install --system -r requirements-cuda.txt
+COPY requirements/common.txt requirements/common.txt
+COPY requirements/cuda.txt requirements/cuda.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r requirements/cuda.txt
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -79,15 +76,19 @@ FROM base AS build
 ARG TARGETPLATFORM
 
 # install build dependencies
-COPY requirements-build.txt requirements-build.txt
+COPY requirements/build.txt requirements/build.txt
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    uv pip install --system -r requirements-build.txt
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r requirements/build.txt
 
 COPY . .
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
-    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
+    if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
 
 # max jobs used by Ninja to build extensions
 ARG max_jobs=2
@@ -101,7 +102,7 @@ ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
 # if USE_SCCACHE is set, use sccache to speed up compilation
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
     if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
@@ -121,9 +122,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git  \
     if [ "$USE_SCCACHE" != "1" ]; then \
+        # Clean any existing CMake artifacts
+        rm -rf .deps && \
+        mkdir -p .deps && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
@@ -143,11 +147,15 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
 #################### DEV IMAGE ####################
 FROM base as dev
 
-COPY requirements-lint.txt requirements-lint.txt
-COPY requirements-test.txt requirements-test.txt
-COPY requirements-dev.txt requirements-dev.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    uv pip install --system -r requirements-dev.txt
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
+
+COPY requirements/lint.txt requirements/lint.txt
+COPY requirements/test.txt requirements/test.txt
+COPY requirements/dev.txt requirements/dev.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r requirements/dev.txt
 #################### DEV IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
@@ -163,23 +171,22 @@ ARG TARGETPLATFORM
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
-# Install Python and other dependencies
-RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
-    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
-    && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl wget sudo vim python3-pip \
-    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
-    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
-    && python3 --version && python3 -m pip --version
-# Install uv for faster pip installs
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install uv
+# Install minimal dependencies and uv
+RUN apt-get update -y \
+    && apt-get install -y ccache git curl wget sudo vim \
+    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 libibverbs-dev \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Add uv to PATH
+ENV PATH="/root/.local/bin:$PATH"
+# Create venv with specified Python and activate by placing at the front of path
+ENV VIRTUAL_ENV="/opt/venv"
+RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -191,15 +198,15 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 # we need to install torch and torchvision from the nightly builds first,
 # pytorch will not appear as a vLLM dependency in all of the following steps
 # after this step
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --system --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" "torchvision==0.22.0.dev20241215";  \
+        uv pip install --index-url https://download.pytorch.org/whl/nightly/cu124 "torch==2.6.0.dev20241210+cu124" "torchvision==0.22.0.dev20241215";  \
     fi
 
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
-    --mount=type=cache,target=/root/.cache/pip \
-    uv pip install --system dist/*.whl --verbose
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install dist/*.whl --verbose
 
 # If we need to build FlashInfer wheel before its release:
 # $ export FLASHINFER_ENABLE_AOT=1
@@ -213,10 +220,9 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # $ ls dist
 # $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/524304395bd1d8cd7d07db083859523fcaa246a4/flashinfer_python-0.2.1.post1+cu124torch2.5-cp38-abi3-linux_x86_64.whl
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-. /etc/environment && \
+RUN --mount=type=cache,target=/root/.cache/uv \
 if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-    uv pip install --system https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.1.post1/flashinfer_python-0.2.1.post1+cu124torch2.5-cp38-abi3-linux_x86_64.whl ; \
+    uv pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.1.post1/flashinfer_python-0.2.1.post1+cu124torch2.5-cp38-abi3-linux_x86_64.whl ; \
 fi
 COPY examples examples
 
@@ -224,9 +230,9 @@ COPY examples examples
 # some issues w.r.t. JIT compilation. Therefore we need to
 # install build dependencies for JIT compilation.
 # TODO: Remove this once FlashInfer AOT wheel is fixed
-COPY requirements-build.txt requirements-build.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    uv pip install --system -r requirements-build.txt
+COPY requirements/build.txt requirements/build.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r requirements/build.txt
 
 #################### vLLM installation IMAGE ####################
 
@@ -237,17 +243,21 @@ FROM vllm-base AS test
 
 ADD . /vllm-workspace/
 
-# install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/pip \
-    uv pip install --system -r requirements-dev.txt
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
 
 # install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/pip \
-    uv pip install --system -e tests/vllm_test_utils
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -r requirements/dev.txt
+
+# install development dependencies (for testing)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install -e tests/vllm_test_utils
 
 # enable fast downloads from hf (for testing)
-RUN --mount=type=cache,target=/root/.cache/pip \
-    uv pip install --system hf_transfer
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install hf_transfer
 ENV HF_HUB_ENABLE_HF_TRANSFER 1
 
 # Copy in the v1 package for testing (it isn't distributed yet)
@@ -265,12 +275,16 @@ RUN mv vllm test_docs/
 # base openai image with additional requirements, for any subsequent openai-style images
 FROM vllm-base AS vllm-openai-base
 
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
+
 # install additional dependencies for openai api server
-RUN --mount=type=cache,target=/root/.cache/pip \
+RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.42.0' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
+        uv pip install accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.42.0' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
     else \
-        uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.45.0' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
+        uv pip install accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.45.0' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image

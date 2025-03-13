@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Optional, Set, Tuple
+import inspect
+from typing import Optional
 
 import numpy as np
 import pytest
@@ -9,7 +10,8 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.gpu_input_batch import (BlockTable, CachedRequestState,
+                                            InputBatch)
 
 VOCAB_SIZE = 1024
 NUM_OUTPUT_TOKENS = 20
@@ -20,24 +22,52 @@ CUDA_DEVICES = [
 MAX_NUM_PROMPT_TOKENS = 64
 
 
+def _compare_objs(obj1, obj2):
+    attrs = inspect.getmembers(obj1, lambda a: not (inspect.isroutine(a)))
+    attr_names = set([
+        a[0] for a in attrs
+        if not (a[0].startswith('__') and a[0].endswith('__'))
+    ])
+    for attr_name in attr_names:
+        a = getattr(obj1, attr_name)
+        b = getattr(obj2, attr_name)
+
+        is_same = False
+        if isinstance(a, torch.Tensor):
+            if (a.numel() == 0 or b.numel() == 0):
+                is_same = (a.numel() == 0 and b.numel() == 0)
+            elif torch.allclose(a, b):
+                is_same = True
+        elif isinstance(a, np.ndarray):
+            if np.allclose(a, b):
+                is_same = True
+        elif isinstance(a, (BlockTable, SamplingMetadata)):
+            _compare_objs(a, b)
+            is_same = True  # if we make it here must be same
+        elif a == b:
+            is_same = True
+        assert is_same, f"Attribute {attr_name} is different"\
+            f" in {obj1} and {obj2}: {a} != {b}"
+
+
 def _remove_requests(
         input_batch: InputBatch, batch_size: int,
-        reqs: List[CachedRequestState]) -> Tuple[Set[str], List[int]]:
+        reqs: list[CachedRequestState]) -> tuple[set[str], list[int]]:
     """
-    Remove some requests randomly from the batch and returns a Tuple
+    Remove some requests randomly from the batch and returns a tuple
     of 1) set of request removed 2) indices of the requests removed
     ordered in descending order
     """
 
     num_reqs_to_remove = np.random.randint(0, batch_size)
-    req_indices_to_remove: Set[int] = set()
+    req_indices_to_remove: set[int] = set()
     for _ in range(num_reqs_to_remove):
         req_index_to_remove = np.random.randint(0, batch_size)
         req_indices_to_remove.add(req_index_to_remove)
 
     req_indices_to_remove_list = list(req_indices_to_remove)
     req_indices_to_remove_list.sort(reverse=True)
-    req_ids_to_remove: Set[str] = set()
+    req_ids_to_remove: set[str] = set()
     for index in req_indices_to_remove:
         input_batch.remove_request(reqs[index].req_id)
         req_ids_to_remove.add(reqs[index].req_id)
@@ -45,9 +75,9 @@ def _remove_requests(
 
 
 def _construct_expected_sampling_metadata(
-    reqs: List[CachedRequestState],
-    req_ids_retained: Set[int],
-    req_id_index_in_input_batch: Dict[str, int],
+    reqs: list[CachedRequestState],
+    req_ids_retained: set[int],
+    req_id_index_in_input_batch: dict[str, int],
     device: torch.device,
 ) -> SamplingMetadata:
     """
@@ -55,8 +85,8 @@ def _construct_expected_sampling_metadata(
     batch.
     """
     num_reqs = len(req_ids_retained)
-    output_token_ids: List[List[int]] = [list() for _ in range(num_reqs)]
-    prompt_token_ids: List[List[int]] = [list() for _ in range(num_reqs)]
+    output_token_ids: list[list[int]] = [list() for _ in range(num_reqs)]
+    prompt_token_ids: list[list[int]] = [list() for _ in range(num_reqs)]
     presence_penalties = [0.0 for _ in range(num_reqs)]
     frequency_penalties = [0.0 for _ in range(num_reqs)]
     repetition_penalties = [1.0 for _ in range(num_reqs)]
@@ -66,6 +96,11 @@ def _construct_expected_sampling_metadata(
     temperature = [0.0 for _ in range(num_reqs)]
     min_tokens = {}
     logit_bias = [None] * num_reqs
+    allowed_token_ids_mask = torch.zeros(num_reqs,
+                                         VOCAB_SIZE,
+                                         dtype=torch.bool,
+                                         device=device)
+    bad_words_token_ids = {}
     for req in reqs:
         if req.req_id not in req_ids_retained:
             continue
@@ -86,6 +121,12 @@ def _construct_expected_sampling_metadata(
             req.sampling_params.min_tokens,
             req.sampling_params.all_stop_token_ids)
         logit_bias[index_in_input_batch] = req.sampling_params.logit_bias
+        if req.sampling_params.allowed_token_ids:
+            allowed_token_ids_mask[index_in_input_batch][
+                req.sampling_params.allowed_token_ids] = True
+        bad_words_token_ids[
+            index_in_input_batch] = req.sampling_params.bad_words_token_ids
+
     return SamplingMetadata(
         temperature=torch.tensor(temperature, dtype=torch.float,
                                  device=device),
@@ -115,12 +156,13 @@ def _construct_expected_sampling_metadata(
                                           dtype=torch.float,
                                           device=device),
         output_token_ids=output_token_ids,
-        spec_token_ids=None,
         min_tokens=min_tokens,
         no_penalties=(all(x == 0 for x in presence_penalties)
                       and all(x == 0 for x in frequency_penalties)
                       and all(x == 1 for x in repetition_penalties)),
         logit_bias=logit_bias,
+        allowed_token_ids_mask=allowed_token_ids_mask,
+        bad_words_token_ids=bad_words_token_ids,
     )
 
 
@@ -183,7 +225,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
     )
-    reqs: List[CachedRequestState] = []
+    reqs: list[CachedRequestState] = []
     req_id_reqs = {}
     req_id_output_token_ids = {}
     # Add requests
@@ -242,3 +284,67 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     assert expected_sampling_metadata.no_penalties == \
            sampling_metadata.no_penalties
     assert expected_sampling_metadata.logit_bias == sampling_metadata.logit_bias
+    if sampling_metadata.allowed_token_ids_mask:
+        assert torch.allclose(
+            expected_sampling_metadata.allowed_token_ids_mask,
+            sampling_metadata.allowed_token_ids_mask)
+    assert expected_sampling_metadata.bad_words_token_ids == \
+        sampling_metadata.bad_words_token_ids
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("batch_size", [32])
+@pytest.mark.parametrize("swap_list", [((0, 1), )])
+def test_swap_states_in_input_batch(device: str, batch_size: int,
+                                    swap_list: list):
+    """
+    Tests the logic for managing sampling metadata in the InputBatch.
+
+    This test involves adding a set of requests to the InputBatch,
+    followed by removing a subset of them. Afterward, the batch is compacted,
+    and the `make_sampling_metadata` method is invoked on the batch. The
+    output of `make_sampling_metadata` is then compared against the expected
+    results to ensure correctness.
+    """
+    input_batch: InputBatch = InputBatch(
+        max_num_reqs=batch_size,
+        max_model_len=1024,
+        max_num_blocks_per_req=10,
+        device=torch.device(device),
+        pin_memory=is_pin_memory_available(),
+        vocab_size=1024,
+    )
+    ref_input_batch: InputBatch = InputBatch(
+        max_num_reqs=batch_size,
+        max_model_len=1024,
+        max_num_blocks_per_req=10,
+        device=torch.device(device),
+        pin_memory=is_pin_memory_available(),
+        vocab_size=1024,
+    )
+
+    reqs: list[CachedRequestState] = []
+    req_id_reqs = {}
+    req_id_output_token_ids = {}
+    # Add requests
+    for req_index in range(batch_size):
+        req: CachedRequestState = _construct_cached_request_state(req_index)
+        input_batch.add_request(req, req_index)
+        reqs.append(req)
+        req_id_reqs[req.req_id] = req
+        req_id_output_token_ids[req.req_id] = req.output_token_ids
+
+    reordered_reqs = reqs.copy()
+    for swap_pair in swap_list:
+        reordered_reqs[swap_pair[0]], reordered_reqs[swap_pair[1]] = \
+            reordered_reqs[swap_pair[1]], reordered_reqs[swap_pair[0]]
+        input_batch.swap_states(swap_pair[0], swap_pair[1])
+
+    for req_index in range(batch_size):
+        req = reordered_reqs[req_index]
+        ref_input_batch.add_request(req, req_index)
+
+    input_batch.refresh_sampling_metadata()
+    ref_input_batch.refresh_sampling_metadata()
+
+    _compare_objs(input_batch, ref_input_batch)

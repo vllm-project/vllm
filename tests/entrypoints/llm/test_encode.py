@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import weakref
-from typing import List
 
 import pytest
 
 from vllm import LLM, PoolingParams, PoolingRequestOutput
-from vllm.config import LoadFormat
 from vllm.distributed import cleanup_dist_env_and_memory
 
-MODEL_NAME = "s3://vllm-ci-model-weights/e5-mistral-7b-instruct"
+MODEL_NAME = "intfloat/multilingual-e5-small"
 
 PROMPTS = [
     "Hello, my name is",
@@ -33,11 +31,11 @@ def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(model=MODEL_NAME,
-              load_format=LoadFormat.RUNAI_STREAMER,
               max_num_batched_tokens=32768,
               tensor_parallel_size=1,
               gpu_memory_utilization=0.75,
-              enforce_eager=True)
+              enforce_eager=True,
+              seed=0)
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
@@ -47,8 +45,8 @@ def llm():
     cleanup_dist_env_and_memory()
 
 
-def assert_outputs_equal(o1: List[PoolingRequestOutput],
-                         o2: List[PoolingRequestOutput]):
+def assert_outputs_equal(o1: list[PoolingRequestOutput],
+                         o2: list[PoolingRequestOutput]):
     assert [o.outputs for o in o1] == [o.outputs for o in o2]
 
 

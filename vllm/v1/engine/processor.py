@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from typing import Mapping, Optional, Union
+from collections.abc import Mapping
+from typing import Optional, Union
 
-from vllm.config import CacheConfig, LoRAConfig, ModelConfig
+import vllm.platforms
+from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
                          PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs
@@ -18,47 +20,46 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
+from vllm.v1.structured_output.utils import validate_structured_output_request
 
 
 class Processor:
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        lora_config: Optional[LoRAConfig],
+        vllm_config: VllmConfig,
         tokenizer: BaseTokenizerGroup,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.decoding_config = vllm_config.decoding_config
         self.tokenizer = tokenizer
 
-        self.generation_config_fields = model_config.try_get_generation_config(
-        )
-        self.input_preprocessor = InputPreprocessor(model_config,
+        self.generation_config_fields = (
+            self.model_config.try_get_generation_config())
+        self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
                                                     mm_registry)
         self.input_processor = input_registry.create_input_processor(
-            model_config)
+            self.model_config)
 
         # Multi-modal (huggingface) input mapper
-        self.mm_input_cache_client = MMInputCacheClient(model_config)
+        self.mm_input_cache_client = MMInputCacheClient(self.model_config)
 
         # Multi-modal hasher (for images)
-        self.use_hash = (not model_config.disable_mm_preprocessor_cache) or \
-            cache_config.enable_prefix_caching
+        self.use_hash = (
+            not self.model_config.disable_mm_preprocessor_cache) or \
+            self.cache_config.enable_prefix_caching
 
     def _validate_logprobs(
         self,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams,
     ) -> None:
-        if not isinstance(params, SamplingParams):
-            return
-
         max_logprobs = self.model_config.max_logprobs
         # Validate sample logprobs.
         if params.logprobs and params.logprobs > max_logprobs:
@@ -72,16 +73,71 @@ class Processor:
                 f"Requested prompt logprobs of {params.prompt_logprobs}, "
                 f"which is greater than max allowed: {max_logprobs}")
 
-        # TODO(andy): enable this in follow up by recomputing.
-        if (params.prompt_logprobs is not None
-                and self.cache_config.enable_prefix_caching):
-            raise ValueError("Prefix caching with prompt logprobs not yet "
-                             "supported on VLLM V1.")
+    def _validate_sampling_params(
+        self,
+        params: SamplingParams,
+    ) -> None:
+        self._validate_structured_output(params)
+
+        if params.allowed_token_ids is None:
+            return
+        if not params.allowed_token_ids:
+            raise ValueError("allowed_token_ids is not None and empty!")
+        vocab_size = self.model_config.get_vocab_size()
+        if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
+            raise ValueError(
+                "allowed_token_ids contains out-of-vocab token id!")
+
+    def _validate_supported_sampling_params(
+        self,
+        params: SamplingParams,
+    ) -> None:
+        # Best of not yet supported.
+        if params.best_of is not None and params.best_of > 1:
+            raise ValueError("vLLM V1 does not yet support best_of.")
+        # Logits processors not supported.
+        if params.logits_processors:
+            raise ValueError("vLLM V1 does not support per request "
+                             "user provided logits processors.")
+
+    def _validate_params(
+        self,
+        params: Union[SamplingParams, PoolingParams],
+    ):
+        """
+        Validate supported SamplingParam.
+        Should raise ValueError if unsupported for API Server.
+        """
+
+        if not isinstance(params, SamplingParams):
+            raise ValueError("V1 does not yet support Pooling models.")
+
+        self._validate_logprobs(params)
+        self._validate_sampling_params(params)
+        self._validate_supported_sampling_params(params)
 
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
+
+    def _validate_structured_output(self, params: SamplingParams) -> None:
+        if not params.guided_decoding or not self.decoding_config:
+            return
+        if self.decoding_config.guided_decoding_backend != "xgrammar":
+            raise ValueError(
+                "Only xgrammar structured output is supported in V1.")
+        if (params.guided_decoding.backend
+                and params.guided_decoding.backend != 'xgrammar'):
+            raise ValueError(
+                "Only xgrammar structured output is supported in V1.")
+        if self.vllm_config.speculative_config:
+            raise ValueError("Structured output is not supported with "
+                             "speculative decoding.")
+        if vllm.platforms.current_platform.is_tpu():
+            raise ValueError("Structured output is not supported on TPU.")
+
+        validate_structured_output_request(params)
 
     def process_inputs(
         self,
@@ -98,13 +154,17 @@ class Processor:
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
 
-        self._validate_logprobs(params)
         self._validate_lora(lora_request)
+        self._validate_params(params)
+        if priority != 0:
+            raise ValueError("V1 does not support priority yet.")
+        if trace_headers is not None:
+            raise ValueError("V1 does not support tracing yet.")
+        if prompt_adapter_request is not None:
+            raise ValueError("V1 does not support prompt_adapter_request.")
 
         if arrival_time is None:
             arrival_time = time.time()
-        assert priority == 0, "vLLM V1 does not support priority at the moment."
-        assert trace_headers is None, "vLLM V1 does not support tracing yet."
 
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
@@ -116,6 +176,7 @@ class Processor:
             request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
+            return_mm_hashes=self.use_hash,
         )
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
@@ -143,6 +204,8 @@ class Processor:
         sampling_params = params.clone()
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
+        sampling_params.update_from_tokenizer(
+            self.tokenizer.get_lora_tokenizer(lora_request))
 
         # Multimodal related.
         # Compute MM hashes (if enabled)

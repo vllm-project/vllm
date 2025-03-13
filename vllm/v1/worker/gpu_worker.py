@@ -2,7 +2,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.distributed
@@ -14,6 +14,7 @@ from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -119,6 +120,8 @@ class Worker(WorkerBase):
         self.model_runner: GPUModelRunner = GPUModelRunner(
             self.vllm_config, self.device)
 
+    # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
+    # to hijack tensor allocation.
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
@@ -185,9 +188,8 @@ class Worker(WorkerBase):
     def get_kv_cache_spec(self) -> KVCacheSpec:
         return self.model_runner.get_kv_cache_spec()
 
-    def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-        kv_cache_config = kv_cache_configs[self.rank]
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
@@ -212,6 +214,29 @@ class Worker(WorkerBase):
             self.model_runner._dummy_run(size)
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
+
+        # Warm up sampler and preallocate memory buffer for logits and other
+        # sampling related tensors of max possible shape to avoid memory
+        # fragmentation issue.
+        # NOTE: This is called after `capture_model` on purpose to prevent
+        # memory buffers from being cleared by `torch.cuda.empty_cache`.
+        if get_pp_group().is_last_rank:
+            try:
+                max_num_reqs = min(
+                    self.scheduler_config.max_num_seqs,
+                    self.scheduler_config.max_num_batched_tokens)
+                self.model_runner._dummy_sampler_run(
+                    hidden_states=self.model_runner._dummy_run(
+                        num_tokens=max_num_reqs))
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    raise RuntimeError(
+                        "CUDA out of memory occurred when warming up sampler. "
+                        "Please try lowering `gpu_memory_utilization` when "
+                        "initializing the engine.") from None
+                else:
+                    raise e
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
@@ -225,7 +250,7 @@ class Worker(WorkerBase):
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
-        return output if self.rank == 0 else None
+        return output if self.is_driver_worker else None
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
@@ -235,8 +260,20 @@ class Worker(WorkerBase):
         else:
             self.profiler.stop()
 
+    def execute_dummy_batch(self) -> None:
+        self.model_runner._dummy_run(1)
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_runner.remove_lora(lora_id)
+
+    def list_loras(self) -> set[int]:
+        return self.model_runner.list_loras()
+
+    def pin_lora(self, lora_id: int) -> bool:
+        return self.model_runner.pin_lora(lora_id)
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
@@ -275,5 +312,5 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
             raise ValueError(
                 "Bfloat16 is only supported on GPUs with compute capability "
                 f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
-                "You can use float16 instead by explicitly setting the"
+                "You can use float16 instead by explicitly setting the "
                 "`dtype` flag in CLI, for example: --dtype=half.")

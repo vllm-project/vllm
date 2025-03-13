@@ -6,7 +6,7 @@ typically specific to a small subset of models.
 import re
 import types
 from pathlib import PosixPath
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Optional, Union
 
 import torch
 from PIL.Image import Image
@@ -49,7 +49,7 @@ def fuyu_vllm_to_hf_output(vllm_output: RunnerOutput,
 
 def qwen_vllm_to_hf_output(
         vllm_output: RunnerOutput,
-        model: str) -> Tuple[List[int], str, Optional[SampleLogprobs]]:
+        model: str) -> tuple[list[int], str, Optional[SampleLogprobs]]:
     """Sanitize vllm output [qwen models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -60,7 +60,7 @@ def qwen_vllm_to_hf_output(
 
 def qwen2_vllm_to_hf_output(
         vllm_output: RunnerOutput,
-        model: str) -> Tuple[List[int], str, Optional[SampleLogprobs]]:
+        model: str) -> tuple[list[int], str, Optional[SampleLogprobs]]:
     """Sanitize vllm output [qwen2 models] to be comparable with hf output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -78,7 +78,7 @@ def llava_image_vllm_to_hf_output(vllm_output: RunnerOutput,
 
 def llava_video_vllm_to_hf_output(
         vllm_output: RunnerOutput,
-        model: str) -> Tuple[List[int], str, Optional[SampleLogprobs]]:
+        model: str) -> tuple[list[int], str, Optional[SampleLogprobs]]:
     config = AutoConfig.from_pretrained(model)
     mm_token_id = config.video_token_index
     return _llava_vllm_to_hf_output(vllm_output, model, mm_token_id)
@@ -247,7 +247,7 @@ def molmo_post_processor(hf_inputs: BatchEncoding, dtype: str):
 
 ####### Prompt path encoders for models that need models on disk
 def qwen_prompt_path_encoder(
-        tmp_path: PosixPath, prompt: str, assets: Union[List[ImageAsset],
+        tmp_path: PosixPath, prompt: str, assets: Union[list[ImageAsset],
                                                         _ImageAssets]) -> str:
     """Given a temporary dir path, export one or more image assets into the
     tempdir & replace its contents with the local path to the string so that
@@ -257,7 +257,7 @@ def qwen_prompt_path_encoder(
     Args:
         tmp_path: Tempdir for test under consideration.
         prompt: Prompt with image placeholders.
-        assets: List of image assets whose len equals the num placeholders.
+        assets: list of image assets whose len equals the num placeholders.
     """
     # Ensure that the number of placeholders matches the number of assets;
     # If this is not true, the test is probably written incorrectly.
@@ -304,8 +304,20 @@ def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
-def glm_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    """Patches and returns an instance of the HfRunner to use for GLM4."""
+def gemma3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for Gemma 3."""
+    hf_processor = hf_model.processor
+
+    def processor(*args, **kwargs):
+        return hf_processor(*args, do_pan_and_scan=True, **kwargs)
+
+    hf_model.processor = processor
+
+    return hf_model
+
+
+def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for GLM4V."""
     hf_processor = hf_model.processor
     patch_padding_side(hf_processor)
 
@@ -313,12 +325,20 @@ def glm_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         if images is None:
             return hf_processor(*args, **kwargs)
 
+        images = [images] if isinstance(images, Image) else images
+
+        contents = re.findall(
+            r"<\|begin_of_image\|><\|endoftext\|><\|end_of_image\|>(.*?)<\|assistant\|>",
+            text,
+        )
+        assert len(contents) == len(images)
+
         return hf_processor.apply_chat_template(
             [{
                 "role": "user",
-                "image": images,
-                "content": text
-            }],
+                "image": image,
+                "content": content
+            } for image, content in zip(images, contents)],
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
@@ -350,7 +370,7 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.max_num = self.config.max_dynamic_patch
             self.image_size = self.vision_config.image_size
 
-        def __call__(self, text: str, images: Union[Image, List[Image]],
+        def __call__(self, text: str, images: Union[Image, list[Image]],
                      **kwargs):
             # yapf: disable
             from vllm.model_executor.models.h2ovl import (
@@ -410,7 +430,7 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.max_num = self.config.max_dynamic_patch
             self.image_size = self.vision_config.image_size
 
-        def __call__(self, text: str, images: Union[Image, List[Image]],
+        def __call__(self, text: str, images: Union[Image, list[Image]],
                      **kwargs):
             from vllm.model_executor.models.internvl import (
                 IMG_CONTEXT, IMG_END, IMG_START,
