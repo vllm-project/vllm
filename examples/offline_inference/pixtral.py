@@ -47,11 +47,12 @@ def run_simple_demo(args: argparse.Namespace):
     model_name = "mistralai/Pixtral-12B-2409"
     sampling_params = SamplingParams(max_tokens=8192)
 
-    # Lower max_num_seqs or max_model_len on low-VRAM GPUs.
+    # Lower max_model_len and/or max_num_seqs on low-VRAM GPUs.
     llm = LLM(
         model=model_name,
         tokenizer_mode="mistral",
         max_model_len=4096,
+        max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
