@@ -680,7 +680,6 @@ def valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
         return False
 
     align = dg.get_m_alignment_for_contiguous_layout()
-    assert align == 128 # for now
     M, K = hidden_states.shape
     N = w2.shape[-1]
     if M < align or  N % align != 0 or K % align != 0:
@@ -761,6 +760,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         B.shape[1], META['BLOCK_SIZE_N']), )
 
     if use_dg:
+        assert use_fp8_w8a8
         # Note: we do not apply weights here since it requires
         # resizing the output.
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
@@ -1009,7 +1009,6 @@ def get_default_config(
     dtype: Optional[str],
     is_marlin: bool,
     block_shape: Optional[List[int]] = None,
-    use_deep_gemm: bool = False,
 ) -> Dict[str, int]:
     if dtype == "fp8_w8a8" and block_shape is not None:
         # Block-wise quant: BLOCK_SIZE_N must be divisible by block_shape[0]
@@ -1063,6 +1062,7 @@ def try_get_optimal_moe_config(
     M: int,
     is_marlin: bool = False,
     block_shape: Optional[List[int]] = None,
+    use_deep_gemm: bool = False,
 ):
     from vllm.model_executor.layers.fused_moe import get_config
     override_config = get_config()
@@ -1085,6 +1085,12 @@ def try_get_optimal_moe_config(
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
                                         is_marlin, block_shape)
+
+
+    # Remove this
+    if use_deep_gemm:
+        config['BLOCK_SIZE_M'] = 128
+
     return config
 
 
@@ -1444,7 +1450,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                         use_int4_w4a16=use_int4_w4a16,
                                         dtype=hidden_states.dtype)
 
-    # move up valid_deep_gemm?
+    use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2,
+                                                 use_fp8_w8a8)
 
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
@@ -1453,6 +1460,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         top_k_num,
         config_dtype,
         block_shape=block_shape,
+        use_deep_gemm=use_dg,
     )
 
     config = get_config_func(M)
@@ -1490,12 +1498,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2,
-                                                 use_fp8_w8a8)
-
-    config_block_m = config['BLOCK_SIZE_M']
-    block_m = config_block_m if not use_dg else dg.get_m_alignment_for_contiguous_layout()
-
+    block_m = config['BLOCK_SIZE_M']
     assert not use_dg or block_m == dg.get_m_alignment_for_contiguous_layout()
 
     chunked_dg = False
@@ -1544,6 +1547,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
+
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
@@ -1551,7 +1555,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_hidden_states = hidden_states[begin_chunk_idx:end_chunk_idx]
         tokens_in_chunk, _ = curr_hidden_states.shape
 
-        skip_dg = use_dg and tokens_in_chunk % 128 != 0 #block_m != 0
+        skip_dg = use_dg and tokens_in_chunk % block_m != 0
 
         if tokens_in_chunk == 0:
             break
@@ -1559,17 +1563,13 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
-        if not (use_dg or skip_dg):
-            block_m = config_block_m
-
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             moe_align_block_size(curr_topk_ids, block_m, global_num_experts,
                                  expert_map))
 
         if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or chunked_dg:
             if chunked_dg:
-                slice_size = ((sorted_token_ids.numel() + block_m - 1) //
-                              block_m) * block_m
+                slice_size = ((sorted_token_ids.numel() + block_m - 1) // block_m) * block_m
                 slice_topk = 1
             else:
                 slice_size = tokens_in_chunk
@@ -1580,21 +1580,13 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             # so the cache size and config are already set correctly and
             # do not need to be adjusted.
             if skip_dg:
-                assert tokens_in_chunk * top_k_num < intermediate_cache1.shape[
-                    0]
-                intermediate_cache1 = intermediate_cache1[:(tokens_in_chunk *
-                                                            top_k_num)].view(
-                                                                -1, top_k_num,
-                                                                N)
+                assert tokens_in_chunk * top_k_num < intermediate_cache1.shape[0]
+                intermediate_cache1 = intermediate_cache1[:(tokens_in_chunk*top_k_num)].view(-1, top_k_num, N)
                 intermediate_cache2 = intermediate_cache2.view(-1, N // 2)
-                intermediate_cache3 = intermediate_cache3[:(tokens_in_chunk *
-                                                            top_k_num)].view(
-                                                                -1, top_k_num,
-                                                                w2.shape[1])
+                intermediate_cache3 = intermediate_cache3[:(tokens_in_chunk*top_k_num)].view(-1, top_k_num, w2.shape[1])
             else:
                 intermediate_cache1 = intermediate_cache1[:slice_size]
-                intermediate_cache2 = intermediate_cache2[:slice_size *
-                                                          slice_topk]
+                intermediate_cache2 = intermediate_cache2[:slice_size * slice_topk]
                 intermediate_cache3 = intermediate_cache3[:slice_size]
 
 
