@@ -2142,46 +2142,42 @@ def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
         ctx.destroy(linger=0)
 
 
-def _check_multiproc_method():
-    if (cuda_is_initialized()
-            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
-        logger.warning("CUDA was previously initialized. We must use "
-                       "the `spawn` multiprocessing start method. Setting "
-                       "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-                       "See https://docs.vllm.ai/en/latest/getting_started/"
-                       "troubleshooting.html#python-multiprocessing "
-                       "for more information.")
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+def ray_is_initialized():
+    """Check if Ray is initialized."""
+
+    try:
+        import ray
+        return ray.is_initialized()
+    except ImportError:
+        return False
 
 
-def get_mp_context(
-    override_mp_method: Optional[str] = None,
-    override_reason: Optional[str] = None,
-):
-    """Get a multiprocessing context.
-    If override_mp_method is provided, it will be used instead of the
-    VLLM_WORKER_MULTIPROC_METHOD environment variable.
+def _maybe_force_spawn():
+    if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
+        return
 
-    Args:
-        override_mp_method: It can be "spawn" or "fork". If provided,
-            it will be used instead of the VLLM_WORKER_MULTIPROC_METHOD
-            environment variable.
-        override_reason: If provided, it will be logged as a warning.
-
-    Returns:
-        A multiprocessing context.
-    """
-    if override_mp_method is not None:
-        current_method = os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
-        if current_method != override_mp_method:
+    for checker, reason in ((cuda_is_initialized, "CUDA is initialized"), (
+            ray_is_initialized,
+            "Ray is initialized and Ray process can only be spawned")):
+        if checker():
             logger.warning(
-                "VLLM_WORKER_MULTIPROC_METHOD is overridden to %s. %s",
-                override_mp_method,
-                override_reason,
-            )
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = override_mp_method
+                "We must use the `spawn` multiprocessing start method. "
+                "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+                "See https://docs.vllm.ai/en/latest/getting_started/"
+                "troubleshooting.html#python-multiprocessing "
+                "for more information. Reason: %s", reason)
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+            break
 
-    _check_multiproc_method()
+
+def get_mp_context():
+    """Get a multiprocessing context with a particular method (spawn or fork).
+    By default we follow the value of the VLLM_WORKER_MULTIPROC_METHOD to
+    determine the multiprocessing method (default is fork). However, under
+    certain conditions, we may enforce spawn and override the value of
+    VLLM_WORKER_MULTIPROC_METHOD.
+    """
+    _maybe_force_spawn()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
     return multiprocessing.get_context(mp_method)
 

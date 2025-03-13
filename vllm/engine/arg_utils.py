@@ -166,7 +166,6 @@ class EngineArgs:
     num_scheduler_steps: int = 1
     multi_step_stream_outputs: bool = True
     ray_workers_use_nsight: bool = False
-    ray_placement_group: Optional[Any] = None
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
     model_loader_extra_config: Optional[dict] = None
@@ -1241,6 +1240,14 @@ class EngineArgs:
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
         )
+
+        try:
+            import ray
+
+            placement_group = ray.util.get_current_placement_group()
+        except ImportError:
+            placement_group = None
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1253,7 +1260,7 @@ class EngineArgs:
                 self.tokenizer_pool_extra_config,
             ),
             ray_workers_use_nsight=self.ray_workers_use_nsight,
-            placement_group=self.ray_placement_group,
+            placement_group=placement_group,
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,

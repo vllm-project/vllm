@@ -104,16 +104,7 @@ class BackgroundProcHandle:
         target_fn: Callable,
         process_kwargs: dict[Any, Any],
     ):
-        assert "executor_class" in process_kwargs, "executor_class is missing"
-
-        override_mp_method, override_reason = None, None
-        if process_kwargs["executor_class"].uses_ray:
-            override_mp_method = "spawn"
-            override_reason = "RayExecutor requires spawn multiprocessing"
-        context = get_mp_context(
-            override_mp_method=override_mp_method,
-            override_reason=override_reason,
-        )
+        context = get_mp_context()
         reader, writer = context.Pipe(duplex=False)
 
         assert ("ready_pipe" not in process_kwargs
