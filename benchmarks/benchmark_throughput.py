@@ -100,6 +100,11 @@ def run_vllm_chat(
         n: int,
         engine_args: EngineArgs,
         disable_detokenize: bool = False) -> tuple[float, list[RequestOutput]]:
+    """
+    Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
+    multimodal models as it properly handles multimodal inputs and chat
+    formatting. For non-multimodal models, use run_vllm() instead.
+    """
     from vllm import LLM, SamplingParams
     llm = LLM(**dataclasses.asdict(engine_args))
 
@@ -123,8 +128,17 @@ def run_vllm_chat(
                 max_tokens=request.expected_output_len,
                 detokenize=not disable_detokenize,
             ))
+
+    # Extract LoRA requests if enabled
+    lora_requests: Optional[list[LoRARequest]] = None
+    if engine_args.enable_lora:
+        lora_requests = [request.lora_request for request in requests]
+
     start = time.perf_counter()
-    outputs = llm.chat(prompts, sampling_params, use_tqdm=True)
+    outputs = llm.chat(prompts,
+                       sampling_params,
+                       lora_request=lora_requests,
+                       use_tqdm=True)
     end = time.perf_counter()
     return end - start, outputs
 
@@ -301,6 +315,8 @@ def get_requests(args, tokenizer):
         dataset_cls = RandomDataset
     elif args.dataset_name == "sharegpt":
         dataset_cls = ShareGPTDataset
+        if args.backend == "vllm-chat":
+            sample_kwargs["enable_multimodal_chat"] = True
     elif args.dataset_name == "sonnet":
         assert tokenizer.chat_template or tokenizer.default_chat_template, (
             "Tokenizer/model must have chat template for sonnet dataset.")
@@ -319,7 +335,7 @@ def get_requests(args, tokenizer):
                        and args.hf_subset is None else HuggingFaceDataset)
         common_kwargs['dataset_subset'] = args.hf_subset
         common_kwargs['dataset_split'] = args.hf_split
-        sample_kwargs["enable_chat"] = True
+        sample_kwargs["enable_multimodal_chat"] = True
 
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
@@ -380,6 +396,11 @@ def main(args: argparse.Namespace):
             total_output_tokens += sum(
                 len(o.token_ids) for o in ro.outputs if o)
         total_num_tokens = total_prompt_tokens + total_output_tokens
+        print(
+            "\033[93mWARNING\033[0m: Token calculation is different when using "
+            "request_outputs. Both prompt tokens and output tokens are based "
+            "on the model's actual output rather than the expected lengths "
+            "from the dataset.")
     else:
         total_num_tokens = sum(r.prompt_len + r.expected_output_len
                                for r in requests)
