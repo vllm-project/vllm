@@ -377,6 +377,9 @@ def main(args: argparse.Namespace):
         raise ValueError(f"Unknown backend: {args.backend}")
 
     if request_outputs:
+        if args.backend == 'vllm':
+            print("For vllm backend we are switching to using request_outputs "
+                  "for token counts.")
         total_prompt_tokens = 0
         total_output_tokens = 0
         for ro in request_outputs:
