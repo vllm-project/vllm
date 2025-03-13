@@ -58,14 +58,14 @@ def get_vision_encoder_info(
         hf_config: VisionLanguageConfig) -> VisionEncoderInfo:
     # Avoid circular imports
     from .clip import CLIPEncoderInfo, CLIPVisionConfig
-    from .pixtral import PixtralHFEncoderInfo, PixtralVisionConfig
+    from .pixtral import PixtralEncoderInfo, PixtralVisionConfig
     from .siglip import SiglipEncoderInfo, SiglipVisionConfig
 
     vision_config = hf_config.vision_config
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPEncoderInfo(vision_config)
     if isinstance(vision_config, PixtralVisionConfig):
-        return PixtralHFEncoderInfo(vision_config)
+        return PixtralEncoderInfo(vision_config)
     if isinstance(vision_config, SiglipVisionConfig):
         return SiglipEncoderInfo(vision_config)
 

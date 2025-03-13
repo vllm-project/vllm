@@ -4,7 +4,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from functools import cached_property
-from typing import List, Optional, Set, Tuple, Union
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import numpy as np
 import torch
@@ -54,6 +54,24 @@ try:
     USE_XFORMERS_OPS = True
 except ImportError:
     USE_XFORMERS_OPS = False
+
+
+class PixtralImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+
+    images: list[torch.Tensor]
+    """
+    Shape: `(batch_size, num_channels, image_width, image_height)`
+
+    The result of stacking :attr:`ImageEncoding.tokens` from each prompt.
+    """
+
+    image_tokens: tuple[torch.Tensor, ...]
+    """
+    Shape: `(batch_size, image_feature_size)`
+
+    The result of stacking :attr:`ImageEncoding.tokens` from each prompt.
+    """
 
 
 class PixtralProcessorAdapter:
@@ -206,7 +224,7 @@ class PixtralProcessingInfo(BaseProcessingInfo):
             processor = self.get_hf_processor()
 
         hf_vision_config = self.get_vision_config(processor)
-        hf_encoder_info = PixtralHFEncoderInfo(hf_vision_config)
+        hf_encoder_info = PixtralEncoderInfo(hf_vision_config)
         hf_num_tokens = hf_encoder_info.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,
@@ -278,6 +296,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
             num_crops_hw=MultiModalFieldConfig.batched("image"),
             image_tokens_flat=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_image_tokens),
+            num_image_tokens=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_updates(
@@ -296,7 +315,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
-            ncols, nrows = get_pixtral_hf_image_feature_grid_size(
+            ncols, nrows = get_pixtral_image_feature_grid_size(
                 self.info.get_vision_config(processor),
                 image_width=image_size.width,
                 image_height=image_size.height,
@@ -336,13 +355,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             if key in dataclass_fields
         }
 
-        if not ("image_break_token_id" in vision_args
-                and "image_end_token_id" in vision_args):
-            raise ValueError(
-                "'image_break_token_id' and 'image_end_token_id' not found "
-                "in the vision_encoder arguments. Please download the latest "
-                "version of 'params.json' from the model repository.")
-
         self.vision_args = VisionEncoderArgs(**vision_args)
 
         # init MistralForCausalLM
@@ -369,34 +381,11 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_multimodal_embeddings(
         self, **kwargs
     ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
-        image_input, image_tokens = self._parse_and_validate_image_input(
-            **kwargs)
+        image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
 
-        vision_embeddings = self._process_image_input(image_input)
-
-        # NOTE: We patch the outputs of the vision encoder with embeddings
-        # from `[IMG_BREAK]` and `[IMG_END]` tokens.
-        image_embeds = self.language_model.get_input_embeddings(image_tokens)
-        image_token_mask = image_tokens == self.vision_args.image_token_id
-        image_embeds[image_token_mask] = vision_embeddings
-
-        # NOTE: Image embeddings are split into separate tensors for each image
-        # by the indices of `[IMG_END]` token.
-        image_end_mask = image_tokens == self.vision_args.image_end_token_id
-        split_indices = torch.where(image_end_mask)[0] + 1
-        if len(split_indices) <= 1:
-            # Do not split, return as tensor of shape [1, fs, hs]
-            return image_embeds.unsqueeze(0)
-
-        # If the last split index is the last index in image_tokens, we
-        # ignore it to avoid empty split tensor
-        if split_indices[-1] == len(image_tokens):
-            split_indices = split_indices[:-1]
-
-        image_embeds = image_embeds.tensor_split(split_indices.cpu())
-        return image_embeds
+        return self._process_image_input(image_input)
 
     def get_input_embeddings(
         self,
@@ -406,11 +395,11 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings, [
-                    self.vision_args.image_token_id,
-                    self.vision_args.image_break_token_id,
-                    self.vision_args.image_end_token_id,
-                ])
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                self.vision_args.image_token_id,
+            )
         return inputs_embeds
 
     def forward(
@@ -421,8 +410,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        """Run forward pass for pixtral.
-        """
+        """Run forward pass for pixtral."""
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -442,13 +430,14 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         return hidden_states
 
     def _parse_and_validate_image_input(
-        self,
-        images_flat: Optional[torch.Tensor] = None,
-        num_crops_hw: Optional[torch.Tensor] = None,
-        image_tokens_flat: Optional[torch.Tensor] = None,
-    ) -> tuple[Optional[list[torch.Tensor]], Optional[torch.Tensor]]:
+            self, **kwargs: object) -> Optional[PixtralImagePixelInputs]:
+        images_flat = kwargs.pop("images_flat", None)
         if images_flat is None:
-            return None, None
+            return None
+
+        num_crops_hw = kwargs.pop("num_crops_hw")
+        image_tokens_flat = kwargs.pop("image_tokens_flat")
+        num_image_tokens = kwargs.pop("num_image_tokens")
 
         if not isinstance(images_flat, torch.Tensor):
             raise ValueError("Incorrect type of images. "
@@ -459,15 +448,19 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         if not isinstance(image_tokens_flat, torch.Tensor):
             raise ValueError("Incorrect type of image_tokens_flat. "
                              f"Got type: {type(image_tokens_flat)}")
+        if not isinstance(num_image_tokens, torch.Tensor):
+            raise ValueError("Incorrect type of num_image_tokens. "
+                             f"Got type: {type(num_image_tokens)}")
 
         images_flat = flatten_bn(images_flat)
         num_crops_hw = flatten_bn(num_crops_hw)
         image_tokens_flat = flatten_bn(image_tokens_flat)
+        num_image_tokens = flatten_bn(num_image_tokens)
 
         assert images_flat.dim() == 4, images_flat.shape
         assert num_crops_hw.dim() == 2, image_tokens_flat.shape
 
-        images_batched = list[torch.Tensor]()
+        images = list[torch.Tensor]()
         for image, (crop_h, crop_w) in zip(
                 torch.split(images_flat,
                             num_crops_hw.prod(-1).tolist()),
@@ -475,18 +468,27 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         ):
             _, C, h, w = image.shape
 
-            images_batched.append(
+            images.append(
                 image.reshape(crop_h, crop_w, C, h,
                               w).permute(2, 0, 3, 1,
                                          4).reshape(C, crop_h * h, crop_w * w))
 
         assert image_tokens_flat.dim() == 1, image_tokens_flat.shape
+        assert num_image_tokens.dim() == 1, num_image_tokens.shape
+        image_tokens = torch.split(image_tokens_flat,
+                                   num_image_tokens.tolist())
 
-        return images_batched, image_tokens_flat
+        return PixtralImagePixelInputs(
+            type="pixel_values",
+            images=images,
+            image_tokens=image_tokens,
+        )
 
-    def _process_image_input(self,
-                             image_input: List[torch.Tensor]) -> torch.Tensor:
-        return self.vision_language_adapter(self.vision_encoder(image_input))
+    def _process_image_input(
+            self, image_input: PixtralImagePixelInputs) -> torch.Tensor:
+        images = image_input["images"]
+
+        return self.vision_language_adapter(self.vision_encoder(images))
 
     def compute_logits(
         self,
@@ -552,8 +554,6 @@ class VisionEncoderArgs:
     num_attention_heads: int
     rope_theta: float  # for rope-2D
     image_token_id: int
-    image_break_token_id: int
-    image_end_token_id: int
     adapter_bias: bool = True
 
 
@@ -836,40 +836,9 @@ class VisionLanguageAdapter(nn.Module):
 # and [`MistralForCausalLM`] for its language decoder.
 
 
-def get_pixtral_hf_patch_grid_length(*, image_size: int,
-                                     patch_size: int) -> int:
-    # Since interpolation is applied, the image size need not be divisible
-    # assert image_size % patch_size == 0
-    return image_size // patch_size
-
-
-def get_pixtral_hf_image_feature_size(
-    *,
-    image_size: int,
-    patch_size: int,
-) -> int:
-    grid_length = get_pixtral_hf_patch_grid_length(
-        image_size=image_size,
-        patch_size=patch_size,
-    )
-
-    # Consider the image_break_token
-    return (grid_length + 1) * grid_length
-
-
-def get_max_pixtral_hf_image_tokens(hf_config: PixtralVisionConfig) -> int:
-    grid_length = get_pixtral_hf_patch_grid_length(
-        image_size=hf_config.image_size,
-        patch_size=hf_config.patch_size,
-    )
-
-    # Consider the image_break_token
-    return (grid_length + 1) * grid_length
-
-
 # Adapted from transformers.models.pixtral.image_processing_pixtral.get_resize_output_image_size # noqa: E501
 # https://github.com/huggingface/transformers/blob/2bd4d5897dc73e8b172832070a6f9e567a0df017/src/transformers/models/pixtral/image_processing_pixtral.py#L180
-def get_pixtral_hf_image_feature_grid_size(
+def get_pixtral_image_feature_grid_size(
     hf_config: PixtralVisionConfig,
     *,
     image_width: int,
@@ -892,7 +861,7 @@ def get_pixtral_hf_image_feature_grid_size(
     return ncols, nrows
 
 
-class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
+class PixtralEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
 
     def get_num_image_tokens(
         self,
@@ -900,13 +869,16 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         image_width: int,
         image_height: int,
     ) -> int:
-        return get_pixtral_hf_image_feature_size(
-            image_size=self.vision_config.image_size,
-            patch_size=self.vision_config.patch_size,
-        )
+        grid_length = self.get_patch_grid_length()
+
+        # Consider the image_break_token
+        return (grid_length + 1) * grid_length
 
     def get_max_image_tokens(self) -> int:
-        return get_max_pixtral_hf_image_tokens(self.vision_config)
+        grid_length = self.get_patch_grid_length()
+
+        # Consider the image_break_token
+        return (grid_length + 1) * grid_length
 
     def get_image_size(self) -> int:
         return self.vision_config.image_size
@@ -915,10 +887,11 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         return self.vision_config.patch_size
 
     def get_patch_grid_length(self) -> int:
-        return get_pixtral_hf_patch_grid_length(
-            image_size=self.vision_config.image_size,
-            patch_size=self.vision_config.patch_size,
-        )
+        image_size, patch_size = self.get_image_size(), self.get_patch_size()
+
+        # Since interpolation is applied, the image size need not be divisible
+        # assert image_size % patch_size == 0
+        return image_size // patch_size
 
 
 class PixtralHFMLP(nn.Module):
