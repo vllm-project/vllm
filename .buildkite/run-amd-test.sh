@@ -101,7 +101,7 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_permute_cols.py"
 fi
 
-#ignore certain Entrypoints tests
+#ignore certain Entrypoints/openai tests
 if [[ $commands == *" entrypoints/openai "* ]]; then
   commands=${commands//" entrypoints/openai "/" entrypoints/openai \
   --ignore=entrypoints/openai/test_audio.py \
@@ -109,9 +109,15 @@ if [[ $commands == *" entrypoints/openai "* ]]; then
   --ignore=entrypoints/openai/test_shutdown.py \
   --ignore=entrypoints/openai/test_completion.py \
   --ignore=entrypoints/openai/test_sleep.py \
-  --ignore=entrypoints/llm/test_guided_generate.py \
   --ignore=entrypoints/openai/test_prompt_validation.py "}
 fi
+
+#ignore certain Entrypoints/llm tests
+if [[ $commands == *" entrypoints/llm "* ]]; then
+  commands=${commands//" entrypoints/llm "/" entrypoints/llm \
+  --ignore=entrypoints/llm/test_guided_generate.py "}
+fi
+
 # --ignore=entrypoints/openai/test_encoder_decoder.py \
 # --ignore=entrypoints/openai/test_embedding.py \
 # --ignore=entrypoints/openai/test_oot_registration.py
