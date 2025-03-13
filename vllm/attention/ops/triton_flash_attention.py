@@ -31,6 +31,7 @@ SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
 QKV_DTYPE_TRITON = tl.float8e4b8
 QKV_DTYPE_TORCH = torch.float8_e4m3fnuz
 
+
 class MetaData:
     cu_seqlens_q = None
     cu_seqlens_k = None
@@ -130,7 +131,7 @@ class MetaData:
         # TODO: Change assert if we support qkl f8 and v f16
         if self.eight_bit:
             if self.eight_bit_kv:
-                assert v.dtype == k.dtype and k.dtype == self.eight_bit_dtype_torch 
+                assert v.dtype == k.dtype and k.dtype == self.eight_bit_dtype_torch
                 assert q.dtype != k.dtype
                 assert (self.v_descale is not None) and (self.k_descale
                                                          is not None)
@@ -666,7 +667,6 @@ def attn_fwd(
     EIGHT_BIT_DTYPE: tl.constexpr = QKV_DTYPE_TRITON,
 ):
 
-
     if PERSISTENT:  # if persistent, kernel loops over multiple tiles
         NUM_WG = NUM_CU * GRID_CU_MULTIP  # number of workgroups launched
         num_tiles_per_head = tl.cdiv(
@@ -751,9 +751,8 @@ def attn_fwd(
                     o_ptrs = (o_offset + offs_m[:, None] * stride_om +
                               offs_d[None, :] * stride_on)
                     # acc = tl.zeros([BLOCK_M, BLOCK_DMODEL],
-                                   # dtype=Out.type.element_ty)
-                    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL],
-                                   dtype=tl.float32)
+                    # dtype=Out.type.element_ty)
+                    acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
                     o_ptrs_mask = (offs_m[:, None] < seqlen_q).broadcast_to(
                         [BLOCK_M, BLOCK_DMODEL])
                     # We still need to write 0s to the result
@@ -1304,7 +1303,7 @@ def triton_attention(
     fp8_scales=None,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
-    eight_bit_dtype = torch.float8_e4m3fnuz,
+    eight_bit_dtype=torch.float8_e4m3fnuz,
 ) -> torch.Tensor:
     num_seqs, num_heads, head_size = q.shape
     attn_metadata = MetaData(sm_scale=sm_scale)
@@ -1341,8 +1340,7 @@ def triton_attention(
                              p_scale,
                              dtype=torch.float32,
                              device=q.device)
-        attn_metadata.set_eight_bit_params(q_scale, k_scale,
-                                          v_scale, 1.0 / p_scale,
-                                           p_scale, o_scale)
+        attn_metadata.set_eight_bit_params(q_scale, k_scale, v_scale,
+                                           1.0 / p_scale, p_scale, o_scale)
 
     return triton_attention_rocm(q, k, v, o, attn_metadata)

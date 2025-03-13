@@ -12,12 +12,12 @@ from vllm.attention.ops.triton_flash_attention import (SUPPORTED_LAYOUTS,
                                                        triton_attention_rocm)
 from vllm.platforms import current_platform
 
-
 FP8_DTYPE_TORCH = torch.float8_e4m3fnuz
 
 float8_info = torch.finfo(FP8_DTYPE_TORCH)
 FP8_MIN = float8_info.min
 FP8_MAX = float8_info.max
+
 
 def get_shape_from_layout(q, k, metadata):
     assert metadata.layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
@@ -35,7 +35,7 @@ def get_shape_from_layout(q, k, metadata):
 
 
 def quantize_fp8(tensor: torch.Tensor,
-                  dim) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                 dim) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     max_vals = tensor.abs().amax(
         dim=[i for i in range(tensor.dim()) if i != dim], keepdim=True)
 
@@ -422,6 +422,7 @@ def test_op_fwd_fp8(Z,
     # compare
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
+
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     (4, 48, 1, 1, 64),
     (4, 48, 1, 1, 128),
@@ -432,13 +433,13 @@ def test_op_fwd_fp8(Z,
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('layout', ['bhsd'])
 def test_op_fwd_fp8_kv(Z,
-                        H,
-                        N_CTX_Q,
-                        N_CTX_K,
-                        D_HEAD,
-                        causal,
-                        layout,
-                        dtype=torch.float16):
+                       H,
+                       N_CTX_Q,
+                       N_CTX_K,
+                       D_HEAD,
+                       causal,
+                       layout,
+                       dtype=torch.float16):
     torch.manual_seed(20)
 
     q, k, v, input_metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD,
@@ -455,8 +456,10 @@ def test_op_fwd_fp8_kv(Z,
                                                  input_metadata,
                                                  fp8_kv=True)
     k_descale, v_descale = input_metadata.k_descale, input_metadata.v_descale
-    k_dequantized = (k_quantized.to(torch.float32)* k_descale.to(torch.float32)).half()
-    v_dequantized = (v_quantized.to(torch.float32)* v_descale.to(torch.float32)).half()
+    k_dequantized = (k_quantized.to(torch.float32) *
+                     k_descale.to(torch.float32)).half()
+    v_dequantized = (v_quantized.to(torch.float32) *
+                     v_descale.to(torch.float32)).half()
 
     tri_out, _ = triton_attention_rocm(q, k_quantized, v_quantized, o,
                                        input_metadata)
@@ -481,14 +484,12 @@ def test_op_fwd_fp8_kv(Z,
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.parametrize(
-    'Z, H, N_CTX_Q, N_CTX_K, D_HEAD',
-    [
-        (4, 48, 1, 1, 64),
-        (4, 48, 1, 1, 128),
-        (4, 48, 3, 3, 128),
-        (4, 4, 128, 128, 65),
-    ])
+@pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
+    (4, 48, 1, 1, 64),
+    (4, 48, 1, 1, 128),
+    (4, 48, 3, 3, 128),
+    (4, 4, 128, 128, 65),
+])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('use_bias', [True])
 @pytest.mark.parametrize('dtype', [torch.bfloat16])
@@ -541,7 +542,7 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [ (4, 48, 256, 64),
+@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [(4, 48, 256, 64),
                                                  (4, 48, 512, 64),
                                                  (4, 48, 128, 128)])
 @pytest.mark.parametrize('causal', [True, False])
@@ -568,10 +569,10 @@ def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.parametrize('Z, HQ, HK, N_CTX, D_HEAD',
-                         [(2, 48, 24, 128, 64), (4, 48, 12, 256, 64),
-                          (4, 48, 4, 512, 64),
-                          (4, 64, 16, 128, 128)])
+@pytest.mark.parametrize('Z, HQ, HK, N_CTX, D_HEAD', [(2, 48, 24, 128, 64),
+                                                      (4, 48, 12, 256, 64),
+                                                      (4, 48, 4, 512, 64),
+                                                      (4, 64, 16, 128, 128)])
 @pytest.mark.parametrize('causal', [False])
 def test_op_varlen_mqa_fwd(Z,
                            HQ,
@@ -606,8 +607,11 @@ def test_op_varlen_mqa_fwd(Z,
     triton_attention_rocm(q, k, v, tri_out, input_metadata)
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
+
 def main():
     test_op_fwd(4, 48, 12, 1, 1, 64, True, False, 'bhsd')
     test_op_fwd_fp8(4, 48, 1, 1, 64, True, 'bhsd')
+
+
 if __name__ == "__main__":
     main()
