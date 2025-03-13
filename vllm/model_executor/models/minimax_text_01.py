@@ -472,14 +472,6 @@ class MiniMaxText01LinearAttention(nn.Module):
         self.tp_slope = self.slope_rate[self.tp_rank *
                                         self.tp_heads:(self.tp_rank + 1) *
                                         self.tp_heads].contiguous()
-        
-        self.kv_cache = [
-            torch.tensor([]) for _ in range(get_current_vllm_config(
-            ).parallel_config.pipeline_parallel_size)
-        ]
-
-        self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
-                                                 cache_shape=self.cache_shape)
 
     @staticmethod
     def weight_direct_load(param: torch.Tensor,
@@ -601,6 +593,7 @@ class MiniMaxText01LinearAttention(nn.Module):
     def forward(
             self,
             hidden_states: torch.Tensor,
+            kv_caches: MinimaxCacheParams,  # layer of tensor
             positions: torch.Tensor,
             **kwargs) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
@@ -610,19 +603,8 @@ class MiniMaxText01LinearAttention(nn.Module):
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
-        (
-            minimax_cache_tensors,
-            state_indices_tensor,
-        ) = self.minimax_cache.current_run_tensors(hidden_states, attn_metadata,
-                                                   **kwargs)
-        if attn_metadata.num_prefills > 0:
-            self._clear_prefill_cache(attn_metadata, minimax_cache_tensors,
-                                      **kwargs)
-
-        minimax_cache_params = MinimaxCacheParams(minimax_cache_tensors,
-                                                  state_indices_tensor)
-        kv_cache = minimax_cache_params.minimax_cache
-        state_indices_tensor = minimax_cache_params.state_indices_tensor
+        kv_cache = kv_caches.minimax_cache
+        state_indices_tensor = kv_caches.state_indices_tensor
 
         decode_only = attn_metadata.num_prefills == 0
         if not decode_only:
