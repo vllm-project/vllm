@@ -605,12 +605,3 @@ def test_op_varlen_mqa_fwd(Z,
         ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p, v_curr)
     triton_attention_rocm(q, k, v, tri_out, input_metadata)
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
-
-
-def main():
-    test_op_fwd(4, 48, 12, 1, 1, 64, True, False, 'bhsd')
-    test_op_fwd_fp8(4, 48, 1, 1, 64, True, 'bhsd')
-
-
-if __name__ == "__main__":
-    main()
