@@ -57,11 +57,16 @@ class TokenizerGroup(BaseTokenizerGroup):
     def encode(self,
                prompt: str,
                request_id: Optional[str] = None,
+               max_length: Optional[int] = None,
+               truncation: Optional[bool] = None,
                lora_request: Optional[LoRARequest] = None,
                add_special_tokens: Optional[bool] = None) -> List[int]:
+
         tokenizer = self.get_lora_tokenizer(lora_request)
         ret = encode_tokens(tokenizer,
                             prompt,
+                            max_length=max_length,
+                            truncation=truncation,
                             add_special_tokens=add_special_tokens)
         self._raise_if_input_too_long(ret, lora_request)
         return ret
