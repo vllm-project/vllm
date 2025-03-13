@@ -12,7 +12,7 @@ from einops import rearrange
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
@@ -44,6 +44,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import HasInnerState, IsHybrid
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from .utils import PPMissingLayer, is_pp_missing_parameter
+from vllm.forward_context import ForwardContext, get_forward_context
 
 
 def replace_weight_name(name: str,
@@ -550,8 +551,8 @@ class MiniMaxText01LinearAttention(nn.Module):
         loader(param, loaded_weight)
         return
 
-    def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor,
-                               attn_metadata):
+    def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor):
+        attn_metadata = get_forward_context().attn_metadata
         hidden = []
         for _prefill_idx in range(attn_metadata.num_prefills):
             _start = attn_metadata.query_start_loc[_prefill_idx]
@@ -574,13 +575,12 @@ class MiniMaxText01LinearAttention(nn.Module):
             hidden.append(out_slice.contiguous())
         if attn_metadata.num_decode_tokens > 0:
             hidden.append(
-                self._decode_infer(q, k, v, kv_cache, state_indices_tensor,
-                                   attn_metadata))
+                self._decode_infer(q, k, v, kv_cache, state_indices_tensor))
         hidden = torch.concat(hidden, dim=0).contiguous()
         return hidden
 
-    def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor,
-                      attn_metadata):
+    def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor):
+        attn_metadata = get_forward_context().attn_metadata
         q = q[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
         k = k[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
         v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
@@ -593,9 +593,8 @@ class MiniMaxText01LinearAttention(nn.Module):
             self,
             hidden_states: torch.Tensor,
             kv_caches: List[torch.Tensor],  # layer of tensor
-            attn_metadata: AttentionMetadata,
             **kwargs) -> torch.Tensor:
-
+        attn_metadata = get_forward_context().attn_metadata
         decode_only = attn_metadata.num_prefills == 0
         qkv, _ = self.qkv_proj(hidden_states)
         qkv32 = qkv.to(torch.float32)
@@ -608,8 +607,7 @@ class MiniMaxText01LinearAttention(nn.Module):
         if not decode_only:
             # prefill and mix
             hidden = self._prefill_and_mix_infer(q, k, v, kv_cache,
-                                                 state_indices_tensor,
-                                                 attn_metadata)
+                                                 state_indices_tensor)
         else:
             # decode only
             hidden = self._decode_infer(q, k, v, kv_cache,
@@ -759,9 +757,9 @@ class MiniMaxText01Attention(nn.Module):
         return
 
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
-                kv_caches: torch.Tensor, attn_metadata: AttentionMetadata,
+                kv_caches: torch.Tensor, 
                 **kwargs) -> torch.Tensor:
-
+        attn_metadata = get_forward_context().attn_metadata
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = attn_metadata.rotary_emb(positions, q, k)
@@ -897,11 +895,10 @@ class MiniMaxText01DecoderLayer(nn.Module):
             kv_caches: Union[List[Dict], Optional[
                 torch.
                 Tensor]],  # linear-attn / flash-attn(possible with warmup)
-            attn_metadata: AttentionMetadata,
             residual: Optional[torch.Tensor],
             is_warmup: bool = False,
             **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
-
+        attn_metadata = get_forward_context().attn_metadata
         # MiniMaxText01 post-norm
         layernorm_input = hidden_states
         layernorm_output = self.input_layernorm(layernorm_input)
@@ -1093,37 +1090,34 @@ class MiniMaxText01Model(nn.Module):
         self.embed_scale = 1.0
         return
 
-    def _clear_prefill_cache(self, attn_metadata: AttentionMetadata,
+    def _clear_prefill_cache(self,
                              minimax_cache_tensors: torch.Tensor, **kwargs):
         """
         clear the minimax cache before new prefill requests computing
         """
-        if "request_ids_to_seq_ids" not in kwargs or not kwargs["request_ids_to_seq_ids"]:
-            return
+        attn_metadata = get_forward_context().attn_metadata
         seq_to_slot_maps = {}
         seq_id_map = sum(list(kwargs["request_ids_to_seq_ids"].values()), [])
-        if not seq_id_map or attn_metadata.num_prefills <= 0:
-            return
         for _, seq_to_slot_map in (
                 self.minimax_cache.cache_indices_mapping.items()):
             seq_to_slot_maps.update(seq_to_slot_map)
         for _prefill_id in range(attn_metadata.num_prefills):
-            if _prefill_id < len(seq_id_map):
-                seq_id = seq_id_map[_prefill_id]
-                # no computed context means this is a new prefill request
-                if attn_metadata.context_lens_tensor[
-                        _prefill_id] == 0 and seq_id in seq_to_slot_maps:
-                    cache_slot_id = seq_to_slot_maps[seq_id]
-                    minimax_cache_tensors[:, cache_slot_id, ...].zero_()
+            seq_id = seq_id_map[_prefill_id]
+            # no computed context means this is a new prefill request
+            if attn_metadata.context_lens_tensor[
+                    _prefill_id] == 0 and seq_id in seq_to_slot_maps:
+                cache_slot_id = seq_to_slot_maps[seq_id]
+                minimax_cache_tensors[:, cache_slot_id, ...].zero_()
 
     def forward(self,
                 input_ids: Optional[torch.Tensor],
                 positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata,
                 intermediate_tensors=None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
+
+        attn_metadata = get_forward_context().attn_metadata
 
         (
             minimax_cache_tensors,
@@ -1131,11 +1125,7 @@ class MiniMaxText01Model(nn.Module):
         ) = self.minimax_cache.current_run_tensors(input_ids, attn_metadata,
                                                    **kwargs)
         if attn_metadata.num_prefills > 0:
-            if "request_ids_to_seq_ids" not in kwargs:
-                batch_size = input_ids.size(0) if input_ids is not None else attn_metadata.num_prefills
-                dummy_seq_ids = list(range(batch_size))
-                kwargs["request_ids_to_seq_ids"] = {"dummy_request": dummy_seq_ids}
-            self._clear_prefill_cache(attn_metadata, minimax_cache_tensors,
+            self._clear_prefill_cache(minimax_cache_tensors,
                                       **kwargs)
 
         minimax_cache_params = MinimaxCacheParams(minimax_cache_tensors,
@@ -1242,21 +1232,13 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: Optional[List] = None,
-                attn_metadata: Optional[AttentionMetadata] = None,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
-        
-        if attn_metadata is None:
-            return inputs_embeds
-        
-        if kv_caches is None or attn_metadata is None:
-            if kv_caches is None:
-                kv_caches = []
+        kv_caches = []
 
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                attn_metadata, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, kv_caches, 
+                                   intermediate_tensors,
                                 inputs_embeds, **kwargs)
 
         return hidden_states
