@@ -760,14 +760,14 @@ class MiniMaxText01Attention(nn.Module):
             loader(param, loaded_weight)
         return
 
-    def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor, kv_caches,
+    def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
                 **kwargs) -> torch.Tensor:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = attn_metadata.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_caches, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
