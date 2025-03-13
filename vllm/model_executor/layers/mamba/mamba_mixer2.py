@@ -466,7 +466,7 @@ class MambaMixer2(CustomOp):
         if has_prefill:
 
             initial_states = None
-            if has_initial_states is not None and any(has_initial_states):
+            if has_initial_states is not None and torch.any(has_initial_states):
                 for idx in mamba_cache_params.state_indices_tensor[
                         ~has_initial_states]:
                     mamba_cache_params.ssm_state[idx].zero_()
