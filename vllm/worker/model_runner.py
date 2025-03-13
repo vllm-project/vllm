@@ -1603,6 +1603,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         ModelInputForGPUWithSamplingMetadata)
     _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
 
+    _fake_sample_output: Optional[SamplerOutput] = None
+
     def make_model_input_from_broadcasted_tensor_dict(
         self,
         tensor_dict: Dict[str, Any],
@@ -1766,6 +1768,14 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 hidden_or_intermediate_states,
             )
 
+            # in the producer side of pd disagg scenario, the next tokens are 
+            # not needed. So we skip it
+            if not self.is_driver_worker:
+                return []
+
+            if self._fake_sample_output is not None and get_pp_group().is_last_rank:
+                return [self._fake_sample_output]
+
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
             if (self.is_driver_worker
@@ -1830,6 +1840,14 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 hidden_states = hidden_or_intermediate_states
 
             output.hidden_states = hidden_states
+
+        # save a fake output
+        if (self._fake_sample_output is None 
+                and output is not None 
+                and self.vllm_config.kv_transfer_config is not None 
+                and self.vllm_config.kv_transfer_config.is_kv_producer):
+
+            self._fake_sample_output = output
 
         return [output]
 
