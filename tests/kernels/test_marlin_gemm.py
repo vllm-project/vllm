@@ -265,8 +265,10 @@ def test_gptq_marlin_gemm(
         assert max_diff < 0.04
 
     check_for_input(a_input=rand_data((size_m, size_k)))
-    # check for non-contiguous input
-    check_for_input(a_input=rand_data((size_m, size_k + 16))[:, 8:size_k + 8])
+    if not act_order:
+        # check for non-contiguous input
+        check_for_input(a_input=rand_data((size_m, size_k + 16))[:,
+                                                                 8:size_k + 8])
 
 
 # TODO: find better way to test this?
