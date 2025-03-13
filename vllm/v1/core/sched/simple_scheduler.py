@@ -351,7 +351,8 @@ class SimpleScheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
         self.requests[request.request_id] = request
-        record_queued(request)
+        if self.log_stats:
+            record_queued(request)
 
     def finish_requests(
         self,
