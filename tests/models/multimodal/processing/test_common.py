@@ -221,12 +221,12 @@ def _test_processing_correctness_mistral(
     res = tokenizer.mistral.encode_chat_completion(request)
     token_prompt = res.tokens
 
+    # Mistral chat outputs tokens directly, rather than text prompts
     baseline_tokenized_result = baseline_processor.apply(
         token_prompt,
         mm_data=mm_data,
         hf_processor_mm_kwargs={},
     )
-
     cached_tokenized_result = cached_processor.apply(
         token_prompt,
         mm_data=mm_data,
