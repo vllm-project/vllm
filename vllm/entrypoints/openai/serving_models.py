@@ -68,6 +68,7 @@ class OpenAIServingModels:
 
         self.static_lora_modules = lora_modules
         self.lora_requests: list[LoRARequest] = []
+        self.lora_resolver = lora_resolver
         self.lora_id_counter = AtomicCounter(0)
 
         self.prompt_adapter_requests = []
