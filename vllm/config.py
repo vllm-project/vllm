@@ -932,19 +932,21 @@ class ModelConfig:
                                               "layers_block_type", None)
             if layers_block_type_value:
                 return sum(t == block_type.value
-                       for t in layers_block_type_value[start:end])
+                           for t in layers_block_type_value[start:end])
 
             # Hybrid model Minimax
-            attn_type_list = getattr(self.hf_config, 
-                                     "attn_type_list", None)
+            attn_type_list = getattr(self.hf_config, "attn_type_list", None)
             if attn_type_list:
                 return sum(t == 1 for t in attn_type_list[start:end])
 
             if layers_block_type_value is None and attn_type_list is None:
-                raise ValueError("The model is an hybrid without a"
-                                "layers_block_type or an attn_type_list in the hf_config,"
-                                "cannot determine the num of "
-                                f"{block_type.value} layers")
+                raise ValueError(
+                    "The model is an hybrid without a"
+                    "layers_block_type or an attn_type_list in the hf_config,"
+                    "cannot determine the num of "
+                    f"{block_type.value} layers")
+            return sum(t == block_type.value
+                       for t in layers_block_type_value[start:end])
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """
