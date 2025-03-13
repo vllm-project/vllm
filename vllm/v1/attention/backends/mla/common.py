@@ -7,22 +7,22 @@ First we define:
 Sq      as Q sequence length
 Skv     as KV sequence length
 
-MLA has two possible ways of computing, a data-movement friendly approach and a 
-compute friendly approach, we generally want to use the compute friendly 
-approach for "prefill" (i.e. the ratio Sq / Skv is "small", is near 1) 
-and the data-movement friendly approach for "decode" (i.e. the ratio 
-Sq / Skv is "large"). 
+MLA has two possible ways of computing, a data-movement friendly approach and a
+compute friendly approach, we generally want to use the compute friendly
+approach for "prefill" (i.e. the ratio Sq / Skv is "small", is near 1)
+and the data-movement friendly approach for "decode" (i.e. the ratio
+Sq / Skv is "large").
 
-NOTE what we deem small and large is currently determined by if its labelled 
-prefill or decode by the scheduler, but this is something we should probably 
+NOTE what we deem small and large is currently determined by if its labelled
+prefill or decode by the scheduler, but this is something we should probably
 tune.
 
 Main reference: DeepseekV2 paper, and FlashInfer Implementation
 (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
 
 Deepseek's MLA attention works the following way:
-* Use a single latent vector to represent the per-token entry of the KV cache.  
-* For decode (i.e. the memory friendly approach) the attention "simulates" a 
+* Use a single latent vector to represent the per-token entry of the KV cache. 
+* For decode (i.e. the memory friendly approach) the attention "simulates" a
 multi-head attention, while the compute is similar to multi-query attention.
 
 Below is example of both paths assuming batchsize = 1
