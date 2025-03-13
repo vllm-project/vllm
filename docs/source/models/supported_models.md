@@ -929,6 +929,9 @@ See [this page](#generative-models) for more information on how to use generativ
 :::{important}
 To use Gemma3 series models, you have to install Hugging Face Transformers library from source via
 `pip install git+https://github.com/huggingface/transformers`.
+
+Pan-and-scan image pre-processing is currently supported on V0 (but not V1).
+You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": True}'`.
 :::
 
 :::{warning}
@@ -947,8 +950,6 @@ V1 currently uses a simplified attention pattern:
 - Will be updated in the future to support the correct behavior
 
 This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
-
-Also, pan-and-scan image pre-processing algorithm is not supported on V1 yet.
 :::
 
 :::{note}
@@ -966,10 +967,6 @@ For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 
 :::{warning}
 Our PaliGemma implementations have the same problem as Gemma 3 (see above) for both V0 and V1.
-:::
-
-:::{important}
-To use Qwen2.5-VL series models, you have to install Hugging Face Transformers library from source via `pip install git+https://github.com/huggingface/transformers`.
 :::
 
 ### Pooling Models

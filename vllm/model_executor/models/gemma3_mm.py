@@ -35,9 +35,14 @@ logger = init_logger(__name__)
 class Gemma3ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     pixel_values: torch.Tensor
-    """Shape: `(batch_size * num_images, num_channels, height, width)`"""
+    """
+    Shape: `(num_crops_total, num_channels, height, width)`
+
+    `num_crops_total` is the total number of crops
+    over each image over each prompt in the batch.
+    """
     num_crops: torch.Tensor
-    """Shape: `(batch_size * num_images, num_crops)`"""
+    """Shape: `(batch_size * num_images,)`"""
 
 
 Gemma3ImageInputs = Gemma3ImagePixelInputs

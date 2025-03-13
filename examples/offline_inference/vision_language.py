@@ -120,8 +120,6 @@ def run_fuyu(questions: list[str], modality: str):
 
 # Gemma 3
 def run_gemma3(questions: list[str], modality: str):
-    import vllm.envs as envs
-
     assert modality == "image"
     model_name = "google/gemma-3-4b-it"
 
@@ -129,8 +127,8 @@ def run_gemma3(questions: list[str], modality: str):
         model=model_name,
         max_model_len=2048,
         max_num_seqs=2,
-        # Default is False; also this is not supported in V1 yet
-        mm_processor_kwargs={"do_pan_and_scan": not envs.VLLM_USE_V1},
+        # Default is False; setting it to True is not supported in V1 yet
+        mm_processor_kwargs={"do_pan_and_scan": True},
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
