@@ -520,7 +520,13 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     grid = lambda META: (triton.cdiv(EM, META['BLOCK_SIZE_M']) * triton.cdiv(
         B.shape[1], META['BLOCK_SIZE_N']), )
 
-    if (use_int8_w8a16 or use_int4_w4a16) and \
+    if use_dg:
+        # Note: we do not apply weights here since it requires
+        # resizing the output.
+        dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
+            (A, A_scale), (B, B_scale), C, expert_ids)
+
+    elif (use_int8_w8a16 or use_int4_w4a16) and \
             block_shape is not None and block_shape[1] > 0:
         assert B_scale is not None and B_scale.ndim == 3
         assert B_zp is None or B_zp.ndim == 3
@@ -808,17 +814,11 @@ def get_default_config(
             "GROUP_SIZE_M": 1,
         }
     else:
-        dg_config = use_deep_gemm and dtype == "fp8_w8a8"
         config = {
-            "BLOCK_SIZE_M":
-            64
-            if not dg_config else dg.get_m_alignment_for_contiguous_layout(),
-            "BLOCK_SIZE_N":
-            64 if not dg_config else 128,
-            "BLOCK_SIZE_K":
-            32 if not dg_config else 128,
-            "GROUP_SIZE_M":
-            8,
+            "BLOCK_SIZE_M": 64,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 32,
+            "GROUP_SIZE_M": 8,
         }
     return config
 
@@ -831,7 +831,6 @@ def try_get_optimal_moe_config(
     M: int,
     is_marlin: bool = False,
     block_shape: Optional[List[int]] = None,
-    use_deep_gemm: bool = False,
 ):
     from vllm.model_executor.layers.fused_moe import get_config
     override_config = get_config()
@@ -853,7 +852,7 @@ def try_get_optimal_moe_config(
         else:
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
-                                        is_marlin, block_shape, use_deep_gemm)
+                                        is_marlin, block_shape)
     return config
 
 
@@ -1288,7 +1287,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         top_k_num,
         config_dtype,
         block_shape=block_shape,
-        use_deep_gemm=has_deep_gemm and allow_deep_gemm,  # hacky
     )
 
     config = get_config_func(M)
@@ -1327,13 +1325,15 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2,
                                                  use_fp8_w8a8)
 
-    block_m = config['BLOCK_SIZE_M']
-    assert not use_dg or block_m == 128
+    config_block_m = config['BLOCK_SIZE_M']
+    block_m = config_block_m if not use_dg else dg.get_m_alignment_for_contiguous_layout()
+
+    assert not use_dg or block_m == dg.get_m_alignment_for_contiguous_layout()
 
     chunked_dg = False
     if use_dg:
-        if M % 128 != 0:
-            CHUNK_SIZE = (M // 128) * 128  # min with env?
+        if M % block_m != 0:
+            CHUNK_SIZE = min((M //block_m) * block_m, CHUNK_SIZE)
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
         chunked_dg = num_chunks > 1
@@ -1376,9 +1376,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
-    # TODO: modify CHUNK_SIZE to be % 128 == 0 and check if each chunk is
-    # valid dg.  fall back to old kernel if not
-
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
@@ -1386,7 +1383,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_hidden_states = hidden_states[begin_chunk_idx:end_chunk_idx]
         tokens_in_chunk, _ = curr_hidden_states.shape
 
-        skip_dg = tokens_in_chunk % 128 != 0
+        skip_dg = use_dg and tokens_in_chunk % 128 != 0 #block_m != 0
 
         if tokens_in_chunk == 0:
             break
