@@ -115,7 +115,7 @@ def _fwd_kv_parallel(
     NUM_BLOCK,
     D_FBLOCK: tl.constexpr,
     E_FBLOCK: tl.constexpr,
-    # NUM_FBLOCK: tl.constexpr,
+    NUM_FBLOCK: tl.constexpr,
     CBLOCK: tl.constexpr,
     NUM_CBLOCK: tl.constexpr,
 ):
