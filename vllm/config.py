@@ -3463,6 +3463,15 @@ class VllmConfig:
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        if ((not envs.VLLM_USE_V1) and self.lora_config is not None
+                and self.compilation_config.level
+                != CompilationLevel.NO_COMPILATION):
+            logger.warning(
+                "LoRA for V0 is not supported with `torch.compile` yet. "
+                "Disabling `torch.compile`.")
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
             logger.info(
