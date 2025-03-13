@@ -466,11 +466,13 @@ def run_nvlm_d(questions: list[str], modality: str):
     model_name = "nvidia/NVLM-D-72B"
 
     # Adjust this as necessary to fit in GPU
-    llm = LLM(model=model_name,
-              trust_remote_code=True,
-              max_model_len=4096,
-              tensor_parallel_size=4,
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        tensor_parallel_size=4,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
