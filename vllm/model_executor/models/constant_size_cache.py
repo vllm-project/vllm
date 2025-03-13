@@ -6,7 +6,10 @@ from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.utils import PAD_SLOT_ID
 
 class ConstantSizeCache(ABC):
-    """Abstract base class for managing constant size caches like Mamba and Minimax."""
+    """
+    Abstract base class for managing constant size caches 
+    like Mamba and Minimax.
+    """
     
     def __init__(self, max_batch_size: int):
         # Maps between the request id and a dict that maps between the seq_id

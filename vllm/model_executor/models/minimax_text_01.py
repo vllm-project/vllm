@@ -10,7 +10,10 @@ from copy import deepcopy
 from collections import OrderedDict
 from transformers.configuration_utils import PretrainedConfig
 from typing import List, Optional, Tuple, Dict, Iterable, Union
-from vllm.model_executor.layers.lightning_attn import lightning_attention2_parallel, linear_decode_forward_triton
+from vllm.model_executor.layers.lightning_attn import (
+    lightning_attention2_parallel, 
+    linear_decode_forward_triton
+)
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.models.utils import maybe_prefix 
 from vllm.distributed.parallel_state import get_pp_group
@@ -19,7 +22,6 @@ from vllm.distributed.utils import get_pp_indices
 from vllm.sequence import (
     IntermediateTensors,
 )
-from vllm.distributed import get_pp_group
 from vllm.distributed.communication_op import (
     tensor_model_parallel_all_reduce,
 )

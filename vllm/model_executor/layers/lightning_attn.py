@@ -131,17 +131,17 @@ def _fwd_kv_parallel(
     NUM_BLOCK,
     D_FBLOCK: tl.constexpr,
     E_FBLOCK: tl.constexpr,
-    NUM_FBLOCK: tl.constexpr,
+    # NUM_FBLOCK: tl.constexpr,
     CBLOCK: tl.constexpr,
     NUM_CBLOCK: tl.constexpr,
 ):
     off_bh = tl.program_id(0)
     off_block = tl.program_id(1)
-    off_de = tl.program_id(2)
+    # off_de = tl.program_id(2)
 
     off_h = off_bh % h
-    off_d = off_de // NUM_FBLOCK
-    off_e = off_de % NUM_FBLOCK
+    # off_d = off_de // NUM_FBLOCK
+    # off_e = off_de % NUM_FBLOCK
 
     block_offset = off_block * BLOCK
 
@@ -152,8 +152,8 @@ def _fwd_kv_parallel(
     k_offset = off_bh * n * d
     v_offset = off_bh * n * e
     kv_offset = off_bh * NUM_BLOCK * d * e
-    d_offset = off_d * D_FBLOCK
-    e_offset = off_e * E_FBLOCK
+    # d_offset = off_d * D_FBLOCK
+    # e_offset = off_e * E_FBLOCK
 
     # (CBLOCK, FBLOCK)
     K_trans_block_ptr = (
@@ -237,18 +237,18 @@ def _fwd_kv_reduce(
     NUM_BLOCK,
     D_FBLOCK: tl.constexpr,
     E_FBLOCK: tl.constexpr,
-    NUM_FBLOCK: tl.constexpr,
-    CBLOCK: tl.constexpr,
-    NUM_CBLOCK: tl.constexpr,
+    # NUM_FBLOCK: tl.constexpr,
+    # CBLOCK: tl.constexpr,
+    # NUM_CBLOCK: tl.constexpr,
 ):
     off_bh = tl.program_id(0)
     off_h = off_bh % h
-    off_d = tl.program_id(1)
-    off_e = tl.program_id(2)
+    # off_d = tl.program_id(1)
+    # off_e = tl.program_id(2)
 
     kv_offset = off_bh * NUM_BLOCK * d * e
-    d_offset = off_d * D_FBLOCK
-    e_offset = off_e * E_FBLOCK
+    # d_offset = off_d * D_FBLOCK
+    # e_offset = off_e * E_FBLOCK
 
     # (CBLOCK, FBLOCK)
     KV_block_ptr = (
@@ -489,10 +489,7 @@ lightning_attention_ = _attention.apply
 def lightning_attention(q, k, v, ed, block_size=256, kv_history=None):
     d = q.shape[-1]
     e = v.shape[-1]
-    if d >= 128:
-        m = 128
-    else:
-        m = 64
+    m = 128 if d >= 128 else 64
     arr = [m * i for i in range(d // m + 1)]
     if arr[-1] != d:
         arr.append(d)
