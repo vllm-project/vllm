@@ -945,8 +945,12 @@ class ModelConfig:
                     "layers_block_type or an attn_type_list in the hf_config,"
                     "cannot determine the num of "
                     f"{block_type.value} layers")
-            return sum(t == block_type.value
-                       for t in layers_block_type_value[start:end])
+            if layers_block_type_value is not None:
+                return sum(t == block_type.value
+                           for t in layers_block_type_value[start:end])
+            else:
+                assert attn_type_list is not None
+                return sum(t == 1 for t in attn_type_list[start:end])
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """
@@ -3579,11 +3583,11 @@ class VllmConfig:
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
             f"num_scheduler_steps={self.scheduler_config.num_scheduler_steps}, "
-            f"multi_step_stream_outputs={self.scheduler_config.multi_step_stream_outputs}, "  # noqa
+            f"multi_step_stream_outputs={self.scheduler_config.multi_step_stream_outputs},  # noqa
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
-            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
+            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled},  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
-            f"disable_mm_preprocessor_cache={self.model_config.disable_mm_preprocessor_cache!r}, "  # noqa
+            f"disable_mm_preprocessor_cache={self.model_config.disable_mm_preprocessor_cache!r},  # noqa
             f"mm_processor_kwargs={self.model_config.mm_processor_kwargs}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}")
