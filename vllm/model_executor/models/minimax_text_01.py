@@ -13,13 +13,13 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
-from vllm.forward_context import get_forward_context
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size)
 from vllm.distributed.utils import get_pp_indices
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -896,7 +896,9 @@ class MiniMaxText01DecoderLayer(nn.Module):
             self,
             hidden_states: torch.Tensor,
             positions: torch.Tensor,
-            kv_caches: Union[List[Dict], Optional[torch.Tensor]],  # linear-attn / flash-attn(possible with warmup)
+            kv_caches: Union[List[Dict], Optional[
+                torch.
+                Tensor]],  # linear-attn / flash-attn(possible with warmup)
             attn_metadata: AttentionMetadata,
             residual: Optional[torch.Tensor],
             is_warmup: bool = False,
@@ -1222,7 +1224,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         else:
             self.lm_head = PPMissingLayer()
 
-        flash_layer_count = sum(1 for attn_type in self.config.attn_type_list if attn_type == 1)
+        flash_layer_count = sum(1 for attn_type in self.config.attn_type_list
+                                if attn_type == 1)
         self.kv_cache = [torch.tensor([]) for _ in range(flash_layer_count)]
         return
 
@@ -1234,15 +1237,15 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(
             batch_size)
 
-    def forward(
-                self,
+    def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, self.kv_cache, intermediate_tensors,
-                                inputs_embeds, **kwargs)
+        hidden_states = self.model(input_ids, positions, self.kv_cache,
+                                   intermediate_tensors, inputs_embeds,
+                                   **kwargs)
 
         return hidden_states
 
@@ -1451,11 +1454,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             return
 
         def is_layer_norm_weight(name: str) -> bool:
-            if "norm" in name:
-                if name.endswith(".bias") or name not in params_dict:
-                    return False
-                return True
-            return False
+            return "norm" in name and not name.endswith(
+                ".bias") and name in params_dict
 
         def load_layer_norm_weight(name: str, loaded_weight: torch.Tensor,
                                    self) -> None:
