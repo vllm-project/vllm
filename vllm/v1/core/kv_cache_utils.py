@@ -465,15 +465,9 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
     """
 
     if available_memory <= 0:
-        raise ValueError(
-            "No available memory for the KV cache blocks."
-            "This typically happens when the model weights themselves consume "
-            "almost all GPU memory."
-            "Try one of the following:\n"
-            "1. Increase `gpu_memory_utilization` when initializing engine\n"
-            "2. Use a smaller model\n"
-            "3. Use a GPU with more memory\n"
-            "4. Reduce model_max_len to decrease KV cache size requirements")
+        raise ValueError("No available memory for the cache blocks. "
+                         "Try increasing `gpu_memory_utilization` when "
+                         "initializing the engine.")
 
     max_model_len = vllm_config.model_config.max_model_len
     needed_memory = 0
