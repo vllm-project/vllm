@@ -607,8 +607,19 @@ class MiniMaxText01LinearAttention(nn.Module):
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
-        kv_cache = kwargs.get("minimax_cache")
-        state_indices_tensor = kwargs.get("state_indices_tensor")
+        (
+            minimax_cache_tensors,
+            state_indices_tensor,
+        ) = self.minimax_cache.current_run_tensors(hidden_states, attn_metadata,
+                                                   **kwargs)
+        if attn_metadata.num_prefills > 0:
+            self._clear_prefill_cache(attn_metadata, minimax_cache_tensors,
+                                      **kwargs)
+
+        minimax_cache_params = MinimaxCacheParams(minimax_cache_tensors,
+                                                  state_indices_tensor)
+        kv_cache = minimax_cache_params.minimax_cache
+        state_indices_tensor = minimax_cache_params.state_indices_tensor
 
         decode_only = attn_metadata.num_prefills == 0
         if not decode_only:
