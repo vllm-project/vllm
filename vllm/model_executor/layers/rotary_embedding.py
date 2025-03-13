@@ -167,6 +167,7 @@ class RotaryEmbedding(CustomOp):
             self.cos_sin_cache.dtype != query.dtype:
             self.cos_sin_cache = self.cos_sin_cache.to(query.device,
                                                        dtype=query.dtype)
+
         # ops.rotary_embedding()/batched_rotary_embedding()
         # are in-place operations that update the query and key tensors.
         if offsets is not None:
