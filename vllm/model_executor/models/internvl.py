@@ -1075,9 +1075,31 @@ def merge_wavg(
     return x, size
 
 
+class InternVLHiCoProcessingInfo(InternVLProcessingInfo):
+
+    def get_hf_processor(
+        self,
+        *,
+        min_dynamic_patch: Optional[int] = None,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+        **kwargs: object,
+    ) -> InternVLProcessor:
+        processor = super().get_hf_processor(
+            min_dynamic_patch=min_dynamic_patch,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+            **kwargs,
+        )
+        local_num_frames = 4
+        num_tome_tokens = 64
+        processor.num_image_token = num_tome_tokens // local_num_frames
+        return processor
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     InternVLMultiModalProcessor,
-    info=InternVLProcessingInfo,
+    info=InternVLHiCoProcessingInfo,
     dummy_inputs=InternVLDummyInputsBuilder)
 class InternVLChatHiCoModel(InternVLChatModel):
 
@@ -1125,6 +1147,7 @@ class InternVLChatHiCoModel(InternVLChatModel):
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
         vit_embeds = self.pixel_shuffle(vit_embeds,
                                         scale_factor=self.downsample_ratio)
+        assert vit_embeds.shape[0] % self.local_num_frames == 0
         vit_embeds = vit_embeds.reshape(
             vit_embeds.shape[0] // self.local_num_frames, -1,
             vit_embeds.shape[-1])
