@@ -478,6 +478,9 @@ class MiniMaxText01LinearAttention(nn.Module):
             ).parallel_config.pipeline_parallel_size)
         ]
 
+        self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
+                                                 cache_shape=self.cache_shape)
+
     @staticmethod
     def weight_direct_load(param: torch.Tensor,
                            loaded_weight: torch.Tensor) -> None:
