@@ -301,7 +301,8 @@ def get_active_block_tables(block_tables, query_lens, seq_lens, block_size,
 
         # Test common/medium configurations
         (4, 12, 32, 2048, 32, 8, 64, False),  # common case, larger heads
-        (4, 12, 32, 2048, 16, 4, 32, True),  # medium size, mixed precision
+        (4, 12, 32, 2048, 16, 4, 32,
+         True),  # medium size, mixed precision, grouped-query attention (GQA)
 
         # Test large configurations
         (4, 12, 256, 8192, 8, 1, 128, False),  # large blocks, large head size
@@ -314,6 +315,8 @@ def get_active_block_tables(block_tables, query_lens, seq_lens, block_size,
         # Test edge cases
         (1, 128, 16, 1024, 4, 2, 16, False),  # large decode batch
         (16, 4, 8, 8192, 48, 1, 128, True),  # large prefill batch
+        (4, 12, 32, 2048, 16, 1, 32, True),  # multi-head attention (MHA)
+        (4, 12, 32, 2048, 16, 16, 32, True),  # multi-query attention (MQA)
     ])
 @torch.inference_mode()
 def test_contexted_kv_attention(
