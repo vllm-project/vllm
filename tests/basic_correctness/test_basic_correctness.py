@@ -5,7 +5,7 @@ Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
 import os
 import weakref
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
@@ -153,9 +153,9 @@ def test_models_distributed(
     )
 
 
-@patch('vllm.v1.engine.llm_engine.VLLM_ENABLE_V1_MULTIPROCESSING', False)
-def test_failed_model_execution(vllm_runner) -> None:
+def test_failed_model_execution(vllm_runner, monkeypatch) -> None:
 
+    monkeypatch.setenv('VLLM_ENABLE_V1_MULTIPROCESSING', '0')
     # Create model
     with vllm_runner('facebook/opt-125m', enforce_eager=True) as vllm_model:
         if isinstance(vllm_model.model.llm_engine, LLMEngineV1):
