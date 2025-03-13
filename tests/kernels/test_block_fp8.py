@@ -38,7 +38,7 @@ K = [256, 4096, 5120, 3884, 13824, 16384]
 # Deepseek-V3's intermediate size 18432, so N is 18432*2/8=4608 at TP8
 # and its hidden size is 7168.
 M_moe = [1, 2, 7, 83, 128, 512, 2048]
-M_moe_dg = [128, 192, 512, 1335, 2048]
+M_moe_dg = [1, 128, 192, 512, 1335, 2048]
 N_moe = [128, 256, 4608]  # [13824]
 K_moe = [256, 512, 7168]  # [13824]
 BLOCK_SIZE = [[128, 128]]
@@ -426,17 +426,16 @@ def deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s, score, topk,
 
 
 @pytest.mark.parametrize(
-    "M,N,K,E,topk,block_size,dtype,seed,test_baseline",
-    #itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS, [True, False]))
-    itertools.product([192], [128], [256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS, [True, False]))
+    "M,N,K,E,topk,block_size,dtype,seed",
+    itertools.product(M_moe_dg, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS))
+    #itertools.product([192], [128], [256], [2], [1], BLOCK_SIZE, DTYPES, SEEDS))
 @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
-                                            dtype, seed, test_baseline):
+                                            dtype, seed):
 
     # only aligned sizes
-    if ((M % 128 != 0 and not test_baseline) or N % 128 != 0 or K % 128 != 0
-            or topk > E):
+    if (N % 128 != 0 or K % 128 != 0 or topk > E):
         pytest.skip(
             f"Skipping test; bad size m={M}, n={N}, k={K}, topk={topk}, E={E}")
 
@@ -487,36 +486,26 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
     w2_s = w2_sa
 
     with set_current_vllm_config(vllm_config):
-        if test_baseline:
-            ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score,
-                                               topk, block_size)
+        ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score,
+                                           topk, block_size)
 
-            out = fused_moe(a,
-                            w1,
-                            w2,
-                            score,
-                            topk,
-                            renormalize=False,
-                            use_fp8_w8a8=True,
-                            w1_scale=w1_s,
-                            w2_scale=w2_s,
-                            block_shape=block_size,
-                            allow_deep_gemm=True)
+        if M % 128 == 0:
+            ref_out2 = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s,
+                                                    score, topk, block_size)
         else:
-            ref_out = deep_gemm_w8a8_block_fp8_moe(M, K, a, w1, w2, w1_s, w2_s,
-                                                   score, topk, block_size)
+            ref_out2 = None
 
-            out = fused_moe(a,
-                            w1,
-                            w2,
-                            score,
-                            topk,
-                            renormalize=False,
-                            use_fp8_w8a8=True,
-                            w1_scale=w1_s,
-                            w2_scale=w2_s,
-                            block_shape=block_size,
-                            allow_deep_gemm=True)
+        out = fused_moe(a,
+                        w1,
+                        w2,
+                        score,
+                        topk,
+                        renormalize=False,
+                        use_fp8_w8a8=True,
+                        w1_scale=w1_s,
+                        w2_scale=w2_s,
+                        block_shape=block_size,
+                        allow_deep_gemm=True)
 
     #print(f"{out.sum()=}")
     #print(f"{ref_out.sum()=}")
@@ -525,3 +514,9 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, block_size,
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
                 torch.mean(torch.abs(ref_out.to(torch.float32))))
     assert rel_diff < 0.03
+
+    if ref_out2 is not None:
+        rel_diff = (torch.mean(
+            torch.abs(out.to(torch.float32) - ref_out2.to(torch.float32))) /
+                    torch.mean(torch.abs(ref_out2.to(torch.float32))))
+        assert rel_diff < 0.03
