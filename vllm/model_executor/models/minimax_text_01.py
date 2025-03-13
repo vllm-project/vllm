@@ -693,10 +693,6 @@ class MiniMaxText01Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
-        self.kv_cache = [
-            torch.tensor([]) for _ in range(get_current_vllm_config(
-            ).parallel_config.pipeline_parallel_size)
-        ]
         return
 
     @staticmethod
@@ -764,11 +760,10 @@ class MiniMaxText01Attention(nn.Module):
             loader(param, loaded_weight)
         return
 
-    def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
+    def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor, kv_caches,
                 **kwargs) -> torch.Tensor:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
-        kv_caches = self.kv_cache[forward_context.virtual_engine]
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = attn_metadata.rotary_emb(positions, q, k)
@@ -1098,10 +1093,6 @@ class MiniMaxText01Model(nn.Module):
             norm_kwargs["eps"] = config.rms_norm_eps
         self.norm = RMSNorm(config.hidden_size, **norm_kwargs)
         self.embed_scale = 1.0
-        self.kv_cache = [
-            torch.tensor([]) for _ in range(get_current_vllm_config(
-            ).parallel_config.pipeline_parallel_size)
-        ]
         return
 
     def _clear_prefill_cache(self, attn_metadata,
@@ -1125,12 +1116,12 @@ class MiniMaxText01Model(nn.Module):
     def forward(self,
                 input_ids: Optional[torch.Tensor],
                 positions: torch.Tensor,
+                kv_caches: List[torch.Tensor],
                 intermediate_tensors=None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
-        kv_caches = self.kv_cache[forward_context.virtual_engine]
         (
             minimax_cache_tensors,
             state_indices_tensor,
@@ -1230,6 +1221,10 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
+        self.kv_cache = [
+            torch.tensor([]) for _ in range(get_current_vllm_config(
+            ).parallel_config.pipeline_parallel_size)
+        ]
         return
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
@@ -1247,7 +1242,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, self.kv_cache, intermediate_tensors,
                                 inputs_embeds, **kwargs)
 
         return hidden_states
