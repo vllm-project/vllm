@@ -2174,6 +2174,16 @@ def _check_multiproc_method():
                        "troubleshooting.html#python-multiprocessing "
                        "for more information.")
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    try:
+        import ray
+        if ray.is_initialized():
+            logger.info(
+                "Ray is initialized. "
+                "Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn', "
+                "because Ray process can only be spawned, but not forked.")
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    except ImportError:
+        pass
 
 
 def get_mp_context():
