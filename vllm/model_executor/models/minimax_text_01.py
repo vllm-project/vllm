@@ -598,10 +598,9 @@ class MiniMaxText01LinearAttention(nn.Module):
     def forward(
             self,
             hidden_states: torch.Tensor,
+            kv_caches: List[torch.Tensor],  # layer of tensor
+            attn_metadata,
             **kwargs) -> torch.Tensor:
-        forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-        kv_caches = self.kv_cache[forward_context.virtual_engine]
         decode_only = attn_metadata.num_prefills == 0
         qkv, _ = self.qkv_proj(hidden_states)
         qkv32 = qkv.to(torch.float32)
@@ -1008,7 +1007,7 @@ class MiniMaxText01Model(nn.Module):
         if not self.decoder_attention_types:
             # by default, use self-attn
             self.decoder_attention_types = [1] * config.num_hidden_layers
-        self.num_layers = config.num_hidden_layers
+        self.num_layers = 8 # config.num_hidden_layers
 
         self._layer_barrier = False
         # world_size = get_tensor_model_parallel_world_size()
