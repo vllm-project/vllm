@@ -24,21 +24,22 @@ This living user guide outlines a few known **important changes and limitations*
 
 ### Feature / Model Supports Overview
 
-| Feature / Model                           | Status                                                                           |
-|-------------------------------------------|-----------------------------------------------------------------------------------|
-| **Logprobs Calculation**                  | <nobr>🟢 Functional</nobr>                                                        |
-| **Prompt Logprobs with Prefix Caching**   | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>  |
-| **LoRA**                                  | <nobr>🟢 Functional ([PR #13096](https://github.com/vllm-project/vllm/pull/13096))</nobr>   |
-| **Spec Decode**                           | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>          |
-| **FP8 KV Cache**                          | <nobr>🟡 Planned</nobr>                                                           |
-| **Structured Generation Fallback**        | <nobr>🔴 Deprecated</nobr>                                                        |
-| **best_of**                               | <nobr>🔴 Deprecated ([RFC #13361](https://github.com/vllm-project/vllm/issues/13361))</nobr>|
-| **Per-Request Logits Processors**         | <nobr>🔴 Deprecated ([RFC #13360](https://github.com/vllm-project/vllm/pull/13360))</nobr>  |
-| **GPU <> CPU KV Cache Swapping**          | <nobr>🔴 Deprecated</nobr>                                                        |
-| **Multimodal Models**                     | <nobr>🟢 Functional</nobr>                            |
-| **Embedding Models**                      | <nobr>🟡 Planned <gh-issue:12249></nobr>                                                           |
-| **Mamba Models**                          | <nobr>🟡 Planned</nobr>                                                           |
-| **Encoder-Decoder Models**                | <nobr>🟡 Planned</nobr>                                                           |
+| Feature / Model                             | Status                                                                           |
+|---------------------------------------------|-----------------------------------------------------------------------------------|
+| **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
+| **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>|
+| **LoRA**                                    | <nobr>🟢 Functional ([PR #13096](https://github.com/vllm-project/vllm/pull/13096))</nobr>|
+| **Spec Decode**                             | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>|
+| **FP8 KV Cache**                            | <nobr>🟡 Planned</nobr>                                                           |
+| **Request-level Structured Output Backend** | <nobr>🔴 Deprecated</nobr>                                                        |
+| **Structured Output Alternative Backends**  | <nobr>🟡 Planned</nobr>                                                           |
+| **best_of**                                 | <nobr>🔴 Deprecated ([RFC #13361](https://github.com/vllm-project/vllm/issues/13361))</nobr>|
+| **Per-Request Logits Processors**           | <nobr>🔴 Deprecated ([RFC #13360](https://github.com/vllm-project/vllm/pull/13360))</nobr> |
+| **GPU <> CPU KV Cache Swapping**            | <nobr>🔴 Deprecated</nobr>                                                        |
+| **Multimodal Models**                       | <nobr>🟢 Functional</nobr>                            |
+| **Embedding Models**                        | <nobr>🟡 Planned ([RFC #12249](https://github.com/vllm-project/vllm/issues/12249))</nobr>                                             |
+| **Mamba Models**                            | <nobr>🟡 Planned</nobr>                                                           |
+| **Encoder-Decoder Models**                  | <nobr>🟡 Planned</nobr>                                                           |
 
 - **🚀 Optimized**: Nearly fully optimized, with no further work currently planned.
 - **🟢 Functional**: Fully operational, with ongoing optimizations.  
@@ -83,6 +84,10 @@ As part of the major architectural rework in vLLM V1, several legacy features ha
 - **GPU <> CPU KV Cache Swapping**: with the new simplified core architecture, vLLM V1 no longer requires KV cache swapping
 to handle request preemptions.
 
+**Structured Output features**
+
+- **Request-level Structured Output Backend**: Deprecated, alternative backends
+  (outlines, guidance) with fallbacks is WIP.
 ### Feature & Model Support in Progress
 
 Although we have re-implemented and partially optimized many features and models from V0 in vLLM V1, optimization work is still ongoing for some, and others remain unsupported.
@@ -100,22 +105,22 @@ in progress.
 - **Spec Decode**: Currently, only ngram-based spec decode is supported in V1. There
   will be follow-up work to support other types of spec decode (e.g., see [PR #13933](https://github.com/vllm-project/vllm/pull/13933)). We will prioritize the support for Eagle, MTP compared to draft model based spec decode.
 
-#### Unsupported Features
+#### Features to Be Supported
 
 - **FP8 KV Cache**: While vLLM V1 introduces new FP8 kernels for model weight quantization, support for an FP8 key–value cache is not yet available. Users must continue using FP16 (or other supported precisions) for the KV cache.
 
-- **Structured Generation Fallback**: For structured output tasks, V1 currently
+- **Structured Output Alternative Backends**: For structured output tasks, V1 currently
   supports only the `xgrammar:no_fallback` mode, meaning that it will error out if the output schema is unsupported by xgrammar.
-  Details about the structured generation can be found
+  Details about the structured outputs can be found
   [here](https://docs.vllm.ai/en/latest/features/structured_outputs.html).
 
-#### Unsupported Models
+#### Models to Be Supported
 
 vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol,
 and the majority fall into the following categories. V1 support for these models will be added eventually.
 
 **Embedding Models**  
-Instead of having a separate model runner, hidden states processor (<gh-issue:12249>), which is based on global logits processor (<gh-pr:13360>), has been proposed to enable simultaneous generation and embedding using the same engine instance in V1. It is still in the planning stage.
+Instead of having a separate model runner, hidden states processor [RFC #12249](https://github.com/vllm-project/vllm/issues/12249), which is based on global logits processor [RFC #13360](https://github.com/vllm-project/vllm/pull/13360), has been proposed to enable simultaneous generation and embedding using the same engine instance in V1. It is still in the planning stage.
 
 **Mamba Models**  
 Models using selective state-space mechanisms (instead of standard transformer attention)
