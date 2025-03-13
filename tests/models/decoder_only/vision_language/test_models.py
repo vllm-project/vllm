@@ -247,6 +247,9 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
         patch_hf_runner=model_utils.glm4v_patch_hf_runner,
+        # The image embeddings match with HF but the outputs of the language
+        # decoder are only consistent up to 2 decimal places.
+        # So, we need to reduce the number of tokens for the test to pass.
         max_tokens=8,
         num_logprobs=10,
         marks=[large_gpu_mark(min_gb=32)],
