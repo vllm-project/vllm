@@ -18,7 +18,7 @@
 """ PyTorch Fuyu model."""
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -58,10 +58,12 @@ class FuyuImagePatchInputs(TypedDict):
     `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
     """
 
-    patches_per_image: List[int]
+    patches_per_image: list[int]
     """
-    List of number of total patches for each image in the batch.
-    This is used to restore the first two dimensions of `flat_data`.
+    The number of total patches for each image in the batch.
+
+    This is used to split the embeddings which has the first two dimensions
+    flattened just like `flat_data`.
     """
 
 

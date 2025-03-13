@@ -66,11 +66,13 @@ class PixtralImagePixelInputs(TypedDict):
     The result of stacking :attr:`ImageEncoding.tokens` from each prompt.
     """
 
-    image_tokens: tuple[torch.Tensor, ...]
+    num_image_tokens: list[int]
     """
-    Shape: `(batch_size, image_feature_size)`
+    The number of image tokens matching :attr:`VisionEncoderArgs.image_token_id`
+    in :attr:`ImageEncoding.tokens` for each image in the batch.
 
-    The result of stacking :attr:`ImageEncoding.tokens` from each prompt.
+    This is used to split the embeddings which has the first two dimensions
+    flattened.
     """
 
 
@@ -150,6 +152,7 @@ class PixtralProcessorAdapter:
         num_image_tokens = []
 
         patch_size = self.patch_size
+        image_token_id = self.image_token_id
 
         for image in images:
             image_inputs = self.image_processor(ImageChunk(image=image))
@@ -165,14 +168,13 @@ class PixtralProcessorAdapter:
             images_flat.append(image_flat)
             num_crops_hw.append([grid_h, grid_w])
             image_tokens_flat.extend(image_inputs.tokens)
-            num_image_tokens.append(len(image_inputs.tokens))
+            num_image_tokens.append(image_inputs.tokens.count(image_token_id))
 
         return BatchFeature(
             {
                 "input_ids": [image_tokens_flat] * len(text),
                 "images_flat": np.concatenate(images_flat),
                 "num_crops_hw": np.array(num_crops_hw),
-                "image_tokens_flat": image_tokens_flat,
                 "num_image_tokens": num_image_tokens,
             },
             tensor_type=return_tensors,
@@ -288,14 +290,11 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         num_crops_hw = hf_inputs.get("num_crops_hw", torch.empty((0, 2)))
-        num_image_tokens = hf_inputs.get("num_image_tokens", torch.empty(0))
 
         return dict(
             images_flat=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_crops_hw.prod(-1)),
             num_crops_hw=MultiModalFieldConfig.batched("image"),
-            image_tokens_flat=MultiModalFieldConfig.flat_from_sizes(
-                "image", num_image_tokens),
             num_image_tokens=MultiModalFieldConfig.batched("image"),
         )
 
@@ -436,7 +435,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         num_crops_hw = kwargs.pop("num_crops_hw")
-        image_tokens_flat = kwargs.pop("image_tokens_flat")
         num_image_tokens = kwargs.pop("num_image_tokens")
 
         if not isinstance(images_flat, torch.Tensor):
@@ -445,20 +443,17 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         if not isinstance(num_crops_hw, torch.Tensor):
             raise ValueError("Incorrect type of num_crops_hw. "
                              f"Got type: {type(num_crops_hw)}")
-        if not isinstance(image_tokens_flat, torch.Tensor):
-            raise ValueError("Incorrect type of image_tokens_flat. "
-                             f"Got type: {type(image_tokens_flat)}")
         if not isinstance(num_image_tokens, torch.Tensor):
             raise ValueError("Incorrect type of num_image_tokens. "
                              f"Got type: {type(num_image_tokens)}")
 
         images_flat = flatten_bn(images_flat)
         num_crops_hw = flatten_bn(num_crops_hw)
-        image_tokens_flat = flatten_bn(image_tokens_flat)
         num_image_tokens = flatten_bn(num_image_tokens)
 
         assert images_flat.dim() == 4, images_flat.shape
-        assert num_crops_hw.dim() == 2, image_tokens_flat.shape
+        assert num_crops_hw.dim() == 2, num_crops_hw.shape
+        assert num_image_tokens.dim() == 1, num_image_tokens.shape
 
         images = list[torch.Tensor]()
         for image, (crop_h, crop_w) in zip(
@@ -473,22 +468,21 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                               w).permute(2, 0, 3, 1,
                                          4).reshape(C, crop_h * h, crop_w * w))
 
-        assert image_tokens_flat.dim() == 1, image_tokens_flat.shape
-        assert num_image_tokens.dim() == 1, num_image_tokens.shape
-        image_tokens = torch.split(image_tokens_flat,
-                                   num_image_tokens.tolist())
-
         return PixtralImagePixelInputs(
             type="pixel_values",
             images=images,
-            image_tokens=image_tokens,
+            num_image_tokens=num_image_tokens.tolist(),
         )
 
     def _process_image_input(
             self, image_input: PixtralImagePixelInputs) -> torch.Tensor:
         images = image_input["images"]
+        num_image_tokens = image_input["num_image_tokens"]
 
-        return self.vision_language_adapter(self.vision_encoder(images))
+        image_embeds_flat = self.vision_language_adapter(
+            self.vision_encoder(images))
+
+        return image_embeds_flat.split(num_image_tokens, dim=0)
 
     def compute_logits(
         self,
