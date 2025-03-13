@@ -33,6 +33,8 @@ __device__ __forceinline__ c10::Float8_e4m3fn cvt_c10(float const r) {
                              __hip_fp8_e4m3::__default_interpret),
       c10::Float8_e4m3fn::from_bits());
     #else
+  // Cast implemented by pytorch. Uses bit manipulation instead of HW cvt.
+  // HW cvt above is faster when it is available (ROCm 6.3 or newer).
   return static_cast<c10::Float8_e4m3fn>(r);
     #endif
 }
