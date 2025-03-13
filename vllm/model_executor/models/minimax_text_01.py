@@ -1224,7 +1224,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             cache_config=vllm_config.cache_config,
             scheduler_config=vllm_config.scheduler_config,
             prefix=maybe_prefix(prefix, "model"))
-        )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
