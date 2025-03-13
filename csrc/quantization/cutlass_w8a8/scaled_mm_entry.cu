@@ -110,6 +110,8 @@ bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability) {
 #if defined CUDA_VERSION
   if (cuda_device_capability >= 90 && cuda_device_capability < 100) {
     return CUDA_VERSION >= 12000;
+  } else if (cuda_device_capability >= 100) {
+    return CUDA_VERSION >= 12080;
   }
 #endif
 
