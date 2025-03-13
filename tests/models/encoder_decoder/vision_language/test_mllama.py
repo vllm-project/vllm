@@ -17,6 +17,7 @@ from vllm.sequence import SampleLogprobs
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
+from ....quantization.utils import is_quant_method_supported
 from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
@@ -395,6 +396,50 @@ def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
             num_logprobs=num_logprobs,
             tensor_parallel_size=1,
         )
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["float16"])
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
+                    reason='bitsandbytes is not supported on this GPU type.')
+def test_bnb_regression(
+    image_assets: _ImageAssets,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+):
+    stop_sign = image_assets[0].pil_image
+    prompts = [
+        {
+            "prompt": "<|begin_of_text|>The content of the image <|image|> is",
+            "multi_modal_data": {
+                "image": stop_sign
+            },
+        },
+        {
+            "prompt":
+            "The color of the sky is blue but sometimes it can also be",
+        },
+    ]
+    # Test regression about QKVCrossParallelLinear
+    llm = LLM(
+        model=model,
+        dtype=dtype,
+        max_model_len=4096,
+        max_num_seqs=2,
+        enforce_eager=True,
+        quantization="bitsandbytes",
+        load_format="bitsandbytes",
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=max_tokens,
+    )
+    outputs = llm.generate(prompts, sampling_params)
+    assert outputs
 
 
 @large_gpu_test(min_gb=48)

@@ -24,7 +24,8 @@ from vllm.entrypoints.openai.protocol import (
     RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.reasoning_parsers import (ReasoningParser,
                                                        ReasoningParserManager)
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
+                                                    clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
@@ -105,10 +106,13 @@ class OpenAIServingChat(OpenAIServing):
                                 "been registered") from e
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        diff_sampling_param = self.model_config.get_diff_sampling_param()
-        if diff_sampling_param:
-            logger.info("Overwriting default chat sampling param with: %s",
-                        diff_sampling_param)
+        self.default_sampling_params = (
+            self.model_config.get_diff_sampling_param())
+        if self.default_sampling_params:
+            source = self.model_config.generation_config
+            source = "model" if source == "auto" else source
+            logger.info("Using default chat sampling params from %s: %s",
+                        source, self.default_sampling_params)
 
     async def create_chat_completion(
         self,
@@ -210,17 +214,14 @@ class OpenAIServingChat(OpenAIServing):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
-                # Build default sampling params
-                default_sampling_params = (
-                    self.model_config.get_diff_sampling_param())
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens, default_sampling_params)
+                        default_max_tokens, self.default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
                         default_max_tokens,
                         self.model_config.logits_processor_pattern,
-                        default_sampling_params)
+                        self.default_sampling_params)
 
                 self._log_inputs(request_id,
                                  request_prompts[i],
@@ -451,6 +452,8 @@ class OpenAIServingChat(OpenAIServing):
                             top_logprobs=output.logprobs,
                             tokenizer=tokenizer,
                             num_output_top_logprobs=request.top_logprobs,
+                            return_as_token_id=request.
+                            return_tokens_as_token_ids,
                         )
                     else:
                         logprobs = None
@@ -706,6 +709,7 @@ class OpenAIServingChat(OpenAIServing):
                     top_logprobs=out_logprobs,
                     num_output_top_logprobs=request.top_logprobs,
                     tokenizer=tokenizer,
+                    return_as_token_id=request.return_tokens_as_token_ids,
                 )
             else:
                 logprobs = None
@@ -846,20 +850,21 @@ class OpenAIServingChat(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
-            prompt_logprobs=final_res.prompt_logprobs,
+            prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
         )
 
         return response
 
     def _get_top_logprobs(
             self, logprobs: dict[int, Logprob], top_logprobs: Optional[int],
-            tokenizer: AnyTokenizer) -> list[ChatCompletionLogProb]:
+            tokenizer: AnyTokenizer,
+            should_return_as_token_id: bool) -> list[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(token=(token := self._get_decoded_token(
                 p[1],
                 p[0],
                 tokenizer,
-                return_as_token_id=self.return_tokens_as_token_ids)),
+                return_as_token_id=should_return_as_token_id)),
                                   logprob=max(p[1].logprob, -9999.0),
                                   bytes=list(
                                       token.encode("utf-8", errors="replace")))
@@ -873,15 +878,18 @@ class OpenAIServingChat(OpenAIServing):
         top_logprobs: GenericSequence[Optional[dict[int, Logprob]]],
         tokenizer: AnyTokenizer,
         num_output_top_logprobs: Optional[int] = None,
+        return_as_token_id: Optional[bool] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
         logprobs_content: list[ChatCompletionLogProbsContent] = []
 
+        should_return_as_token_id = return_as_token_id if \
+            return_as_token_id is not None else self.return_tokens_as_token_ids
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 token = tokenizer.decode(token_id)
-                if self.return_tokens_as_token_ids:
+                if should_return_as_token_id:
                     token = f"token_id:{token_id}"
 
                 logprobs_content.append(
@@ -899,16 +907,14 @@ class OpenAIServingChat(OpenAIServing):
                             step_token,
                             token_id,
                             tokenizer,
-                            self.return_tokens_as_token_ids,
+                            should_return_as_token_id,
                         ),
                         logprob=max(step_token.logprob, -9999.0),
                         bytes=None if step_decoded is None else list(
                             step_decoded.encode("utf-8", errors="replace")),
                         top_logprobs=self._get_top_logprobs(
-                            step_top_logprobs,
-                            num_output_top_logprobs,
-                            tokenizer,
-                        ),
+                            step_top_logprobs, num_output_top_logprobs,
+                            tokenizer, should_return_as_token_id),
                     ))
 
         return ChatCompletionLogProbs(content=logprobs_content)
