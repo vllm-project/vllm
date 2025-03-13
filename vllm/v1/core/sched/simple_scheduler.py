@@ -103,7 +103,7 @@ class SimpleScheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
-        # First, schedule the WAITING requests.
+        # First, schedule prefill requests.
         while self.waiting and token_budget > 0:
             if len(self.running) == self.max_num_running_reqs:
                 break
@@ -165,9 +165,9 @@ class SimpleScheduler(SchedulerInterface):
             # NOTE(woosuk): Check that the request is "fully" scheduled.
             assert num_computed_tokens + num_new_tokens == request.num_tokens
 
-        # If no prefill was scheduled, schedule the RUNNING requests.
-        num_prefill_reqs = len(scheduled_new_reqs) + len(
-            scheduled_resumed_reqs)
+        # If no prefill was scheduled, schedule decode requests.
+        num_prefill_reqs = (len(scheduled_new_reqs) +
+                            len(scheduled_resumed_reqs))
         if num_prefill_reqs == 0:
             req_index = 0
             while req_index < len(self.running) and token_budget > 0:
