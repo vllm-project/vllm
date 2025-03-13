@@ -23,6 +23,10 @@ anyio==4.6.2.post1
     # via httpx
 argcomplete==3.5.1
     # via datamodel-code-generator
+async-timeout==4.0.3
+    # via
+    #   aiohttp
+    #   redis
 attrs==24.2.0
     # via
     #   aiohttp
@@ -119,6 +123,10 @@ encodec==0.1.1
     # via vocos
 evaluate==0.4.3
     # via lm-eval
+exceptiongroup==1.2.2
+    # via
+    #   anyio
+    #   pytest
 fastparquet==2024.11.0
     # via genai-perf
 fastrlock==0.8.2
@@ -554,9 +562,7 @@ sentence-transformers==3.2.1
 sentencepiece==0.2.0
     # via mistral-common
 setuptools==75.8.0
-    # via
-    #   pytablewriter
-    #   torch
+    # via pytablewriter
 six==1.16.0
     # via
     #   python-dateutil
@@ -669,9 +675,11 @@ typing-extensions==4.12.2
     #   huggingface-hub
     #   librosa
     #   mistral-common
+    #   multidict
     #   pqdm
     #   pydantic
     #   pydantic-core
+    #   rich
     #   torch
     #   typer
 tzdata==2024.2
