@@ -17,6 +17,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op, is_navi
+from vllm.attention.backends.abstract import AttentionLayer
+from typing import cast
 
 
 class Attention(nn.Module):
@@ -53,6 +55,7 @@ class Attention(nn.Module):
         `self.kv_cache`.
         """
         super().__init__()
+        sliding_window: Optional[int]
         if per_layer_sliding_window is not None:
             # per-layer sliding window
             sliding_window = per_layer_sliding_window
@@ -206,7 +209,7 @@ class Attention(nn.Module):
                 forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                self.impl.forward(self,
+                self.impl.forward(cast(AttentionLayer, self),
                                   query,
                                   key,
                                   value,
@@ -228,7 +231,7 @@ class Attention(nn.Module):
                 forward_context = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                return self.impl.forward(self,
+                return self.impl.forward(cast(AttentionLayer, self),
                                          query,
                                          key,
                                          value,
