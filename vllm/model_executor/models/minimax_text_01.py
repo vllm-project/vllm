@@ -1221,10 +1221,9 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             self.sampler = Sampler()
         else:
             self.lm_head = PPMissingLayer()
-        self.kv_cache = [
-            torch.tensor([]) for _ in range(get_current_vllm_config(
-            ).parallel_config.pipeline_parallel_size)
-        ]
+
+        flash_layer_count = sum(1 for attn_type in self.config.attn_type_list if attn_type == 1)
+        self.kv_cache = [torch.tensor([]) for _ in range(flash_layer_count)]
         return
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
