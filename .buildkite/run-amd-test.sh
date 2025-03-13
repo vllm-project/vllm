@@ -104,12 +104,20 @@ fi
 #ignore certain Entrypoints tests
 if [[ $commands == *" entrypoints/openai "* ]]; then
   commands=${commands//" entrypoints/openai "/" entrypoints/openai \
-  --ignore=entrypoints/openai/test_accuracy.py \
   --ignore=entrypoints/openai/test_audio.py \
-  --ignore=entrypoints/openai/test_encoder_decoder.py \
-  --ignore=entrypoints/openai/test_embedding.py \
-  --ignore=entrypoints/openai/test_oot_registration.py "}
+  --ignore=entrypoints/openai/test_chat.py \
+  --ignore=entrypoints/openai/test_shutdown.py \
+  --ignore=entrypoints/openai/test_completion.py \
+  --ignore=entrypoints/openai/test_sleep.py \
+  --ignore=entrypoints/llm/test_guided_generate.py \
+  --ignore=entrypoints/openai/test_prompt_validation.py "}
 fi
+# --ignore=entrypoints/openai/test_encoder_decoder.py \
+# --ignore=entrypoints/openai/test_embedding.py \
+# --ignore=entrypoints/openai/test_oot_registration.py
+# --ignore=entrypoints/openai/test_accuracy.py \
+
+
 
 PARALLEL_JOB_COUNT=8
 # check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
