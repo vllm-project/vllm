@@ -2153,6 +2153,9 @@ def ray_is_initialized():
 
 
 def _maybe_force_spawn():
+    """Check if we need to force the use of the `spawn` multiprocessing start
+    method.
+    """
     if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
         return
 
