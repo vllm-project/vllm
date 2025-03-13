@@ -248,6 +248,8 @@ VLM_TEST_SETTINGS = {
         # TODO: Use AutoModelForVision2Seq once transformers supports this
         auto_cls=AutoModelForPreTraining,
         dtype="bfloat16",
+        vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
+        patch_hf_runner=model_utils.gemma3_patch_hf_runner,
     ),
     "glm4v": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
