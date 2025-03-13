@@ -599,17 +599,16 @@ class MiniMaxText01LinearAttention(nn.Module):
             self,
             hidden_states: torch.Tensor,
             positions: torch.Tensor,
-            kv_caches: MinimaxCacheParams,
-            attn_metadata,
             **kwargs) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         qkv32 = qkv.to(torch.float32)
         qkvact = torch.nn.functional.silu(qkv32)
         qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
-        
-        kv_cache = kv_caches.minimax_cache
-        state_indices_tensor = kv_caches.state_indices_tensor
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        kv_cache = kwargs.get("minimax_cache")
+        state_indices_tensor = kwargs.get("state_indices_tensor")
 
         decode_only = attn_metadata.num_prefills == 0
         if not decode_only:
