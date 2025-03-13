@@ -1332,11 +1332,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     chunked_dg = False
     if use_dg:
-        #print("USE_DG")
-        #CHUNK_SIZE = 128
         if M % 128 != 0:
-            CHUNK_SIZE = (M // 128) * 128
-            #print(f"DG_CHUNK {CHUNK_SIZE}")
+            CHUNK_SIZE = (M // 128) * 128  # min with env?
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
         chunked_dg = num_chunks > 1
@@ -1393,8 +1390,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
         if tokens_in_chunk == 0:
             break
-
-        #print(f"LOOP skip={skip_dg} tic={tokens_in_chunk}, chunk={chunk}")
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
