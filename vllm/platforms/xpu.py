@@ -68,6 +68,9 @@ class XPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
+        # in V1(or with ipex chunked prefill) block_size is 64
+        if cache_config and envs.VLLM_USE_V1:
+            cache_config.block_size = 64
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
