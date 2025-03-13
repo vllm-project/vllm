@@ -1328,6 +1328,14 @@ class GGUFModelLoader(BaseModelLoader):
     def load_model(self, vllm_config: VllmConfig) -> nn.Module:
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
+
+        # GGUF hasn't supported multimodal models yet, we need to
+        # extract text_config to only initialize the llm backbone
+        architectures = model_config.hf_config.architectures
+        vllm_config.model_config.hf_config = (
+            vllm_config.model_config.hf_text_config)
+        vllm_config.model_config.hf_config.architectures = architectures
+
         local_model_path = self._prepare_weights(model_config.model)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         # we can only know if tie word embeddings after mapping weights
