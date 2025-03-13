@@ -83,10 +83,14 @@ def load_deepseek_vl2(question: str, image_urls: list[str]):
 def load_gemma3(question, image_urls: list[str]) -> ModelRequestData:
     model_name = "google/gemma-3-4b-it"
 
-    llm = LLM(model=model_name,
-              max_model_len=8192,
-              max_num_seqs=2,
-              limit_mm_per_prompt={"image": len(image_urls)})
+    llm = LLM(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        # Default is False; setting it to True is not supported in V1 yet
+        mm_processor_kwargs={"do_pan_and_scan": True},
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [{

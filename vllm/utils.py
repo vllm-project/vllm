@@ -1488,11 +1488,11 @@ def get_allowed_kwarg_only_overrides(
         if requires_kw_only:
             logger.warning(
                 "The following intended overrides are not keyword-only args "
-                "and and will be dropped: %s", dropped_keys)
+                "and will be dropped: %s", dropped_keys)
         else:
             logger.warning(
                 "The following intended overrides are not keyword args "
-                "and and will be dropped: %s", dropped_keys)
+                "and will be dropped: %s", dropped_keys)
 
     return filtered_overrides
 
