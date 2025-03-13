@@ -7,7 +7,7 @@ import time
 from concurrent.futures import Future
 from inspect import isclass, signature
 from multiprocessing.connection import Connection
-from typing import Any, Optional
+from typing import Any, Optional, Callable, TypeVar, cast
 
 import msgspec
 import psutil
@@ -38,10 +38,135 @@ logger = init_logger(__name__)
 
 POLLING_TIMEOUT_S = 2.5
 
+F = TypeVar('F', bound=Callable[..., Any])
+
+def handle_engine_errors(func: F) -> F:
+    """
+    Decorator to catch exceptions 
+    during engine initialization or operations.
+    
+    This decorator catches exceptions, 
+    formats them using the _format_error method,
+    and sends the error information 
+    through the ready_pipe if available.
+    """
+    def wrapper(self, *args, **kwargs):
+        try:
+            return func(self, *args, **kwargs)
+        except Exception as e:
+            error_info = self._format_error(e)
+            # Send structured error information through ready_pipe if available
+            if hasattr(self, 'ready_pipe') and self.ready_pipe:
+                self.ready_pipe.send({
+                    "status": "error",
+                    "error": error_info
+                })
+            logger.error(f"Engine error: {error_info['type']}: {error_info['message']}")
+            raise  # Re-raise the original exception to preserve the stack trace
+    return cast(F, wrapper)
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
+    def _format_error(self, exc: Exception) -> dict[str, Any]:
+        """Format an exception into a structured error message.
+        
+        Args:
+            exc: The exception to format.
+            
+        Returns:
+            A dictionary containing structured error information.
+        """
+        error_info = {
+            "type": exc.__class__.__name__,
+            "message": str(exc),
+            "traceback": get_exception_traceback(exc),
+            "details": getattr(exc, "details", None)
+        }
+        
+        # Enhance error reporting for specific error types
+        self._enhance_error_info(error_info, exc)
+        
+        return error_info
+        
+    def _enhance_error_info(self, error_info: dict[str, Any], exc: Exception) -> None:
+        """Enhance error information for specific types of errors.
+        
+        This method adds additional context and recommendations for known error types.
+        It's designed to be extensible for future error types.
+        
+        Args:
+            error_info: The error information dictionary to enhance.
+            exc: The original exception.
+        """
+        # Handle CUDA out of memory errors
+        if self._is_cuda_out_of_memory_error(exc):
+            import torch
+            
+            # Get basic CUDA memory information
+            if torch.cuda.is_available():
+                device = torch.cuda.current_device()
+                total_memory = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+                allocated_memory = torch.cuda.memory_allocated(device) / (1024**3)
+                
+                # Add detailed memory information
+                error_info["details"] = {
+                    "cuda_info": {
+                        "total_gpu_memory_gb": round(total_memory, 2),
+                        "allocated_memory_gb": round(allocated_memory, 2),
+                        "available_memory_gb": round(total_memory - allocated_memory, 2),
+                        "device_name": torch.cuda.get_device_name(device)
+                    },
+                    "recommendations": [
+                        "Increase 'gpu_memory_utilization' parameter",
+                        "Decrease 'max_model_len' parameter",
+                        "Try using a smaller model",
+                        "Use a GPU with more memory",
+                        "Enable tensor parallelism across multiple GPUs"
+                    ]
+                }
+                
+                # Update error message to include memory information
+                error_info["message"] = (
+                    f"CUDA out of memory during initialization. "
+                    f"Available GPU memory: {round(total_memory - allocated_memory, 2)}GB "
+                    f" / {round(total_memory, 2)}GB "
+                    f"on {torch.cuda.get_device_name(device)}. {str(exc)}"
+                )
+    
+    def _is_cuda_out_of_memory_error(self, exc: Exception) -> bool:
+        """Determine if an exception is related to CUDA out of memory errors.
+        
+        Args:
+            exc: The exception to check.
+            
+        Returns:
+            True if the exception is a CUDA out of memory error, False otherwise.
+        """
+        # Check for different types of CUDA OOM errors
+        error_msg = str(exc).lower()
+        
+        # Check ValueErrors from check_enough_kv_cache_memory
+        if isinstance(exc, ValueError) and any(x in error_msg for x in [
+            "no available memory for the cache blocks",
+            "larger than the available kv cache memory"
+        ]):
+            return True
+            
+        # Check PyTorch CUDA OOM errors
+        if ("cuda out of memory" in error_msg or  
+            "cudaerror" in error_msg 
+            or "out of memory" in error_msg
+        ):
+            return True
+            
+        # Check other memory-related errors
+        if isinstance(exc, RuntimeError) and "out of memory" in error_msg:
+            return True
+            
+        return False
+
+    @handle_engine_errors
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -109,8 +234,20 @@ class EngineCore:
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
+    @handle_engine_errors
     def _initialize_kv_caches(self,
                               vllm_config: VllmConfig) -> tuple[int, int]:
+        """Initialize Key-Value caches for the engine.
+        
+        This method is wrapped with error handling 
+        to catch and report initialization issues.
+        
+        Args:
+            vllm_config: The VLLM configuration object.
+            
+        Returns:
+            A tuple containing the number of GPU and CPU blocks.
+        """
         start = time.time()
 
         # Get all kv cache needed by the model
@@ -122,9 +259,9 @@ class EngineCore:
 
         # Get the kv cache tensor size
         kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
-                                                available_gpu_memory)
+                                               available_gpu_memory)
         num_gpu_blocks_set = set(config.num_blocks
-                                 for config in kv_cache_configs)
+                                for config in kv_cache_configs)
         assert len(num_gpu_blocks_set) == 1, (
             f"num_gpu_blocks need to be the same across workers, "
             f"but they are different: {num_gpu_blocks_set}")
@@ -272,6 +409,7 @@ class EngineCore:
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
+    @handle_engine_errors
     def __init__(
         self,
         input_path: str,
@@ -281,6 +419,12 @@ class EngineCoreProc(EngineCore):
         executor_class: type[Executor],
         log_stats: bool,
     ):
+        # Store ready_pipe before super().__init__ 
+        # so that error handler can access it
+        self.ready_pipe = ready_pipe
+        
+        # Initialize the core engine - errors here 
+        # will be caught by the decorator
         super().__init__(vllm_config, executor_class, log_stats)
 
         # Background Threads and Queues for IO. These enable us to

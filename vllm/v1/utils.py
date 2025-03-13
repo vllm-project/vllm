@@ -118,9 +118,71 @@ class BackgroundProcHandle:
         self.proc.start()
 
         # Wait for startup.
-        if reader.recv()["status"] != "READY":
-            raise RuntimeError(f"{process_name} initialization failed. "
-                               "See root cause above.")
+        response = reader.recv()
+        status = response.get("status", "")
+        
+        if status == "READY":
+            return
+        elif status == "error":
+            error = response.get("error", {})
+            error_type = error.get("type", "Unknown")
+            error_message = error.get("message", "No details available")
+            error_traceback = error.get("traceback", "")
+            
+            # Format a user-friendly error message
+            error_msg = self._format_user_friendly_error(process_name, error)
+            
+            raise RuntimeError(error_msg)
+        else:
+            raise RuntimeError(f"{process_name} initialization failed with unknown status: {status}. "
+                              "See root cause above.")
+
+    def _format_user_friendly_error(self, process_name: str, error: dict) -> str:
+        """Format error information into a user-friendly error message.
+        
+        Args:
+            process_name: The name of the process that failed.
+            error: The error information dictionary.
+            
+        Returns:
+            A formatted error message string.
+        """
+        error_type = error.get("type", "Unknown")
+        error_message = error.get("message", "No details available")
+        error_traceback = error.get("traceback", "")
+        
+        # Basic error message
+        message_parts = [
+            f"{process_name} initialization failed: "
+            f"[{error_type}] {error_message}"
+        ]
+        
+        # Add detailed recommendations for known error types
+        details = error.get("details", {})
+        if isinstance(details, dict) and "recommendations" in details:
+            message_parts.append("\nRecommendations:")
+            for i, recommendation in enumerate(details["recommendations"], 1):
+                message_parts.append(f"  {i}. {recommendation}")
+                
+        # Add CUDA information if available
+        if isinstance(details, dict) and "cuda_info" in details:
+            cuda_info = details["cuda_info"]
+            message_parts.append("\nCUDA Information:")
+            message_parts.append(f"  Device: {
+                    cuda_info.get('device_name', 'Unknown')}")
+            message_parts.append(f"  Total Memory: {
+                cuda_info.get('total_gpu_memory_gb', 'Unknown')}GB")
+            message_parts.append(f"  Allocated: {
+                    cuda_info.get('allocated_memory_gb', 'Unknown')}GB")
+            message_parts.append(f"  Available: {
+                    cuda_info.get('available_memory_gb', 'Unknown')}GB")
+        
+        # Add traceback if it exists
+        if error_traceback:
+            message_parts.append("\nTraceback:")
+            message_parts.append(error_traceback)
+            
+        return "\n".join(message_parts)
 
     def shutdown(self):
         self._finalizer()
