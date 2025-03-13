@@ -448,8 +448,29 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
         batch = X.size(0)
         return torch.empty((batch, row), dtype=X.dtype, device=W.device)
 
+    @register_fake("_C::ggml_moe_a8")
+    def _ggml_moe_a8_fake(
+        X: torch.Tensor,
+        W: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        quant_type: int,
+        row: torch.SymInt,
+        top_k: torch.SymInt,
+        tokens: torch.SymInt,
+    ) -> torch.Tensor:
+        tokens = X.size(0)
+        return torch.empty((tokens * top_k, row),
+                           dtype=torch.float16,
+                           device=W.device)
+
 
 # cutlass
+def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
+
+
 def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
                           block_scale_a: torch.Tensor,
                           block_scale_b: torch.Tensor, alpha: torch.Tensor,
@@ -1034,6 +1055,26 @@ def ggml_mul_mat_a8(
     return torch.ops._C.ggml_mul_mat_a8(W, X, quant_type, row)
 
 
+def ggml_moe_a8(
+    X: torch.Tensor,
+    W: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    quant_type: int,
+    row: int,
+    top_k: int,
+    tokens: int,
+) -> torch.Tensor:
+    return torch.ops._C.ggml_moe_a8(X, W, sorted_token_ids, expert_ids,
+                                    num_tokens_post_padded, quant_type, row,
+                                    top_k, tokens)
+
+
+def ggml_moe_get_block_size(quant_type: int) -> int:
+    return torch.ops._C.ggml_moe_get_block_size(quant_type)
+
+
 # mamba
 def causal_conv1d_fwd(x: torch.Tensor, weight: torch.Tensor,
                       bias_: Optional[torch.Tensor],
@@ -1105,6 +1146,10 @@ def moe_wna16_gemm(input: torch.Tensor, output: torch.Tensor,
                    num_tokens_post_pad: torch.Tensor, top_k: int,
                    BLOCK_SIZE_M: int, BLOCK_SIZE_N: int, BLOCK_SIZE_K: int,
                    bit: int) -> torch.Tensor:
+    if not current_platform.is_cuda():
+        raise NotImplementedError(
+            "The optimized moe_wna16_gemm kernel is only "
+            "available on CUDA platforms")
     torch.ops._moe_C.moe_wna16_gemm(input, output, b_qweight, b_scales,
                                     b_qzeros, topk_weights, sorted_token_ids,
                                     experts_ids, num_tokens_post_pad, top_k,

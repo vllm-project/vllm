@@ -45,7 +45,7 @@ class NVLMProcessor(BaseInternVLProcessor):
             raise NotImplementedError("Embedding inputs are not supported")
 
         tile_pos_identifiers = [f"<tile_{i}>" for i in range(1, num_patches)]
-        if self.use_thumbnail and num_patches != 1:
+        if self.use_thumbnail:
             tile_pos_identifiers += ["<tile_global_thumbnail>"]
 
         context_size = feature_size // num_patches
