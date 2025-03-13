@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from mistral_common.protocol.instruct.messages import ImageChunk
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
+from PIL import Image
 from transformers import BatchFeature, PixtralVisionConfig, TensorType
 from transformers.image_utils import ImageInput
 from transformers.models.pixtral.image_processing_pixtral import (
@@ -227,13 +228,10 @@ class PixtralProcessingInfo(BaseProcessingInfo):
         if processor is None:
             processor = self.get_hf_processor()
 
-        hf_vision_config = self.get_vision_config(processor)
-        hf_encoder_info = PixtralEncoderInfo(hf_vision_config)
+        ncols, nrows = processor.image_processor._image_to_num_tokens(
+            Image.new("RGB", (image_width, image_height)))
 
-        return hf_encoder_info.get_num_image_tokens(
-            image_width=image_width,
-            image_height=image_height,
-        )
+        return (ncols + 1) * nrows
 
     def get_image_size_with_most_features(self) -> ImageSize:
         image_processor = self.get_hf_processor().image_processor
@@ -308,11 +306,8 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
-            ncols, nrows = get_pixtral_image_feature_grid_size(
-                self.info.get_vision_config(processor),
-                image_width=image_size.width,
-                image_height=image_size.height,
-            )
+            ncols, nrows = processor.image_processor._image_to_num_tokens(
+                Image.new("RGB", (image_size.width, image_size.height)))
 
             tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
             tokens[-1] = image_end_id
@@ -839,32 +834,7 @@ class VisionLanguageAdapter(nn.Module):
 # and [`MistralForCausalLM`] for its language decoder.
 
 
-# Adapted from transformers.models.pixtral.image_processing_pixtral.get_resize_output_image_size # noqa: E501
-# https://github.com/huggingface/transformers/blob/2bd4d5897dc73e8b172832070a6f9e567a0df017/src/transformers/models/pixtral/image_processing_pixtral.py#L180
-def get_pixtral_image_feature_grid_size(
-    hf_config: PixtralVisionConfig,
-    *,
-    image_width: int,
-    image_height: int,
-) -> tuple[int, int]:
-    max_width = max_height = hf_config.image_size
-    patch_width = patch_height = hf_config.patch_size
-
-    ratio = max(image_width / max_width, image_height / max_height)
-
-    if ratio > 1:
-        image_width = int(math.ceil(image_width / ratio))
-        image_height = int(math.ceil(image_height / ratio))
-
-    nrows, ncols = _get_pixtral_hf_num_image_tokens(
-        (image_height, image_width),
-        (patch_height, patch_width),
-    )  # type: ignore
-
-    return ncols, nrows
-
-
-class PixtralEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
+class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
 
     def get_num_image_tokens(
         self,
@@ -895,6 +865,29 @@ class PixtralEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         # Since interpolation is applied, the image size need not be divisible
         # assert image_size % patch_size == 0
         return image_size // patch_size
+
+    # Adapted from: https://github.com/huggingface/transformers/blob/v4.49.0/src/transformers/models/pixtral/image_processing_pixtral.py#L99
+    def get_patch_grid_size(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int]:
+        max_width = max_height = self.get_image_size()
+        patch_width = patch_height = self.get_patch_size()
+
+        ratio = max(image_width / max_width, image_height / max_height)
+
+        if ratio > 1:
+            image_width = int(math.ceil(image_width / ratio))
+            image_height = int(math.ceil(image_height / ratio))
+
+        nrows, ncols = _get_pixtral_hf_num_image_tokens(
+            (image_height, image_width),
+            (patch_height, patch_width),
+        )  # type: ignore
+
+        return ncols, nrows
 
 
 class PixtralHFMLP(nn.Module):

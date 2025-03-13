@@ -39,7 +39,7 @@ from vllm.utils import JSONTree, flatten_2d_lists, json_map_leaves
 
 from .clip import CLIPVisionModel
 from .interfaces import SupportsMultiModal, SupportsPP
-from .pixtral import PixtralHFVisionModel, get_pixtral_image_feature_grid_size
+from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -349,13 +349,15 @@ class PixtralHFMultiModalProcessor(
                 ]
 
             hf_config = self.info.get_hf_config()
+            vision_config = hf_config.vision_config
+            assert isinstance(vision_config, PixtralVisionConfig)
+            encoder_info = PixtralHFEncoderInfo(vision_config)
 
             tile_sizes = [
-                get_pixtral_image_feature_grid_size(
-                    hf_config.vision_config,
+                encoder_info.get_patch_grid_size(
                     image_width=pixel_value.shape[-1],
-                    image_height=pixel_value.shape[-2])
-                for pixel_value in processed_outputs["pixel_values"]
+                    image_height=pixel_value.shape[-2],
+                ) for pixel_value in processed_outputs["pixel_values"]
             ]
             num_crops = torch.tensor([(ncols + 1) * nrows
                                       for ncols, nrows in tile_sizes])
@@ -403,13 +405,13 @@ class PixtralHFMultiModalProcessor(
 
         vision_config = hf_config.vision_config
         assert isinstance(vision_config, PixtralVisionConfig)
+        encoder_info = PixtralHFEncoderInfo(vision_config)
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
-            ncols, nrows = get_pixtral_image_feature_grid_size(
-                vision_config,
+            ncols, nrows = encoder_info.get_patch_grid_size(
                 image_width=image_size.width,
                 image_height=image_size.height,
             )
