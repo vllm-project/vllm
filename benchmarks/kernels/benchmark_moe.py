@@ -506,7 +506,8 @@ def get_weight_block_size_safety(config, default_value=None):
 def main(args: argparse.Namespace):
     print(args)
     block_quant_shape = None
-    config = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(
+        args.model, trust_remote_code=args.trust_remote_code)
     if config.architectures[0] == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
