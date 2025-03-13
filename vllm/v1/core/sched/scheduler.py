@@ -695,16 +695,8 @@ class Scheduler(SchedulerInterface):
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
 
-    def has_unfinished_requests(self) -> bool:
-        return self.get_num_unfinished_requests() > 0
-
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
-
-    def has_requests(self) -> bool:
-        """Returns True if there are unfinished requests, or finished requests
-        not yet returned in SchedulerOutputs."""
-        return self.has_unfinished_requests() or self.has_finished_requests()
 
     def get_num_unscheduled_requests(self) -> int:
         """Number of requests that are not being processed by the executor."""

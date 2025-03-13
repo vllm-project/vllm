@@ -41,19 +41,17 @@ class SchedulerInterface(ABC):
     def get_num_unfinished_requests(self) -> int:
         raise NotImplementedError
 
-    @abstractmethod
     def has_unfinished_requests(self) -> bool:
-        raise NotImplementedError
+        return self.get_num_unfinished_requests() > 0
 
     @abstractmethod
     def has_finished_requests(self) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def has_requests(self) -> bool:
         """Returns True if there are unfinished requests, or finished requests
         not yet returned in SchedulerOutputs."""
-        raise NotImplementedError
+        return self.has_unfinished_requests() or self.has_finished_requests()
 
     @abstractmethod
     def get_num_unscheduled_requests(self) -> int:
