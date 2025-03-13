@@ -53,8 +53,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         """
         Extract the content after the end tokens
         """
-        if self.think_end_token_id not in input_ids or input_ids.index(
-                self.think_end_token_id) + 1 == len(input_ids):
+        if self.think_end_token_id not in input_ids[:-1]:
             return []
         else:
             return input_ids[input_ids.index(self.think_end_token_id) + 1:]
