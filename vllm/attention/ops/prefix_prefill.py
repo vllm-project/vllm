@@ -269,6 +269,10 @@ if triton.__version__ >= "2.1.0":
                  (offs_m[:, None] < cur_batch_query_len))
         return
 
+    # On triton versions lower 3.2 the assertion:
+    # Assertion `!(srcMmaLayout && dstMmaLayout && !srcMmaLayout.isAmpere()) &&
+    #  "mma -> mma layout conversion is only supported on Ampere"' failed.
+    # is observed
     if triton.__version__ >= "3.2.0":
         @triton.autotune(
             configs=[
