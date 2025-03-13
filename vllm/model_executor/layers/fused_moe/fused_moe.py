@@ -738,8 +738,6 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                                            1, top_k,
                                            1).reshape(-1, A_scale.shape[1])
 
-                #print(f"A.shape = {A.shape}, max={sorted_token_ids.max()}, st={sorted_token_ids}")
-
                 # Permute according to sorted token ids.
                 A = A.view(dtype=torch.uint8)[sorted_token_ids,
                                               ...].view(dtype=A.dtype)
@@ -1510,11 +1508,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     chunked_dg = False
     if use_dg:
-        #print("USE_DG")
-        #CHUNK_SIZE = 128
         if M % 128 != 0:
-            CHUNK_SIZE = (M // 128) * 128
-            #print(f"DG_CHUNK {CHUNK_SIZE}")
+            CHUNK_SIZE = (M // 128) * 128  # min with env?
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
         chunked_dg = num_chunks > 1
@@ -1572,8 +1567,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         if tokens_in_chunk == 0:
             break
 
-        #print(f"LOOP skip={skip_dg} tic={tokens_in_chunk}, chunk={chunk}")
-
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
@@ -1593,9 +1586,17 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             # chunk. Note that in most cases we only have one chunk
             # so the cache size and config are already set correctly and
             # do not need to be adjusted.
-            intermediate_cache1 = intermediate_cache1[:slice_size]
-            intermediate_cache2 = intermediate_cache2[:slice_size * slice_topk]
-            intermediate_cache3 = intermediate_cache3[:slice_size]
+            if skip_dg:
+                assert tokens_in_chunk * top_k_num < intermediate_cache1.shape[0]
+                intermediate_cache1 = intermediate_cache1[:(tokens_in_chunk*top_k_num)].view(-1, top_k_num, N)
+                intermediate_cache2 = intermediate_cache2.view(-1, N // 2)
+                intermediate_cache3 = intermediate_cache3[:(tokens_in_chunk*top_k_num)].view(-1, top_k_num, w2.shape[1])
+            else:
+                intermediate_cache1 = intermediate_cache1[:slice_size]
+                intermediate_cache2 = intermediate_cache2[:slice_size * slice_topk]
+                intermediate_cache3 = intermediate_cache3[:slice_size]
+
+
             config = get_config_func(slice_size)
 
         inv_perm: Optional[torch.Tensor] = None
