@@ -57,8 +57,8 @@ steps:
     agents:
       queue: tpu_queue_postmerge
     commands:
-      - "rm /var/log/syslog"
-      - "rm /var/log/kern.log"
+      - "rm -f /var/log/syslog"
+      - "rm -f /var/log/kern.log"
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --tag vllm/vllm-tpu:nightly --tag vllm/vllm-tpu:$BUILDKITE_COMMIT --progress plain -f Dockerfile.tpu ."
       - "docker push vllm/vllm-tpu:nightly"
       - "docker push vllm/vllm-tpu:$BUILDKITE_COMMIT"
