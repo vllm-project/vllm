@@ -1939,6 +1939,9 @@ void paged_attention_xpu_v1_impl_launcher(
     case 32:                                                      \
       CALL_KERNEL_LAUNCHER(T, 32);                                \
       break;                                                      \
+    case 64:                                                      \
+      CALL_KERNEL_LAUNCHER(T, 64);                                \
+      break;                                                      \
     default:                                                      \
       TORCH_CHECK(false, "Unsupported block size: ", block_size); \
       break;                                                      \
@@ -2439,6 +2442,9 @@ void paged_attention_v2_launcher(
       break;                                                      \
     case 32:                                                      \
       CALL_V2_LAUNCHER(T, 32);                                    \
+      break;                                                      \
+    case 64:                                                      \
+      CALL_V2_LAUNCHER(T, 64);                                    \
       break;                                                      \
     default:                                                      \
       TORCH_CHECK(false, "Unsupported block size: ", block_size); \
