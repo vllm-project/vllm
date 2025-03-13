@@ -1556,7 +1556,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             capture_inputs)
 
                     with set_forward_context(attn_metadata, self.vllm_config,
-                                             virtual_engine):
+                                             virtual_engine, batch_size):
                         graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
@@ -1738,7 +1738,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         if not bypass_model_exec:
             with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config, virtual_engine):
+                                     self.vllm_config, virtual_engine, 
+                                     model_input.input_tokens.shape[0]):
+                print(f"model executable num_tokens={model_input.input_tokens.shape[0]}")
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
@@ -1785,8 +1787,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     torch.tensor(model_forward_time + orig_model_forward_time))
             return hidden_or_intermediate_states
 
-        logits = self.model.compute_logits(hidden_or_intermediate_states,
-                                           model_input.sampling_metadata)
+        num_tokens = model_input.input_tokens.shape[0]
+        with set_forward_context(model_input.attn_metadata, self.vllm_config, virtual_engine, num_tokens): 
+            logits = self.model.compute_logits(hidden_or_intermediate_states,
+                                            model_input.sampling_metadata)
 
         if not self.is_driver_worker:
             return []

@@ -130,6 +130,34 @@ class PPTestSettings:
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
         )
+        
+        
+    @staticmethod
+    def lessfast(
+        *,
+        tp_base: int = 1,
+        pp_base: int = 1,
+        task: TaskOption = "auto",
+        multi_node_only: bool = False,
+        load_format: Optional[str] = None,
+    ):
+        return PPTestSettings(
+            parallel_setups=[
+                ParallelSetup(tp_size=tp_base * 2,
+                              pp_size=pp_base,
+                              eager_mode=True,
+                              chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base * 4,
+                              pp_size=pp_base,
+                              eager_mode=True,
+                              chunked_prefill=False),
+            ],
+            distributed_backends=["mp"],
+            vllm_major_versions=["0"],
+            task=task,
+            test_options=PPTestOptions(multi_node_only=multi_node_only,
+                                       load_format=load_format),
+        )
 
     def iter_params(self, model_id: str):
         opts = self.test_options
@@ -452,6 +480,52 @@ def test_tp_language_embedding(
 )
 @fork_new_process_for_each_test
 def test_tp_multimodal_generation(
+    model_id: str,
+    parallel_setup: ParallelSetup,
+    distributed_backend: str,
+    vllm_major_version: str,
+    task: TaskOption,
+    test_options: PPTestOptions,
+    num_gpus_available,
+):
+    _compare_tp(model_id,
+                parallel_setup,
+                distributed_backend,
+                vllm_major_version,
+                task,
+                test_options,
+                num_gpus_available,
+                method="generate",
+                is_multimodal=True)
+
+
+
+
+
+# =============== my test ================================
+
+# NOTE: You can update this on your local machine to run specific tests
+LOCAL_TEST_MODELS = [
+    # [LANGUAGE GENERATION]
+    "unsloth/Llama-3.2-1B-Instruct",
+]
+
+MULTIMODAL_MODELS = {
+    # [Decoder-only]
+    "unsloth/Llama-3.2-1B-Instruct": PPTestSettings.lessfast(),
+}
+
+
+@pytest.mark.parametrize(
+    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
+     "task", "test_options"),
+    [
+        params for model_id, settings in MULTIMODAL_MODELS.items()
+        for params in settings.iter_params(model_id) if model_id in LOCAL_TEST_MODELS
+    ],
+)
+@fork_new_process_for_each_test
+def test_tp_sp_generation(
     model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,

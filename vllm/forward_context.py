@@ -38,6 +38,7 @@ class ForwardContext:
     attn_metadata: "AttentionMetadata"  # set dynamically for each forward pass
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
+    enable_sequence_parallel: bool # If enable sequence_parallelism
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
 
@@ -57,7 +58,8 @@ def get_forward_context() -> ForwardContext:
 def set_forward_context(attn_metadata: Any,
                         vllm_config: VllmConfig,
                         virtual_engine: int = 0,
-                        num_tokens: int = 0):
+                        num_tokens: int = 0,
+                        origin_num_tokens: int = 0):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -89,7 +91,12 @@ def set_forward_context(attn_metadata: Any,
         dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)
         dp_metadata = DPMetadata(cu_tokens_across_dp_cpu)
-
+    
+    # only do sequence parallelism when it's enabled and num of tokens is divisible by parallel size
+    # sequence parallelism uses torch.distributed.reduce_scatter which only supports the case when size is divisible by parallel size
+    enable_sequence_parallel = vllm_config.parallel_config.enable_sequence_parallel \
+        and num_tokens % vllm_config.parallel_config.tensor_parallel_size == 0
+        
     global _forward_context
     prev_context = _forward_context
     _forward_context = ForwardContext(
@@ -97,7 +104,9 @@ def set_forward_context(attn_metadata: Any,
         static_forward_context,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
-        dp_metadata=dp_metadata)
+        enable_sequence_parallel=enable_sequence_parallel,
+        dp_metadata=dp_metadata
+        )
     try:
         yield
     finally:
