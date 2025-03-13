@@ -98,6 +98,13 @@ MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
 
 def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
                   qweight_type: int) -> torch.Tensor:
+    # HACK: when doing chunked prefill we don't generate output tokens
+    # so input to logits generator is empty which causes invalid parameter
+    if x.shape[0] == 0:
+        return torch.empty(x.shape[0],
+                           qweight.shape[0],
+                           dtype=x.dtype,
+                           device=x.device)
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
