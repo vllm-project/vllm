@@ -9,6 +9,7 @@ setuptools-scm>=8
 wheel
 jinja2
 ray[default]
+ray[data]
 
 # Install torch_xla
 --pre
