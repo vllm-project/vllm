@@ -855,10 +855,9 @@ def try_get_optimal_moe_config(
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
                                         is_marlin, block_shape)
 
-
-    # Remove this
+    # Try to remove this
     if use_deep_gemm:
-        config['BLOCK_SIZE_M'] = 128
+        config['BLOCK_SIZE_M'] = dg.get_m_alignment_for_contiguous_layout()
 
     return config
 
@@ -1386,10 +1385,10 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_hidden_states = hidden_states[begin_chunk_idx:end_chunk_idx]
         tokens_in_chunk, _ = curr_hidden_states.shape
 
-        skip_dg = use_dg and tokens_in_chunk % block_m != 0
-
         if tokens_in_chunk == 0:
             break
+
+        skip_dg = use_dg and tokens_in_chunk % block_m != 0
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
