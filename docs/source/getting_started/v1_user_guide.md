@@ -1,5 +1,7 @@
 # vLLM V1 User Guide
 
+V1 is now enabled by default for all supported use cases, and we will gradually enable it for every use case we plan to support. Please share any feedback on [GitHub](https://github.com/vllm-project/vllm) or in the [vLLM Slack](https://inviter.co/vllm-slack).
+
 ## Why vLLM V1?
 
 vLLM V0 successfully supported a wide range of models and hardware, but as new features were developed independently, the system grew increasingly complex. This complexity made it harder to integrate new capabilities and introduced technical debt, revealing the need for a more streamlined and unified design.
@@ -17,6 +19,8 @@ Specifically, V1 aims to:
 - **Combine key optimizations** into a unified architecture.
 - Require **zero configs** by enabling features/optimizations by default.
 
+We see significant performance improvements from upgrading to V1 core engine, in particular for long context scenarios. Please see performance benchmark [here](TODO:placeholder for now).
+
 For more details, check out the vLLM V1 blog post [vLLM V1: A Major
 Upgrade to vLLM’s Core Architecture](https://blog.vllm.ai/2025/01/27/v1-alpha-release.html) (published Jan 27, 2025).
 
@@ -24,22 +28,22 @@ This living user guide outlines a few known **important changes and limitations*
 
 ### Feature / Model Supports Overview
 
-| Feature / Model                             | Status                                                                           |
-|---------------------------------------------|-----------------------------------------------------------------------------------|
+| Feature / Model | Status |
+|-----------------|-----------------------------------------------------------------------------------|
 | **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
-| **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>|
 | **LoRA**                                    | <nobr>🟢 Functional ([PR #13096](https://github.com/vllm-project/vllm/pull/13096))</nobr>|
+| **Multimodal Models**                       | <nobr>🟢 Functional</nobr>                                                        |
 | **Spec Decode**                             | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>|
+| **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>|
 | **FP8 KV Cache**                            | <nobr>🟡 Planned</nobr>                                                           |
-| **Request-level Structured Output Backend** | <nobr>🔴 Deprecated</nobr>                                                        |
 | **Structured Output Alternative Backends**  | <nobr>🟡 Planned</nobr>                                                           |
+| **Embedding Models**                        | <nobr>🟡 Planned ([RFC #12249](https://github.com/vllm-project/vllm/issues/12249))</nobr> |
+| **Mamba Models**                            | <nobr>🟡 Planned</nobr>                                                           |
+| **Encoder-Decoder Models**                  | <nobr>🟡 Planned</nobr>                                                           |
+| **Request-level Structured Output Backend** | <nobr>🔴 Deprecated</nobr>                                                        |
 | **best_of**                                 | <nobr>🔴 Deprecated ([RFC #13361](https://github.com/vllm-project/vllm/issues/13361))</nobr>|
 | **Per-Request Logits Processors**           | <nobr>🔴 Deprecated ([RFC #13360](https://github.com/vllm-project/vllm/pull/13360))</nobr> |
 | **GPU <> CPU KV Cache Swapping**            | <nobr>🔴 Deprecated</nobr>                                                        |
-| **Multimodal Models**                       | <nobr>🟢 Functional</nobr>                            |
-| **Embedding Models**                        | <nobr>🟡 Planned ([RFC #12249](https://github.com/vllm-project/vllm/issues/12249))</nobr>                                             |
-| **Mamba Models**                            | <nobr>🟡 Planned</nobr>                                                           |
-| **Encoder-Decoder Models**                  | <nobr>🟡 Planned</nobr>                                                           |
 
 - **🚀 Optimized**: Nearly fully optimized, with no further work currently planned.
 - **🟢 Functional**: Fully operational, with ongoing optimizations.  
