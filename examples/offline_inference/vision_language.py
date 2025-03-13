@@ -123,10 +123,14 @@ def run_gemma3(questions: list[str], modality: str):
     assert modality == "image"
     model_name = "google/gemma-3-4b-it"
 
-    llm = LLM(model=model_name,
-              max_model_len=2048,
-              max_num_seqs=2,
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model=model_name,
+        max_model_len=2048,
+        max_num_seqs=2,
+        # Default is False; setting it to True is not supported in V1 yet
+        mm_processor_kwargs={"do_pan_and_scan": True},
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
 
     prompts = [("<bos><start_of_turn>user\n"
                 f"<start_of_image>{question}<end_of_turn>\n"
