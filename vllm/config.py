@@ -3312,9 +3312,7 @@ class VllmConfig:
             # The tensor sizes and strides get captured in the torch.compile
             # graph explicitly.
             vllm_factors.append(
-                hashlib.md5(
-                    str(self.scheduler_config.max_num_batched_tokens).encode()
-                ).hexdigest())
+                str(self.scheduler_config.max_num_batched_tokens))
         else:
             vllm_factors.append("None")
         if self.speculative_config:
