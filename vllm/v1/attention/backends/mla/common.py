@@ -7,22 +7,22 @@ First we define:
 Sq      as Q sequence length
 Skv     as KV sequence length
 
-MLA has two possible ways of computing, a data-movement friendly approach and a
-compute friendly approach, we generally want to use the compute friendly
-approach for "prefill" (i.e. the ratio Sq / Skv is "small", is near 1)
-and the data-movement friendly approach for "decode" (i.e. the ratio
-Sq / Skv is "large").
+MLA has two possible ways of computing, a data-movement friendly approach and a 
+compute friendly approach, we generally want to use the compute friendly 
+approach for "prefill" (i.e. the ratio Sq / Skv is "small", is near 1) 
+and the data-movement friendly approach for "decode" (i.e. the ratio 
+Sq / Skv is "large"). 
 
-NOTE what we deem small and large is currently determined by if its labelled
-prefill or decode by the scheduler, but this is something we should probably
+NOTE what we deem small and large is currently determined by if its labelled 
+prefill or decode by the scheduler, but this is something we should probably 
 tune.
 
 Main reference: DeepseekV2 paper, and FlashInfer Implementation
 (https://arxiv.org/abs/2405.04434 and https://github.com/flashinfer-ai/flashinfer/pull/551).
 
 Deepseek's MLA attention works the following way:
-* Use a single latent vector to represent the per-token entry of the KV cache.
-* For decode (i.e. the memory friendly approach) the attention "simulates" a
+* Use a single latent vector to represent the per-token entry of the KV cache.  
+* For decode (i.e. the memory friendly approach) the attention "simulates" a 
 multi-head attention, while the compute is similar to multi-query attention.
 
 Below is example of both paths assuming batchsize = 1
@@ -54,9 +54,9 @@ W_DQ        project h_t to q_c                  shape [H, Lq]
 W_UQ        project q_c to q_nope               shape [Lq, N * P]
 W_QR        project q_c to q_pe                 shape [Lq, N * R]
 W_DKV       project h_t to kv_c                 shape [H, Lkv]
-W_UK        project kv_c to k_nope              shape [Lkv, N * P]
+W_UK        project kv_c to k_nope              shape [Lkv, N, P]
 W_KR        project h_t to k_pe                 shape [H, R]
-W_UV        project kv_c to v                   shape [Lkv, N * V]
+W_UV        project kv_c to v                   shape [Lkv, N, V]
 W_O         project v to h_t                    shape [N * V, H]
 
 
@@ -69,8 +69,8 @@ new_kv_c = h_t @ W_DKV
 new_k_pe = RoPE(h_t @ W_KR)
 kv_c     = torch.cat([new_kv_c, cache_kv_c], dim=0)
 k_pe     = torch.cat([new_k_pe, cache_k_pe], dim=0)
-k_nope   = (kv_c @ W_UK).view(Skv, N, P)
-v        = (kv_c @ W_UV).view(Skv, N, V)
+k_nope   = (kv_c @ W_UK.view(Lkv, N * P)).view(Skv, N, P)
+v        = (kv_c @ W_UV.view(Lkv, N * V)).view(Skv, N, V)
 
 // MHA with QK headdim = P + R
 //           V headdim = V
@@ -79,7 +79,7 @@ spda_o = scaled_dot_product_attention(
     torch.cat([q_nope, q_pe], dim=-1),
     torch.cat([k_nope, k_pe.unsqueeze(1).expand(-1, N, -1)], dim=-1),
     v
-)
+) 
 return spda_o @ W_O
 
 NOTE: in the actual code,
@@ -90,20 +90,10 @@ NOTE: in the actual code,
 
 ## Data-Movement Friendly Approach (i.e. "_forward_decode"):
 
-Ahead of time, compute:
-
-% this projects from q_c to [Sq, N * Lkv]
-W_UQ_UK = einsum("qnp,knp -> qnk"
-                     W_UQ.view(Lq, N, P), W_UK.view(Lkv, N, P)
-                ).view(Lkv, N * Lkv)
-% this projects from attn output [Sq, N * Lkv] to [Sq, H]
-W_UV_O  = einsum("knv,nvh -> nkh"
-                     W_UV.view(Lkv, N, V), W_O.view(N, V, H)
-                ).view(N * Lkv, H)
-
 Runtime
 q_c      = h_t @ W_DQ
-q_latent = q_c @ W_UQ_UK.view(Sq, N, Lkv)
+q_nope   = (q_c @ W_UQ).view(-1, N, P)
+ql_nope  = einsum("snh,lnh->snl", q, W_UK)
 q_pe     = RoPE(q_c @ W_QR).view(Sq, N, R)
 new_kv_c = h_t @ W_DKV
 new_k_pe = RoPE(h_t @ W_KR)
@@ -116,29 +106,31 @@ k_pe     = torch.cat([new_k_pe, cache_k_pe], dim=0)
 // NOTE: this is less compute-friendly since Lkv > P
 //       but is more data-movement friendly since its MQA vs MHA
 spda_o = scaled_dot_product_attention(
-    torch.cat([q_latent, q_pe], dim=-1),
+    torch.cat([ql_nope, q_pe], dim=-1),
     torch.cat([kv_c, k_pe], dim=-1),
     kv_c
 )
-return spda_o.reshape(-1, N * Lkv) @ W_UV_O
+
+o = einsum("snl,lnv->snv", spda_o.reshape(-1, N, Lkv), W_UV)
+return o.view(-1, N * V) @ self.num_heads @ W_O
 
 
 ## Chunked Prefill
 
-For chunked prefill we want to use the compute friendly algorithm. We are
-assuming sufficiently large Sq / Skv ratio, in the future may want to switch to
+For chunked prefill we want to use the compute friendly algorithm. We are 
+assuming sufficiently large Sq / Skv ratio, in the future may want to switch to 
 the data-movement friendly approach if the chunk (i.e. `Sq`) is small.
 
 However, the compute-friendly approach can potentially run out of memory if Skv
 is large due to: `k_nope = (kv_c @ W_UK).view(Skv, N, P)`
 
-To mitigate this, we chunk the computation of attention with respect to the
-current context (i.e. `cache_kv_c` and `cache_k_pe`) so that we can used a
+To mitigate this, we chunk the computation of attention with respect to the 
+current context (i.e. `cache_kv_c` and `cache_k_pe`) so that we can used a 
 fixed workspace size.
 
 The chunked prefill approach is as follows:
 
-MCC        Max chunk of context to process per iter, computed dynamically,
+MCC        Max chunk of context to process per iter, computed dynamically, 
            used to bound the memory usage
 
 q_c        = h_t @ W_DQ
@@ -146,8 +138,8 @@ q_nope     = (q_c @ W_UQ).view(Sq, N, P)
 q_pe       = RoPE(q_c @ W_QR).view(Sq, N, R)
 new_kv_c   = h_t @ W_DKV
 new_k_pe   = RoPE(h_t @ W_KR)
-new_k_nope = (new_kv_c @ W_UK).view(Sq, N, P)
-new_v      = (new_kv_c @ W_UV).view(Sq, N, V)
+new_k_nope = (new_kv_c @ W_UK.view(Lkv, N * P)).view(Sq, N, P)
+new_v      = (new_kv_c @ W_UV.view(Lkv, N * V)).view(Sq, N, V)
 
 // MHA between queries and new KV
 //     with QK headdim = P + R
@@ -160,7 +152,7 @@ curr_o, curr_lse = scaled_dot_product_attention(
     new_v,
     casual=True,
     return_softmax_lse=True
-)
+) 
 
 // Compute attention with the already existing context
 for chunk_idx in range(cdiv(C, MCC)):
@@ -171,17 +163,17 @@ for chunk_idx in range(cdiv(C, MCC)):
     cache_k_pe_chunk   = cache_k_pe[chunk_start:chunk_end]
     cache_k_nope_chunk = (cache_kv_c_chunk @ W_UK).view(-1, N, P)
     cache_v_chunk      = (cache_kv_c_chunk @ W_UV).view(-1, N, V)
-
+    
     chunk_o, chunk_lse = scaled_dot_product_attention(
         torch.cat([q_nope, q_pe], dim=-1),
-        torch.cat([cache_k_nope_chunk,
-                   cache_k_pe_chunk.unsqueeze(1).expand(-1, N, -1)],
+        torch.cat([cache_k_nope_chunk, 
+                   cache_k_pe_chunk.unsqueeze(1).expand(-1, N, -1)], 
                    dim=-1),
         cache_v_chunk,
         casual=False,
         return_softmax_lse=True
     )
-
+    
     curr_o, curr_lse = merge_attn_states(
         suffix_output=curr_o,
         suffix_lse=curr_lse,
@@ -198,10 +190,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar
 
 import torch
-from compressed_tensors.quantization import QuantizationStrategy
 
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
@@ -659,7 +649,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         q_nope, q_pe = self.q_proj(x)[0]\
             .view(-1, self.num_heads, self.qk_head_dim)\
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        
+
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
         # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
@@ -668,6 +658,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         return ql_nope.transpose(0, 1), q_pe
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+
         def get_layer_weight(layer):
             WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
             for attr in WEIGHT_NAMES:
