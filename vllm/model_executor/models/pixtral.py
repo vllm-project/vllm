@@ -322,10 +322,25 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         return [
             PromptReplacement(
                 modality="image",
-                target=[image_token_id],
+                target="",  # Never match the prompt (see below note)
                 replacement=get_replacement,
             ),
         ]
+
+    def _cached_apply_hf_processor(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], MultiModalKwargs, bool]:
+        prompt_ids, mm_kwargs, _ = super()._cached_apply_hf_processor(
+            prompt=prompt,
+            mm_data_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
+
+        # NOTE: The tokens are already inserted by the chat template
+        return prompt_ids, mm_kwargs, True
 
 
 @MULTIMODAL_REGISTRY.register_processor(PixtralMultiModalProcessor,
