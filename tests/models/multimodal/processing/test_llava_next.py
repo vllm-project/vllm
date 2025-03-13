@@ -36,8 +36,7 @@ def _validate_image_max_tokens_one(
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 def test_processor_max_tokens(model_id):
     ctx = build_model_context(
-        model_name=model_id,
-        tokenizer_name=model_id,
+        model_id,
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": 1},
     )
@@ -136,8 +135,7 @@ def _test_image_prompt_replacements(
 @pytest.mark.parametrize("num_imgs", [1, 2])
 def test_processor_prompt_replacements_regression(model_id, num_imgs):
     ctx = build_model_context(
-        model_name=model_id,
-        tokenizer_name=model_id,
+        model_id,
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
@@ -166,8 +164,7 @@ def test_processor_prompt_replacements_regression(model_id, num_imgs):
 @pytest.mark.parametrize("num_imgs", [1])
 def test_processor_prompt_replacements_all(model_id, num_imgs):
     ctx = build_model_context(
-        model_name=model_id,
-        tokenizer_name=model_id,
+        model_id,
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
