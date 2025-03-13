@@ -31,6 +31,12 @@ class BuiltinLoggerName(str, Enum):
 
 
 class StatLoggerBase(ABC):
+    """Interface for logging metrics.
+
+    API users may define custom loggers that implement this interface.
+    However, note that the `SchedulerStats` and `IterationStats` classes
+    are not considered stable interfaces and may change in future versions.
+    """
 
     @abstractmethod
     def record(self, scheduler_stats: SchedulerStats,
