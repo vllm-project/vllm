@@ -507,7 +507,7 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
             model,
             dtype=dtype,
             max_model_len=8192,
-            max_num_seqs=2,
+            max_num_seqs=4,
             tensor_parallel_size=1,
             limit_mm_per_prompt={"image":
                                  _LIMIT_IMAGE_PER_PROMPT}) as vllm_model:
@@ -546,6 +546,23 @@ def test_regression(vllm_runner, image_assets, model, dtype, max_tokens,
         images = [
             [stop_sign],
             None,
+        ]
+        vllm_model.generate_greedy_logprobs(prompts,
+                                            max_tokens,
+                                            num_logprobs,
+                                            images=images)
+
+        # Mixed batch with text and images with different numbers of tiles
+        prompts = [
+            "<|begin_of_text|>Hello!",
+            "<|begin_of_text|>Some text before.<|image|>What is in the image?",  # noqa: E501
+            "<|begin_of_text|>Some text before.<|image|>What is in the image?",  # noqa: E501
+        ]
+        images = [
+            None,
+            [stop_sign],
+            # smaller image must be 2nd for the repro
+            [stop_sign.resize((448, 448))],
         ]
         vllm_model.generate_greedy_logprobs(prompts,
                                             max_tokens,
