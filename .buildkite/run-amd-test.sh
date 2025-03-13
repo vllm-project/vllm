@@ -113,9 +113,8 @@ if [[ $commands == *" entrypoints/openai "* ]]; then
 fi
 
 #ignore certain Entrypoints/llm tests
-if [[ $commands == *" entrypoints/llm "* ]]; then
-  commands=${commands//" entrypoints/llm "/" entrypoints/llm \
-  --ignore=entrypoints/llm/test_guided_generate.py "}
+if [[ $commands == *"pytest -v -s entrypoints/llm/test_guided_generate.py"* ]]; then
+  commands=${commands//"pytest -v -s entrypoints/llm/test_guided_generate.py"/" "}
 fi
 
 # --ignore=entrypoints/openai/test_encoder_decoder.py \
