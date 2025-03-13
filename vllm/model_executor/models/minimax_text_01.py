@@ -1245,14 +1245,27 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 
             if attn_metadata is None:
                 from vllm.attention import AttentionMetadata
+                context_lens_tensor = torch.zeros(input_ids.size(0), 
+                                                 dtype=torch.int32, 
+                                                 device=input_ids.device)
+                
+                slot_mapping = torch.arange(input_ids.size(0), 
+                                           dtype=torch.int32, 
+                                           device=input_ids.device)
+                
                 attn_metadata = AttentionMetadata(
                     num_prefills=input_ids.size(0),
                     num_prefill_tokens=input_ids.size(0),
                     num_decode_tokens=0,
-                    slot_mapping=None,
+                    slot_mapping=slot_mapping,
                     multi_modal_placeholder_index_maps=None,
                     enable_kv_scales_calculation=False
                 )
+                attn_metadata.context_lens_tensor = context_lens_tensor
+                
+                # 添加必要的属性方法
+                attn_metadata.prefill_metadata = property(lambda self: self)
+                attn_metadata.decode_metadata = property(lambda self: None if self.num_decode_tokens == 0 else self)
 
         hidden_states = self.model(input_ids, positions, kv_caches,
                                 attn_metadata, intermediate_tensors,
