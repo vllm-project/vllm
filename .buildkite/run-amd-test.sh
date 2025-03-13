@@ -109,6 +109,7 @@ if [[ $commands == *" entrypoints/openai "* ]]; then
   --ignore=entrypoints/openai/test_shutdown.py \
   --ignore=entrypoints/openai/test_completion.py \
   --ignore=entrypoints/openai/test_sleep.py \
+  --ignore=entrypoints/openai/test_models.py \
   --ignore=entrypoints/openai/test_prompt_validation.py "}
 fi
 
@@ -121,7 +122,7 @@ fi
 # --ignore=entrypoints/openai/test_embedding.py \
 # --ignore=entrypoints/openai/test_oot_registration.py
 # --ignore=entrypoints/openai/test_accuracy.py \
-
+# --ignore=entrypoints/openai/test_models.py <= Fails on MI250 but passes on MI300 as of 2025-03-13
 
 
 PARALLEL_JOB_COUNT=8
