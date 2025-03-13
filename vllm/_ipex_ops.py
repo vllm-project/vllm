@@ -248,23 +248,20 @@ class ipex_ops:
         gen_: Optional[torch.Generator],
     ):
         return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
+            output,
             query.contiguous(),
             key_cache,
             value_cache,
-            output,
             cu_seqlens_q,
             cu_seqlens_k,
-            seq_used_k,
-            block_table,
-            alibi_slopes,
             max_seqlen_q,
             max_seqlen_k,
-            p_dropout,
             softmax_scale,
-            zero_tensors,
             is_casual,
-            return_softmax,
-            gen_,
+            block_table,
+            alibi_slopes,
+            k_scale=1.0,
+            v_scale=1.0,
         )
 
     @staticmethod
