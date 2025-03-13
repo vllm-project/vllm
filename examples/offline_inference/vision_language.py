@@ -123,10 +123,13 @@ def run_gemma3(questions: list[str], modality: str):
     assert modality == "image"
     model_name = "google/gemma-3-4b-it"
 
-    llm = LLM(model=model_name,
-              max_model_len=2048,
-              max_num_seqs=2,
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model=model_name,
+        max_model_len=2048,
+        max_num_seqs=2,
+        mm_processor_kwargs={"do_pan_and_scan": True},  # Default is False
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
 
     prompts = [("<bos><start_of_turn>user\n"
                 f"<start_of_image>{question}<end_of_turn>\n"
@@ -460,14 +463,11 @@ def run_nvlm_d(questions: list[str], modality: str):
     model_name = "nvidia/NVLM-D-72B"
 
     # Adjust this as necessary to fit in GPU
-    llm = LLM(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=4096,
-        tensor_parallel_size=4,
-        mm_processor_kwargs={"do_pan_and_scan": True},  # Default is False
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
-    )
+    llm = LLM(model=model_name,
+              trust_remote_code=True,
+              max_model_len=4096,
+              tensor_parallel_size=4,
+              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
                                               trust_remote_code=True)
