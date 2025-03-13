@@ -1447,8 +1447,14 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
             actual_encoder_seq_lens = [
                 sum(num_tile) * num_tokens_per_tile for num_tile in num_tiles
             ]
-            for actual_len, last_group_len in zip(
-                    actual_encoder_seq_lens, attn_metadata.encoder_seq_lens):
+
+            # remove 0 entries for text-only requests for these assertions
+            attn_metadata_lens = [
+                len for len in attn_metadata.encoder_seq_lens if len > 0
+            ]
+            assert len(actual_encoder_seq_lens) == len(attn_metadata_lens)
+            for actual_len, last_group_len in zip(actual_encoder_seq_lens,
+                                                  attn_metadata_lens):
                 assert actual_len >= last_group_len
 
             cross_attention_states = self.get_cross_attention_states(
