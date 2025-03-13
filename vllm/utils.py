@@ -2156,18 +2156,20 @@ def _maybe_force_spawn():
     if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
         return
 
-    for checker, reason in ((cuda_is_initialized, "CUDA is initialized"), (
-            ray_is_initialized,
-            "Ray is initialized and Ray process can only be spawned")):
-        if checker():
-            logger.warning(
-                "We must use the `spawn` multiprocessing start method. "
-                "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-                "See https://docs.vllm.ai/en/latest/getting_started/"
-                "troubleshooting.html#python-multiprocessing "
-                "for more information. Reason: %s", reason)
-            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-            break
+    reason = None
+    if cuda_is_initialized():
+        reason = "CUDA is initialized"
+    elif ray_is_initialized():
+        reason = "Ray is initialized and Ray process can only be spawned"
+
+    if reason is not None:
+        logger.warning(
+            "We must use the `spawn` multiprocessing start method. "
+            "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+            "See https://docs.vllm.ai/en/latest/getting_started/"
+            "troubleshooting.html#python-multiprocessing "
+            "for more information. Reason: %s", reason)
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def get_mp_context():
