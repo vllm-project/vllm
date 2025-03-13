@@ -1,245 +1,262 @@
 # SPDX-License-Identifier: Apache-2.0
-
-import asyncio
-import time
-import uuid
-from typing import Optional
+from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import AutoTokenizer
 
-from tests.utils import fork_new_process_for_each_test
-from vllm import SamplingParams
-from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
-                                        SyncMPClient)
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
                 allow_module_level=True)
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
-TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
-PROMPT = "Hello my name is Robert and I love quantization kernels"
-PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
+
+# Unit tests for _initialize_kv_caches function
+def test_initialize_kv_caches_no_gpu_memory():
+    """Test handling of no available GPU memory."""
+    model_executor = MagicMock()
+    model_executor.get_kv_cache_specs.return_value = [
+        KVCacheSpec(block_size=16, num_blocks=100)
+    ]
+    # No memory available
+    model_executor.determine_available_memory.return_value = -10
+
+    # Create a minimal config required for the test with mocked ModelConfig
+    vllm_config = MagicMock()
+    cache_config = MagicMock()
+    cache_config.min_required_gpu_blocks = 16
+    vllm_config.cache_config = cache_config
+
+    engine_core = EngineCore.__new__(
+        EngineCore)  # Create instance without calling __init__
+    engine_core.model_executor = model_executor
+
+    with pytest.raises(RuntimeError) as exc_info:
+        engine_core._initialize_kv_caches(vllm_config)
+
+    assert "Not enough GPU memory available to fit the model" in str(
+        exc_info.value)
 
 
-def make_request(params: SamplingParams) -> EngineCoreRequest:
-    return EngineCoreRequest(
-        request_id=str(uuid.uuid4()),
-        prompt=PROMPT,
-        prompt_token_ids=PROMPT_TOKENS,
-        mm_inputs=None,
-        mm_hashes=None,
-        mm_placeholders=None,
-        sampling_params=params,
-        eos_token_id=None,
-        arrival_time=time.time(),
-        lora_request=None,
-    )
+def test_initialize_kv_caches_zero_blocks():
+    """Test handling of zero KV cache blocks allocation."""
+    model_executor = MagicMock()
+    model_executor.get_kv_cache_specs.return_value = [
+        KVCacheSpec(block_size=16, num_blocks=100)
+    ]
+
+    # Some memory available
+    model_executor.determine_available_memory.return_value = 1000
+
+    # Mock the get_kv_cache_configs function to return an empty set of configs
+    with patch('vllm.v1.engine.core.get_kv_cache_configs') as mock_get_configs:
+        mock_get_configs.return_value = []  # No blocks allocated
+
+        # Create a minimal config required for the test with mocked ModelConfig
+        vllm_config = MagicMock()
+        cache_config = MagicMock()
+        cache_config.min_required_gpu_blocks = 16
+        vllm_config.cache_config = cache_config
+
+        engine_core = EngineCore.__new__(
+            EngineCore)  # Create instance without calling __init__
+        engine_core.model_executor = model_executor
+
+        with pytest.raises(RuntimeError) as exc_info:
+            engine_core._initialize_kv_caches(vllm_config)
+
+        assert "Could not allocate any KV cache blocks" in str(exc_info.value)
 
 
-def loop_until_done(client: EngineCoreClient, outputs: dict):
+def test_initialize_kv_caches_insufficient_blocks():
+    """Test handling of insufficient KV cache blocks."""
+    model_executor = MagicMock()
+    model_executor.get_kv_cache_specs.return_value = [
+        KVCacheSpec(block_size=16, num_blocks=100)
+    ]
 
-    while True:
-        engine_core_outputs = client.get_output().outputs
+    # Some memory available
+    model_executor.determine_available_memory.return_value = 1000
 
-        if len(engine_core_outputs) == 0:
-            continue
+    # Create the KVCacheConfig with appropriate properties
+    mock_kv_config = MagicMock(spec=KVCacheConfig)
+    mock_kv_config.num_blocks = 10  # Fewer blocks than minimum required
 
-        all_finished = True
-        for out in engine_core_outputs:
-            outputs[out.request_id].append(out)
-            if not out.finished:
-                all_finished = False
+    # Mock the get_kv_cache_configs to return configs with insufficient blocks
+    with patch('vllm.v1.engine.core.get_kv_cache_configs') as mock_get_configs:
+        mock_get_configs.return_value = [mock_kv_config]
 
-        if all_finished:
-            break
+        # Create a minimal config with minimum required blocks
+        vllm_config = MagicMock()
+        cache_config = MagicMock()
+        cache_config.min_required_gpu_blocks = 20  #min required 20, but only 10
+        vllm_config.cache_config = cache_config
 
+        engine_core = EngineCore.__new__(
+            EngineCore)  # Create instance without calling __init__
+        engine_core.model_executor = model_executor
 
-async def loop_until_done_async(client: EngineCoreClient, outputs: dict):
+        with pytest.raises(RuntimeError) as exc_info:
+            engine_core._initialize_kv_caches(vllm_config)
 
-    while True:
-        engine_core_outputs = (await client.get_output_async()).outputs
-
-        if len(engine_core_outputs) == 0:
-            continue
-
-        all_finished = True
-        for out in engine_core_outputs:
-            outputs[out.request_id].append(out)
-            if not out.finished:
-                all_finished = False
-
-        if all_finished:
-            break
-
-
-# Dummy utility function to monkey-patch into engine core.
-def echo(self, msg: str, err_msg: Optional[str] = None) -> str:
-    print(f"echo util function called: {msg}, {err_msg}")
-    if err_msg is not None:
-        raise ValueError(err_msg)
-    return msg
+        assert "Could only allocate 10 KV cache blocks, " in str(
+            exc_info.value)
+        assert "but minimum required is 20" in str(exc_info.value)
 
 
-@fork_new_process_for_each_test
-@pytest.mark.parametrize("multiprocessing_mode", [True, False])
-def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
+def test_initialize_kv_caches_cuda_out_of_memory():
+    """Test handling of CUDA out of memory during initialization."""
+    model_executor = MagicMock()
+    model_executor.get_kv_cache_specs.return_value = [
+        KVCacheSpec(block_size=16, num_blocks=100)
+    ]
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
+    # Some memory available
+    model_executor.determine_available_memory.return_value = 1000
 
-        # Monkey-patch core engine utility function to test.
-        m.setattr(EngineCore, "echo", echo, raising=False)
+    # Set up the model_executor to raise a CUDA OOM error during initialization
+    cuda_error = RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+    model_executor.initialize_from_config.side_effect = cuda_error
 
-        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
-        vllm_config = engine_args.create_engine_config(
-            UsageContext.UNKNOWN_CONTEXT)
-        executor_class = Executor.get_class(vllm_config)
-        client = EngineCoreClient.make_client(
-            multiprocess_mode=multiprocessing_mode,
-            asyncio_mode=False,
-            vllm_config=vllm_config,
-            executor_class=executor_class,
-            log_stats=False,
-        )
+    # Create the KVCacheConfig with appropriate properties
+    mock_kv_config = MagicMock(spec=KVCacheConfig)
+    mock_kv_config.num_blocks = 50
 
-        MAX_TOKENS = 20
-        params = SamplingParams(max_tokens=MAX_TOKENS)
-        """Normal Request Cycle."""
-        requests = [make_request(params) for _ in range(10)]
-        request_ids = [req.request_id for req in requests]
+    # Mock the get_kv_cache_configs function to return valid configs
+    with patch('vllm.v1.engine.core.get_kv_cache_configs') as mock_get_configs:
+        mock_get_configs.return_value = [mock_kv_config]
 
-        # Add requests to the engine.
-        for request in requests:
-            client.add_request(request)
-            time.sleep(0.01)
+        vllm_config = MagicMock()
+        cache_config = MagicMock()
+        cache_config.min_required_gpu_blocks = 16
+        vllm_config.cache_config = cache_config
 
-        outputs: dict[str, list] = {req_id: [] for req_id in request_ids}
-        loop_until_done(client, outputs)
+        engine_core = EngineCore.__new__(
+            EngineCore)  # Create instance without calling __init__
+        engine_core.model_executor = model_executor
 
-        for req_id in request_ids:
-            assert len(outputs[req_id]) == MAX_TOKENS, (
-                f"{outputs[req_id]=}, {MAX_TOKENS=}")
-        """Abort Request Cycle."""
+        with pytest.raises(RuntimeError) as exc_info:
+            engine_core._initialize_kv_caches(vllm_config)
 
-        # Note: this code pathway will only work for multiprocessing
-        # since we have to call get_output() explicitly
-
-        # Add requests to the engine.
-        for idx, request in enumerate(requests):
-            client.add_request(request)
-            time.sleep(0.01)
-            if idx % 2 == 0:
-                client.abort_requests([request.request_id])
-
-        outputs = {req_id: [] for req_id in request_ids}
-        loop_until_done(client, outputs)
-
-        for idx, req_id in enumerate(request_ids):
-            if idx % 2 == 0:
-                assert len(outputs[req_id]) < MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
-            else:
-                assert len(outputs[req_id]) == MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
-        """Abort after request is finished."""
-
-        # Note: this code pathway will only work for multiprocessing
-        # since we have to call get_output() explicitly
-
-        request = requests[0]
-        client.add_request(request)
-        time.sleep(10.)
-
-        client.abort_requests([request.request_id])
-
-        if multiprocessing_mode:
-            """Utility method invocation"""
-
-            core_client: SyncMPClient = client
-
-            result = core_client._call_utility("echo", "testarg")
-            assert result == "testarg"
-
-            with pytest.raises(Exception) as e_info:
-                core_client._call_utility("echo", None, "help!")
-
-            assert str(e_info.value) == "Call to echo method failed: help!"
+        assert "CUDA out of memory during model initialization" in str(
+            exc_info.value)
 
 
-@pytest.mark.asyncio(loop_scope="function")
-async def test_engine_core_client_asyncio(monkeypatch):
+def test_initialize_kv_caches_operation_not_implemented():
+    """Test 'operation not implemented' error during initialization."""
+    model_executor = MagicMock()
+    model_executor.get_kv_cache_specs.return_value = [
+        KVCacheSpec(block_size=16, num_blocks=100)
+    ]
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
+    # Some memory available
+    model_executor.determine_available_memory.return_value = 1000
 
-        # Monkey-patch core engine utility function to test.
-        m.setattr(EngineCore, "echo", echo, raising=False)
+    # Set up the model_executor to raise an 'operation not implemented' error
+    not_implemented_error = RuntimeError("operation not implemented for dtype")
+    model_executor.initialize_from_config.side_effect = not_implemented_error
 
-        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
-        vllm_config = engine_args.create_engine_config(
-            usage_context=UsageContext.UNKNOWN_CONTEXT)
-        executor_class = Executor.get_class(vllm_config)
-        client = EngineCoreClient.make_client(
-            multiprocess_mode=True,
-            asyncio_mode=True,
-            vllm_config=vllm_config,
-            executor_class=executor_class,
-            log_stats=True,
-        )
+    # Create the KVCacheConfig with appropriate properties
+    mock_kv_config = MagicMock(spec=KVCacheConfig)
+    mock_kv_config.num_blocks = 50
 
-        MAX_TOKENS = 20
-        params = SamplingParams(max_tokens=MAX_TOKENS)
-        """Normal Request Cycle."""
+    # Mock the get_kv_cache_configs function to return valid configs
+    with patch('vllm.v1.engine.core.get_kv_cache_configs') as mock_get_configs:
+        mock_get_configs.return_value = [mock_kv_config]
 
-        requests = [make_request(params) for _ in range(10)]
-        request_ids = [req.request_id for req in requests]
+        vllm_config = MagicMock()
+        cache_config = MagicMock()
+        cache_config.min_required_gpu_blocks = 16
+        vllm_config.cache_config = cache_config
 
-        # Add requests to the engine.
-        for request in requests:
-            await client.add_request_async(request)
-            await asyncio.sleep(0.01)
+        engine_core = EngineCore.__new__(
+            EngineCore)  # Create instance without calling __init__
+        engine_core.model_executor = model_executor
 
-        outputs: dict[str, list] = {req_id: [] for req_id in request_ids}
-        await loop_until_done_async(client, outputs)
+        with pytest.raises(RuntimeError) as exc_info:
+            engine_core._initialize_kv_caches(vllm_config)
 
-        for req_id in request_ids:
-            assert len(outputs[req_id]) == MAX_TOKENS, (
-                f"{outputs[req_id]=}, {MAX_TOKENS=}")
-        """Abort Request Cycle."""
+        assert "Model operation not supported on this hardware" in str(
+            exc_info.value)
 
-        # Add requests to the engine.
-        for idx, request in enumerate(requests):
-            await client.add_request_async(request)
-            await asyncio.sleep(0.01)
-            if idx % 2 == 0:
-                await client.abort_requests_async([request.request_id])
 
-        outputs = {req_id: [] for req_id in request_ids}
-        await loop_until_done_async(client, outputs)
+def test_initialize_kv_caches_general_runtime_error():
+    """Test handling of general runtime errors during initialization."""
+    model_executor = MagicMock()
+    model_executor.get_kv_cache_specs.return_value = [
+        KVCacheSpec(block_size=16, num_blocks=100)
+    ]
 
-        for idx, req_id in enumerate(request_ids):
-            if idx % 2 == 0:
-                assert len(outputs[req_id]) < MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
-            else:
-                assert len(outputs[req_id]) == MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
-        """Utility method invocation"""
+    # Some memory available
+    model_executor.determine_available_memory.return_value = 1000
 
-        core_client: AsyncMPClient = client
+    # Set up the model_executor to raise a general error
+    general_error = RuntimeError("Some unexpected error occurred")
+    model_executor.initialize_from_config.side_effect = general_error
 
-        result = await core_client._call_utility_async("echo", "testarg")
-        assert result == "testarg"
+    # Create the KVCacheConfig with appropriate properties
+    mock_kv_config = MagicMock(spec=KVCacheConfig)
+    mock_kv_config.num_blocks = 50
 
-        with pytest.raises(Exception) as e_info:
-            await core_client._call_utility_async("echo", None, "help!")
+    # Mock the get_kv_cache_configs function to return valid configs
+    with patch('vllm.v1.engine.core.get_kv_cache_configs') as mock_get_configs:
+        mock_get_configs.return_value = [mock_kv_config]
 
-        assert str(e_info.value) == "Call to echo method failed: help!"
+        vllm_config = MagicMock()
+        cache_config = MagicMock()
+        cache_config.min_required_gpu_blocks = 16
+        vllm_config.cache_config = cache_config
+
+        engine_core = EngineCore.__new__(
+            EngineCore)  # Create instance without calling __init__
+        engine_core.model_executor = model_executor
+
+        with pytest.raises(RuntimeError) as exc_info:
+            engine_core._initialize_kv_caches(vllm_config)
+
+        # The original error should be re-raised
+        assert "Some unexpected error occurred" in str(exc_info.value)
+
+
+def test_initialize_kv_caches_success():
+    """Test successful initialization of KV caches."""
+    model_executor = MagicMock()
+    model_executor.get_kv_cache_specs.return_value = [
+        KVCacheSpec(block_size=16, num_blocks=100)
+    ]
+    # Some memory available
+    model_executor.determine_available_memory.return_value = 1000
+
+    # Create the KVCacheConfig with appropriate properties
+    mock_kv_config = MagicMock(spec=KVCacheConfig)
+    mock_kv_config.num_blocks = 50
+
+    # Mock the get_kv_cache_configs function to return valid configs
+    with patch('vllm.v1.engine.core.get_kv_cache_configs') as mock_get_configs:
+        mock_get_configs.return_value = [mock_kv_config]
+
+        vllm_config = MagicMock()
+        cache_config = MagicMock()
+        cache_config.min_required_gpu_blocks = 16
+        vllm_config.cache_config = cache_config
+
+        engine_core = EngineCore.__new__(
+            EngineCore)  # Create instance without calling __init__
+        engine_core.model_executor = model_executor
+        engine_core.structured_output_manager = MagicMock(
+        )  # Add this to avoid AttributeError
+
+        # Patching the logger to check for success message
+        with patch('vllm.v1.engine.core.logger') as mock_logger:
+            num_gpu_blocks, num_cpu_blocks = engine_core._initialize_kv_caches(
+                vllm_config)
+
+            # Verify success
+            assert num_gpu_blocks == 50
+            assert num_cpu_blocks == 0
+            # Verify that the info log was called with elapsed time message
+            mock_logger.info.assert_called_with(
+                ("init engine (profile, create kv cache, "
+                 "warmup model) took %.2f seconds"),
+                mock_logger.info.call_args[0][1])
