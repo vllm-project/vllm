@@ -1045,7 +1045,7 @@ class MiniMaxText01Model(nn.Module):
         """
         seq_to_slot_maps = {}
         seq_id_map = sum(list(kwargs["request_ids_to_seq_ids"].values()), [])
-        for _, seq_to_slot_map in self.minimax_cache.minimax_cache_indices_mapping.items():
+        for _, seq_to_slot_map in self.minimax_cache.cache_indices_mapping.items():
             seq_to_slot_maps.update(seq_to_slot_map)
         for _prefill_id in range(attn_metadata.num_prefills):
             seq_id = seq_id_map[_prefill_id]
