@@ -895,7 +895,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if req_id in scheduler_output.structured_output_request_ids:
                 struct_out_req_batch_indices[req_id] = logit_index
 
-        out_indices = list(struct_out_req_batch_indices.values())
+        out_indices = []
 
         # Reorder the bitmask to match the order of the requests in the batch.
         sorted_bitmask = np.zeros_like(grammar_bitmask,
@@ -911,6 +911,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for i in range(1 + num_spec_tokens):
                 sorted_bitmask[batch_index + i] = \
                     grammar_bitmask[cumulative_index + i]
+                out_indices.append(batch_index + i)
             cumulative_index += 1 + num_spec_tokens
         grammar_bitmask = sorted_bitmask
 
