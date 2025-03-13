@@ -697,7 +697,7 @@ sentencepiece==0.2.0
     #   mistral-common
     #   vllm
     #   xgrammar
-+setuptools==76.0.0
+setuptools==76.0.0
     # via
     #   pytablewriter
     #   torch
