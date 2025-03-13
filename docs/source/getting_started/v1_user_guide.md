@@ -24,31 +24,26 @@ This living user guide outlines a few known **important changes and limitations*
 
 ### Feature / Model Supports Overview
 
-| Feature / Model                           | Status                                                                           | Notes                                                            |
-|-------------------------------------------|----------------------------------------------------------------------------------------------|------------------------------------------------------------------|
-| **Logprobs Calculation**                  | <nobr>🟢 Functional</nobr>                                                                   | Returns raw logprobs; post-adjustments logprobs support pending. |
-| **Prompt Logprobs with Prefix Caching**   | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>    | Computes prompt logprobs without caching; caching to be added.   |
-| **LoRA**                                  | <nobr>🟢 Functional ([PR #13096](https://github.com/vllm-project/vllm/pull/13096))</nobr>    | Working; optimization coming.                                    |
-| **Spec Decode**                           | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>           | Supports Ngram-based; more support coming.                       |
-| **FP8 KV Cache**                          | <nobr>🟡 Planned</nobr>                                                                      | FP8 kernels exist; KV cache integration pending.                 |
-| **Structured Generation Fallback**        | <nobr>🔴 Deprecated</nobr>                                                                   | Supports only `xgrammar:no_fallback`.                            |
-| **best_of**                               | <nobr>🔴 Deprecated ([RFC #13361](https://github.com/vllm-project/vllm/issues/13361))</nobr> | Deprecated due to limited use.                                   |
-| **Per-Request Logits Processors**         | <nobr>🔴 Deprecated ([RFC #13360](https://github.com/vllm-project/vllm/pull/13360))</nobr>   | Deprecated; global processors will be used instead.              |
-| **GPU <> CPU KV Cache Swapping**          | <nobr>🔴 Deprecated</nobr>                                                                   | No longer needed.                                                |
-| **Embedding Models**                      | <nobr>🟡 Planned</nobr>                                                                      | `PoolingModelRunner` support pending.                            |
-| **Mamba Models**                          | <nobr>🟡 Planned</nobr>                                                                      | Selective state-space support pending.                           |
-| **Encoder-Decoder Models**                | <nobr>🟡 Planned</nobr>                                                                      | Cross-attention support pending.                                 |
-
-<details>
-  <summary><strong>Legend</strong></summary>
+| Feature / Model                           | Status                                                                           |
+|-------------------------------------------|-----------------------------------------------------------------------------------|
+| **Logprobs Calculation**                  | <nobr>🟢 Functional</nobr>                                                        |
+| **Prompt Logprobs with Prefix Caching**   | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>  |
+| **LoRA**                                  | <nobr>🟢 Functional ([PR #13096](https://github.com/vllm-project/vllm/pull/13096))</nobr>   |
+| **Spec Decode**                           | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>          |
+| **FP8 KV Cache**                          | <nobr>🟡 Planned</nobr>                                                           |
+| **Structured Generation Fallback**        | <nobr>🔴 Deprecated</nobr>                                                        |
+| **best_of**                               | <nobr>🔴 Deprecated ([RFC #13361](https://github.com/vllm-project/vllm/issues/13361))</nobr>|
+| **Per-Request Logits Processors**         | <nobr>🔴 Deprecated ([RFC #13360](https://github.com/vllm-project/vllm/pull/13360))</nobr>  |
+| **GPU <> CPU KV Cache Swapping**          | <nobr>🔴 Deprecated</nobr>                                                        |
+| **Embedding Models**                      | <nobr>🟡 Planned</nobr>                                                           |
+| **Mamba Models**                          | <nobr>🟡 Planned</nobr>                                                           |
+| **Encoder-Decoder Models**                | <nobr>🟡 Planned</nobr>                                                           |
 
 - **🚀 Optimized**: Nearly fully optimized, with no further work currently planned.
 - **🟢 Functional**: Fully operational, with ongoing optimizations.  
 - **🚧 WIP**: Under active development.  
 - **🟡 Planned**: Scheduled for future implementation (some may have open PRs/RFCs).  
 - **🔴 Deprecated**: Not planned for v1 unless there is strong demand.
-
-</details>
 
 ### Semantic Changes and Deprecated Features
 
