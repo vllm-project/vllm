@@ -24,9 +24,12 @@ Currently only the forward kernel is supported, and contains these features:
 import torch
 import triton
 import triton.language as tl
+from vllm.platforms import current_platform
 
 SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
 
+QKV_DTYPE_TRITON = tl.float8e4b8
+QKV_DTYPE_TORCH = torch.float8_e4m3fnuz
 
 class MetaData:
     cu_seqlens_q = None
@@ -39,9 +42,11 @@ class MetaData:
     persistent = None
     num_contexts = 0
     varlen = False
-    int8 = False
+    eight_bit = False
     layout = None
     dropout_p, return_encoded_softmax = 0.0, False
+    eight_bit_dtype_triton = QKV_DTYPE_TRITON
+    eight_bit_dtype_torch = QKV_DTYPE_TORCH
 
     def __init__(self, sm_scale=1.0):
         self.sm_scale = sm_scale
@@ -66,18 +71,19 @@ class MetaData:
     def set_persistent(self, persistent):
         self.persistent = persistent
 
-    def set_int8_params(self, q_descale, k_descale, v_descale, p_scale,
-                        p_descale):
-        self.int8 = True
+    def set_eight_bit_params(self, q_descale, k_descale, v_descale, p_scale,
+                             p_descale, o_scale):
+        self.eight_bit = True
         self.q_descale = q_descale
         self.k_descale = k_descale
         self.v_descale = v_descale
         self.p_scale = p_scale
         self.p_descale = p_descale
+        self.o_scale = o_scale
         self.use_p_scale = (p_scale is not None) and (
             p_descale is not None) and (v_descale is not None)
-        self.int8_kv = ((q_descale is None) and (k_descale is not None)
-                        and (v_descale is not None))
+        self.eight_bit_kv = ((q_descale is None) and (k_descale is not None)
+                             and (v_descale is not None))
 
     def need_bias(self, bias, batch, nheads, seqlen_q, seqlen_k):
         assert bias.is_cuda
@@ -122,15 +128,15 @@ class MetaData:
         assert k.shape == v.shape
         assert q.shape[-1] == k.shape[-1] and q.shape[-1] == v.shape[-1]
         # TODO: Change assert if we support qkl f8 and v f16
-        if self.int8:
-            if self.int8_kv:
-                assert v.dtype == k.dtype and k.dtype == torch.int8
+        if self.eight_bit:
+            if self.eight_bit_kv:
+                assert v.dtype == k.dtype and k.dtype == self.eight_bit_dtype_torch 
                 assert q.dtype != k.dtype
                 assert (self.v_descale is not None) and (self.k_descale
                                                          is not None)
             else:
                 assert (q.dtype == k.dtype and q.dtype == v.dtype
-                        and q.dtype == torch.int8)
+                        and q.dtype == self.eight_bit_dtype_torch)
                 assert (self.q_descale
                         is not None) and (self.k_descale
                                           is not None) and (self.v_descale
@@ -139,7 +145,7 @@ class MetaData:
                     assert (self.p_scale is not None) and (self.p_descale
                                                            is not None)
         else:
-            assert q.dtype == k.dtype and q.dtype == v.dtype
+            assert (q.dtype == k.dtype) and (q.dtype == v.dtype)
         assert head_size <= 256
         assert o.shape == q.shape
         assert (nheads_q % nheads_k) == 0
@@ -201,16 +207,6 @@ def load_fn(ptrs, offset_first, offset_second, boundary_first,
 
 
 @triton.jit
-def print_gpu(prefix, val=None):
-    if (tl.program_id(0) == 0) and ((tl.program_id(1) == 0) and
-                                    (tl.program_id(2) == 0)):
-        if val is not None:
-            tl.device_print(prefix, val)
-        else:
-            tl.device_print(prefix)
-
-
-@triton.jit
 def compute_alibi_block(alibi_slope,
                         seqlen_q,
                         seqlen_k,
@@ -265,19 +261,50 @@ def compute_alibi_tensor(alibi_slopes, seqlen_q, seqlen_k):
 
 
 @triton.jit
-def _attn_fwd_inner(
-        acc, l_i, m_i, q, k_ptrs, v_ptrs, bias_ptrs, stride_kn, stride_vk,
-        stride_bn, start_m, actual_seqlen_k, actual_seqlen_q, dropout_p,
-        philox_seed, batch_philox_offset, encoded_sm_ptrs, block_min,
-        block_max, offs_n_causal, masked_blocks, n_extra_tokens, alibi_slope,
-        q_descale, k_descale, v_descale, p_scale, IS_CAUSAL: tl.constexpr,
-        BLOCK_M: tl.constexpr, BLOCK_DMODEL: tl.constexpr,
-        BLOCK_N: tl.constexpr, OFFS_M: tl.constexpr, OFFS_N: tl.constexpr,
-        PRE_LOAD_V: tl.constexpr, MASK_STEPS: tl.constexpr,
-        ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr,
-        PADDED_HEAD: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr,
-        QK_SCALE: tl.constexpr, INT8_GEMM: tl.constexpr,
-        USE_P_SCALE: tl.constexpr, INT8_KV: tl.constexpr):
+def _attn_fwd_inner(acc,
+                    l_i,
+                    m_i,
+                    q,
+                    k_ptrs,
+                    v_ptrs,
+                    bias_ptrs,
+                    stride_kn,
+                    stride_vk,
+                    stride_bn,
+                    start_m,
+                    actual_seqlen_k,
+                    actual_seqlen_q,
+                    dropout_p,
+                    philox_seed,
+                    batch_philox_offset,
+                    encoded_sm_ptrs,
+                    block_min,
+                    block_max,
+                    offs_n_causal,
+                    masked_blocks,
+                    n_extra_tokens,
+                    alibi_slope,
+                    q_descale,
+                    k_descale,
+                    v_descale,
+                    p_scale,
+                    IS_CAUSAL: tl.constexpr,
+                    BLOCK_M: tl.constexpr,
+                    BLOCK_DMODEL: tl.constexpr,
+                    BLOCK_N: tl.constexpr,
+                    OFFS_M: tl.constexpr,
+                    OFFS_N: tl.constexpr,
+                    PRE_LOAD_V: tl.constexpr,
+                    MASK_STEPS: tl.constexpr,
+                    ENABLE_DROPOUT: tl.constexpr,
+                    RETURN_ENCODED_SOFTMAX: tl.constexpr,
+                    PADDED_HEAD: tl.constexpr,
+                    ACTUAL_BLOCK_DMODEL: tl.constexpr,
+                    QK_SCALE: tl.constexpr,
+                    EIGHT_BIT_GEMM: tl.constexpr,
+                    USE_P_SCALE: tl.constexpr,
+                    EIGHT_BIT_KV: tl.constexpr,
+                    EIGHT_BIT_DTYPE: tl.constexpr = QKV_DTYPE_TRITON):
     # loop over k, v, and update accumulator
     for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
@@ -311,12 +338,13 @@ def _attn_fwd_inner(
             causal_boundary = start_n + offs_n_causal
             causal_mask = OFFS_M[:, None] >= causal_boundary[None, :]
             qk = tl.where(causal_mask, qk, float("-inf"))
+
         # -- compute qk ----
-        if INT8_GEMM:
+        if EIGHT_BIT_GEMM:
             qk += ((((tl.dot(q, k).to(tl.float32) * q_descale)) * k_descale) *
                    QK_SCALE)
         else:
-            if INT8_KV:
+            if EIGHT_BIT_KV:
                 k = (k * k_descale).to(q.type.element_ty)
             qk += (tl.dot(q, k) * QK_SCALE)
 
@@ -372,16 +400,16 @@ def _attn_fwd_inner(
         # update m_i and l_i
         m_i = m_ij
 
-        if INT8_GEMM:
+        if EIGHT_BIT_GEMM:
             if USE_P_SCALE:
-                p = (p * p_scale).to(tl.int8)
-                # They are all int8
+                p = (p * p_scale).to(EIGHT_BIT_DTYPE)
+                # They are all eight bit
                 acc += tl.dot(p, v)
             else:
-                # v is in int8 but p is not, we want the gemm in p's type
+                # v is in eight_bit but p is not, we want the gemm in p's type
                 acc += tl.dot(p, v.to(p.type.element_ty))
         else:
-            if INT8_KV:
+            if EIGHT_BIT_KV:
                 v = (v * v_descale).to(p.type.element_ty)
             acc += tl.dot(p.to(v.type.element_ty), v)
 
@@ -557,6 +585,8 @@ def get_autotune_configs():
 
 autotune_configs, autotune_keys = get_autotune_configs()
 
+float8_info = torch.finfo(torch.float8_e4m3fnuz)
+
 
 @triton.autotune(
     configs=autotune_configs,
@@ -565,23 +595,77 @@ autotune_configs, autotune_keys = get_autotune_configs()
 )
 @triton.jit
 def attn_fwd(
-        Q, K, V, bias, SM_SCALE: tl.constexpr, L, Out, stride_qz, stride_qh,
-        stride_qm, stride_qk, stride_kz, stride_kh, stride_kn, stride_kk,
-        stride_vz, stride_vh, stride_vk, stride_vn, stride_oz, stride_oh,
-        stride_om, stride_on, stride_bz, stride_bh, stride_bm, stride_bn,
-        stride_az, stride_ah, Q_descale, K_descale, P_scale, P_descale,
-        V_descale, cu_seqlens_q, cu_seqlens_k, dropout_p, philox_seed,
-        PERSISTENT: tl.constexpr, PERSISTENT_DYNAMIC: tl.constexpr,
-        atomic_counter, NUM_CU: tl.constexpr, GRID_CU_MULTIP: tl.constexpr,
-        B: tl.constexpr, philox_offset_base, encoded_softmax, alibi_slopes,
-        HQ: tl.constexpr, HK: tl.constexpr, ACTUAL_BLOCK_DMODEL: tl.constexpr,
-        MAX_SEQLENS_Q: tl.constexpr, MAX_SEQLENS_K: tl.constexpr,
-        VARLEN: tl.constexpr, IS_CAUSAL: tl.constexpr, BLOCK_M: tl.constexpr,
-        BLOCK_DMODEL: tl.constexpr, BLOCK_N: tl.constexpr,
-        PRE_LOAD_V: tl.constexpr, USE_BIAS: tl.constexpr,
-        ENABLE_DROPOUT: tl.constexpr, RETURN_ENCODED_SOFTMAX: tl.constexpr,
-        USE_ALIBI: tl.constexpr, INT8: tl.constexpr, USE_P_SCALE: tl.constexpr,
-        INT8_KV: tl.constexpr):
+    Q,
+    K,
+    V,
+    bias,
+    SM_SCALE: tl.constexpr,
+    L,
+    Out,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qk,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kk,
+    stride_vz,
+    stride_vh,
+    stride_vk,
+    stride_vn,
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_on,
+    stride_bz,
+    stride_bh,
+    stride_bm,
+    stride_bn,
+    stride_az,
+    stride_ah,
+    Q_descale,
+    K_descale,
+    P_scale,
+    P_descale,
+    o_descale,
+    V_descale,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    dropout_p,
+    philox_seed,
+    PERSISTENT: tl.constexpr,
+    PERSISTENT_DYNAMIC: tl.constexpr,
+    atomic_counter,
+    NUM_CU: tl.constexpr,
+    GRID_CU_MULTIP: tl.constexpr,
+    B: tl.constexpr,
+    philox_offset_base,
+    encoded_softmax,
+    alibi_slopes,
+    HQ: tl.constexpr,
+    HK: tl.constexpr,
+    ACTUAL_BLOCK_DMODEL: tl.constexpr,
+    MAX_SEQLENS_Q: tl.constexpr,
+    MAX_SEQLENS_K: tl.constexpr,
+    VARLEN: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    PRE_LOAD_V: tl.constexpr,
+    USE_BIAS: tl.constexpr,
+    ENABLE_DROPOUT: tl.constexpr,
+    RETURN_ENCODED_SOFTMAX: tl.constexpr,
+    USE_ALIBI: tl.constexpr,
+    EIGHT_BIT: tl.constexpr,
+    USE_P_SCALE: tl.constexpr,
+    EIGHT_BIT_KV: tl.constexpr,
+    FP8_MIN: tl.constexpr = float8_info.min,
+    FP8_MAX: tl.constexpr = float8_info.max,
+    EIGHT_BIT_DTYPE: tl.constexpr = QKV_DTYPE_TRITON,
+):
+
 
     if PERSISTENT:  # if persistent, kernel loops over multiple tiles
         NUM_WG = NUM_CU * GRID_CU_MULTIP  # number of workgroups launched
@@ -666,8 +750,10 @@ def attn_fwd(
                                 cu_seqlens_q_start * stride_om)
                     o_ptrs = (o_offset + offs_m[:, None] * stride_om +
                               offs_d[None, :] * stride_on)
+                    # acc = tl.zeros([BLOCK_M, BLOCK_DMODEL],
+                                   # dtype=Out.type.element_ty)
                     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL],
-                                   dtype=Out.type.element_ty)
+                                   dtype=tl.float32)
                     o_ptrs_mask = (offs_m[:, None] < seqlen_q).broadcast_to(
                         [BLOCK_M, BLOCK_DMODEL])
                     # We still need to write 0s to the result
@@ -716,11 +802,11 @@ def attn_fwd(
                           offs_d[None, :] * stride_vn)
                 # Compute pointers for all scale tensors used in this kernel.
 
-                INT8_GEMM: tl.constexpr = INT8 & (not INT8_KV)
-                if INT8:
+                EIGHT_BIT_GEMM: tl.constexpr = EIGHT_BIT & (not EIGHT_BIT_KV)
+                if EIGHT_BIT:
                     k_descale_ptrs = K_descale + off_h_k
                     v_descale_ptrs = V_descale + off_h_k
-                    if not INT8_KV:
+                    if not EIGHT_BIT_KV:
                         q_descale_ptrs = Q_descale + off_h_q
                     if USE_P_SCALE:
                         p_scale_ptrs = P_scale + off_h_q
@@ -772,10 +858,11 @@ def attn_fwd(
                                                  < ACTUAL_BLOCK_DMODEL)
                 q = tl.load(q_ptrs, mask=q_ptrs_mask, other=0.0)
 
-                if INT8:
+                if EIGHT_BIT:
                     k_descale = tl.load(k_descale_ptrs)
                     v_descale = tl.load(v_descale_ptrs)
-                    q_descale = None if INT8_KV else tl.load(q_descale_ptrs)
+                    q_descale = None if EIGHT_BIT_KV else tl.load(
+                        q_descale_ptrs)
                     if USE_P_SCALE:
                         p_scale = tl.load(p_scale_ptrs)
                         p_descale = tl.load(p_descale_ptrs)
@@ -855,9 +942,10 @@ def attn_fwd(
                         PADDED_HEAD,
                         ACTUAL_BLOCK_DMODEL,
                         QK_SCALE,
-                        INT8_GEMM,
+                        EIGHT_BIT_GEMM,
                         USE_P_SCALE,
-                        INT8_KV)
+                        EIGHT_BIT_KV,
+                        EIGHT_BIT_DTYPE)
                     block_min = block_max
                     block_max = n_blocks * BLOCK_N
 
@@ -916,11 +1004,12 @@ def attn_fwd(
                         PADDED_HEAD,
                         ACTUAL_BLOCK_DMODEL,
                         QK_SCALE,
-                        INT8_GEMM,
+                        EIGHT_BIT_GEMM,
                         USE_P_SCALE,
-                        INT8_KV)
+                        EIGHT_BIT_KV,
+                        EIGHT_BIT_DTYPE)
 
-                if INT8 and not INT8_KV:
+                if EIGHT_BIT and not EIGHT_BIT_KV:
                     if USE_P_SCALE:
                         acc *= p_descale
                     acc *= v_descale
@@ -941,6 +1030,10 @@ def attn_fwd(
                 end_m_idx = (start_m + 1) * BLOCK_M
                 start_m_idx = start_m * BLOCK_M
                 causal_start_idx = seqlen_q - seqlen_k
+                if EIGHT_BIT and not EIGHT_BIT_KV:
+                    if o_descale is not None:
+                        acc *= o_descale
+                        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
                 acc = acc.to(Out.type.element_ty)
                 if IS_CAUSAL:  # noqa: SIM102
                     if (causal_start_idx > start_m_idx
@@ -951,7 +1044,7 @@ def attn_fwd(
                         mask_m_offsets = start_m_idx + tl.arange(0, BLOCK_M)
                         out_ptrs_mask = (mask_m_offsets[:, None]
                                          >= out_mask_boundary[None, :])
-                        z = 0.0
+                        z = tl.zeros((1, ), tl.float32)
                         acc = tl.where(out_ptrs_mask, acc,
                                        z.to(acc.type.element_ty))
                 # write back LSE
@@ -1042,10 +1135,10 @@ class _attention(torch.autograd.Function):
             assert (metadata.bias.numel() < 2**31)
 
         if o is None:
-            if not metadata.int8:
+            if not metadata.eight_bit:
                 o = torch.empty_like(q, dtype=v.dtype)
             else:
-                o = torch.empty_like(q, dtype=torch.float16)
+                o = torch.empty_like(q, dtype=metadata.eight_bit_dtype_torch)
 
         metadata.check_args(q, k, v, o)
 
@@ -1095,12 +1188,13 @@ class _attention(torch.autograd.Function):
         else:
             alibi_strides = (0, 0)
 
-        if metadata.int8:
-            q_descale, k_descale, p_scale, p_descale, v_descale = (
+        if metadata.eight_bit:
+            q_descale, k_descale, p_scale, p_descale, v_descale, o_scale = (
                 metadata.q_descale, metadata.k_descale, metadata.p_scale,
-                metadata.p_descale, metadata.v_descale)
+                metadata.p_descale, metadata.v_descale, metadata.o_scale)
+            o_descale = 1.0 / o_scale if o_scale is not None else None
         else:
-            q_descale = k_descale = p_scale = p_descale = v_descale = None
+            q_descale = k_descale = p_scale = p_descale = v_descale = o_descale = None
 
         # number of compute units available
         NUM_CU = torch.cuda.get_device_properties("cuda").multi_processor_count
@@ -1133,6 +1227,7 @@ class _attention(torch.autograd.Function):
                        k_descale,
                        p_scale,
                        p_descale,
+                       o_descale,
                        v_descale,
                        metadata.cu_seqlens_q,
                        metadata.cu_seqlens_k,
@@ -1153,16 +1248,17 @@ class _attention(torch.autograd.Function):
                        USE_ALIBI=metadata.alibi_slopes is not None,
                        ENABLE_DROPOUT=metadata.dropout_p > 0.0,
                        RETURN_ENCODED_SOFTMAX=metadata.return_encoded_softmax,
-                       INT8=metadata.int8,
-                       USE_P_SCALE=metadata.int8 and metadata.use_p_scale,
-                       INT8_KV=metadata.int8 and metadata.int8_kv,
+                       EIGHT_BIT=metadata.eight_bit,
+                       USE_P_SCALE=metadata.eight_bit and metadata.use_p_scale,
+                       EIGHT_BIT_KV=metadata.eight_bit
+                       and metadata.eight_bit_kv,
                        PERSISTENT=metadata.persistent is not None,
                        PERSISTENT_DYNAMIC=metadata.persistent == "dynamic",
                        NUM_CU=NUM_CU,
                        atomic_counter=atomic_counter,
-                       B=batch)
+                       B=batch,
+                       EIGHT_BIT_DTYPE=metadata.eight_bit_dtype_triton)
 
-        ctx.save_for_backward(q, k, v, o, M)
         ctx.grid = grid
         ctx.sm_scale = metadata.sm_scale
         ctx.BLOCK_DMODEL = head_size
@@ -1178,7 +1274,21 @@ class _attention(torch.autograd.Function):
 
 triton_attention_rocm = _attention.apply
 
+num_tensors = 0
+num_good = 0
+objects = {'tensors': {}}
 
+
+def quantize_fp8(x, scale, eight_bit_dtype):
+    x *= scale
+    x = x.clamp(min=float8_info.min, max=float8_info.max).to(eight_bit_dtype)
+    return x
+
+
+# query   - [num_tokens, num_heads, head_size]
+# key     - [num_tokens, num_kv_heads, head_size]
+# value   - [num_tokens, num_kv_heads, head_size
+# output  - [num_tokens, num_heads, head_size]
 def triton_attention(
     q,
     k,
@@ -1191,6 +1301,10 @@ def triton_attention(
     causal=False,
     sm_scale=1.0,
     bias=None,
+    fp8_scales=None,
+    FP8_MIN: tl.constexpr = float8_info.min,
+    FP8_MAX: tl.constexpr = float8_info.max,
+    eight_bit_dtype = torch.float8_e4m3fnuz,
 ) -> torch.Tensor:
     num_seqs, num_heads, head_size = q.shape
     attn_metadata = MetaData(sm_scale=sm_scale)
@@ -1198,5 +1312,37 @@ def triton_attention(
     attn_metadata.max_seqlens_k = max_seqlens_q
     attn_metadata.causal = causal
     attn_metadata.bias = bias
+    attn_metadata.eight_bit_dtype_torch = eight_bit_dtype
     attn_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
+
+    global float8_info
+    float8_info = torch.finfo(eight_bit_dtype)
+
+    if fp8_scales is not None:
+        (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
+        if q.dtype != eight_bit_dtype:
+            q = quantize_fp8(q, 1.0 / q_scale, eight_bit_dtype)
+            k = quantize_fp8(k, 1.0 / k_scale, eight_bit_dtype)
+            v = quantize_fp8(v, 1.0 / v_scale, eight_bit_dtype)
+
+        q_scale = torch.full((q.shape[1], 1, 1),
+                             q_scale,
+                             dtype=torch.float32,
+                             device=q.device)
+        k_scale = torch.full((k.shape[1], 1, 1),
+                             k_scale,
+                             dtype=torch.float32,
+                             device=k.device)
+        v_scale = torch.full((v.shape[1], 1, 1),
+                             v_scale,
+                             dtype=torch.float32,
+                             device=v.device)
+        p_scale = torch.full((q.shape[1], 1, 1),
+                             p_scale,
+                             dtype=torch.float32,
+                             device=q.device)
+        attn_metadata.set_eight_bit_params(q_scale, k_scale,
+                                          v_scale, 1.0 / p_scale,
+                                           p_scale, o_scale)
+
     return triton_attention_rocm(q, k, v, o, attn_metadata)

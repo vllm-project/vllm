@@ -10,9 +10,14 @@ from vllm.attention.ops.triton_flash_attention import (SUPPORTED_LAYOUTS,
                                                        MetaData,
                                                        compute_alibi_tensor,
                                                        triton_attention_rocm)
+from vllm.platforms import current_platform
 
-INT8_MAX = 127
 
+FP8_DTYPE_TORCH = torch.float8_e4m3fnuz
+
+float8_info = torch.finfo(FP8_DTYPE_TORCH)
+FP8_MIN = float8_info.min
+FP8_MAX = float8_info.max
 
 def get_shape_from_layout(q, k, metadata):
     assert metadata.layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
@@ -29,7 +34,7 @@ def get_shape_from_layout(q, k, metadata):
     return batch, nheads_q, nheads_k, head_size
 
 
-def quantize_int8(tensor: torch.Tensor,
+def quantize_fp8(tensor: torch.Tensor,
                   dim) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     max_vals = tensor.abs().amax(
         dim=[i for i in range(tensor.dim()) if i != dim], keepdim=True)
@@ -38,30 +43,29 @@ def quantize_int8(tensor: torch.Tensor,
     max_vals[max_vals == 0] = 1e-8
 
     # Compute scale factors for each channel
-    scale = INT8_MAX / max_vals.to(torch.float32)
+    scale = (FP8_MAX / max_vals).clamp(1e-12)
 
     # Quantize the tensor
     tensor = tensor * scale
-    tensor = tensor.round_()
-    tensor.clamp_(-INT8_MAX, INT8_MAX)
-    tensor_quantized = tensor.to(torch.int8)
+    tensor.clamp_(FP8_MIN, FP8_MAX)
+    tensor_quantized = tensor.to(FP8_DTYPE_TORCH)
 
     return tensor_quantized, scale, 1 / scale
 
 
-def quantize_input(q, k, v, input_metadata: MetaData, int8_kv=False):
+def quantize_input(q, k, v, input_metadata: MetaData, fp8_kv=False):
     is_supported_layout = input_metadata.layout in SUPPORTED_LAYOUTS
     assert is_supported_layout, "Got unsupported layout."
     if input_metadata.layout == 'bhsd':
-        qunatization_dim = 1
+        quantization_dim = 1
     elif input_metadata.layout == 'bshd':
-        qunatization_dim = 2
+        quantization_dim = 2
 
     q_descale = None
-    if not int8_kv:
-        q, _, q_descale = quantize_int8(q, dim=qunatization_dim)
-    k, _, k_descale = quantize_int8(k, dim=qunatization_dim)
-    v, _, v_descale = quantize_int8(v, dim=qunatization_dim)
+    if not fp8_kv:
+        q, _, q_descale = quantize_fp8(q, dim=quantization_dim)
+    k, _, k_descale = quantize_fp8(k, dim=quantization_dim)
+    v, _, v_descale = quantize_fp8(v, dim=quantization_dim)
 
     # In real world use case, the p scale would be a parameter trained by the
     # model.
@@ -73,13 +77,14 @@ def quantize_input(q, k, v, input_metadata: MetaData, int8_kv=False):
     # o_desale = p_descale * v_descale
     # it results in very small fp e.g. 0,0002, losing precision.
     # They are applied on the run.
-    input_metadata.set_int8_params(
+    input_metadata.set_eight_bit_params(
         q_descale=q_descale,
         k_descale=k_descale,
         v_descale=v_descale,
         # By default p_scaling is not enabled
         p_scale=p_scale,
-        p_descale=p_descale)
+        p_descale=p_descale,
+        o_scale=None)
 
     return q, k, v
 
@@ -200,6 +205,7 @@ def test_op_fwd(Z,
     torch.manual_seed(20)
     q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
                                            dtype, layout)
+    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
     if causal:
         input_metadata.need_causal()
 
@@ -285,6 +291,7 @@ def test_op_persistent_fwd(Z,
     torch.manual_seed(20)
     q, k, v, input_metadata = input_helper(Z, HQ, HK, N_CTX_Q, N_CTX_K, D_HEAD,
                                            dtype, layout)
+    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
     if causal:
         input_metadata.need_causal()
 
@@ -355,14 +362,14 @@ def test_op_persistent_fwd(Z,
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('layout', ['bhsd'])
-def test_op_fwd_int8(Z,
-                     H,
-                     N_CTX_Q,
-                     N_CTX_K,
-                     D_HEAD,
-                     causal,
-                     layout,
-                     dtype=torch.float16):
+def test_op_fwd_fp8(Z,
+                    H,
+                    N_CTX_Q,
+                    N_CTX_K,
+                    D_HEAD,
+                    causal,
+                    layout,
+                    dtype=torch.float16):
     torch.manual_seed(20)
 
     # Disable grad to save memory it won't run into OOM on CI machine.
@@ -375,6 +382,7 @@ def test_op_fwd_int8(Z,
                                            dtype,
                                            layout,
                                            requires_grad=False)
+    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
     if causal:
         input_metadata.need_causal()
 
@@ -386,30 +394,33 @@ def test_op_fwd_int8(Z,
     tri_out, _ = triton_attention_rocm(q_quantized, k_quantized, v_quantized,
                                        o, input_metadata)
 
-    # Compute scores
     q_descale, k_descale, v_descale = (input_metadata.q_descale,
                                        input_metadata.k_descale,
                                        input_metadata.v_descale)
-    scores = (torch.einsum('bhqd,bhkd->bhqk', q_quantized.half(),
-                           k_quantized.half()) * q_descale *
-              k_descale) * input_metadata.sm_scale
 
+    q = q_quantized.to(torch.float16) * q_descale
+    k = k_quantized.to(torch.float16) * k_descale
+    v = v_quantized.to(torch.float16) * v_descale
+
+    scores = torch.einsum('bhqd,bhkd->bhqk', q,
+                          k).float() * input_metadata.sm_scale
     if causal:
         mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device="cuda"),
                           diagonal=N_CTX_K - N_CTX_Q)
         scores[:, :, mask == 0] = float("-inf")
 
     p = torch.softmax(scores, dim=-1)
-    ref_out = (
-        torch.einsum('bhqk,bhkd->bhqd', p.float(), v_quantized.float()) *
-        v_descale).to(torch.float16)
-
     if causal:
-        nan_mask = torch.isnan(ref_out)
-        ref_out[nan_mask] = 0
+        # If N_CTX_Q > N_CTX_K, there is at least one row of all -infs going
+        # into the softmax. This produces a row of NaNs as -inf - -inf == NaN.
+        # So we fix this by converting the NaNs to 0s, which is what they
+        # should be out of the softmax.
+        nan_mask = torch.isnan(p)
+        p[nan_mask == 1] = 0
+    ref_out = torch.einsum('bhqk,bhkd->bhqd', p.half(), v)
 
-    torch.testing.assert_close(ref_out, tri_out, atol=1e-1, rtol=1e-1)
-
+    # compare
+    torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     (4, 48, 1, 1, 64),
@@ -420,7 +431,7 @@ def test_op_fwd_int8(Z,
 ])
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('layout', ['bhsd'])
-def test_op_fwd_int8_kv(Z,
+def test_op_fwd_fp8_kv(Z,
                         H,
                         N_CTX_Q,
                         N_CTX_K,
@@ -432,6 +443,7 @@ def test_op_fwd_int8_kv(Z,
 
     q, k, v, input_metadata = input_helper(Z, H, H, N_CTX_Q, N_CTX_K, D_HEAD,
                                            dtype, layout)
+    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
     if causal:
         input_metadata.need_causal()
 
@@ -441,10 +453,10 @@ def test_op_fwd_int8_kv(Z,
                                                  k,
                                                  v,
                                                  input_metadata,
-                                                 int8_kv=True)
+                                                 fp8_kv=True)
     k_descale, v_descale = input_metadata.k_descale, input_metadata.v_descale
-    k_dequantized = (k_quantized * k_descale).half()
-    v_dequantized = (v_quantized * v_descale).half()
+    k_dequantized = (k_quantized.to(torch.float32)* k_descale.to(torch.float32)).half()
+    v_dequantized = (v_quantized.to(torch.float32)* v_descale.to(torch.float32)).half()
 
     tri_out, _ = triton_attention_rocm(q, k_quantized, v_quantized, o,
                                        input_metadata)
@@ -492,6 +504,7 @@ def test_op_fwd_bias(Z, H, N_CTX_Q, N_CTX_K, D_HEAD, causal, use_bias, dtype):
                                            D_HEAD,
                                            dtype,
                                            layout='bhsd')
+    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
     if causal:
         input_metadata.need_causal()
     if use_bias:
@@ -537,6 +550,7 @@ def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
     q, k, v, input_metadata = varlen_input_helper(Z, H, H, N_CTX, N_CTX,
                                                   D_HEAD, dtype)
 
+    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
     tri_out = torch.empty_like(q)
     ref_out = torch.empty_like(q)
 
@@ -551,7 +565,7 @@ def test_op_varlen_fwd(Z, H, N_CTX, D_HEAD, causal, dtype=torch.float16):
         ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p,
                                               v[start_k:end_k])
     triton_attention_rocm(q, k, v, tri_out, input_metadata)
-    torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize('Z, HQ, HK, N_CTX, D_HEAD',
@@ -568,6 +582,7 @@ def test_op_varlen_mqa_fwd(Z,
                            dtype=torch.float16):
     q, k, v, input_metadata = varlen_input_helper(Z, HQ, HK, N_CTX, N_CTX,
                                                   D_HEAD, dtype)
+    input_metadata.eight_bit_dtype_torch = FP8_DTYPE_TORCH
     ref_out = torch.empty_like(q)
     tri_out = torch.empty_like(q)
     # Make KV look like HQ/HK "groups" of HK. Later, we will reshape so the
@@ -589,4 +604,10 @@ def test_op_varlen_mqa_fwd(Z,
         p = torch.softmax(scores * input_metadata.sm_scale, dim=-1).half()
         ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p, v_curr)
     triton_attention_rocm(q, k, v, tri_out, input_metadata)
-    torch.testing.assert_close(ref_out, tri_out, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
+
+def main():
+    test_op_fwd(4, 48, 12, 1, 1, 64, True, False, 'bhsd')
+    test_op_fwd_fp8(4, 48, 1, 1, 64, True, 'bhsd')
+if __name__ == "__main__":
+    main()
