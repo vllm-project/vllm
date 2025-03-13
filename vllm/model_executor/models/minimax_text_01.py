@@ -1006,7 +1006,6 @@ class MiniMaxText01Model(nn.Module):
         self.decoder_attention_types = getattr(
             config, "attn_type_list", False) or getattr(
                 config, "decoder_attention_types", False)
-        config.num_hidden_layers = 8
         if not self.decoder_attention_types:
             # by default, use self-attn
             self.decoder_attention_types = [1] * config.num_hidden_layers
