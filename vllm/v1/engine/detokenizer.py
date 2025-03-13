@@ -108,10 +108,10 @@ class IncrementalDetokenizer:
         if stop_terminated and not self.include_stop_str_in_output:
             # If stop-terminated, exclude last token from detokenization
             # based on include_stop_str_in_output parameter.
-            stop_token_id = new_token_ids[-1]
+            skipped_stop_token_id = new_token_ids[-1]
             new_token_ids = new_token_ids[:-1]
         else:
-            stop_token_id = None
+            skipped_stop_token_id = None
 
         # 1) Detokenize the new token ids incrementally.
         # TODO(woosuk): This method becomes very inefficient when the number of
@@ -140,10 +140,9 @@ class IncrementalDetokenizer:
         self.output_text += decoded_text
 
         if stop_terminated:
-            if not self.include_stop_str_in_output:
+            if skipped_stop_token_id is not None:
                 # Cleanup after skipping detokenization
-                assert stop_token_id is not None
-                self.token_ids.append(stop_token_id)
+                self.token_ids.append(skipped_stop_token_id)
             # Stop token triggered; skip stop string check
             return None
 
