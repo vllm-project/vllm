@@ -105,6 +105,9 @@ class LoRAModel(AdapterModel):
         """Get LoRA for a given module by name"""
         return self.loras.get(module_name, None)
 
+    def check_lora_name(self, lora_name: str) -> bool:
+        return lora_name in self.loras
+
     # (yard1): TODO see if we can derive target_embedding_padding automatically
     @classmethod
     def from_lora_tensors(
@@ -629,7 +632,6 @@ class LoRAModelManager(AdapterModelManager):
             replaced_module: Set[str] = set()
             has_replacement = False
             for r in new_module_names:
-
                 lora = self._get_lora_layer_weights(lora_model, r)
                 replacement_loras.append(lora)
                 if lora:
@@ -641,9 +643,12 @@ class LoRAModelManager(AdapterModelManager):
                 if replacement_loras[i]:
                     continue
                 replacement_loras[i] = None
-            if self.is_pooling_model:
-                # TODO: optimize this
-                module_name = module_name.replace("model.", "")
+
+            if self.is_pooling_model and not lora_model.check_lora_name(
+                    module_name):
+                new_module_name = module_name.replace("model.", "")
+                if lora_model.check_lora_name(module_name):
+                    module_name = new_module_name
             lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
                 replacement_loras)
             # Remove the modules that have been replaced.
@@ -653,11 +658,13 @@ class LoRAModelManager(AdapterModelManager):
     def _get_lora_layer_weights(
             self, lora_model: LoRAModel,
             module_name: str) -> Optional[LoRALayerWeights]:
-        if self.is_pooling_model:
-            module_lora = lora_model.get_lora(module_name)
-            if module_lora is None:
-                module_name = module_name.replace("model.", "")
-        return lora_model.get_lora(module_name)
+        org_module_name = module_name
+        if self.is_pooling_model and not lora_model.check_lora_name(
+                module_name):
+            module_name = module_name.replace("model.", "")
+            if lora_model.check_lora_name(module_name):
+                org_module_name = module_name
+        return lora_model.get_lora(org_module_name)
 
     def deactivate_adapter(self, adapter_id: int) -> bool:
         return deactivate_adapter(adapter_id, self._active_adapters,
