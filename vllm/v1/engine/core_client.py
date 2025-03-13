@@ -323,7 +323,7 @@ class MPClient(EngineCoreClient):
         self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
         # ZMQ setup.
-        sync_ctx = zmq.Context()
+        sync_ctx = zmq.Context(io_threads=2)
         self.ctx = zmq.asyncio.Context(sync_ctx) if asyncio_mode else sync_ctx
 
         # This will ensure resources created so far are closed
@@ -633,7 +633,6 @@ class DPAsyncMPClient(AsyncMPClient):
         self.reqs_in_flight: dict[str, CoreEngine] = {}
 
         self.outputs_handler = DPAsyncMPClient.process_engine_outputs  # type: ignore[assignment]
-        self.outputs_counter = 0
 
     def _init_core_engines(
         self,
@@ -707,15 +706,6 @@ class DPAsyncMPClient(AsyncMPClient):
                 ]
                 if coros:
                     await asyncio.gather(*coros)
-
-        if outputs.scheduler_stats:
-            # Unset the final flag if we haven't yet received outputs
-            # from all engines for this step.
-            self.outputs_counter += 1
-            if self.outputs_counter == len(self.core_engines):
-                self.outputs_counter = 0
-            else:
-                outputs.final_outputs_for_step = False
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         if not request_ids:

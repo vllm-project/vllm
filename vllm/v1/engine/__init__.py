@@ -141,11 +141,6 @@ class EngineCoreOutputs(
     # In DP case, used to signal that the engine is paused.
     engine_paused: bool = False
 
-    # Set to False to indicate stats should be accumulated rather than
-    # recorded, when there are remaining outputs from other engines
-    # still to come for this iteration.
-    final_outputs_for_step: bool = True
-
     def __post_init__(self):
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
