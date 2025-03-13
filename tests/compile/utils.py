@@ -61,10 +61,10 @@ if not current_platform.is_rocm() and is_quant_method_supported("awq"):
 
 
 def check_full_graph_support(
+    monkeypatch: pytest.MonkeyPatch,
     model,
     model_kwargs,
     optimization_level,
-    monkeypatch: pytest.MonkeyPatch,
     tp_size=1,
 ):
     # make sure these models can be captured in full graph mode
