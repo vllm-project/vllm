@@ -10,7 +10,6 @@ from vllm.attention.ops.triton_flash_attention import (SUPPORTED_LAYOUTS,
                                                        MetaData,
                                                        compute_alibi_tensor,
                                                        triton_attention_rocm)
-from vllm.platforms import current_platform
 
 FP8_DTYPE_TORCH = torch.float8_e4m3fnuz
 

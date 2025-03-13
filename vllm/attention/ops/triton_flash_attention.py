@@ -25,8 +25,6 @@ import torch
 import triton
 import triton.language as tl
 
-from vllm.platforms import current_platform
-
 SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
 
 QKV_DTYPE_TRITON = tl.float8e4b8
@@ -132,7 +130,8 @@ class MetaData:
         # TODO: Change assert if we support qkl f8 and v f16
         if self.eight_bit:
             if self.eight_bit_kv:
-                assert v.dtype == k.dtype and k.dtype == self.eight_bit_dtype_torch
+                assert (v.dtype == k.dtype
+                        and k.dtype == self.eight_bit_dtype_torch)
                 assert q.dtype != k.dtype
                 assert (self.v_descale is not None) and (self.k_descale
                                                          is not None)
@@ -1030,7 +1029,7 @@ def attn_fwd(
                 end_m_idx = (start_m + 1) * BLOCK_M
                 start_m_idx = start_m * BLOCK_M
                 causal_start_idx = seqlen_q - seqlen_k
-                if EIGHT_BIT and not EIGHT_BIT_KV:
+                if EIGHT_BIT and not EIGHT_BIT_KV:  # noqa: SIM102
                     if o_descale is not None:
                         acc *= o_descale
                         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
@@ -1194,7 +1193,8 @@ class _attention(torch.autograd.Function):
                 metadata.p_descale, metadata.v_descale, metadata.o_scale)
             o_descale = 1.0 / o_scale if o_scale is not None else None
         else:
-            q_descale = k_descale = p_scale = p_descale = v_descale = o_descale = None
+            q_descale = k_descale = p_scale = None
+            p_descale = v_descale = o_descale = None
 
         # number of compute units available
         NUM_CU = torch.cuda.get_device_properties("cuda").multi_processor_count
