@@ -234,6 +234,10 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
                                    num_images=num_images)
         }
 
+        # NOTE: We need to separate the image tokens here because
+        # encode("\n\n\n\n") != encode("\n\n") * 2, which interferes
+        # with the detection of prompt updates when the image tokens are
+        # right next to each other
         return ProcessorInputs(
             prompt_text=" ".join([image_token] * num_images),
             mm_data=mm_data,
