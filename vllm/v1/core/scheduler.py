@@ -587,9 +587,6 @@ class Scheduler:
             if spec_token_ids is not None:
                 request.spec_token_ids = spec_token_ids[req_index]
 
-            # Get prompt logprobs for this request.
-            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-
             stopped = False
             new_logprobs = None
             new_token_ids: list[int] = []
@@ -622,6 +619,8 @@ class Scheduler:
                     new_token_ids,
                 )
 
+            # Get prompt logprobs for this request.
+            prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             # Transmit partial if chunked prefill & prompt logprobs is enabled
             if new_token_ids or prompt_logprobs_tensors is not None:
                 # Add EngineCoreOutput for this Request.
@@ -693,8 +692,7 @@ class Scheduler:
 
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
-                if request.request_id in self.scheduled_req_ids:
-                    self.scheduled_req_ids.remove(request.request_id)
+                self.scheduled_req_ids.discard(request.request_id)
             else:
                 self.waiting.remove(request)
             request.status = finished_status
