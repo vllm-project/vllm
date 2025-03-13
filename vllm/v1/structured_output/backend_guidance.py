@@ -56,6 +56,9 @@ class GuidanceBackend(StructuredOutputBackend):
             # TODO: make whitespace_flexible configurable
             compiler = llguidance.JsonCompiler(whitespace_flexible=False)
             self.serialized_grammar = compiler.compile(schema)
+        elif request_type == StructuredOutputOptions.JSON_OBJECT:
+            compiler = llguidance.JsonCompiler(whitespace_flexible=False)
+            self.serialized_grammar = compiler.compile("{}")
         elif (request_type == StructuredOutputOptions.REGEX
               or request_type == StructuredOutputOptions.CHOICE):
             compiler = llguidance.RegexCompiler()
