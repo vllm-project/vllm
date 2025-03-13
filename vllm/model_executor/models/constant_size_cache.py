@@ -1,16 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
-from typing import Dict, List, Any, Tuple
+from typing import Any, Dict, List, Tuple
+
 import torch
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.utils import PAD_SLOT_ID
+
 
 class ConstantSizeCache(ABC):
     """
     Abstract base class for managing constant size caches 
     like Mamba and Minimax.
     """
-    
+
     def __init__(self, max_batch_size: int):
         # Maps between the request id and a dict that maps between the seq_id
         # and its index inside the cache
@@ -29,7 +32,8 @@ class ConstantSizeCache(ABC):
         pass
 
     def current_run_tensors(self, input_ids: torch.Tensor,
-                          attn_metadata: AttentionMetadata, **kwargs) -> Tuple:
+                            attn_metadata: AttentionMetadata,
+                            **kwargs) -> Tuple:
         """
         Return the tensors for the current run's conv and ssm state.
         """
@@ -48,7 +52,8 @@ class ConstantSizeCache(ABC):
             cache_tensors = self.cache
         else:
             # CUDA graph capturing runs
-            cache_tensors, state_indices_tensor = kwargs["seqlen_agnostic_capture_inputs"]
+            cache_tensors, state_indices_tensor = kwargs[
+                "seqlen_agnostic_capture_inputs"]
 
         return (cache_tensors, state_indices_tensor)
 
@@ -97,11 +102,9 @@ class ConstantSizeCache(ABC):
             return PAD_SLOT_ID
         elif cur_rid not in self.cache_indices_mapping:
             destination_index = self.free_cache_indices.pop()
-            self.cache_indices_mapping[cur_rid] = {
-                seq_id: destination_index
-            }
+            self.cache_indices_mapping[cur_rid] = {seq_id: destination_index}
             return destination_index
-        elif seq_id not in (seq_ids2indices := 
+        elif seq_id not in (seq_ids2indices :=
                             self.cache_indices_mapping[cur_rid]):
             # parallel sampling , where n > 1, assume prefill have
             # already happened, so we copy the
@@ -133,4 +136,4 @@ class ConstantSizeCache(ABC):
                 for seq_id in self.cache_indices_mapping[req_id]:
                     self.free_cache_indices.append(
                         self.cache_indices_mapping[req_id][seq_id])
-                self.cache_indices_mapping.pop(req_id) 
+                self.cache_indices_mapping.pop(req_id)

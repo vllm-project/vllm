@@ -1,5 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
-from typing import Dict, List
 
 import torch
 
@@ -21,8 +21,8 @@ class MinimaxCacheManager(ConstantSizeCache):
     def __init__(self, dtype, cache_shape):
         super().__init__(cache_shape[1])  # max_batch_size is cache_shape[1]
         self._minimax_cache = torch.empty(size=cache_shape,
-                                      dtype=dtype,
-                                      device="cuda")
+                                          dtype=dtype,
+                                          device="cuda")
 
     @property
     def cache(self):
