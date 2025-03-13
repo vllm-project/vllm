@@ -521,6 +521,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         B.shape[1], META['BLOCK_SIZE_N']), )
 
     if use_dg:
+        assert use_fp8_w8a8
         # Note: we do not apply weights here since it requires
         # resizing the output.
         dg.m_grouped_gemm_fp8_fp8_bf16_nt_contiguous(
@@ -771,7 +772,6 @@ def get_default_config(
     dtype: Optional[str],
     is_marlin: bool,
     block_shape: Optional[List[int]] = None,
-    use_deep_gemm: bool = False,
 ) -> Dict[str, int]:
     if dtype == "fp8_w8a8" and block_shape is not None:
         # Block-wise quant: BLOCK_SIZE_N must be divisible by block_shape[0]
@@ -831,6 +831,7 @@ def try_get_optimal_moe_config(
     M: int,
     is_marlin: bool = False,
     block_shape: Optional[List[int]] = None,
+    use_deep_gemm: bool = False,
 ):
     from vllm.model_executor.layers.fused_moe import get_config
     override_config = get_config()
@@ -853,6 +854,12 @@ def try_get_optimal_moe_config(
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
                                         is_marlin, block_shape)
+
+
+    # Remove this
+    if use_deep_gemm:
+        config['BLOCK_SIZE_M'] = 128
+
     return config
 
 
@@ -1322,12 +1329,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     else:
         out_hidden_states = torch.empty_like(hidden_states)
 
-    use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2,
-                                                 use_fp8_w8a8)
-
-    config_block_m = config['BLOCK_SIZE_M']
-    block_m = config_block_m if not use_dg else dg.get_m_alignment_for_contiguous_layout()
-
+    block_m = config['BLOCK_SIZE_M']
     assert not use_dg or block_m == dg.get_m_alignment_for_contiguous_layout()
 
     chunked_dg = False
@@ -1376,6 +1378,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
+
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
@@ -1383,7 +1386,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_hidden_states = hidden_states[begin_chunk_idx:end_chunk_idx]
         tokens_in_chunk, _ = curr_hidden_states.shape
 
-        skip_dg = use_dg and tokens_in_chunk % 128 != 0 #block_m != 0
+        skip_dg = use_dg and tokens_in_chunk % block_m != 0
 
         if tokens_in_chunk == 0:
             break
