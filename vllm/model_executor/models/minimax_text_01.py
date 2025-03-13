@@ -384,7 +384,6 @@ class MiniMaxText01LinearKernel:
     def jit_linear_forward_prefix(q: torch.Tensor,
                                   k: torch.Tensor,
                                   v: torch.Tensor,
-                                  kv_caches: torch.Tensor,
                                   slope_rate: torch.Tensor,
                                   block_size: int,
                                   layer_idx: int = None,
@@ -398,10 +397,8 @@ class MiniMaxText01LinearKernel:
             v = v.unsqueeze(0)
         b, h, n, d = q.shape
         e = d
-        kv_history = kv_caches.reshape(1, h, d, e).contiguous()
         output, kv_history = lightning_attention2_parallel(
             q, k, v, slope_rate, block_size=block_size, kv_history=kv_history)
-        kv_caches.copy_(kv_history[:, :, -1, :, :].reshape(h, d, e))
         assert output.shape[0] == 1, "batch size must be 1"
         return rearrange(output.squeeze(0), "h n d -> n (h d)")
 
@@ -551,48 +548,43 @@ class MiniMaxText01LinearAttention(nn.Module):
         loader(param, loaded_weight)
         return
 
-    def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor):
+    def _prefill_and_mix_infer(self, q, k, v):
         attn_metadata = get_forward_context().attn_metadata
         hidden = []
         for _prefill_idx in range(attn_metadata.num_prefills):
             _start = attn_metadata.query_start_loc[_prefill_idx]
             _end = attn_metadata.query_start_loc[_prefill_idx + 1]
-            slot_id = state_indices_tensor[_prefill_idx]
             qs = q[_start:_end].transpose(0, 1).contiguous()
             ks = k[_start:_end].transpose(0, 1).contiguous()
             vs = v[_start:_end].transpose(0, 1).contiguous()
-            slot_id = state_indices_tensor[_prefill_idx]
-            slice_layer_cache = kv_cache[slot_id, ...]
 
             out_slice = MiniMaxText01LinearKernel.jit_linear_forward_prefix(
                 qs,
                 ks,
                 vs,
-                slice_layer_cache,
                 self.tp_slope,
                 self.BLOCK,
                 layer_idx=self.layer_idx)
             hidden.append(out_slice.contiguous())
         if attn_metadata.num_decode_tokens > 0:
             hidden.append(
-                self._decode_infer(q, k, v, kv_cache, state_indices_tensor))
+                self._decode_infer(q, k, v))
         hidden = torch.concat(hidden, dim=0).contiguous()
         return hidden
 
-    def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor):
+    def _decode_infer(self, q, k, v, state_indices_tensor):
         attn_metadata = get_forward_context().attn_metadata
         q = q[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
         k = k[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
         v = v[attn_metadata.num_prefill_tokens:].unsqueeze(2).contiguous()
         slot_id = state_indices_tensor[attn_metadata.num_prefills:]
-        hidden = linear_decode_forward_triton(q, k, v, kv_cache, self.tp_slope,
+        hidden = linear_decode_forward_triton(q, k, v, self.tp_slope,
                                               slot_id, 32)
         return hidden
 
     def forward(
             self,
             hidden_states: torch.Tensor,
-            kv_caches: List[torch.Tensor],  # layer of tensor
             **kwargs) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         decode_only = attn_metadata.num_prefills == 0
@@ -601,17 +593,13 @@ class MiniMaxText01LinearAttention(nn.Module):
         qkvact = torch.nn.functional.silu(qkv32)
         qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
-        kv_cache, state_indices_tensor = (kv_caches.minimax_cache,
-                                          kv_caches.state_indices_tensor)
 
         if not decode_only:
             # prefill and mix
-            hidden = self._prefill_and_mix_infer(q, k, v, kv_cache,
-                                                 state_indices_tensor)
+            hidden = self._prefill_and_mix_infer(q, k, v)
         else:
             # decode only
-            hidden = self._decode_infer(q, k, v, kv_cache,
-                                        state_indices_tensor, attn_metadata)
+            hidden = self._decode_infer(q, k, v)
 
         hidden = self.norm._forward(hidden)
         gate, _ = self.output_gate(hidden_states)
@@ -757,13 +745,12 @@ class MiniMaxText01Attention(nn.Module):
         return
 
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
-                kv_caches: torch.Tensor, 
                 **kwargs) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = attn_metadata.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_caches, attn_metadata)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -892,22 +879,16 @@ class MiniMaxText01DecoderLayer(nn.Module):
             self,
             hidden_states: torch.Tensor,
             positions: torch.Tensor,
-            kv_caches: Union[List[Dict], Optional[
-                torch.
-                Tensor]],  # linear-attn / flash-attn(possible with warmup)
             residual: Optional[torch.Tensor],
             is_warmup: bool = False,
             **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
-        attn_metadata = get_forward_context().attn_metadata
         # MiniMaxText01 post-norm
         layernorm_input = hidden_states
         layernorm_output = self.input_layernorm(layernorm_input)
         residual = layernorm_output if self.postnorm else layernorm_input
         self_attention_output = self.self_attn(
             hidden_states=layernorm_output,
-            positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
+            positions=positions
         )
 
         # MiniMaxText01 post-norm
@@ -1112,7 +1093,6 @@ class MiniMaxText01Model(nn.Module):
     def forward(self,
                 input_ids: Optional[torch.Tensor],
                 positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
                 intermediate_tensors=None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
@@ -1146,20 +1126,13 @@ class MiniMaxText01Model(nn.Module):
         attn_metadata.rotary_emb = self.rotary_emb
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            _caches = None
             if isinstance(layer.self_attn, MiniMaxText01Attention):
-                _caches = kv_caches[kv_cache_index]
                 kv_cache_index += 1
             if isinstance(layer.self_attn, MiniMaxText01LinearAttention):
-                current_state_layer = minimax_cache_index
-                _caches = minimax_cache_params.at_layer_idx(
-                    current_state_layer)
                 minimax_cache_index += 1
             hidden_states, residual = layer(
                 hidden_states=hidden_states,
                 positions=positions,
-                kv_caches=_caches,
-                attn_metadata=attn_metadata,
                 residual=residual,
             )
         if not get_pp_group().is_last_rank:
@@ -1235,10 +1208,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
-        kv_caches = []
-
-        hidden_states = self.model(input_ids, positions, kv_caches, 
-                                   intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                 inputs_embeds, **kwargs)
 
         return hidden_states
