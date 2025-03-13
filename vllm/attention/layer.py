@@ -206,23 +206,14 @@ class Attention(nn.Module):
                 forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                if current_platform.is_rocm() and not is_navi():
-                    self.impl.forward(self,
-                                      query,
-                                      key,
-                                      value,
-                                      self_kv_cache,
-                                      attn_metadata,
-                                      output=output,
-                                      fp8_out_scale=fp8_out_scale)
-                else:
-                    self.impl.forward(self,
-                                      query,
-                                      key,
-                                      value,
-                                      self_kv_cache,
-                                      attn_metadata,
-                                      output=output)
+                self.impl.forward(self,
+                                  query,
+                                  key,
+                                  value,
+                                  self_kv_cache,
+                                  attn_metadata,
+                                  output=output,
+                                  fp8_out_scale=fp8_out_scale)
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query,
@@ -237,17 +228,13 @@ class Attention(nn.Module):
                 forward_context = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                if current_platform.is_rocm() and not is_navi():
-                    return self.impl.forward(self,
-                                             query,
-                                             key,
-                                             value,
-                                             self_kv_cache,
-                                             attn_metadata,
-                                             fp8_out_scale=fp8_out_scale)
-                else:
-                    return self.impl.forward(self, query, key, value,
-                                             self_kv_cache, attn_metadata)
+                return self.impl.forward(self,
+                                         query,
+                                         key,
+                                         value,
+                                         self_kv_cache,
+                                         attn_metadata,
+                                         fp8_out_scale=fp8_out_scale)
             else:
                 return torch.ops.vllm.unified_attention(
                     query,
