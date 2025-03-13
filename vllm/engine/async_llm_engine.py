@@ -69,7 +69,7 @@ def _log_task_completion(task: asyncio.Task,
         error_callback(exception)
         raise AsyncEngineDeadError(
             "Task finished unexpectedly. This should never happen! "
-            "Please open an issue on Github. See stack trace above for the "
+            "Please open an issue on GitHub. See stack trace above for the "
             "actual cause.") from e
 
 
