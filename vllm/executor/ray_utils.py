@@ -312,6 +312,7 @@ def initialize_ray_cluster(
     # Create placement group for worker processes
     current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:
+        logger.info("Using current placement group")
         # We are in a placement group
         bundles = current_placement_group.bundle_specs
         # Verify that we can use the placement group.
@@ -331,9 +332,8 @@ def initialize_ray_cluster(
                 f"Required number of devices: {parallel_config.world_size}. "
                 f"Total number of devices: {device_bundles}.")
     else:
-        logger.info(
-            "Current placement group is not set. Creating a new placement group."
-        )
+        logger.info("No current placement group found. "
+                    "Creating a new placement group.")
         num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
         # Log a warning message and delay resource allocation failure response.
         # Avoid immediate rejection to allow user-initiated placement group
