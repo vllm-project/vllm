@@ -433,11 +433,20 @@ def build_cudagraph_buckets(vllm_config: VllmConfig) -> list[int]:
         return [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096]
 
 
-def setup_default_loggers(vllm_config: VllmConfig, enable_stats_log: bool,
-                          stat_loggers: dict[str, StatLoggerBase]):
+def setup_default_loggers(
+    vllm_config: VllmConfig, log_stats: bool, enable_logging: bool,
+    custom_stat_loggers: Optional[dict[str, StatLoggerBase]]
+) -> dict[str, StatLoggerBase]:
     """Setup logging and prometheus metrics."""
-    stat_loggers[PROMETHEUS_LOGGING_LOGGER_NAME] = (
-        PrometheusStatLogger(vllm_config))
+    if not log_stats:
+        return {}
 
-    if enable_stats_log:
-        stat_loggers[STANDARD_LOGGING_LOGGER_NAME] = (LoggingStatLogger())
+    if custom_stat_loggers is not None:
+        return custom_stat_loggers
+
+    stat_loggers: dict[str, StatLoggerBase] = {}
+    stat_loggers[PROMETHEUS_LOGGING_LOGGER_NAME] = \
+        PrometheusStatLogger(vllm_config)
+    if enable_logging:
+        stat_loggers[STANDARD_LOGGING_LOGGER_NAME] = LoggingStatLogger()
+    return stat_loggers

@@ -66,14 +66,9 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers: dict[str, StatLoggerBase] = dict()
-        if self.log_stats:
-            if stat_loggers is not None:
-                self.stat_loggers = stat_loggers
-            else:
-                setup_default_loggers(vllm_config,
-                                      logger.isEnabledFor(logging.INFO),
-                                      self.stat_loggers)
+        self.stat_loggers = setup_default_loggers(
+            vllm_config, self.log_stats, logger.isEnabledFor(logging.INFO),
+            stat_loggers)
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
