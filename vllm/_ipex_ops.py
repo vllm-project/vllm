@@ -247,7 +247,7 @@ class ipex_ops:
         return_softmax: bool,
         gen_: Optional[torch.Generator],
     ):
-        return torch.ops.torch_ipex.chunked_prefill(
+        return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
             query.contiguous(),
             key_cache,
             value_cache,
