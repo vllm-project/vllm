@@ -39,5 +39,3 @@ tritonclient==2.51.0
 numpy < 2.0.0
 runai-model-streamer==0.11.0
 runai-model-streamer-s3==0.11.0
-
-flashinfer-python==0.2.3 # required for flashinfer tests
