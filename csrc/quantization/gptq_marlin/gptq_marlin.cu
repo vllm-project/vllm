@@ -2245,7 +2245,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
                   ", num_bits = ", num_bits);
     }
 
-    A_ptr += 16 * thread_m_blocks * (prob_k / 8) * par;
+    A_ptr += 16 * thread_m_blocks * (stride_am / 8) * par;
     C_ptr += 16 * thread_m_blocks * (prob_n / 8) * par;
   }
 }
