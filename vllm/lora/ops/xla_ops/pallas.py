@@ -10,22 +10,24 @@ from torch.library import impl
 from torch_xla.experimental.custom_kernel import (XLA_LIB, jax_import_guard,
                                                   make_kernel_from_pallas)
 
-def _bgmv_kernel(bT: int, bL: int, idx_ref, inp_ref, lora_ref, out_ref,
+def _bgmv_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref, lora_ref, out_ref,
                  acc_ref, mask_ref):
     @pl.when(pl.program_id(2) == 0)
     def _():
         acc_ref[...] = jnp.zeros_like(acc_ref[...], dtype=jnp.float32)
 
     t = pl.program_id(0)
-
-    for i in range(bT):
-        idx = idx_ref[i + bT * t]
+    
+    for i in range(max_num_loras):
         mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
-        mask_ref[i, :] = jnp.ones((bL, ), dtype=jnp.float32)
+        for j in range(bT):
+            @pl.when(idx_ref[j + bT * t] == i)
+            def _():
+                mask_ref[j, :] = jnp.ones((bL, ), dtype=jnp.float32)
 
         acc_ref[...] += jax.lax.dot_general(
             inp_ref[...],
-            lora_ref[idx, ...], (((1, ), (1, )), ((), ())),
+            lora_ref[i, ...], (((1, ), (1, )), ((), ())),
             preferred_element_type=jnp.float32) * mask_ref[...]
 
     @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
@@ -47,7 +49,7 @@ def _bgmv(
     N, L, _ = loras.shape
 
     return pl.pallas_call(
-        kernel=functools.partial(_bgmv_kernel, TOKEN_BLOCK_SIZE, LORA_RANK_BLOCK_SIZE),
+        kernel=functools.partial(_bgmv_kernel, TOKEN_BLOCK_SIZE, LORA_RANK_BLOCK_SIZE, N),
         out_shape=jax.ShapeDtypeStruct((T, L), dtype=inputs.dtype),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=1,
