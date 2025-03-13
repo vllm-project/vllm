@@ -12,7 +12,7 @@ from einops import rearrange
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
@@ -905,6 +905,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
             self,
             hidden_states: torch.Tensor,
             positions: torch.Tensor,
+            kv_caches: Union[List[Dict], Optional[torch.Tensor]],  # linear-attn / flash-attn(possible with warmup)
+            attn_metadata: AttentionMetadata,
             residual: Optional[torch.Tensor],
             is_warmup: bool = False,
             **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
