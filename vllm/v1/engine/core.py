@@ -131,8 +131,7 @@ class EngineCore:
                     f"CUDA out of memory during initialization. "
                     f"Available GPU memory: {round(total_memory - allocated_memory, 2)}GB "
                     f" / {round(total_memory, 2)}GB "
-                    f"on {torch.cuda.get_device_name(device)}. {str(exc)}"
-                )
+                    f"on {torch.cuda.get_device_name(device)}. {str(exc)}")
     
     def _is_cuda_out_of_memory_error(self, exc: Exception) -> bool:
         """Determine if an exception is related to CUDA out of memory errors.
