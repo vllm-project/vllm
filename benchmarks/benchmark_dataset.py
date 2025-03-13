@@ -550,12 +550,13 @@ class HuggingFaceDataset(BenchmarkDataset):
             split=self.dataset_split,
             streaming=True,
         )
-
-        if "conversations" not in self.data.features:
-            raise ValueError("HuggingFaceDataset currently only supports \
-                 datasets with a 'conversations' column. Please consider \
-                    contributing if you would like to add support for \
-                         additional dataset formats.")
+        if self.data.features is None or "conversations" \
+            not in self.data.features:
+            raise ValueError(
+                "HuggingFaceDataset currently only supports datasets with "
+                "a 'conversations' column like lmms-lab/LLaVA-OneVision-Data. "
+                "Please consider contributing if you would like to add "
+                "support for additional dataset formats.")
         # Shuffle and filter examples with at least 2 conversations.
         self.data = self.data.shuffle(seed=self.random_seed).filter(
             lambda x: len(x["conversations"]) >= 2)
