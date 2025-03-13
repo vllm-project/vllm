@@ -81,9 +81,12 @@ sampling_params = SamplingParams(temperature=args.temp, max_tokens=256)
 outputs = llm.generate(prompt_token_ids=prompt_ids,
                        sampling_params=sampling_params)
 
+# calculate the average number of accepted tokens per forward pass, +1 is
+# to account for the token from the target model that's always going to be
+# accepted
 acceptance_counts = [0] * (args.num_spec_tokens + 1)
 for output in outputs:
-    for step, count in enumerate(output.metrics.node_acceptance_counts):
+    for step, count in enumerate(output.metrics.spec_token_acceptance_counts):
         acceptance_counts[step] += count
 
 print(f"mean acceptance length: \

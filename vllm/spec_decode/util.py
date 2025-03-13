@@ -110,6 +110,7 @@ def create_sequence_group_output(
         seq_id (int): The sequence id.
         topk_token_ids (List[Optional[int]]): The list of top-k token ids.
         topk_logprobs (List[Optional[float]]): The list of top-k logprobs.
+        step_index: (Optional[int]): The index of the speculative token.
     """
 
     logprobs = create_logprobs_output(

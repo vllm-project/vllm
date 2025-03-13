@@ -1080,9 +1080,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                         [sequence_index][:num_logprobs],
                         topk_logprobs=topk_logprobs_by_step[step_index]
                         [sequence_index][:num_logprobs],
-                        step_index=None if
-                        accepted_token_ids_by_step[step_index][sequence_index]
-                        == -1 else step_index))
+                        step_index=step_index))
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
 
