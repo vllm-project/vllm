@@ -30,9 +30,6 @@ class IncrementalDetokenizer:
     read_offset: int = 0
 
     # Parameters for detokenization
-    eos_token_id: Optional[int] = None
-    stop_token_ids: Optional[list[int]] = None
-    ignore_eos: bool = False
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
 
@@ -89,9 +86,6 @@ class IncrementalDetokenizer:
             prompt_len=len(request.prompt_token_ids),
             tokenizer=tokenizer,
             stop_buffer_length=stop_buffer_length,
-            stop_token_ids=request.sampling_params.stop_token_ids,
-            ignore_eos=request.sampling_params.ignore_eos,
-            eos_token_id=request.eos_token_id,
         )
 
     def update(self, new_token_ids: list[int],
@@ -103,12 +97,12 @@ class IncrementalDetokenizer:
 
         Return matched stop string or None.
         """
+        if not new_token_ids:
+            # Skip detokenization if no new token ids
+            return None
         if self.tokenizer is None:
             # Skip detokenization if no tokenizer
             self.token_ids.extend(new_token_ids)
-            return None
-        if not new_token_ids:
-            # Skip detokenization if no new token ids
             return None
 
         if stop_terminated and not self.include_stop_str_in_output:
