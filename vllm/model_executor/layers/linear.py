@@ -31,12 +31,23 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
-    "CompressedTensorsLinearMethod", "AWQMarlinLinearMethod",
-    "AWQLinearMethod", "GPTQMarlinLinearMethod", "Fp8LinearMethod",
-    "MarlinLinearMethod", "QQQLinearMethod", "GPTQMarlin24LinearMethod",
-    "TPUInt8LinearMethod", "GPTQLinearMethod", "FBGEMMFp8LinearMethod",
-    "ModelOptFp8LinearMethod", "IPEXAWQLinearMethod", "IPEXGPTQLinearMethod",
-    "HQQMarlinMethod", "QuarkLinearMethod"
+    "CompressedTensorsLinearMethod",
+    "AWQMarlinLinearMethod",
+    "AWQLinearMethod",
+    "GPTQMarlinLinearMethod",
+    "Fp8LinearMethod",
+    "MarlinLinearMethod",
+    "QQQLinearMethod",
+    "GPTQMarlin24LinearMethod",
+    "TPUInt8LinearMethod",
+    "GPTQLinearMethod",
+    "FBGEMMFp8LinearMethod",
+    "ModelOptFp8LinearMethod",
+    "IPEXAWQLinearMethod",
+    "IPEXGPTQLinearMethod",
+    "HQQMarlinMethod",
+    "QuarkLinearMethod",
+    "ModelOptNvFp4LinearMethod",
 ]
 
 
