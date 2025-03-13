@@ -593,8 +593,8 @@ class MiniMaxText01LinearAttention(nn.Module):
     def forward(
             self,
             hidden_states: torch.Tensor,
-            kv_caches: MinimaxCacheParams,  # layer of tensor
             positions: torch.Tensor,
+            kv_caches: MinimaxCacheParams,  # layer of tensor
             **kwargs) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         qkv32 = qkv.to(torch.float32)
