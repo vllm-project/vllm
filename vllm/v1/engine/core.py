@@ -113,31 +113,90 @@ class EngineCore:
                               vllm_config: VllmConfig) -> tuple[int, int]:
         start = time.time()
 
-        # Get all kv cache needed by the model
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        try:
+            # Get all kv cache needed by the model
+            kv_cache_specs = self.model_executor.get_kv_cache_specs()
 
-        # Profiles the peak memory usage of the model to determine how much
-        # memory can be allocated for kv cache.
-        available_gpu_memory = self.model_executor.determine_available_memory()
+            # Profiles the peak memory usage of the model to determine how much
+            # memory can be allocated for kv cache.
+            available_gpu_memory = (
+                self.model_executor.determine_available_memory())
 
-        # Get the kv cache tensor size
-        kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
-                                                available_gpu_memory)
-        num_gpu_blocks_set = set(config.num_blocks
-                                 for config in kv_cache_configs)
-        assert len(num_gpu_blocks_set) == 1, (
-            f"num_gpu_blocks need to be the same across workers, "
-            f"but they are different: {num_gpu_blocks_set}")
-        num_gpu_blocks = num_gpu_blocks_set.pop()
-        num_cpu_blocks = 0
+            # Check if we have enough memory to fit the model at all
+            if available_gpu_memory <= 0:
+                raise RuntimeError(
+                    "Not enough GPU memory available to fit the model. "
+                    "Please try using a smaller model, reducing batch size, "
+                    "or using a GPU with more memory.")
 
-        # Initialize kv cache and warmup the execution
-        self.model_executor.initialize_from_config(kv_cache_configs)
+            # Get the kv cache tensor size
+            kv_cache_configs = get_kv_cache_configs(vllm_config,
+                                                    kv_cache_specs,
+                                                    available_gpu_memory)
 
-        elapsed = time.time() - start
-        logger.info(("init engine (profile, create kv cache, "
-                     "warmup model) took %.2f seconds"), elapsed)
-        return num_gpu_blocks, num_cpu_blocks
+            num_gpu_blocks_set = set(config.num_blocks
+                                     for config in kv_cache_configs)
+
+            if not num_gpu_blocks_set:
+                raise RuntimeError(
+                    "Could not allocate any KV cache blocks. This typically "
+                    "happens when there is not enough GPU memory available "
+                    "for the model and KV cache. Consider using a smaller "
+                    "model, reducing context length, or using a GPU with "
+                    "more memory.")
+
+            assert len(num_gpu_blocks_set) == 1, (
+                f"num_gpu_blocks need to be the same across workers, "
+                f"but they are different: {num_gpu_blocks_set}")
+
+            num_gpu_blocks = num_gpu_blocks_set.pop()
+            min_blocks = vllm_config.cache_config.min_required_gpu_blocks
+            if num_gpu_blocks < min_blocks:
+                raise RuntimeError(
+                    f"Could only allocate {num_gpu_blocks} KV cache blocks, "
+                    f"but minimum required is "
+                    f"{min_blocks}. This means there is not enough GPU memory"
+                    f"for sufficient KV cache space. Consider using a smaller "
+                    f"model, reducing context length, or using a GPU with "
+                    f"more memory.")
+
+            num_cpu_blocks = 0
+
+            # Initialize kv cache and warmup the execution
+            try:
+                self.model_executor.initialize_from_config(kv_cache_configs)
+            except RuntimeError as e:
+                if "CUDA out of memory" in str(e):
+                    raise RuntimeError(
+                        "CUDA out of memory during model initialization. "
+                        "This typically happens when the GPU doesn't have "
+                        "enough memory for the model weights and KV cache. "
+                        "Consider using a smaller model, reducing context "
+                        "length, or using a GPU with more memory.") from e
+                elif "operation not implemented" in str(e).lower():
+                    raise RuntimeError(
+                        "Model operation not supported on this hardware. "
+                        "This typically happens when using a model with "
+                        "operations not supported by your GPU "
+                        "architecture.") from e
+                else:
+                    raise
+
+            elapsed = time.time() - start
+            logger.info(("init engine (profile, create kv cache, "
+                         "warmup model) took %.2f seconds"), elapsed)
+            return num_gpu_blocks, num_cpu_blocks
+
+        except Exception as e:
+            logger.error("Error during KV cache initialization: %s", str(e))
+            if "CUDA" in str(e) and "out of memory" in str(e):
+                logger.error(
+                    "Not enough GPU memory to initialize the model and KV "
+                    "cache. Please try using a smaller model, reducing the "
+                    "maximum sequence length, or using a GPU with more memory."
+                )
+            # Re-raise the exception after logging helpful information
+            raise
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
