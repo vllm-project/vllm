@@ -1271,7 +1271,7 @@ class GGUFModelLoader(BaseModelLoader):
         See "Standardized tensor names" in
         https://github.com/ggerganov/ggml/blob/master/docs/gguf.md for details.
         """
-        config = copy.deepcopy(model_config.hf_config)
+        config = copy.deepcopy(model_config.hf_text_config)
         model_type = config.model_type
         gguf_to_hf_name_map = {}
         # hack: ggufs have a different name than transformers
