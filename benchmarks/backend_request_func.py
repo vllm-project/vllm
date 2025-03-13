@@ -241,7 +241,6 @@ async def async_request_openai_completions(
             "best_of": request_func_input.best_of,
             "max_tokens": request_func_input.output_len,
             "min_tokens": request_func_input.output_len,
-            "ignore_eos": True,
             "stream": True,
             "ignore_eos": request_func_input.ignore_eos,
         }
