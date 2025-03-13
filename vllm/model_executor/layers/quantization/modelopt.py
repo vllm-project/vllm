@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from torch.nn import Module
@@ -9,6 +9,10 @@ from torch.nn.parameter import Parameter
 from vllm._custom_ops import (cutlass_scaled_fp4_mm,
                               cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_fp4_moe
+from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
+                                                        FusedMoEMethodBase,
+                                                        FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -21,8 +25,8 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-
 logger = init_logger(__name__)
 
 QUANT_ALGOS = ["FP8", "NVFP4"]
@@ -210,25 +214,37 @@ class ModelOptNvFp4Config(QuantizationConfig):
                              "`hf_quant_config.json` file for your model's "
                              "quant configuration.")
         is_checkpoint_nvfp4_serialized = ("NVFP4" in quant_method)
-        kv_cache_quant_algo = quant_config["kv_cache_quant_algo"]
-        group_size = quant_config["group_size"]
-        exclude_modules = quant_config["exclude_modules"]
-        if not (group_size and kv_cache_quant_algo and exclude_modules):
+        if not ("group_size" and "kv_cache_quant_algo" and 
+                                            "exclude_modules") in quant_config:
             raise ValueError("NVFP4 quantization requires group size and "
                              "kv_cache_quant_algo specified in "
                              "hf_quant_config.json")
+        kv_cache_quant_algo = quant_config["kv_cache_quant_algo"]
+        group_size = quant_config["group_size"]
+        exclude_modules = quant_config["exclude_modules"]
         return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo,
                    exclude_modules, group_size)
+    
+    def is_layer_excluded(self, prefix: str, exclude_modules:List):
+        import re
+        for pattern in exclude_modules:
+            regex_str = pattern.replace('.', r'\.').replace('*', r'.*')
+            if re.fullmatch(regex_str, prefix):
+                return True
+        return False
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
-            if is_layer_skipped(prefix, self.exclude_modules):
+            if (is_layer_skipped(prefix, self.exclude_modules)
+                or  self.is_layer_excluded(prefix, self.exclude_modules)):
                 return UnquantizedLinearMethod()
             return ModelOptNvFp4LinearMethod(self)
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
+        elif isinstance(layer, FusedMoE):
+            return ModelOptNvFp4FusedMoE(self)
         return None
 
 
@@ -409,3 +425,161 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         if bias is not None:
             out = out + bias
         return out.view(*output_shape)
+
+
+class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
+    """
+    MoE Method for FP4 Quantization.
+    Args: 
+        quant_config: NVFP4 Quant Config
+    """
+    
+    def __init__(self, quant_config: ModelOptNvFp4Config):
+        self.quant_config = quant_config
+    
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+        if not self.quant_config.is_checkpoint_nvfp4_serialized:
+            raise ValueError("NVFP4 quantization was selected, "
+                             " dynamic quantization is not supported.")
+            
+        layer.quant_config = self.quant_config
+        group_size = self.quant_config.group_size
+        weight_dtype = torch.uint8
+        weight_scale_dtype = torch.float8_e4m3fn
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        # GEMM 1 
+        w13_weight = ModelWeightParameter(
+            data=torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                # 2 fp4 items are packed in the input dimension
+                hidden_size // 2,
+                dtype=weight_dtype),
+            input_dim=1,
+            output_dim=2,
+            weight_loader=weight_loader)
+        layer.register_parameter("w13_weight", w13_weight)
+
+       # GEMM 2
+        w2_weight = ModelWeightParameter(
+            data=torch.empty(
+                num_experts,
+                hidden_size,
+                # 2 fp4 items are packed in the input dimension
+                intermediate_size_per_partition // 2,
+                dtype=weight_dtype),
+            input_dim=1,
+            output_dim=2,
+            weight_loader=weight_loader)
+        layer.register_parameter("w2_weight", w2_weight)
+        
+        
+        
+        w13_weight_scale = ModelWeightParameter(
+            data=torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                # 2 fp4 items are packed in the input dimension
+                hidden_size // self.quant_config.group_size,
+                dtype=weight_scale_dtype),
+            input_dim=1,
+            output_dim=2,
+            weight_loader=weight_loader)
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        
+        w2_weight_scale = ModelWeightParameter(
+            data=torch.empty(
+                num_experts,
+                hidden_size,
+                # 2 fp4 items are packed in the input dimension
+                intermediate_size_per_partition // self.quant_config.group_size,
+                dtype=weight_scale_dtype),
+            input_dim=1,
+            output_dim=2,
+            weight_loader=weight_loader)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        
+        extra_weight_attrs.update(
+             {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value})
+        
+        w13_weight_scale_2 = PerTensorScaleParameter(data=torch.empty(
+            num_experts, 2, dtype=torch.float32),
+                                                 weight_loader=weight_loader)
+        layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
+        
+       
+        w2_weight_scale_2 = PerTensorScaleParameter(data=torch.empty(
+            num_experts, dtype=torch.float32),
+            weight_loader=weight_loader)
+        layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
+    
+        extra_weight_attrs.update(
+             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
+         
+        w13_input_scale = PerTensorScaleParameter(data=torch.empty(
+            num_experts, dtype=torch.float32), weight_loader=weight_loader)
+        layer.register_parameter("w13_input_scale", w13_input_scale) 
+        
+        w2_input_scale = PerTensorScaleParameter(data=torch.empty(
+            num_experts, dtype=torch.float32), weight_loader=weight_loader)
+        layer.register_parameter("w2_input_scale", w2_input_scale)
+  
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        
+        #transpose w2
+        
+        return
+          
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
+    ):
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
+        
+        
+        return cutlass_fp4_moe(a=x, 
+                        w1_fp4=layer.w13_weight, 
+                        w1_blockscale=layer.w13_weight_scale,
+                        w1_tensorscale=layer.w13_weight_scale_2,
+                        w2_fp4=layer.w2_weight, 
+                        w2_blockscale=layer.w2_weight_scale,
+                        w2_tensorscale=layer.w2_weight_scale_2,
+                        topk_weights=topk_weights,
+                        topk_ids=topk_ids,
+                        m=x.shape[0],
+                        n=layer.w2_weight.shape[1],
+                        k=x.shape[1],
+                        e=layer.w13_weight.shape[0],
+                        # ab_strides1=self.ab_strides1,
+                        # c_strides1=self.c_strides1,
+                        # ab_strides2=self.ab_strides2,
+                        # c_strides2=self.c_strides2,
+                        gemm1_a_scale=layer.w13_input_scale,
+                        gemm2_a_scale=layer.w2_input_scale,
+        ).to(x.dtype)

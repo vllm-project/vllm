@@ -17,7 +17,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 MAX_MODEL_LEN = 1024
 
 MODELS = ["nvidia/Llama-3.3-70B-Instruct-FP4"]
-
+# Same process to load nvidia/DeepSeek-R1-FP4 as well by including a `--tp-size=4/8` flag.
 EXPECTED_STRS_MAP = {
     "nvidia/Llama-3.3-70B-Instruct-FP4": [
         'vLLM (Vectorized Large Language Model) is indeed a high-throughput and memory-efficient inference',

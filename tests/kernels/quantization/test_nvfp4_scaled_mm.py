@@ -22,44 +22,35 @@ CUDA_DEVICES = ['cuda:0']
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
-kE2M1ToFloatArray = [
-    0.,
-    0.5,
-    1.,
-    1.5,
-    2.,
-    3.,
-    4.,
-    6.,
-]
-
-
-def e2m1_to_fp32(int4_value):
-    signBit = (int4_value & 0x8)
-    int4_absValue = int4_value & 0x7
-    float_result = kE2M1ToFloatArray[int4_absValue]
-    if (signBit):
-        float_result = -float_result
-    return float_result
-
+kE2M1ToFloat = torch.tensor([
+    0., 0.5, 1., 1.5, 
+    2., 3., 4., 6.
+], dtype=torch.float32)
 
 def break_fp4_bytes(a, dtype):
-    assert (a.dtype == torch.uint8)
+    assert a.dtype == torch.uint8
     m, n = a.shape
-    a = a.flatten()
-    # Get upper 4 bits
-    highHalfByte = (a & 0xF0) >> 4
-    # Get lower 4 bits
-    lowHalfByte = a & 0x0F
-    fH = torch.tensor([e2m1_to_fp32(x) for x in highHalfByte]).to(a.device)
-    fL = torch.tensor([e2m1_to_fp32(x) for x in lowHalfByte]).to(a.device)
-    # [0xAB, 0xCD] -> [0xB, 0xA, 0xD, 0xC]
-    out = torch.stack((fL, fH), dim=-1).reshape(m, n * 2)
-    return out
-
+    
+    # Vectorized nibble processing
+    a_flat = a.flatten()
+    high = (a_flat & 0xF0) >> 4  # Upper nibbles
+    low = a_flat & 0x0F          # Lower nibbles
+    
+    # Combine nibbles for batch processing
+    combined = torch.stack((low, high), dim=1).flatten()
+    
+    # Vectorized sign and magnitude extraction
+    signs = (combined & 0x08).to(torch.bool)  # Sign bits
+    abs_vals = (combined & 0x07).to(torch.long)                # Magnitude indices
+    
+    # Device-aware lookup and sign application
+    kE2M1 = kE2M1ToFloat.to(device=a.device)
+    values = kE2M1[abs_vals] * torch.where(signs, -1.0, 1.0)
+    
+    # Reshape to final form
+    return values.reshape(m, n * 2).to(dtype=dtype)
 
 def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
-    sf_m, sf_k = a_sf_swizzled.shape
     m_tiles = (m + 128 - 1) // 128
     f = block_size * 4
     k_tiles = (k + f - 1) // f

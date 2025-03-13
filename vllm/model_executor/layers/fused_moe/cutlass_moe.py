@@ -178,3 +178,128 @@ def cutlass_moe_fp8(
     if not apply_router_weight_on_input:
         c2 = c2 * topk_weights.view(m, topk, 1).to(out_dtype)
     return c2.sum(dim=1)
+
+from vllm.scalar_type import scalar_types
+
+FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
+FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+
+def mock_group_gemm(rep_a, a_gs, 
+                     w1_fp4,w1_blockscale, w1_tensorscale,
+                     problem_sizes, expert_offsets,
+                     m,n,k,e,topk,device, out_shape, out_dtype):
+    c1 = torch.empty(out_shape, device=device, dtype=out_dtype)
+    for eIdx in range(0, e):
+        expert_num_tokens = problem_sizes[eIdx,0]
+        eL = expert_offsets[eIdx]
+        eH = expert_offsets[eIdx+1]
+        assert(eH-eL == expert_num_tokens)
+        if not expert_num_tokens:
+            continue
+        mat_a = rep_a[eL:eH].reshape(-1, rep_a.shape[-1])
+        if a_gs[eIdx]:
+            mat_a_gs = a_gs[eIdx]
+        else:
+            expert_amax = torch.abs(mat_a).amax().to(torch.float32)
+            mat_a_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / expert_amax
+        mat_a_q, mat_a_bs = ops.scaled_fp4_quant(
+                mat_a, mat_a_gs)
+        mat_b = w1_fp4[eIdx]
+        mat_b_bs = w1_blockscale[eIdx]
+        alpha = 1 / (mat_a_gs * w1_tensorscale[eIdx])
+        out = ops.cutlass_scaled_fp4_mm(mat_a_q, mat_b, mat_a_bs,
+                                    mat_b_bs, alpha,out_dtype)
+        assert(out.shape[0] == expert_num_tokens and out.shape[1] == w1_fp4.shape[1])
+        c1[eL:eL + expert_num_tokens] = out
+    return c1
+
+
+def cutlass_fp4_moe(
+    a: torch.Tensor,
+    w1_fp4: torch.Tensor, 
+    w1_blockscale: torch.Tensor,
+    w1_tensorscale: torch.Tensor,
+    w2_fp4: torch.Tensor, 
+    w2_blockscale: torch.Tensor,
+    w2_tensorscale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    m:int, n:int, k:int, e:int,
+    gemm1_AB_strides: Optional[torch.Tensor] = None,
+    gemm1_C_strides: Optional[torch.Tensor] = None,
+    gemm2_AB_strides: Optional[torch.Tensor] = None,
+    gemm2_C_strides: Optional[torch.Tensor] = None,
+    gemm1_a_scale: Optional[torch.Tensor] = None,
+    gemm2_a_scale: Optional[torch.Tensor] = None,
+    ): 
+    """
+  
+    
+    """
+    num_topk = topk_ids.shape[1]
+    device = a.device
+    out_dtype = a.dtype
+    
+    expert_offsets = torch.empty((e+ 1),
+                                 dtype=torch.int32,
+                                 device=device)
+    # Problem size:  (num_experts, (m,2n,k)) 
+    problem_sizes1 = torch.empty((e, 3),
+                                 dtype=torch.int32,
+                                 device=device)
+    # Problem size:  (num_experts, (m,n,k)) 
+    problem_sizes2 = torch.empty((e, 3),
+                                 dtype=torch.int32,
+                                 device=device)
+
+    a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+    c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+
+    ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
+                                problem_sizes2, a_map, c_map, e, n, k)
+            
+    rep_a = a[a_map]
+    a_gs = torch.zeros((e,),dtype=torch.float32, device=device)
+    FLOAT4_E2M1_MAX = scalar_types.float4_e2m1fn.max()
+    FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+    m_topk, two_n = rep_a.shape
+    assert m_topk == m * num_topk
+    # rep_a = rep_a.reshape(num_topk,m, two_n)
+
+    if gemm1_a_scale is not None:
+        a_gs = gemm1_a_scale
+    # First gemm is up projection. We the contracting dimension is 
+    # smaller than n
+    # X: [m * num_topk, intermediate_partition] 
+    # Y: [E, hidden_size, intermediate_partitions]: hidden_size = hidden_size_gate + hidden_size_up
+    # Y_FP4 = [E, hidden_size, intermediate_partition_size // 2]
+    c1_shape =  (m * num_topk, w1_fp4.shape[1])
+    
+    c1 = mock_group_gemm(rep_a,a_gs, w1_fp4,w1_blockscale, w1_tensorscale,
+                         problem_sizes1, expert_offsets,
+                         m,n,k,e,num_topk,device,c1_shape,out_dtype)
+    # hidden size dimension is split to one half sized tensor. 
+
+    intermediate = torch.empty((m * num_topk, w1_fp4.shape[1] // 2),
+                                device=device, dtype=out_dtype)
+    
+    torch.ops._C.silu_and_mul(intermediate, c1)
+
+    # rep_int = intermediate.reshape(num_topk,m,k)
+    int_gs = torch.zeros((e,),dtype=torch.float32, device=device)
+    if gemm2_a_scale is not None:
+       int_gs = gemm2_a_scale
+    c2_shape = (m * num_topk, w2_fp4.shape[1])
+    c2 = mock_group_gemm(intermediate, int_gs,
+                         w2_fp4,w2_blockscale,
+                         w2_tensorscale,
+                         problem_sizes2,
+                         expert_offsets,
+                         m,n,k,e,num_topk,
+                         device,c2_shape, out_dtype)
+    
+    out =  (c2[c_map].view(m, num_topk, k) *
+           topk_weights.view(m, num_topk, 1).half()).sum(dim=1)
+    
+    return out
+    
