@@ -3,7 +3,7 @@
 import asyncio
 import os
 import socket
-from typing import AsyncIterator, Tuple
+from collections.abc import AsyncIterator
 from unittest.mock import patch
 
 import pytest
@@ -14,7 +14,7 @@ from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.utils import (FlexibleArgumentParser, MemorySnapshot,
                         PlaceholderModule, StoreBoolean, bind_kv_cache,
                         deprecate_kwargs, get_open_port, memory_profiling,
-                        merge_async_iterators, supports_kw)
+                        merge_async_iterators, supports_kw, swap_dict_values)
 
 from .utils import error_on_warning, fork_new_process_for_each_test
 
@@ -33,7 +33,7 @@ async def test_merge_async_iterators():
     iterators = [mock_async_iterator(i) for i in range(3)]
     merged_iterator = merge_async_iterators(*iterators)
 
-    async def stream_output(generator: AsyncIterator[Tuple[int, str]]):
+    async def stream_output(generator: AsyncIterator[tuple[int, str]]):
         async for idx, output in generator:
             print(f"idx: {idx}, output: {output}")
 
@@ -449,3 +449,26 @@ def test_placeholder_module_error_handling():
     with build_ctx():
         # Test conflict with internal __module attribute
         _ = placeholder_attr.module
+
+
+@pytest.mark.parametrize(
+    "obj,key1,key2",
+    [
+        # Tests for both keys exist
+        ({1: "a", 2: "b"}, 1, 2),
+        # Tests for one key does not exist
+        ({1: "a", 2: "b"}, 1, 3),
+        # Tests for both keys do not exist
+        ({1: "a", 2: "b"}, 3, 4),
+    ])
+def test_swap_dict_values(obj, key1, key2):
+    original_obj = obj.copy()
+    swap_dict_values(obj, key1, key2)
+    if key1 in original_obj:
+        assert obj[key2] == original_obj[key1]
+    else:
+        assert key2 not in obj
+    if key2 in original_obj:
+        assert obj[key1] == original_obj[key2]
+    else:
+        assert key1 not in obj

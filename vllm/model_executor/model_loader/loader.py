@@ -10,6 +10,7 @@ import inspect
 import itertools
 import math
 import os
+import time
 import warnings
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -216,6 +217,9 @@ class DefaultModelLoader(BaseModelLoader):
         allow_patterns_overrides: Optional[list[str]] = None
         """If defined, weights will load exclusively using these patterns."""
 
+    counter_before_loading_weights: float = 0.0
+    counter_after_loading_weights: float = 0.0
+
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         if load_config.model_loader_extra_config:
@@ -350,11 +354,18 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.download_dir,
                 hf_folder,
                 hf_weights_files,
+                self.load_config.use_tqdm_on_load,
             )
         elif use_safetensors:
-            weights_iterator = safetensors_weights_iterator(hf_weights_files)
+            weights_iterator = safetensors_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+            )
         else:
-            weights_iterator = pt_weights_iterator(hf_weights_files)
+            weights_iterator = pt_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+            )
 
         if current_platform.is_tpu():
             # In PyTorch XLA, we should call `xm.mark_step` frequently so that
@@ -368,6 +379,8 @@ class DefaultModelLoader(BaseModelLoader):
 
             weights_iterator = _xla_weights_iterator(weights_iterator)
 
+        if self.counter_before_loading_weights == 0.0:
+            self.counter_before_loading_weights = time.perf_counter()
         # Apply the prefix.
         return ((source.prefix + name, tensor)
                 for (name, tensor) in weights_iterator)
@@ -412,6 +425,11 @@ class DefaultModelLoader(BaseModelLoader):
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
                 self._get_all_weights(model_config, model))
+            self.counter_after_loading_weights = time.perf_counter()
+            logger.info(
+                "Loading weights took %.2f seconds",
+                self.counter_after_loading_weights -
+                self.counter_before_loading_weights)
             # We only enable strict check for non-quantized models
             # that have loaded weights tracking currently.
             if model_config.quantization is None and loaded_weights is not None:
@@ -795,9 +813,15 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def _hf_weight_iter(self, hf_weights_files, use_safetensors: bool):
         if use_safetensors:
-            iterator = safetensors_weights_iterator(hf_weights_files)
+            iterator = safetensors_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+            )
         else:
-            iterator = pt_weights_iterator(hf_weights_files)
+            iterator = pt_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+            )
         for org_name, param in iterator:
             # mapping weight names from transformers to vllm while preserving
             # original names.
@@ -1385,7 +1409,10 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             revision: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
-        return runai_safetensors_weights_iterator(hf_weights_files)
+        return runai_safetensors_weights_iterator(
+            hf_weights_files,
+            self.load_config.use_tqdm_on_load,
+        )
 
     def download_model(self, model_config: ModelConfig) -> None:
         """Download model if necessary"""

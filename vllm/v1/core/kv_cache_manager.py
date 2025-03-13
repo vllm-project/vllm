@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections import defaultdict
-from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.utils import cdiv
@@ -52,20 +53,20 @@ class KVCacheManager:
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
-        self.req_to_blocks: DefaultDict[str,
-                                        List[KVCacheBlock]] = defaultdict(list)
+        self.req_to_blocks: defaultdict[str,
+                                        list[KVCacheBlock]] = defaultdict(list)
 
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
-        self.req_to_block_hashes: DefaultDict[
-            str, List[BlockHashType]] = defaultdict(list)
+        self.req_to_block_hashes: defaultdict[
+            str, list[BlockHashType]] = defaultdict(list)
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
         # This is only used to track the RUNNING requests, we do not track the
         # data for reempted ones.
-        self.num_cached_block: Dict[str, int] = {}
+        self.num_cached_block: dict[str, int] = {}
         self.prefix_cache_stats = PrefixCacheStats()
 
     @property
@@ -88,7 +89,7 @@ class KVCacheManager:
         return stats
 
     def get_computed_blocks(
-            self, request: Request) -> Tuple[List[KVCacheBlock], int]:
+            self, request: Request) -> tuple[list[KVCacheBlock], int]:
         """Get the computed (cached) blocks for the request.
         Note that the computed blocks must be full.
 
@@ -104,8 +105,6 @@ class KVCacheManager:
             # Prefix caching is disabled.
             return [], 0
 
-        computed_blocks = []
-
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
         block_hashes = self.req_to_block_hashes[request.request_id]
@@ -113,31 +112,38 @@ class KVCacheManager:
             block_hashes = hash_request_tokens(self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
-        for block_hash in block_hashes:
-            # block_hashes is a chain of block hashes. If a block hash is not
-            # in the cached_block_hash_to_id, the following block hashes are
-            # not computed yet for sure.
-            if cached_block := self.block_pool.get_cached_block(block_hash):
-                computed_blocks.append(cached_block)
-            else:
-                break
-
         self.prefix_cache_stats.requests += 1
-        self.prefix_cache_stats.queries += len(block_hashes)
-        self.prefix_cache_stats.hits += len(computed_blocks)
+        if request.sampling_params.prompt_logprobs is None:
+            # Check for cache hits
+            computed_blocks = []
+            for block_hash in block_hashes:
+                # block_hashes is a chain of block hashes. If a block hash
+                # is not in the cached_block_hash_to_id, the following
+                # block hashes are not computed yet for sure.
+                if cached_block := self.block_pool.get_cached_block(
+                        block_hash):
+                    computed_blocks.append(cached_block)
+                else:
+                    break
 
-        # NOTE(woosuk): Since incomplete blocks are not eligible for
-        # sharing, `num_computed_tokens` is always a multiple of
-        # `block_size`.
-        num_computed_tokens = len(computed_blocks) * self.block_size
-        return computed_blocks, num_computed_tokens
+            self.prefix_cache_stats.queries += len(block_hashes)
+            self.prefix_cache_stats.hits += len(computed_blocks)
+
+            # NOTE(woosuk): Since incomplete blocks are not eligible for
+            # sharing, `num_computed_tokens` is always a multiple of
+            # `block_size`.
+            num_computed_tokens = len(computed_blocks) * self.block_size
+            return computed_blocks, num_computed_tokens
+        else:
+            # Skip cache hits for prompt logprobs
+            return [], 0
 
     def allocate_slots(
         self,
         request: Request,
         num_tokens: int,
-        new_computed_blocks: Optional[List[KVCacheBlock]] = None
-    ) -> Optional[List[KVCacheBlock]]:
+        new_computed_blocks: Optional[list[KVCacheBlock]] = None
+    ) -> Optional[list[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
         Args:

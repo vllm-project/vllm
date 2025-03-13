@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Mapping, Set
 from dataclasses import dataclass, field
-from typing import AbstractSet, Any, Literal, Mapping, Optional
+from typing import Any, Literal, Optional
 
 import pytest
 from packaging.version import Version
@@ -123,6 +124,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-2b"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
+    "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it",
+                                         min_transformers_version="4.50"),
     "GlmForCausalLM": _HfExamplesInfo("THUDM/glm-4-9b-chat-hf"),
     "GPT2LMHeadModel": _HfExamplesInfo("gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo("bigcode/starcoder"),
@@ -130,6 +133,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GPTNeoXForCausalLM": _HfExamplesInfo("EleutherAI/pythia-160m"),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
+    "GraniteMoeSharedForCausalLM": _HfExamplesInfo("ibm-research/moe-7b-1b-active-shared-experts",  # noqa: E501
+                                                   min_transformers_version="4.49"),  # noqa: E501
     "Grok1ModelForCausalLM": _HfExamplesInfo("hpcai-tech/grok-1",
                                              trust_remote_code=True),
     "InternLMForCausalLM": _HfExamplesInfo("internlm/internlm-chat-7b",
@@ -238,6 +243,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
                                                hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]}),  # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
+    "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it",
+                                                      min_transformers_version="4.50"),
     "GLM4VForCausalLM": _HfExamplesInfo("THUDM/glm-4v-9b",
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
@@ -269,6 +276,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          extras={"v2": "google/paligemma2-3b-ft-docci-448"}),  # noqa: E501
     "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3-vision-128k-instruct",
                                         trust_remote_code=True),
+    "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
+                                        trust_remote_code=True),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
                                                        tokenizer_mode="mistral"),
     "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL",
@@ -279,8 +288,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
     "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct",  # noqa: E501
                                                           min_transformers_version="4.49"),  # noqa: E501
-    "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_4",
-                                     extras={"v0.5": "fixie-ai/ultravox-v0_5-llama-3_2-1b"},  # noqa: E501
+    "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
                                      trust_remote_code=True),
     # [Encoder-decoder]
     # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
@@ -324,7 +332,7 @@ class HfExampleModels:
 
         self.hf_models = hf_models
 
-    def get_supported_archs(self) -> AbstractSet[str]:
+    def get_supported_archs(self) -> Set[str]:
         return self.hf_models.keys()
 
     def get_hf_info(self, model_arch: str) -> _HfExamplesInfo:
