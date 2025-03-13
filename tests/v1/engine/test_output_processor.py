@@ -537,9 +537,11 @@ def test_stop_token(include_stop_str_in_output: bool,
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer_group,
                                        log_stats=False)
     # Dummy engine core outputs, with control tokens suffixed to test stops
+    suffix_token = ([eos_token_id] if is_eos_test else stop_token_ids)
+    assert suffix_token is not None and isinstance(suffix_token[0], int)
     generation_string = dummy_test_vectors.generation_strings[0]
-    generation_tokens = (dummy_test_vectors.generation_tokens[0] + 2 *
-                         ([eos_token_id] if is_eos_test else stop_token_ids))
+    generation_tokens = (dummy_test_vectors.generation_tokens[0] +
+                         2 * suffix_token)
     if do_logprobs:
         generation_logprobs = (
             dummy_test_vectors.generation_logprobs[0] +

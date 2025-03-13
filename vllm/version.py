@@ -28,4 +28,5 @@ def _prev_minor_version_was(version_str):
         return True
 
     # Note - this won't do the right thing when we release 1.0!
+    assert isinstance(__version_tuple__[1], int)
     return version_str == f"{__version_tuple__[0]}.{__version_tuple__[1] - 1}"
