@@ -18,6 +18,13 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+if current_platform.is_rocm_aiter_paged_attn_enabled():
+    from vllm.attention.ops.rocm_aiter_paged_attn import (
+        PagedAttention, PagedAttentionMetadata)
+else:
+    from vllm.attention.ops.paged_attn import (PagedAttention,
+                                               PagedAttentionMetadata)
+
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
@@ -469,6 +476,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         if blocksparse_params is not None:
             raise ValueError(
                 "ROCmFlashAttention does not support blocksparse attention.")
+        self.aiter_kv_scales_initialized = False
 
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -615,6 +623,30 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             value = value.view(-1, self.num_kv_heads, self.head_size)
         else:
             assert value is None
+
+        # Reshaping kv tensors is required for AITER paged attention kernel
+        # because it works on a different tensor shape,
+        # when the size of one element is one byte (int8/fp8 dtypes).
+        # This reshaping is only required on the first forward call
+        # and the kv cache must not be empty.
+        if (current_platform.is_rocm_aiter_paged_attn_enabled()
+                and kv_cache.dtype.itemsize == 1
+                and not self.aiter_kv_scales_initialized
+                and kv_cache.shape != torch.Size([0])):
+            num_blocks = kv_cache.shape[1]
+            block_size = kv_cache.shape[2] // (self.num_kv_heads *
+                                               self.head_size)
+            k_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
+                                  dtype=torch.float32,
+                                  device=kv_cache.device)
+            v_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
+                                  dtype=torch.float32,
+                                  device=kv_cache.device)
+            self.aiter_kv_scales_initialized = True
+            k_scale.fill_(layer._k_scale.item())
+            v_scale.fill_(layer._v_scale.item())
+            layer._k_scale = k_scale
+            layer._v_scale = v_scale
 
         # Only update KV cache for decoder self-attention
         # and encoder-decoder cross-attention
@@ -909,4 +941,5 @@ def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
-            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
+            and not current_platform.is_rocm_aiter_paged_attn_enabled())
