@@ -304,6 +304,18 @@ def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def gemma3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for Gemma 3."""
+    hf_processor = hf_model.processor
+
+    def processor(*args, **kwargs):
+        return hf_processor(*args, do_pan_and_scan=True, **kwargs)
+
+    hf_model.processor = processor
+
+    return hf_model
+
+
 def glm_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4."""
     hf_processor = hf_model.processor

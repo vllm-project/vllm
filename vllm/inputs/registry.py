@@ -348,7 +348,11 @@ class InputRegistry:
                 dummy_factory = self._get_dummy_data_factory(model_cls)
             mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-                dummy_factory, overrides=model_config.mm_processor_kwargs)
+                dummy_factory,
+                overrides=model_config.mm_processor_kwargs,
+                requires_kw_only=False,
+                allow_var_kwargs=True,
+            )
 
             dummy_data = dummy_factory(InputContext(model_config), seq_len,
                                        _MultiModalCounts(mm_counts),
@@ -381,6 +385,7 @@ class InputRegistry:
         self,
         ctx: InputContext,
         inputs: ProcessorInputs,
+        **kwargs: object,
     ) -> ProcessorInputs:
         """The default input processor is a no-op."""
         return inputs
@@ -447,6 +452,8 @@ class InputRegistry:
             model_config.mm_processor_kwargs,
             inputs.get("mm_processor_kwargs", {}),  # type: ignore
             processor,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
         )
 
         processed_inputs = processor(
