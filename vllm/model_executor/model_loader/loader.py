@@ -1271,12 +1271,15 @@ class GGUFModelLoader(BaseModelLoader):
         See "Standardized tensor names" in
         https://github.com/ggerganov/ggml/blob/master/docs/gguf.md for details.
         """
-        config = model_config.hf_config
+        config = copy.deepcopy(model_config.hf_config)
         model_type = config.model_type
         gguf_to_hf_name_map = {}
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
             model_type = "command-r"
+        # revert sliding_window modifications
+        if model_type == "gemma3_text":
+            model_type = "gemma3"
         if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             # GGUF layer map assumes that we will have a merged expert weights
@@ -1290,6 +1293,8 @@ class GGUFModelLoader(BaseModelLoader):
                         f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = \
                         f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+        if hasattr(config, "interleaved_sliding_window"):
+            config.sliding_window = config.interleaved_sliding_window
 
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():

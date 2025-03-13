@@ -344,6 +344,8 @@ class Gemma3Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -423,6 +425,11 @@ class Gemma3Model(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
+            if self.quant_config and self.quant_config.get_name() == "gguf" \
+                and name.endswith("norm.weight"):
+                # Revert +1 during llama.cpp conversion
+                # see: https://github.com/ggml-org/llama.cpp/blob/be7c3034108473beda214fd1d7c98fd6a7a3bdf5/convert_hf_to_gguf.py#L3397-L3400
+                loaded_weight -= 1
             for (param_name, shard_name, shard_id) in stacked_params_mapping:
                 if shard_name not in name:
                     continue
