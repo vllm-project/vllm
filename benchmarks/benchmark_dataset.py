@@ -550,20 +550,27 @@ class HuggingFaceDataset(BenchmarkDataset):
             split=self.dataset_split,
             streaming=True,
         )
-
-        if "conversations" not in self.data.features:
-            raise ValueError("HF Dataset must have a 'conversations' column.")
-
+        if self.data.features is None or "conversations" \
+            not in self.data.features:
+            raise ValueError(
+                "HuggingFaceDataset currently only supports datasets with "
+                "a 'conversations' column like lmms-lab/LLaVA-OneVision-Data. "
+                "Please consider contributing if you would like to add "
+                "support for additional dataset formats.")
         # Shuffle and filter examples with at least 2 conversations.
         self.data = self.data.shuffle(seed=self.random_seed).filter(
             lambda x: len(x["conversations"]) >= 2)
 
+    def apply_chat_transformation(self, prompt: str, mm_content):
+        textpart = {"text": prompt, "type": "text"}
+        conversations = [{"role": "user", "content": [textpart, mm_content]}]
+        return conversations
+
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
                num_requests: int,
-               lora_path: Optional[str] = None,
-               max_loras: Optional[int] = None,
                output_len: Optional[int] = None,
+               enable_chat: bool = False,
                **kwargs) -> list:
         sampled_requests = []
         dynamic_output = output_len is None
@@ -571,12 +578,8 @@ class HuggingFaceDataset(BenchmarkDataset):
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
-
             conv = item["conversations"]
             prompt, completion = conv[0]["value"], conv[1]["value"]
-
-            lora_request, tokenizer = self.get_random_lora_request(
-                tokenizer, lora_path=lora_path, max_loras=max_loras)
 
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
@@ -587,16 +590,19 @@ class HuggingFaceDataset(BenchmarkDataset):
             if dynamic_output and not is_valid_sequence(
                     prompt_len, completion_len):
                 continue
-
             mm_content = process_image(
                 item["image"]) if "image" in item else None
+            if enable_chat:
+                # Note: when chat is enabled the request prompt_len is no longer
+                # accurate and we will be using request output to count the
+                # actual prompt len and output len
+                prompt = self.apply_chat_transformation(prompt, mm_content)
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
-                    lora_request=lora_request,
                 ))
         return sampled_requests
 
@@ -606,7 +612,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 # -----------------------------------------------------------------------------
 
 
-class VisionArenaDataset(BenchmarkDataset):
+class VisionArenaDataset(HuggingFaceDataset):
     """
     Vision Arena Dataset.
     """
@@ -617,14 +623,9 @@ class VisionArenaDataset(BenchmarkDataset):
 
     def __init__(
         self,
-        dataset_split: str,
-        dataset_subset: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.dataset_split = dataset_split
-        self.dataset_subset = dataset_subset
-
         if self.dataset_path != self.VISION_ARENA_DATASET_PATH:
             raise ValueError(f"Only support Vision Arena dataset.\
                     This data path {self.dataset_path} is not valid.")
@@ -642,15 +643,10 @@ class VisionArenaDataset(BenchmarkDataset):
         )
         self.data = dataset.shuffle(seed=self.random_seed)
 
-    def apply_chat_transformation(self, prompt: str, mm_content):
-        textpart = {"text": prompt, "type": "text"}
-        conversations = [{"role": "user", "content": [textpart, mm_content]}]
-        return conversations
-
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
                num_requests: int,
-               output_len: int = DEFAULT_OUTPUT_LEN,
+               output_len: Optional[int] = DEFAULT_OUTPUT_LEN,
                enable_chat: bool = False,
                **kwargs) -> list:
         output_len = (output_len
