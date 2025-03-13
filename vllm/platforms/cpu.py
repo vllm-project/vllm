@@ -67,6 +67,13 @@ class CpuPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
+        scheduler_config = vllm_config.scheduler_config
+        if ((scheduler_config.chunked_prefill_enabled
+             or cache_config.enable_prefix_caching)
+                and cache_config.cache_dtype != "auto"):
+            raise RuntimeError("Chunked-prefill and prefix-cache on the CPU "
+                               "backend is not compatible with FP8 KV cache.")
+
         if cache_config.cache_dtype == "fp8_e4m3":
             cache_config.cache_dtype = "fp8_e5m2"
             logger.warning(
