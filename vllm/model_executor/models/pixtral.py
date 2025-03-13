@@ -446,7 +446,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         num_crops_hw = kwargs.pop("num_crops_hw")
         num_image_tokens = kwargs.pop("num_image_tokens")
 
-        if not isinstance(images_flat, torch.Tensor):
+        if not isinstance(images_flat, (torch.Tensor, list)):
             raise ValueError("Incorrect type of images. "
                              f"Got type: {type(images_flat)}")
         if not isinstance(num_crops_hw, torch.Tensor):
@@ -456,7 +456,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise ValueError("Incorrect type of num_image_tokens. "
                              f"Got type: {type(num_image_tokens)}")
 
-        images_flat = flatten_bn(images_flat)
+        images_flat = flatten_bn(images_flat, concat=True)
         num_crops_hw = flatten_bn(num_crops_hw)
         num_image_tokens = flatten_bn(num_image_tokens)
 
