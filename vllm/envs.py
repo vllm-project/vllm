@@ -591,6 +591,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RAY_BUNDLE_INDICES":
     lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
 
+    # Ray placement group name, if it is set, it can control the
+    # placement group for vLLM to use.
+    "VLLM_RAY_PG_NAME":
+    lambda: os.getenv("VLLM_RAY_PG_NAME", None),
+
+    # Ray namespace, if it is set, it can control the namespace for vLLM to use.
+    "VLLM_RAY_NAMESPACE":
+    lambda: os.getenv("VLLM_RAY_NAMESPACE", None),
+
     # When on a Nvidia GPU aligns single entries (within a page) so they are 256
     # byte aligned for better performance, this increases the memory usage of
     # the cache. Currently this only affects MLA that results in non-256

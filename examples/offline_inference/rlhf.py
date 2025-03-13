@@ -27,11 +27,17 @@ from vllm.utils import get_ip, get_open_port
 
 class MyLLM(LLM):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, pg_name, ray_namespace, **kwargs):
         # a hack to make the script work.
         # stop ray from manipulating CUDA_VISIBLE_DEVICES
         # at the top-level
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        # set the placement group name for vLLM to use
+        os.environ['VLLM_RAY_PG_NAME'] = pg_name
+        # set the ray namespace for vLLM to use
+        os.environ['VLLM_RAY_NAMESPACE'] = ray_namespace
+        # set the ray address for vLLM to use
+        os.environ['RAY_ADDRESS'] = ray.get_runtime_context().gcs_address
         super().__init__(*args, **kwargs)
 
 
@@ -47,10 +53,13 @@ Start the inference process, here we use vLLM to hold a model on GPU 1 and
 GPU 2. For the details on how to use ray, please refer to the ray 
 documentation https://docs.ray.io/en/latest/ .
 """
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
-ray.init()
+PG_NAME = "pg_inference"
+RAY_NAMESPACE = "rlhf"
 
-pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2)
+os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
+ray.init(namespace=RAY_NAMESPACE)
+
+pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2, name=PG_NAME)
 ray.get(pg_inference.ready())
 scheduling_inference = PlacementGroupSchedulingStrategy(
     placement_group=pg_inference,
@@ -71,6 +80,8 @@ llm = ray.remote(
     worker_extension_cls="rlhf_utils.WorkerExtension",
     tensor_parallel_size=2,
     distributed_executor_backend="ray",
+    pg_name=PG_NAME,
+    ray_namespace=RAY_NAMESPACE,
 )
 
 # Generate texts from the prompts.
