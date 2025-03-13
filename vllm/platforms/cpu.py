@@ -60,15 +60,24 @@ class CpuPlatform(Platform):
         # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if not model_config.enforce_eager:
-            logger.warning(
-                "CUDA graph is not supported on CPU, fallback to the eager "
-                "mode.")
             model_config.enforce_eager = True
 
         cache_config = vllm_config.cache_config
 
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
+
+        if cache_config.cache_dtype == "fp8_e4m3":
+            cache_config.cache_dtype = "fp8_e5m2"
+            logger.warning(
+                "CPU backend doesn't support fp8_e4m3 KV cache type, "
+                "cast to fp8_e5m2.")
+
+        if (cache_config.cache_dtype != "auto"
+                and model_config.dtype == torch.half):
+            logger.warning("FP8 KV cache on the CPU backend only does not"
+                           " support fp16 for now, cast to bf16.")
+            model_config.dtype = torch.bfloat16
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
 
