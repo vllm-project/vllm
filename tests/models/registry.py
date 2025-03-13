@@ -124,6 +124,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-2b"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
+    "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it",
+                                         min_transformers_version="4.50"),
     "GlmForCausalLM": _HfExamplesInfo("THUDM/glm-4-9b-chat-hf"),
     "GPT2LMHeadModel": _HfExamplesInfo("gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo("bigcode/starcoder"),
@@ -241,6 +243,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-vl2-tiny",  # noqa: E501
                                                hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]}),  # noqa: E501
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
+    "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it",
+                                                      min_transformers_version="4.50"),
     "GLM4VForCausalLM": _HfExamplesInfo("THUDM/glm-4v-9b",
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
@@ -284,8 +288,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
     "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct",  # noqa: E501
                                                           min_transformers_version="4.49"),  # noqa: E501
-    "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_4",
-                                     extras={"v0.5": "fixie-ai/ultravox-v0_5-llama-3_2-1b"},  # noqa: E501
+    "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
                                      trust_remote_code=True),
     # [Encoder-decoder]
     # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
