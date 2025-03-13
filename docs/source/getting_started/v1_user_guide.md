@@ -35,7 +35,8 @@ This living user guide outlines a few known **important changes and limitations*
 | **best_of**                               | <nobr>🔴 Deprecated ([RFC #13361](https://github.com/vllm-project/vllm/issues/13361))</nobr>|
 | **Per-Request Logits Processors**         | <nobr>🔴 Deprecated ([RFC #13360](https://github.com/vllm-project/vllm/pull/13360))</nobr>  |
 | **GPU <> CPU KV Cache Swapping**          | <nobr>🔴 Deprecated</nobr>                                                        |
-| **Embedding Models**                      | <nobr>🟡 Planned</nobr>                                                           |
+| **Multimodal Models**                     | <nobr>🟢 Functional</nobr>                            |
+| **Embedding Models**                      | <nobr>🟡 Planned <gh-issue:12249></nobr>                                                           |
 | **Mamba Models**                          | <nobr>🟡 Planned</nobr>                                                           |
 | **Encoder-Decoder Models**                | <nobr>🟡 Planned</nobr>                                                           |
 
@@ -114,8 +115,7 @@ vLLM V1 currently excludes model architectures with the `SupportsV0Only` protoco
 and the majority fall into the following categories. V1 support for these models will be added eventually.
 
 **Embedding Models**  
-vLLM V1 does not yet include a `PoolingModelRunner` to support embedding/pooling
-  models (e.g, `XLMRobertaModel`).
+Instead of having a separate model runner, hidden states processor (<gh-issue:12249>), which is based on global logits processor (<gh-pr:13360>), has been proposed to enable simultaneous generation and embedding using the same engine instance in V1. It is still in the planning stage.
 
 **Mamba Models**  
 Models using selective state-space mechanisms (instead of standard transformer attention)
