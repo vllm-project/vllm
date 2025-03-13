@@ -3,7 +3,7 @@
 import base64
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from PIL import Image
@@ -31,7 +31,7 @@ class ImagePlugin(MultiModalPlugin):
     def _get_hf_image_processor(
         self,
         model_config: "ModelConfig",
-        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        mm_processor_kwargs: Optional[dict[str, Any]] = None,
     ):
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
@@ -134,3 +134,22 @@ class ImageMediaIO(MediaIO[Image.Image]):
             data = buffer.getvalue()
 
         return base64.b64encode(data).decode('utf-8')
+
+
+class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def load_bytes(self, data: bytes) -> torch.Tensor:
+        buffer = BytesIO(data)
+        return torch.load(buffer, weights_only=True)
+
+    def load_base64(self, media_type: str, data: str) -> torch.Tensor:
+        return self.load_bytes(base64.b64decode(data))
+
+    def load_file(self, filepath: Path) -> torch.Tensor:
+        return torch.load(filepath)
+
+    def encode_base64(self, media: torch.Tensor) -> str:
+        return base64.b64encode(media.numpy()).decode('utf-8')
