@@ -13,10 +13,9 @@ import triton.language as tl
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    _normalize_quant_group_shape, scaled_dequantize)
+    scaled_dequantize)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    CUTLASS_BLOCK_FP8_SUPPORTED, Fp8LinearOp, cutlass_block_fp8_supported,
-    cutlass_fp8_supported)
+    CUTLASS_BLOCK_FP8_SUPPORTED)
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
