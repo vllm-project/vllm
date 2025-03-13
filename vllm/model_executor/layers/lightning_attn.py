@@ -373,7 +373,8 @@ class _attention(torch.autograd.Function):
         kv = torch.empty((b, h, NUM_BLOCK, d, e),
                          dtype=torch.float32,
                          device=q.device)
-        grid = (b * h, NUM_BLOCK, NUM_FBLOCK * NUM_FBLOCK)
+        # grid = (b * h, NUM_BLOCK, NUM_FBLOCK * NUM_FBLOCK)
+        grid = (b * h, NUM_BLOCK, NUM_FBLOCK)
         _fwd_kv_parallel[grid](
             k,
             v,
@@ -393,7 +394,8 @@ class _attention(torch.autograd.Function):
             NUM_CBLOCK=NUM_CBLOCK,
         )
 
-        grid = (b * h, NUM_FBLOCK, NUM_FBLOCK)
+        # grid = (b * h, NUM_FBLOCK, NUM_FBLOCK)
+        grid = (b * h, NUM_BLOCK)
         _fwd_kv_reduce[grid](
             k,
             v,
@@ -414,7 +416,8 @@ class _attention(torch.autograd.Function):
             NUM_CBLOCK=NUM_CBLOCK,
         )
 
-        grid = (b * h, NUM_BLOCK * NUM_CBLOCK, NUM_FBLOCK)
+        # grid = (b * h, NUM_BLOCK * NUM_CBLOCK, NUM_FBLOCK)
+        grid = (b * h, NUM_BLOCK * NUM_CBLOCK)
         _fwd_none_diag_kernel[grid](
             q,
             k,
