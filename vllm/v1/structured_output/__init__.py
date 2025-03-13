@@ -90,7 +90,7 @@ class StructuredOutputManager:
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self._grammar_bitmask = xgr.allocate_token_bitmask(
             self.vllm_config.scheduler_config.max_num_seqs *
-                (1 + self.num_speculative_tokens),
+            (1 + self.num_speculative_tokens),
             self.vocab_size,
         )
 
