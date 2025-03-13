@@ -12,7 +12,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from mistral_common.protocol.instruct.messages import ImageChunk
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
-from PIL import Image
 from transformers import BatchFeature, PixtralVisionConfig, TensorType
 from transformers.image_utils import ImageInput
 from transformers.models.pixtral.image_processing_pixtral import (
@@ -149,7 +148,7 @@ class PixtralProcessorAdapter:
         images_flat = []
         num_crops_hw = []
         image_tokens_flat = []
-        num_image_tokens = []
+        num_images_tokens = []
 
         patch_size = self.patch_size
         image_token_id = self.image_token_id
@@ -165,17 +164,20 @@ class PixtralProcessorAdapter:
                                       4).reshape(grid_h * grid_w, C,
                                                  patch_size, patch_size))
 
+            num_image_tokens = image_inputs.tokens.count(image_token_id)
+            assert num_image_tokens == grid_h * grid_w
+
             images_flat.append(image_flat)
             num_crops_hw.append([grid_h, grid_w])
             image_tokens_flat.extend(image_inputs.tokens)
-            num_image_tokens.append(image_inputs.tokens.count(image_token_id))
+            num_images_tokens.append(num_image_tokens)
 
         return BatchFeature(
             {
                 "input_ids": [image_tokens_flat] * len(text),
                 "images_flat": np.concatenate(images_flat),
                 "num_crops_hw": np.array(num_crops_hw),
-                "num_image_tokens": num_image_tokens,
+                "num_image_tokens": num_images_tokens,
             },
             tensor_type=return_tensors,
         )
@@ -227,19 +229,11 @@ class PixtralProcessingInfo(BaseProcessingInfo):
 
         hf_vision_config = self.get_vision_config(processor)
         hf_encoder_info = PixtralEncoderInfo(hf_vision_config)
-        hf_num_tokens = hf_encoder_info.get_num_image_tokens(
+
+        return hf_encoder_info.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,
         )
-
-        image_processor = processor.image_processor
-        image = Image.new("RGB", (image_width, image_height), color=0)
-        mistral_num_tokens = len(
-            image_processor(ImageChunk(image=image)).tokens)
-
-        assert hf_num_tokens == mistral_num_tokens
-
-        return hf_num_tokens
 
     def get_image_size_with_most_features(self) -> ImageSize:
         image_processor = self.get_hf_processor().image_processor
