@@ -97,8 +97,7 @@ in progress.
 (e.g., see [PR #13096](https://github.com/vllm-project/vllm/pull/13096)).
 
 - **Spec Decode**: Currently, only ngram-based spec decode is supported in V1. There
-  will be follow-up work to support other types of spec decode (e.g., see [PR #13933]
-  (https://github.com/vllm-project/vllm/pull/13933)). We will prioritize the support for Eagle, MTP compared to draft model based spec decode.
+  will be follow-up work to support other types of spec decode (e.g., see [PR #13933](https://github.com/vllm-project/vllm/pull/13933)). We will prioritize the support for Eagle, MTP compared to draft model based spec decode.
 
 #### Unsupported Features
 
