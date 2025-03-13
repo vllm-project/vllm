@@ -9,8 +9,8 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (List, Literal, Optional, Set, Tuple, TypedDict, TypeVar,
-                    Union)
+from typing import (Callable, List, Literal, Optional, Set, Tuple, TypedDict,
+                    TypeVar, Union)
 
 import torch
 import torch.nn as nn
@@ -981,5 +981,156 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(self)
+        # unused modules appear in OpenGVLab/InternVideo2_5_Chat_8B
+        skip_prefixes = [
+            "action_embed", "temporal_embed", "track_embed",
+            "track_embed_decoder", "box_token", "cg_criterion", "cg_model",
+            "loc_encoder", "loc_decoder", "sam", "temporal_token",
+            "track_token"
+        ]
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)
+
+
+# copied from https://huggingface.co/OpenGVLab/InternVideo2_5_Chat_8B/blob/main/modeling_internvl_chat_hico2.py
+def bipartite_soft_matching(
+    metric: torch.Tensor,
+    r: int,
+) -> tuple[Callable, Callable]:
+    """
+    Applies ToMe with a balanced matching set (50%, 50%).
+    Input size is [batch, tokens, channels].
+    r indicates the number of tokens to remove (max 50% of tokens).
+    """
+    protected = 0
+
+    t = metric.shape[1]
+    r = min(r, (t - protected) // 2)
+
+    assert r > 0, r
+
+    with torch.no_grad():
+        metric = metric / metric.norm(dim=-1, keepdim=True)
+        a, b = metric[..., ::2, :], metric[..., 1::2, :]
+        scores = a @ b.transpose(-1, -2)
+
+        node_max, node_idx = scores.max(dim=-1)
+        edge_idx = node_max.argsort(dim=-1, descending=True)[..., None]
+
+        unm_idx = edge_idx[..., r:, :]  # Unmerged Tokens
+        src_idx = edge_idx[..., :r, :]  # Merged Tokens
+        dst_idx = node_idx[..., None].gather(dim=-2, index=src_idx)
+
+    def merge(x: torch.Tensor, mode="mean") -> torch.Tensor:
+        src, dst = x[..., ::2, :], x[..., 1::2, :]
+        n, t1, c = src.shape
+        unm = src.gather(dim=-2, index=unm_idx.expand(n, t1 - r, c))
+        src = src.gather(dim=-2, index=src_idx.expand(n, r, c))
+        dst = dst.scatter_add(-2, dst_idx.expand(n, r, c),
+                              src)  # , reduce=mode)
+
+        return torch.cat([unm, dst], dim=1)
+
+    def unmerge(x: torch.Tensor) -> torch.Tensor:
+        unm_len = unm_idx.shape[1]
+        unm, dst = x[..., :unm_len, :], x[..., unm_len:, :]
+        n, _, c = unm.shape
+
+        src = dst.gather(dim=-2, index=dst_idx.expand(n, r, c))
+
+        out = torch.zeros(n,
+                          metric.shape[1],
+                          c,
+                          device=x.device,
+                          dtype=x.dtype)
+
+        out[..., 1::2, :] = dst
+        out.scatter_(dim=-2,
+                     index=(2 * unm_idx).expand(n, unm_len, c),
+                     src=unm)
+        out.scatter_(dim=-2, index=(2 * src_idx).expand(n, r, c), src=src)
+
+        return out
+
+    return merge, unmerge
+
+
+# copied from https://huggingface.co/OpenGVLab/InternVideo2_5_Chat_8B/blob/main/modeling_internvl_chat_hico2.py
+def merge_wavg(
+    merge: Callable,
+    x: torch.Tensor,
+    size: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Applies the merge function by taking a weighted average based on token size.
+    Returns the merged tensor and the new token sizes.
+    """
+    if size is None:
+        size = torch.ones_like(x[..., 0, None])
+
+    x = merge(x * size, mode="sum")
+    size = merge(size, mode="sum")
+
+    x = x / size
+    return x, size
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    InternVLMultiModalProcessor,
+    info=InternVLProcessingInfo,
+    dummy_inputs=InternVLDummyInputsBuilder)
+class InternVLChatHiCoModel(InternVLChatModel):
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.local_num_frames = 4
+        self.num_tome_tokens = 64
+        self.num_image_token = self.num_tome_tokens // self.local_num_frames
+
+    def merge_tokens(self, x: torch.Tensor, target_num_token: int):
+        r"""
+        x = torch.randn(10, 2560, c)
+        x = merge_tokens(x, r_merge_list=[1280])
+        """
+        size = None
+        b, p, c = x.shape
+        tmp_p = p
+        r_merge_list = []
+        assert tmp_p > target_num_token, (
+            f"{tmp_p} should greater than {target_num_token}")
+        while tmp_p != target_num_token:
+            if tmp_p - target_num_token <= (tmp_p // 2):
+                r_merge_list.append(tmp_p - target_num_token)
+                break
+            else:
+                r_merge_list.append(tmp_p // 2)
+                tmp_p = tmp_p - (tmp_p // 2)
+
+        head = self.config.text_config.num_attention_heads
+
+        dim = c // head
+        for r in r_merge_list:
+            metric = x.reshape(b, p, head, dim).mean(2)  # [b, p, c//head]
+            merge, _ = bipartite_soft_matching(metric, r)
+            x, size = merge_wavg(merge, x, size)
+            _, p, _ = x.shape
+        # x = x.reshape(-1, c)  # 300, 1024
+        return x
+
+    def extract_feature(self, pixel_values: torch.Tensor):
+        vit_embeds = self.vision_model(pixel_values=pixel_values)
+        vit_embeds = vit_embeds[:, 1:, :]
+
+        h = w = int(vit_embeds.shape[1]**0.5)
+        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
+        vit_embeds = self.pixel_shuffle(vit_embeds,
+                                        scale_factor=self.downsample_ratio)
+        vit_embeds = vit_embeds.reshape(
+            vit_embeds.shape[0] // self.local_num_frames, -1,
+            vit_embeds.shape[-1])
+        vit_embeds = self.merge_tokens(vit_embeds, self.num_tome_tokens)
+        vit_embeds = vit_embeds.reshape(
+            vit_embeds.shape[0] * self.local_num_frames, -1,
+            vit_embeds.shape[-1])
+        vit_embeds = self.mlp1(vit_embeds)
+        return vit_embeds
