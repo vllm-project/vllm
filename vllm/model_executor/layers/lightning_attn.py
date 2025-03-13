@@ -374,7 +374,7 @@ class _attention(torch.autograd.Function):
                          dtype=torch.float32,
                          device=q.device)
         # grid = (b * h, NUM_BLOCK, NUM_FBLOCK * NUM_FBLOCK)
-        grid = (b * h, NUM_BLOCK, NUM_FBLOCK)
+        grid = (b * h, NUM_BLOCK)
         _fwd_kv_parallel[grid](
             k,
             v,
