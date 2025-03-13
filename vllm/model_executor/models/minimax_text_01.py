@@ -598,18 +598,20 @@ class MiniMaxText01LinearAttention(nn.Module):
     def forward(
             self,
             hidden_states: torch.Tensor,
-            kv_caches: List[torch.Tensor],  # layer of tensor
+            positions: torch.Tensor,
+            kv_caches: MinimaxCacheParams,
             attn_metadata,
             **kwargs) -> torch.Tensor:
-        decode_only = attn_metadata.num_prefills == 0
         qkv, _ = self.qkv_proj(hidden_states)
         qkv32 = qkv.to(torch.float32)
         qkvact = torch.nn.functional.silu(qkv32)
         qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
-        kv_cache, state_indices_tensor = (kv_caches.minimax_cache,
-                                          kv_caches.state_indices_tensor)
+        
+        kv_cache = kv_caches.minimax_cache
+        state_indices_tensor = kv_caches.state_indices_tensor
 
+        decode_only = attn_metadata.num_prefills == 0
         if not decode_only:
             # prefill and mix
             hidden = self._prefill_and_mix_infer(q, k, v, kv_cache,
@@ -1007,7 +1009,7 @@ class MiniMaxText01Model(nn.Module):
         if not self.decoder_attention_types:
             # by default, use self-attn
             self.decoder_attention_types = [1] * config.num_hidden_layers
-        self.num_layers = 8 # config.num_hidden_layers
+        self.num_layers = config.num_hidden_layers
 
         self._layer_barrier = False
         # world_size = get_tensor_model_parallel_world_size()
@@ -1222,6 +1224,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             cache_config=vllm_config.cache_config,
             scheduler_config=vllm_config.scheduler_config,
             prefix=maybe_prefix(prefix, "model"))
+        )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
@@ -1246,7 +1249,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         return self.model.minimax_cache.get_seqlen_agnostic_capture_inputs(
             batch_size)
 
-    def forward(self,
+    def forward(
+                self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
