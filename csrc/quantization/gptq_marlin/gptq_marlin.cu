@@ -2318,10 +2318,6 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   TORCH_CHECK(perm.device().is_cuda(), "perm is not on GPU");
   TORCH_CHECK(perm.is_contiguous(), "perm is not contiguous");
 
-  // We use int4 (16 bytes) to load A, so A must aligned to 16 bytes
-  TORCH_CHECK(a.stride(0) % 8 == 0, "A.stride(0) must divisible by 8");
-  TORCH_CHECK(((uint64_t)a.data_ptr()) % 16 == 0, "A must aligned to 16 bytes");
-
   // Alloc buffers
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
@@ -2335,8 +2331,12 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   torch::Tensor a_tmp;
   bool has_act_order = g_idx.size(0) != 0;
   if (has_act_order) {
+    TORCH_CHECK(a.is_contiguous(), "When act_order=True, A must be contiguous");
     a_tmp = torch::empty({size_m, size_k}, options);
   } else {
+    // We use int4 (16 bytes) to load A, so A must aligned to 16 bytes
+    TORCH_CHECK(a.stride(0) % 8 == 0, "A.stride(0) must divisible by 8");
+    TORCH_CHECK(((uint64_t)a.data_ptr()) % 16 == 0, "A must aligned to 16 bytes");
     a_tmp = torch::empty({0}, options);
   }
 
