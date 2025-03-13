@@ -304,8 +304,8 @@ def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
-def glm_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    """Patches and returns an instance of the HfRunner to use for GLM4."""
+def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for GLM4V."""
     hf_processor = hf_model.processor
     patch_padding_side(hf_processor)
 

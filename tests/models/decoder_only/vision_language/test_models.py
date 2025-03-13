@@ -243,7 +243,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         dtype="bfloat16",
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
-        patch_hf_runner=model_utils.glm_patch_hf_runner,
+        patch_hf_runner=model_utils.glm4v_patch_hf_runner,
         max_tokens=16,
         marks=[large_gpu_mark(min_gb=32)],
     ),
