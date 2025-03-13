@@ -299,9 +299,9 @@ class OutputProcessor:
             # in the EngineCore.
             req_state.is_prefilling = not new_token_ids
 
-            # 2) Detokenize the token ids into text and check for stop
-            #    strings.
-            stop_string = req_state.detokenizer.update(new_token_ids)
+            # 2) Detokenize the token ids into text and perform stop checks.
+            stop_string = req_state.detokenizer.update(
+                new_token_ids, finish_reason == FinishReason.STOP)
             if stop_string and finish_reason != FinishReason.STOP:
                 finish_reason = FinishReason.STOP
                 stop_reason = stop_string
