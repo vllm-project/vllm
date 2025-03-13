@@ -1249,7 +1249,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                     num_prefills=input_ids.size(0),
                     num_prefill_tokens=input_ids.size(0),
                     num_decode_tokens=0,
-                    max_context_len=input_ids.size(1) if input_ids.dim() > 1 else 1,
                     block_tables=None,
                     context_lens=None,
                     max_block_len=None,
