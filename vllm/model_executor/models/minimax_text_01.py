@@ -1249,10 +1249,9 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                     num_prefills=input_ids.size(0),
                     num_prefill_tokens=input_ids.size(0),
                     num_decode_tokens=0,
-                    block_tables=None,
-                    context_lens=None,
-                    max_block_len=None,
                     slot_mapping=None,
+                    multi_modal_placeholder_index_maps=None,
+                    enable_kv_scales_calculation=False
                 )
 
         hidden_states = self.model(input_ids, positions, kv_caches,
