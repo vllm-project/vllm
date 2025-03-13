@@ -1233,15 +1233,32 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: List,
-                attn_metadata: AttentionMetadata,
+                kv_caches: Optional[List] = None,
+                attn_metadata: Optional[AttentionMetadata] = None,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
 
+        if kv_caches is None or attn_metadata is None:
+            if kv_caches is None:
+                kv_caches = []
+                
+            if attn_metadata is None:
+                from vllm.attention import AttentionMetadata
+                attn_metadata = AttentionMetadata(
+                    num_prefills=input_ids.size(0),
+                    num_prefill_tokens=input_ids.size(0),
+                    num_decode_tokens=0,
+                    max_context_len=input_ids.size(1) if input_ids.dim() > 1 else 1,
+                    block_tables=None,
+                    context_lens=None,
+                    max_block_len=None,
+                    slot_mapping=None,
+                )
+
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors,
-                                   inputs_embeds, **kwargs)
+                                attn_metadata, intermediate_tensors,
+                                inputs_embeds, **kwargs)
 
         return hidden_states
 
@@ -1451,7 +1468,9 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
         def is_layer_norm_weight(name: str) -> bool:
             if "norm" in name:
-                return not (name.endswith(".bias") or name not in params_dict)
+                if name.endswith(".bias") or name not in params_dict:
+                    return False
+                return True
             return False
 
         def load_layer_norm_weight(name: str, loaded_weight: torch.Tensor,
