@@ -10,20 +10,11 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union, final
 
 import torch
 
-import vllm.envs as env
 from vllm.lora.layers import LoRAMapping
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
-    if env.VLLM_USE_V1:
-        from vllm.lora.ops.triton_ops.v1 import (V1KernelMeta, v1_expand,
-                                                 v1_shrink)
-    else:
-        from vllm.lora.ops.triton_ops import bgmv_expand
-        from vllm.lora.ops.triton_ops import bgmv_expand_slice
-        from vllm.lora.ops.triton_ops import bgmv_shrink
-        from vllm.lora.ops.triton_ops import sgmv_expand
-        from vllm.lora.ops.triton_ops import sgmv_shrink
+    from vllm.lora.ops.triton_ops import (V1KernelMeta, v1_expand, v1_shrink)
 
 from .punica_base import PunicaWrapperBase
 
@@ -96,9 +87,8 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
 
         self.max_loras = kwargs['max_loras']
 
-        if env.VLLM_USE_V1:
-            self._v1_make_metadata(self.max_loras, max_num_batched_tokens,
-                                   max_batches, device)
+        self._v1_make_metadata(self.max_loras, max_num_batched_tokens,
+                               max_batches, device)
 
     def update_metadata(
             self,
@@ -110,79 +100,12 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
             long_lora_context: Optional["LongContextLoRAContext"] = None,
             **kwargs):
 
-        if env.VLLM_USE_V1:
-            self.is_prefill = mapping.is_prefill
-            self._update_base_metadata(mapping, lora_index_to_id, max_loras,
-                                       vocab_size, extra_vocab_size,
-                                       long_lora_context)
-            self._v1_prepare_metadata_tensors(self.token_lora_indices,
-                                              self.sampler_indices)
-        else:
-            # Forward to base class update_metadata
-            PunicaWrapperBase.update_metadata(self, mapping, lora_index_to_id,
-                                              max_loras, vocab_size,
-                                              extra_vocab_size,
-                                              long_lora_context, **kwargs)
-
-    def _apply_shrink_prefill(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: Tuple[torch.Tensor, ...],
-        scale: float,
-    ):
-        #No LoRA request, so return directly
-        if self.no_lora:
-            return
-        sgmv_shrink(
-            x,
-            w_t_all,
-            y,
-            *self.prefill_metadata,
-            scale,
-        )
-
-    def _apply_shrink_decode(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        scale: float,
-    ):
-        bgmv_shrink(x, w_t_all, y, self.token_lora_indices, scale)
-
-    def _apply_expand_prefill(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: Tuple[torch.Tensor, ...],
-        offset_start: int,
-        add_inputs: bool,
-    ):
-        #No LoRA request, so return directly
-        if self.no_lora:
-            return
-
-        sgmv_expand(
-            x,
-            w_t_all,
-            y,
-            *self.prefill_metadata,
-            offset_start=offset_start,
-            add_inputs=add_inputs,
-        )
-
-    def _apply_expand_decode(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        y_offset: Optional[int],
-        y_slice_size: Optional[int],
-        add_inputs: bool,
-    ):
-        bgmv_expand_slice(x, w_t_all, y, self.token_lora_indices, y_offset,
-                          y_slice_size, add_inputs)
+        self.is_prefill = mapping.is_prefill
+        self._update_base_metadata(mapping, lora_index_to_id, max_loras,
+                                   vocab_size, extra_vocab_size,
+                                   long_lora_context)
+        self._v1_prepare_metadata_tensors(self.token_lora_indices,
+                                          self.sampler_indices)
 
     def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
                    x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
@@ -207,21 +130,7 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
 
         x = x.view(-1, x.shape[-1])
 
-        if env.VLLM_USE_V1:
-            self._v1_apply_shrink(y, x, lora_a_stacked, scale)  # type: ignore
-        else:
-            if self.is_prefill:
-                # NOTE fused kernel
-                self._apply_shrink_prefill(
-                    y,  # type: ignore
-                    x,
-                    lora_a_stacked,
-                    scale)
-            else:
-                # TODO fuse these kernels
-                for slice_idx in range(len(lora_a_stacked)):
-                    self._apply_shrink_decode(y[slice_idx], x,
-                                              lora_a_stacked[slice_idx], scale)
+        self._v1_apply_shrink(y, x, lora_a_stacked, scale)  # type: ignore
 
     def add_expand(self,
                    y: torch.Tensor,
@@ -259,37 +168,13 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
             self._apply_bias(token_lora_indices, y, output_slices,
                              lora_bias_stacked)
 
-        if env.VLLM_USE_V1:
-            # TODO (varun): Profile with add_inputs = False. i.e. move the
-            # addition out of the kernel
-            self._v1_apply_expand(
-                y,
-                x,  # type: ignore
-                lora_b_stacked,
-                offset_start,
-                add_inputs=True)
-        else:
+        self._v1_apply_expand(
+            y,
+            x,  # type: ignore
+            lora_b_stacked,
+            offset_start,
+            add_inputs=True)
 
-            if self.is_prefill:
-                # NOTE fused kernel
-                self._apply_expand_prefill(
-                    y,
-                    x,  # type: ignore
-                    lora_b_stacked,
-                    offset_start,
-                    add_inputs=True)
-            else:
-                # TODO fuse these kernels
-                for slice_idx in range(len(lora_b_stacked)):
-                    self._apply_expand_decode(
-                        y,
-                        x[slice_idx],
-                        lora_b_stacked[slice_idx],
-                        offset_start,
-                        output_slices[slice_idx],
-                        add_inputs=add_inputs,
-                    )
-                    offset_start += output_slices[slice_idx]
         y = y.view_as(y_org)
 
     def add_lora_embedding(self,
@@ -311,24 +196,10 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
             add_inputs (bool): Default to True.
         """
 
-        if env.VLLM_USE_V1:
-            self._v1_apply_expand(y,
-                                  x.unsqueeze(dim=0), (lora_b_stacked, ),
-                                  offset_start=0,
-                                  add_inputs=add_inputs)
-        else:
-            if self.is_prefill:
-                sgmv_expand(
-                    x.unsqueeze(dim=0),
-                    (lora_b_stacked, ),
-                    y,
-                    *self.prefill_metadata,
-                    offset_start=0,
-                    add_inputs=add_inputs,
-                )
-            else:
-                bgmv_expand(x, lora_b_stacked, y, self.token_lora_indices,
-                            add_inputs)
+        self._v1_apply_expand(y,
+                              x.unsqueeze(dim=0), (lora_b_stacked, ),
+                              offset_start=0,
+                              add_inputs=add_inputs)
 
     def add_lora_linear(self,
                         y: torch.Tensor,
@@ -431,21 +302,11 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
                                  dtype=torch.float32,
                                  device=x.device)
 
-        if env.VLLM_USE_V1:
-            v1_shrink(x, [lora_a_stacked], buffer.unsqueeze(dim=0),
-                      *self.prompt_mapping_v1_meta.meta_args(x.size(0)), scale)
+        v1_shrink(x, [lora_a_stacked], buffer.unsqueeze(dim=0),
+                  *self.prompt_mapping_v1_meta.meta_args(x.size(0)), scale)
 
-            v1_expand(buffer.unsqueeze(dim=0), [lora_b_stacked],
-                      y,
-                      *self.prompt_mapping_v1_meta.meta_args(buffer.size(0)),
-                      add_inputs=True)
-        else:
-
-            # V0 LogitsProcessorWithLoRA always using bgmv.
-            bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices, scale)
-            bgmv_expand(buffer,
-                        lora_b_stacked,
-                        y,
-                        self.sampler_indices,
-                        add_inputs=True)
+        v1_expand(buffer.unsqueeze(dim=0), [lora_b_stacked],
+                  y,
+                  *self.prompt_mapping_v1_meta.meta_args(buffer.size(0)),
+                  add_inputs=True)
         y = y.view_as(y_org)
