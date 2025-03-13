@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Type
 
 import torch
 
+import vllm._custom_ops as ops
 from vllm._ipex_ops import ipex_ops
 from vllm.attention.backends.abstract import (AttentionMetadataBuilder,
                                               AttentionType,
@@ -13,7 +14,6 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
                                                 MLACommonImpl,
                                                 MLACommonMetadata)
 from vllm.attention.backends.torch_sdpa import TorchSDPAMetadata
-from vllm.attention.ops.cpu_mla_decode import mla_decode_kvcache_cpu
 from vllm.utils import make_tensor_with_pad
 from vllm.worker.cpu_model_runner import ModelInputForCPUBuilder
 
@@ -63,41 +63,50 @@ class CPUMLAMetadataBuilder(AttentionMetadataBuilder[CPUMLAMetadata]):
                                     dtype=torch.long,
                                     device="cpu")
 
-        query_lens_tensor = torch.tensor(prefill_query_lens,
-                                         dtype=torch.int32,
-                                         device="cpu")
-        kv_lens_tensor = torch.tensor(prefill_seq_lens,
-                                      dtype=torch.int32,
-                                      device="cpu")
-        query_start_loc = torch.zeros(input_data.num_prefills + 1,
-                                      dtype=torch.int32,
-                                      device="cpu")
-        kv_start_loc = torch.zeros(input_data.num_prefills + 1,
-                                   dtype=torch.int32,
-                                   device="cpu")
-        torch.cumsum(query_lens_tensor,
-                     dim=0,
-                     dtype=torch.int32,
-                     out=query_start_loc[1:])
-        torch.cumsum(kv_lens_tensor,
-                     dim=0,
-                     dtype=torch.int32,
-                     out=kv_start_loc[1:])
-        max_query_len = max(prefill_query_lens)
-        max_kv_len = max(prefill_seq_lens)
+        # metadata for prefill
+        if input_data.num_prefills > 0:
+            query_lens_tensor = torch.tensor(prefill_query_lens,
+                                             dtype=torch.int32,
+                                             device="cpu")
+            kv_lens_tensor = torch.tensor(prefill_seq_lens,
+                                          dtype=torch.int32,
+                                          device="cpu")
+            query_start_loc = torch.zeros(input_data.num_prefills + 1,
+                                          dtype=torch.int32,
+                                          device="cpu")
+            kv_start_loc = torch.zeros(input_data.num_prefills + 1,
+                                       dtype=torch.int32,
+                                       device="cpu")
+            torch.cumsum(query_lens_tensor,
+                         dim=0,
+                         dtype=torch.int32,
+                         out=query_start_loc[1:])
+            torch.cumsum(kv_lens_tensor,
+                         dim=0,
+                         dtype=torch.int32,
+                         out=kv_start_loc[1:])
+            max_query_len = max(prefill_query_lens)
+            max_kv_len = max(prefill_seq_lens)
 
-        # For chunked-prefill
-        if self.chunked_prefill and input_data.num_prefill_tokens != 0:
-            prefill_block_tables = make_tensor_with_pad(
-                self.input_data.prefill_block_tables,
-                pad=0,
-                dtype=torch.int32,
-                device="cpu",
-            )
+            # for chunked-prefill
+            if self.chunked_prefill:
+                prefill_block_tables = make_tensor_with_pad(
+                    self.input_data.prefill_block_tables,
+                    pad=0,
+                    dtype=torch.int32,
+                    device="cpu",
+                )
+            else:
+                prefill_block_tables = None
+
         else:
+            query_start_loc = None
+            kv_start_loc = None
+            max_query_len = None
+            max_kv_len = None
             prefill_block_tables = None
 
-        # For paged attention
+        # metadata for decode
         if input_data.num_decode_tokens != 0:
             seq_lens_tensor = torch.tensor(
                 input_data.seq_lens[input_data.num_prefills:],
@@ -250,10 +259,10 @@ class CPUMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert decode_meta is not None
 
         q = torch.cat([q_nope, q_pe], dim=-1)
+        o = q.new_empty(q.shape[0], self.num_heads, self.kv_lora_rank)
 
         # Run MQA
-        o = mla_decode_kvcache_cpu(q, kv_c_and_k_pe_cache,
+        ops.mla_decode_kvcache_cpu(o, q, kv_c_and_k_pe_cache, self.scale,
                                    decode_meta.block_tables,
-                                   decode_meta.seq_lens_tensor, self.scale)
-
+                                   decode_meta.seq_lens_tensor)
         return self._v_up_proj_and_o_proj(o)

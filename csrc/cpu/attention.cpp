@@ -800,26 +800,27 @@ void paged_attention_v2(
 
 template <typename scalar_t, int BLOCK_SIZE>
 void mla_decode_kvcache_cpu_impl(
-    scalar_t* __restrict__ out,      // [num_seqs, num_heads, v_head_dim]
-    const scalar_t* __restrict__ q,  // [num_seqs, num_heads, qk_head_dim]
+    scalar_t* __restrict__ out,             // [num_seqs, num_heads, v_head_dim]
+    const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_dim]
     const scalar_t* __restrict__ kv_cache,  // [num_blocks, block_size,
-                                            // qk_head_dim + v_head_dim]
-    const int num_heads, const int qk_head_dim, const int v_head_dim,
+                                            // head_dim]
+    const int num_heads, const int head_dim, const int v_head_dim,
     const float scale,
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int max_num_blocks_per_seq, const int o_stride, const int q_stride,
     const int kv_stride, const int num_seqs) {
+#pragma omp parallel for collapse(2)
   for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
-    const int seq_len = seq_lens[seq_idx];
-    const int* seq_block_table =
-        block_tables + max_num_blocks_per_seq * seq_idx;
-    const int block_num = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    const int last_block_token_num = seq_len - (block_num - 1) * BLOCK_SIZE;
-
     for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
+      const int seq_len = seq_lens[seq_idx];
+      const int* seq_block_table =
+          block_tables + max_num_blocks_per_seq * seq_idx;
+      const int block_num = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+      const int last_block_token_num = seq_len - (block_num - 1) * BLOCK_SIZE;
+
       const scalar_t* __restrict__ q_ptr =
-          q + seq_idx * q_stride + head_idx * qk_head_dim;
+          q + seq_idx * q_stride + head_idx * head_dim;
 
       std::vector<float> logits(seq_len);
       float max_val = -FLT_MAX;
@@ -831,12 +832,12 @@ void mla_decode_kvcache_cpu_impl(
             block_idx < block_num - 1 ? BLOCK_SIZE : last_block_token_num;
 
         for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
-          const scalar_t* __restrict__ k_ptr =
-              kv_cache + physical_block_idx * kv_stride +
-              block_offset * (qk_head_dim + v_head_dim);
+          const scalar_t* __restrict__ k_ptr = kv_cache +
+                                               physical_block_idx * kv_stride +
+                                               block_offset * head_dim;
           float acc = 0.0f;
 
-          for (int dim_idx = 0; dim_idx < qk_head_dim; ++dim_idx) {
+          for (int dim_idx = 0; dim_idx < head_dim; ++dim_idx) {
             const float q_val = q_ptr[dim_idx];
             const float k_val = k_ptr[dim_idx];
             acc += q_val * k_val;
@@ -869,9 +870,9 @@ void mla_decode_kvcache_cpu_impl(
             block_idx < block_num - 1 ? BLOCK_SIZE : last_block_token_num;
 
         for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
-          const scalar_t* __restrict__ v_ptr =
-              kv_cache + physical_block_idx * kv_stride +
-              block_offset * (qk_head_dim + v_head_dim) + qk_head_dim;
+          const scalar_t* __restrict__ v_ptr = kv_cache +
+                                               physical_block_idx * kv_stride +
+                                               block_offset * head_dim;
           const float logit_val = logits[block_idx * BLOCK_SIZE + block_offset];
 
           for (int dim_idx = 0; dim_idx < v_head_dim; ++dim_idx) {
@@ -895,9 +896,9 @@ void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
                         torch::Tensor& block_tables, torch::Tensor& seq_lens) {
   const int num_seqs = query.size(0);
   const int num_heads = query.size(1);
-  const int qk_head_dim = query.size(2);
+  const int head_dim = query.size(2);
   const int block_size = kv_cache.size(1);
-  const int v_head_dim = kv_cache.size(2) - query.size(2);
+  const int v_head_dim = out.size(2);
 
   const int max_num_blocks_per_seq = block_tables.size(1);
   const int o_stride = out.stride(0);
@@ -911,10 +912,10 @@ void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
           case 16:
             mla_decode_kvcache_cpu_impl<scalar_t, 16>(
                 out.data_ptr<scalar_t>(), query.data_ptr<scalar_t>(),
-                kv_cache.data_ptr<scalar_t>(), num_heads, qk_head_dim,
-                v_head_dim, scale, block_tables.data_ptr<int>(),
-                seq_lens.data_ptr<int>(), max_num_blocks_per_seq, o_stride,
-                q_stride, kv_stride, num_seqs);
+                kv_cache.data_ptr<scalar_t>(), num_heads, head_dim, v_head_dim,
+                scale, block_tables.data_ptr<int>(), seq_lens.data_ptr<int>(),
+                max_num_blocks_per_seq, o_stride, q_stride, kv_stride,
+                num_seqs);
             break;
           default:
             TORCH_CHECK(false, "Unsupported block size: ", block_size);
