@@ -20,15 +20,20 @@ def _bgmv_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref, lora_re
     
     for i in range(max_num_loras):
         mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
+        valid = False
         for j in range(bT):
+            valid |= idx_ref[j + bT * t] == i
+            
             @pl.when(idx_ref[j + bT * t] == i)
             def _():
                 mask_ref[j, :] = jnp.ones((bL, ), dtype=jnp.float32)
 
-        acc_ref[...] += jax.lax.dot_general(
-            inp_ref[...],
-            lora_ref[i, ...], (((1, ), (1, )), ((), ())),
-            preferred_element_type=jnp.float32) * mask_ref[...]
+        @pl.when(valid)
+        def _():
+            acc_ref[...] += jax.lax.dot_general(
+                inp_ref[...],
+                lora_ref[i, ...], (((1, ), (1, )), ((), ())),
+                preferred_element_type=jnp.float32) * mask_ref[...]
 
     @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
     def _():
