@@ -2,6 +2,7 @@
 
 import time
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import Optional
 
 import numpy as np
@@ -17,8 +18,16 @@ logger = init_logger(__name__)
 
 _LOCAL_LOGGING_INTERVAL_SEC = 5.0
 
-STANDARD_LOGGING_LOGGER_NAME = "logging"
-PROMETHEUS_LOGGING_LOGGER_NAME = "prometheus"
+
+class BuiltinLoggerName(str, Enum):
+    """Internal names for built-in metric loggers
+
+    These values are intended for internal use only. Accessing to
+    these built-in loggers is not considered to be part of the
+    public API.
+    """
+    LOGGING = "logging"
+    PROMETHEUS = "prometheus"
 
 
 class StatLoggerBase(ABC):
@@ -445,8 +454,8 @@ def setup_default_loggers(
         return custom_stat_loggers
 
     stat_loggers: dict[str, StatLoggerBase] = {}
-    stat_loggers[PROMETHEUS_LOGGING_LOGGER_NAME] = \
+    stat_loggers[BuiltinLoggerName.PROMETHEUS] = \
         PrometheusStatLogger(vllm_config)
     if enable_logging:
-        stat_loggers[STANDARD_LOGGING_LOGGER_NAME] = LoggingStatLogger()
+        stat_loggers[BuiltinLoggerName.LOGGING] = LoggingStatLogger()
     return stat_loggers
