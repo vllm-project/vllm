@@ -1478,7 +1478,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
                              f"Got type: {type(embed_is_patch)}")
 
         num_crops = kwargs.pop("num_crops", None)
-        if not isinstance(num_crops, torch.Tensor):
+        if not isinstance(num_crops, (torch.Tensor, list)):
             raise ValueError("Incorrect type of num_crops. "
                              f"Got type: {type(num_crops)}")
 
