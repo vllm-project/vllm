@@ -630,9 +630,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         # This reshaping is only required on the first forward call
         # and the kv cache must not be empty.
         if (current_platform.is_rocm_aiter_paged_attn_enabled()
-                and kv_cache.dtype.itemsize == 1
-                and not self.aiter_kv_scales_initialized
-                and kv_cache.shape != torch.Size([0])):
+                # and kv_cache.dtype.itemsize == 1
+                and not self.aiter_kv_scales_initialized and kv_cache.shape
+                != torch.Size([0])):
             num_blocks = kv_cache.shape[1]
             block_size = kv_cache.shape[2] // (self.num_kv_heads *
                                                self.head_size)

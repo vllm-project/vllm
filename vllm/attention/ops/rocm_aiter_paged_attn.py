@@ -108,6 +108,7 @@ class PagedAttention:
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
     ) -> torch.Tensor:
+        # print("RUNNING CORRECT KERNEL")
         if kv_cache_dtype not in ["int8", "fp8", "fp8_e4m3"]:
             if num_kv_heads == 1:
                 k_scale, v_scale = (None, None)
