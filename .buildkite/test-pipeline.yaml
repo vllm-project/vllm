@@ -41,7 +41,6 @@ steps:
   - grep \"sig sig-object py\" build/html/api/inference_params.html
 
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
-  fast_check: true
   source_file_dependencies:
   - vllm/
   - tests/mq_llm_engine
@@ -126,7 +125,6 @@ steps:
 - label: Distributed Tests (4 GPUs) # 10min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
-  fast_check: true
   source_file_dependencies:
   - vllm/distributed/
   - vllm/core/
@@ -152,7 +150,6 @@ steps:
 
 - label: Metrics, Tracing Test # 10min
   num_gpus: 2
-  fast_check: true
   source_file_dependencies:
   - vllm/
   - tests/metrics
@@ -284,7 +281,6 @@ steps:
   parallelism: 4
 
 - label: PyTorch Fullgraph Smoke Test # 9min
-  fast_check: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -528,7 +524,6 @@ steps:
 - label: Plugin Tests (2 GPUs) # 40min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
-  fast_check: true
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
