@@ -14,6 +14,8 @@ from tests.utils import compare_two_settings, fork_new_process_for_each_test
 
 models_4bit_to_test = [
     ("facebook/opt-125m", "quantize opt model inflight"),
+    ("mistralai/Mistral-7B-Instruct-v0.3",
+     "quantize inflight model with both HF and Mistral format weights")
 ]
 
 models_pre_qaunt_4bit_to_test = [
