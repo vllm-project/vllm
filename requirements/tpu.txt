@@ -3,7 +3,6 @@
 
 # Dependencies for TPU
 cmake>=3.26
-ninja
 packaging
 setuptools-scm>=8
 wheel
