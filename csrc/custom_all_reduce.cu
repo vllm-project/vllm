@@ -142,3 +142,45 @@ void register_graph_buffers(fptr_t _fa,
   bytes.reserve(handles.size());
   fa->register_graph_buffers(bytes, offsets);
 }
+
+std::tuple<fptr_t, torch::Tensor> allocate_shared_buffer_and_handle(
+    int64_t size) {
+  auto device_index = c10::cuda::current_device();
+  at::DeviceGuard device_guard(at::Device(at::DeviceType::CUDA, device_index));
+  void* buffer;
+  cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;
+  auto stream = c10::cuda::getCurrentCUDAStream().stream();
+  AT_CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
+#if defined(USE_ROCM)
+  // data buffers need to be "uncached" for signal on MI200
+  AT_CUDA_CHECK(
+      hipExtMallocWithFlags((void**)&buffer, size, hipDeviceMallocUncached));
+#else
+  AT_CUDA_CHECK(cudaMalloc((void**)&buffer, size));
+#endif
+
+  AT_CUDA_CHECK(cudaMemsetAsync(buffer, 0, size, stream));
+  AT_CUDA_CHECK(cudaStreamSynchronize(stream));
+  AT_CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
+
+  auto options =
+      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+  auto handle =
+      torch::empty({static_cast<int64_t>(sizeof(cudaIpcMemHandle_t))}, options);
+  AT_CUDA_CHECK(
+      cudaIpcGetMemHandle((cudaIpcMemHandle_t*)handle.data_ptr(), buffer));
+
+  return std::make_tuple(reinterpret_cast<fptr_t>(buffer), handle);
+}
+
+fptr_t open_mem_handle(torch::Tensor& mem_handle) {
+  void* ipc_ptr;
+  AT_CUDA_CHECK(cudaIpcOpenMemHandle(
+      (void**)&ipc_ptr, *((const cudaIpcMemHandle_t*)mem_handle.data_ptr()),
+      cudaIpcMemLazyEnablePeerAccess));
+  return reinterpret_cast<fptr_t>(ipc_ptr);
+}
+
+void free_shared_buffer(fptr_t buffer) {
+  AT_CUDA_CHECK(cudaFree(reinterpret_cast<void*>(buffer)));
+}
