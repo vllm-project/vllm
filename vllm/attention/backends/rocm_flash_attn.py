@@ -13,14 +13,15 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
-from vllm.attention.ops.paged_attn import (PagedAttention,
-                                           PagedAttentionMetadata)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-if current_platform.is_rocm_aiter_paged_attn_enabled():
+USE_AITER_PAGED_ATTN = envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
+
+if USE_AITER_PAGED_ATTN:
+    from vllm.attention.ops.paged_attn import PagedAttentionMetadata
     from vllm.attention.ops.rocm_aiter_paged_attn import (
-        PagedAttention, PagedAttentionMetadata)
+        AiterPagedAttention as PagedAttention)
 else:
     from vllm.attention.ops.paged_attn import (PagedAttention,
                                                PagedAttentionMetadata)
@@ -629,10 +630,11 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         # when the size of one element is one byte (int8/fp8 dtypes).
         # This reshaping is only required on the first forward call
         # and the kv cache must not be empty.
-        if (current_platform.is_rocm_aiter_paged_attn_enabled()
-                # and kv_cache.dtype.itemsize == 1
-                and not self.aiter_kv_scales_initialized and kv_cache.shape
-                != torch.Size([0])):
+        if (USE_AITER_PAGED_ATTN \
+                and kv_cache.dtype.itemsize == 1 \
+                and not self.aiter_kv_scales_initialized \
+                and kv_cache.shape != torch.Size([0])):
+
             num_blocks = kv_cache.shape[1]
             block_size = kv_cache.shape[2] // (self.num_kv_heads *
                                                self.head_size)
@@ -942,4 +944,4 @@ def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
-            and not current_platform.is_rocm_aiter_paged_attn_enabled())
+            and not USE_AITER_PAGED_ATTN)

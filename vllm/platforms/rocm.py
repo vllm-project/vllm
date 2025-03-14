@@ -248,6 +248,3 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fnuz
         else:
             return torch.float8_e4m3fn
-
-    def is_rocm_aiter_paged_attn_enabled(self) -> bool:
-        return envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
