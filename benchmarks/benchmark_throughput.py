@@ -377,9 +377,6 @@ def main(args: argparse.Namespace):
         raise ValueError(f"Unknown backend: {args.backend}")
 
     if request_outputs:
-        if args.backend == 'vllm':
-            print("For vllm backend we are switching to using request_outputs "
-                  "for token counts.")
         total_prompt_tokens = 0
         total_output_tokens = 0
         for ro in request_outputs:
@@ -390,11 +387,6 @@ def main(args: argparse.Namespace):
             total_output_tokens += sum(
                 len(o.token_ids) for o in ro.outputs if o)
         total_num_tokens = total_prompt_tokens + total_output_tokens
-        print(
-            "\033[93mWARNING\033[0m: Token calculation is different when using "
-            "request_outputs. Both prompt tokens and output tokens are based "
-            "on the model's actual output rather than the expected lengths "
-            "from the dataset.")
     else:
         total_num_tokens = sum(r.prompt_len + r.expected_output_len
                                for r in requests)
