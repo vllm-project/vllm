@@ -14,18 +14,15 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 GUIDED_DECODING_BACKENDS_V1 = ["xgrammar"]
-
-
-@pytest.fixture
-def model_name():
-    return [
-        "Qwen/Qwen2.5-1.5B-Instruct", "mistralai/Ministral-8B-Instruct-2410"
-    ]
+MODELS_TO_TEST = [
+    "Qwen/Qwen2.5-1.5B-Instruct", "mistralai/Ministral-8B-Instruct-2410"
+]
 
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
+@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
 def test_guided_json_completion(
     monkeypatch: pytest.MonkeyPatch,
     sample_json_schema: dict[str, Any],
@@ -63,6 +60,7 @@ def test_guided_json_completion(
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
+@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
 def test_guided_json_object(
     monkeypatch: pytest.MonkeyPatch,
     guided_decoding_backend: str,
@@ -101,6 +99,7 @@ def test_guided_json_object(
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
+@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
 def test_guided_json_unsupported_schema(
     monkeypatch: pytest.MonkeyPatch,
     unsupported_json_schema: dict[str, Any],
@@ -128,6 +127,7 @@ def test_guided_json_unsupported_schema(
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
+@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
 def test_guided_grammar_ebnf(
     monkeypatch: pytest.MonkeyPatch,
     sample_sql_ebnf: str,
@@ -170,6 +170,7 @@ def test_guided_grammar_ebnf(
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
+@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
 def test_guided_grammar_lark(
     monkeypatch: pytest.MonkeyPatch,
     sample_sql_lark: str,
@@ -217,6 +218,7 @@ def test_guided_grammar_lark(
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
+@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
 def test_guided_grammar_ebnf_invalid(
     monkeypatch: pytest.MonkeyPatch,
     guided_decoding_backend: str,
@@ -244,6 +246,7 @@ def test_guided_grammar_ebnf_invalid(
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
+@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
 def test_guided_regex(
     monkeypatch: pytest.MonkeyPatch,
     sample_regex: str,
@@ -280,6 +283,7 @@ def test_guided_regex(
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
+@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
 def test_guided_choice_completion(
     monkeypatch: pytest.MonkeyPatch,
     sample_guided_choice: str,
