@@ -798,19 +798,113 @@ void paged_attention_v2(
                                });
 }
 
-template <typename scalar_t, int BLOCK_SIZE>
+template <typename scalar_t, int HEAD_DIM, int V_HEAD_DIM, int BLOCK_SIZE>
 void mla_decode_kvcache_cpu_impl(
     scalar_t* __restrict__ out,             // [num_seqs, num_heads, v_head_dim]
     const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_dim]
     const scalar_t* __restrict__ kv_cache,  // [num_blocks, block_size,
                                             // head_dim]
-    const int num_heads, const int head_dim, const int v_head_dim,
-    const float scale,
+    const int num_heads, const float scale,
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int max_num_blocks_per_seq, const int o_stride, const int q_stride,
     const int kv_stride, const int num_seqs) {
-#pragma omp parallel for collapse(2)
+  // there is n query heads and 1 key-value head, where value overlaps witih key
+  // to make good use of data reuse, we want to
+  // -> for each kv token, compute required problem for all query heads
+  // -> this means that we have to do softmax(QK.T)@V in 1 pass
+  //   - if KV cache is separate, it's ok to do attention in 2 passes, since
+  //     logits is not that big, and we need to read fresh V anyway.
+  // -> let seq_len dim is the outer most loop. we chunk the seq_len, compute
+  // sub-problem
+  //   - chunk according to BLOCK_SIZE for convenience
+
+  for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
+    const int seq_len = seq_lens[seq_idx];
+    const int block_num = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const int last_block_size = seq_len - (block_num - 1) * BLOCK_SIZE;
+
+    std::vector<float> acc_lse(num_heads, -FLT_MAX);
+    std::vector<float> acc_out(num_heads * V_HEAD_DIM);
+
+    for (int block_idx = 0; block_idx < block_num; ++block_idx) {
+      const int physical_block_idx =
+          block_tables[seq_idx * max_num_blocks_per_seq + block_idx];
+      const scalar_t* __restrict__ this_kv_block =
+          kv_cache + physical_block_idx * kv_stride;
+      const int num_tokens =
+          block_idx < block_num - 1 ? BLOCK_SIZE : last_block_size;
+
+      for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
+        float logits[BLOCK_SIZE] = {};  // initialize to zeros
+        float max_val = -FLT_MAX;
+
+        for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
+          // dot product
+          float acc = 0.0f;
+          for (int i = 0; i < HEAD_DIM; ++i) {
+            const float q_val = q[seq_idx * q_stride + head_idx * HEAD_DIM + i];
+            const float k_val = this_kv_block[block_offset * HEAD_DIM + i];
+            acc += q_val * k_val;
+          }
+
+          acc *= scale;  // softmax scale
+          logits[block_offset] = acc;
+          max_val = std::max(max_val, acc);
+        }
+
+        float sum_exp = 0.0f;
+        for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
+          const float val = std::exp(logits[block_offset] - max_val);
+          logits[block_offset] = val;
+          sum_exp += val;
+        }
+
+        float out_vec[V_HEAD_DIM] = {};  // initialize to zeros
+        float inv_sum = 1.0f / sum_exp;
+
+        // v[BLOCK_SIZE][V_HEAD_DIM] should still be in L1/L2
+        for (int block_offset = 0; block_offset < BLOCK_SIZE; ++block_offset) {
+          const float scale_ = logits[block_offset] * inv_sum;
+
+          for (int i = 0; i < V_HEAD_DIM; ++i) {
+            const float v_val = this_kv_block[block_offset * HEAD_DIM + i];
+            out_vec[i] += v_val * scale_;
+          }
+        }
+
+        // merge attention state
+        // section 2.2 in https://arxiv.org/pdf/2501.01005
+        const float prev_lse = acc_lse[head_idx];
+        const float curr_lse =
+            std::log(sum_exp) + max_val;  // add back max_val to get true lse
+        max_val = std::max(prev_lse, curr_lse);
+        const float prev_sum_exp =
+            std::exp(prev_lse - max_val);  // softmax trick
+        const float curr_sum_exp = std::exp(curr_lse - max_val);
+
+        const float new_sum_exp = prev_sum_exp + curr_sum_exp;
+        const float prev_scale = prev_sum_exp / new_sum_exp;
+        const float curr_scale = curr_sum_exp / new_sum_exp;
+
+        acc_lse[head_idx] = std::log(new_sum_exp) +
+                            max_val;  // add back max_val to get true lse
+        for (int i = 0; i < V_HEAD_DIM; ++i) {
+          const float prev_o = acc_out[head_idx * V_HEAD_DIM + i];
+          const float curr_o = out_vec[i];
+          acc_out[head_idx * V_HEAD_DIM + i] =
+              prev_o * prev_scale + curr_o * curr_scale;
+        }
+      }
+    }
+
+    for (int i = 0; i < num_heads * V_HEAD_DIM; ++i) {
+      out[seq_idx * o_stride + i] = acc_out[i];
+    }
+  }
+  return;
+
+  // #pragma omp parallel for collapse(2)
   for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
     for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
       const int seq_len = seq_lens[seq_idx];
@@ -820,24 +914,24 @@ void mla_decode_kvcache_cpu_impl(
       const int last_block_token_num = seq_len - (block_num - 1) * BLOCK_SIZE;
 
       const scalar_t* __restrict__ q_ptr =
-          q + seq_idx * q_stride + head_idx * head_dim;
+          q + seq_idx * q_stride + head_idx * HEAD_DIM;
 
       std::vector<float> logits(seq_len);
       float max_val = -FLT_MAX;
 
       // compute QK.T
       for (int block_idx = 0; block_idx < block_num; ++block_idx) {
-        const int64_t physical_block_idx = seq_block_table[block_idx];
+        const int physical_block_idx = seq_block_table[block_idx];
         const int num_tokens =
             block_idx < block_num - 1 ? BLOCK_SIZE : last_block_token_num;
 
         for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
           const scalar_t* __restrict__ k_ptr = kv_cache +
                                                physical_block_idx * kv_stride +
-                                               block_offset * head_dim;
+                                               block_offset * HEAD_DIM;
           float acc = 0.0f;
 
-          for (int dim_idx = 0; dim_idx < head_dim; ++dim_idx) {
+          for (int dim_idx = 0; dim_idx < HEAD_DIM; ++dim_idx) {
             const float q_val = q_ptr[dim_idx];
             const float k_val = k_ptr[dim_idx];
             acc += q_val * k_val;
@@ -862,7 +956,7 @@ void mla_decode_kvcache_cpu_impl(
       }
 
       // multiply with v
-      std::vector<float> out_token(v_head_dim);
+      std::vector<float> out_token(V_HEAD_DIM);
 
       for (int block_idx = 0; block_idx < block_num; ++block_idx) {
         const int64_t physical_block_idx = seq_block_table[block_idx];
@@ -872,10 +966,10 @@ void mla_decode_kvcache_cpu_impl(
         for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
           const scalar_t* __restrict__ v_ptr = kv_cache +
                                                physical_block_idx * kv_stride +
-                                               block_offset * head_dim;
+                                               block_offset * HEAD_DIM;
           const float logit_val = logits[block_idx * BLOCK_SIZE + block_offset];
 
-          for (int dim_idx = 0; dim_idx < v_head_dim; ++dim_idx) {
+          for (int dim_idx = 0; dim_idx < V_HEAD_DIM; ++dim_idx) {
             const float v_val = v_ptr[dim_idx];
             out_token[dim_idx] += v_val * logit_val;
           }
@@ -883,8 +977,8 @@ void mla_decode_kvcache_cpu_impl(
       }
 
       scalar_t* __restrict__ o_ptr =
-          out + seq_idx * o_stride + head_idx * v_head_dim;
-      for (int dim_idx = 0; dim_idx < v_head_dim; ++dim_idx) {
+          out + seq_idx * o_stride + head_idx * V_HEAD_DIM;
+      for (int dim_idx = 0; dim_idx < V_HEAD_DIM; ++dim_idx) {
         o_ptr[dim_idx] = out_token[dim_idx];
       }
     }
@@ -908,19 +1002,14 @@ void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
   VLLM_DISPATCH_FLOATING_TYPES(
       query.scalar_type(), "mla_decode_kvcache_cpu_impl", [&] {
         CPU_KERNEL_GUARD_IN(mla_decode_kvcache_cpu_impl)
-        switch (block_size) {
-          case 16:
-            mla_decode_kvcache_cpu_impl<scalar_t, 16>(
-                out.data_ptr<scalar_t>(), query.data_ptr<scalar_t>(),
-                kv_cache.data_ptr<scalar_t>(), num_heads, head_dim, v_head_dim,
-                scale, block_tables.data_ptr<int>(), seq_lens.data_ptr<int>(),
-                max_num_blocks_per_seq, o_stride, q_stride, kv_stride,
-                num_seqs);
-            break;
-          default:
-            TORCH_CHECK(false, "Unsupported block size: ", block_size);
-            break;
-        }
+        if (head_dim == 576 && v_head_dim == 512 && block_size == 16)
+          mla_decode_kvcache_cpu_impl<scalar_t, 576, 512, 16>(
+              out.data_ptr<scalar_t>(), query.data_ptr<scalar_t>(),
+              kv_cache.data_ptr<scalar_t>(), num_heads, scale,
+              block_tables.data_ptr<int>(), seq_lens.data_ptr<int>(),
+              max_num_blocks_per_seq, o_stride, q_stride, kv_stride, num_seqs);
+        else
+          TORCH_CHECK(false, "Unsupported block size: ", block_size);
         CPU_KERNEL_GUARD_OUT(mla_decode_kvcache_cpu_impl)
       });
 }
