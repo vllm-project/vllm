@@ -176,6 +176,10 @@ class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
     def __init__(self, data: Sequence[HfAudioItem]) -> None:
         super().__init__(data, "audio")
 
+    def get_audio_length(self, item_idx: int) -> int:
+        audio = self.get(item_idx)
+        return len(audio)
+
 
 class AudioEmbeddingItems(EmbeddingItems):
 

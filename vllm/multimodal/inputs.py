@@ -433,6 +433,10 @@ class MultiModalFieldConfig:
             :func:`MultiModalFieldConfig.flat`
         """
 
+        if size_per_item.ndim != 1:
+            raise ValueError("size_per_item should be a 1-D tensor, "
+                             f"but found shape: {size_per_item.shape}")
+
         slice_idxs = [0, *accumulate(size_per_item)]
         slices = [
             slice(slice_idxs[i], slice_idxs[i + 1])

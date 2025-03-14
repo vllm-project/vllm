@@ -222,10 +222,10 @@ class Qwen2AudioMultiModalProcessor(
             num_features = audio_output_lengths[item_idx]
             if num_features == 0:
                 audios = mm_items.get_items("audio", AudioProcessorItems)
-                audio = audios.get(item_idx)
-                raise ValueError(
-                    f"The audio {audio} (len={len(audio)}) is too short "
-                    "to be represented inside the model")
+                audio_len = audios.get_audio_length(item_idx)
+
+                raise ValueError(f"The audio (len={audio_len}) is too short "
+                                 "to be represented inside the model")
 
             audio_tokens = [audio_token_id] * num_features
 

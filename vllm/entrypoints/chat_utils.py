@@ -37,6 +37,7 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
+from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 
 logger = init_logger(__name__)
@@ -1070,7 +1071,19 @@ def apply_hf_chat_template(
     tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
 ) -> str:
-    if chat_template is None and tokenizer.chat_template is None:
+    if chat_template is None:
+        chat_template = tokenizer.chat_template
+
+    # FIXME: Temporary workaround for
+    # https://huggingface.co/mistral-community/pixtral-12b/discussions/31
+    if chat_template is None:
+        try:
+            processor = cached_get_processor(tokenizer.name_or_path)
+            chat_template = processor.chat_template
+        except Exception:
+            pass
+
+    if chat_template is None:
         raise ValueError(
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
