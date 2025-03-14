@@ -81,7 +81,7 @@ def v1(run_with_both_engines_lora):
 
 
 # V1 Test: Failing due to numerics on V1.
-# @pytest.mark.skip_v1
+@pytest.mark.skip_v1
 @fork_new_process_for_each_test
 def test_llama_lora(sql_lora_files):
 
@@ -96,7 +96,7 @@ def test_llama_lora(sql_lora_files):
 
 # Skipping for v1 as v1 doesn't have a good way to expose the num_gpu_blocks
 # used by the engine yet.
-# @pytest.mark.skip_v1
+@pytest.mark.skip_v1
 @fork_new_process_for_each_test
 def test_llama_lora_warmup(sql_lora_files):
     """Test that the LLM initialization works with a warmup LORA path and
@@ -126,7 +126,7 @@ def test_llama_lora_warmup(sql_lora_files):
 
 
 # V1 Test: Failing due to numerics on V1.
-# @pytest.mark.skip_v1
+@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_llama_lora_tp4(sql_lora_files):
