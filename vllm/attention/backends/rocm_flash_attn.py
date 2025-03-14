@@ -20,8 +20,7 @@ USE_AITER_PAGED_ATTN = envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
 
 if USE_AITER_PAGED_ATTN:
     from vllm.attention.ops.paged_attn import PagedAttentionMetadata
-    from vllm.attention.ops.rocm_aiter_paged_attn import (
-        AiterPagedAttention as PagedAttention)
+    from vllm.attention.ops.rocm_aiter_paged_attn import AiterPagedAttention as PagedAttention
 else:
     from vllm.attention.ops.paged_attn import (PagedAttention,
                                                PagedAttentionMetadata)
