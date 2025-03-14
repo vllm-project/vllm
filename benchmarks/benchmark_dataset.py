@@ -46,7 +46,7 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: str
+    prompt: Union[str, Any]
     prompt_len: int
     expected_output_len: int
     multi_modal_data: Optional[Union[MultiModalDataDict, dict]] = None
@@ -83,6 +83,20 @@ class BenchmarkDataset(ABC):
         self.random_seed = (random_seed
                             if random_seed is not None else self.DEFAULT_SEED)
         self.data = None
+
+    def apply_multimodal_chat_transformation(
+            self,
+            prompt: str,
+            mm_content: Optional[MultiModalDataDict] = None) -> list[dict]:
+        """
+        Transform a prompt and optional multimodal content into a chat format.
+        This method is used for chat models that expect a specific 
+        conversation format.
+        """
+        content = [{"text": prompt, "type": "text"}]
+        if mm_content is not None:
+            content.append(mm_content)
+        return [{"role": "user", "content": content}]
 
     def load_data(self) -> None:
         """
@@ -338,6 +352,7 @@ class ShareGPTDataset(BenchmarkDataset):
                lora_path: Optional[str] = None,
                max_loras: Optional[int] = None,
                output_len: Optional[int] = None,
+               enable_multimodal_chat: bool = False,
                **kwargs) -> list:
         samples: list = []
         for entry in self.data:
@@ -358,6 +373,9 @@ class ShareGPTDataset(BenchmarkDataset):
                                      skip_min_output_len_check=output_len
                                      is not None):
                 continue
+            if enable_multimodal_chat:
+                prompt = self.apply_multimodal_chat_transformation(
+                    prompt, None)
             samples.append(
                 SampleRequest(
                     prompt=prompt,
@@ -550,10 +568,13 @@ class HuggingFaceDataset(BenchmarkDataset):
             split=self.dataset_split,
             streaming=True,
         )
-
-        if "conversations" not in self.data.features:
-            raise ValueError("HF Dataset must have a 'conversations' column.")
-
+        if self.data.features is None or "conversations" \
+            not in self.data.features:
+            raise ValueError(
+                "HuggingFaceDataset currently only supports datasets with "
+                "a 'conversations' column like lmms-lab/LLaVA-OneVision-Data. "
+                "Please consider contributing if you would like to add "
+                "support for additional dataset formats.")
         # Shuffle and filter examples with at least 2 conversations.
         self.data = self.data.shuffle(seed=self.random_seed).filter(
             lambda x: len(x["conversations"]) >= 2)
@@ -561,9 +582,8 @@ class HuggingFaceDataset(BenchmarkDataset):
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
                num_requests: int,
-               lora_path: Optional[str] = None,
-               max_loras: Optional[int] = None,
                output_len: Optional[int] = None,
+               enable_multimodal_chat: bool = False,
                **kwargs) -> list:
         sampled_requests = []
         dynamic_output = output_len is None
@@ -571,12 +591,8 @@ class HuggingFaceDataset(BenchmarkDataset):
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
-
             conv = item["conversations"]
             prompt, completion = conv[0]["value"], conv[1]["value"]
-
-            lora_request, tokenizer = self.get_random_lora_request(
-                tokenizer, lora_path=lora_path, max_loras=max_loras)
 
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
@@ -587,16 +603,20 @@ class HuggingFaceDataset(BenchmarkDataset):
             if dynamic_output and not is_valid_sequence(
                     prompt_len, completion_len):
                 continue
-
             mm_content = process_image(
                 item["image"]) if "image" in item else None
+            if enable_multimodal_chat:
+                # Note: when chat is enabled the request prompt_len is no longer
+                # accurate and we will be using request output to count the
+                # actual prompt len and output len
+                prompt = self.apply_multimodal_chat_transformation(
+                    prompt, mm_content)
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
-                    lora_request=lora_request,
                 ))
         return sampled_requests
 
@@ -606,7 +626,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 # -----------------------------------------------------------------------------
 
 
-class VisionArenaDataset(BenchmarkDataset):
+class VisionArenaDataset(HuggingFaceDataset):
     """
     Vision Arena Dataset.
     """
@@ -617,14 +637,9 @@ class VisionArenaDataset(BenchmarkDataset):
 
     def __init__(
         self,
-        dataset_split: str,
-        dataset_subset: Optional[str] = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.dataset_split = dataset_split
-        self.dataset_subset = dataset_subset
-
         if self.dataset_path != self.VISION_ARENA_DATASET_PATH:
             raise ValueError(f"Only support Vision Arena dataset.\
                     This data path {self.dataset_path} is not valid.")
@@ -645,9 +660,9 @@ class VisionArenaDataset(BenchmarkDataset):
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
                num_requests: int,
-               output_len: int = DEFAULT_OUTPUT_LEN,
+               output_len: Optional[int] = None,
+               enable_multimodal_chat: bool = False,
                **kwargs) -> list:
-        # TODO (jenniferzhao): Add support for offline benchmark sampling
         output_len = (output_len
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests = []
@@ -655,8 +670,14 @@ class VisionArenaDataset(BenchmarkDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["turns"][0][0]["content"]
-            prompt_len = len(tokenizer(prompt).input_ids)
             mm_content = process_image(item["images"][0])
+            prompt_len = len(tokenizer(prompt).input_ids)
+            if enable_multimodal_chat:
+                # Note: when chat is enabled the request prompt_len is no longer
+                # accurate and we will be using request output to count the
+                # actual prompt len
+                prompt = self.apply_multimodal_chat_transformation(
+                    prompt, mm_content)
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
