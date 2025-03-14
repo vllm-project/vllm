@@ -14,7 +14,6 @@ from typing import Any, Callable, Optional, Union
 import msgspec
 import torch
 
-from vllm.distributed.kv_transfer.kv_transfer_params import KVTransferParams
 from vllm.inputs import SingletonInputs, SingletonInputsAdapter
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
@@ -944,8 +943,6 @@ class SequenceGroupMetadata(
                            unless you are working with an encoder/decoder
                            model.
         prompt_adapter_request: Prompt Adapter request.
-        kv_transfer_params: The KVCache transfer parameters to use for
-            disaggregated prefilling and KVCache sharing.
     """
 
     request_id: str
@@ -969,7 +966,6 @@ class SequenceGroupMetadata(
     cross_block_table: Optional[list[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
     token_chunk_size: Optional[int] = None
-    kv_transfer_params: Optional[KVTransferParams] = None
 
     ### Stateful fields that are lazily defined. ###
     # The number of speculative tokens adopted in this request.
@@ -985,11 +981,6 @@ class SequenceGroupMetadata(
                     self.seq_data.values())).get_len()
             else:
                 self.token_chunk_size = 1
-
-        # Init KVTransferParams from SamplingParams, if exists.
-        if self.sampling_params is not None and hasattr(
-                self.sampling_params, "kv_transfer_params"):
-            self.kv_transfer_params = self.sampling_params.kv_transfer_params
 
     @property
     def lora_int_id(self) -> int:
