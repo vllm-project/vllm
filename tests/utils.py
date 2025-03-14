@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 import warnings
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
@@ -693,7 +693,72 @@ def fork_new_process_for_each_test(
             assert _exitcode == 0, (f"function {f} failed when called with"
                                     f" args {args} and kwargs {kwargs}")
 
+        return wrapper
+
+
+_P = ParamSpec("_P")
+
+
+def spawn_new_process_for_each_test(
+        f: Callable[_P, None]) -> Callable[_P, None]:
+    """Decorator to spawn a new process for each test function.
+    """
+
+    @functools.wraps(f)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        # Check if we're already in a subprocess
+        if os.environ.get('RUNNING_IN_SUBPROCESS') == '1':
+            # If we are, just run the function directly
+            return f(*args, **kwargs)
+
+        import torch.multiprocessing as mp
+        with suppress(RuntimeError):
+            mp.set_start_method('spawn')
+
+        # Get the module and function name
+        module_name = f.__module__
+        func_name = f.__name__
+
+        # Create a process with environment variable set
+        env = os.environ.copy()
+        env['RUNNING_IN_SUBPROCESS'] = '1'
+
+        cmd = [
+            sys.executable, "-c",
+            f"from {module_name} import *; {func_name}(*{args}, **{kwargs})"
+        ]
+
+        process = subprocess.Popen(cmd, env=env)
+        process.wait()
+
+        assert process.returncode == 0, (
+            f"function {f} failed when called with"
+            f" args {args} and kwargs {kwargs}")
+
     return wrapper
+
+
+_P = ParamSpec("_P")
+
+
+def create_new_process_for_each_test(
+        method: str = "fork") -> Callable[_P, None]:
+    """creates a new process for each test function.
+
+    Args:
+        method: The process creation method, either "spawn" or "fork".
+
+    Returns:
+        A decorator function that will run the test in a new process.
+    """
+
+    assert method in ["spawn",
+                      "fork"], "Method must be either 'spawn' or 'fork'"
+
+    if method == "fork":
+        return fork_new_process_for_each_test
+
+    return spawn_new_process_for_each_test
 
 
 def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
@@ -755,7 +820,8 @@ def multi_gpu_test(*, num_gpus: int):
     marks = multi_gpu_marks(num_gpus=num_gpus)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        func = fork_new_process_for_each_test(f)
+        func = create_new_process_for_each_test(
+            "spawn" if current_platform.is_rocm() else "fork")(f)
         for mark in reversed(marks):
             func = mark(func)
 

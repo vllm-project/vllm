@@ -41,8 +41,9 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
+from vllm.platforms import current_platform
 
-from ...utils import fork_new_process_for_each_test
+from ...utils import create_new_process_for_each_test
 from .conftest import (get_output_from_llm_generator,
                        run_equality_correctness_test)
 
@@ -82,7 +83,8 @@ from .conftest import (get_output_from_llm_generator,
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_spec_decode_e2e_with_detokenization(test_llm_generator,
                                              batch_size: int):
     """Run generation with speculative decoding on a batch. Verify the engine
@@ -170,7 +172,8 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
     ])
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
@@ -244,7 +247,8 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
     ])
 @pytest.mark.parametrize("batch_size", [64])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
@@ -300,7 +304,8 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
 ])
 @pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
@@ -356,7 +361,8 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
         256,
     ])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
@@ -411,7 +417,8 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
         64,
     ])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
@@ -469,7 +476,8 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
     ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_spec_decode_e2e_greedy_correctness_with_preemption(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
@@ -534,7 +542,8 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_spec_decode_different_block_size(vllm_runner, common_llm_kwargs,
                                           per_test_common_llm_kwargs,
                                           baseline_llm_kwargs, test_llm_kwargs,
@@ -594,7 +603,8 @@ def test_spec_decode_different_block_size(vllm_runner, common_llm_kwargs,
         64,
     ])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_skip_speculation(vllm_runner, common_llm_kwargs,
                           per_test_common_llm_kwargs, baseline_llm_kwargs,
                           test_llm_kwargs, batch_size: int, output_len: int,
@@ -644,7 +654,8 @@ def test_skip_speculation(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("output_len", [10])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_disable_speculation(vllm_runner, common_llm_kwargs,
                              per_test_common_llm_kwargs, baseline_llm_kwargs,
                              test_llm_kwargs, batch_size: int, output_len: int,
@@ -697,7 +708,8 @@ def test_disable_speculation(vllm_runner, common_llm_kwargs,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_many_k(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
                 baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
                 output_len: int, seed: int):
@@ -752,7 +764,8 @@ def test_many_k(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_typical_acceptance_sampling(vllm_runner, common_llm_kwargs,
                                      per_test_common_llm_kwargs,
                                      baseline_llm_kwargs, test_llm_kwargs,

@@ -6,11 +6,13 @@ import pytest
 
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.platforms import current_platform
 
-from ..utils import fork_new_process_for_each_test
+from ..utils import create_new_process_for_each_test
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_plugin(dummy_opt_path):
     os.environ["VLLM_PLUGINS"] = ""
     with pytest.raises(Exception) as excinfo:
@@ -20,7 +22,8 @@ def test_plugin(dummy_opt_path):
     assert (error_msg in str(excinfo.value))
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_oot_registration_text_generation(dummy_opt_path):
     os.environ["VLLM_PLUGINS"] = "register_dummy_model"
     prompts = ["Hello, my name is", "The text does not matter"]
@@ -36,7 +39,8 @@ def test_oot_registration_text_generation(dummy_opt_path):
         assert rest == ""
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_oot_registration_embedding(dummy_gemma2_embedding_path):
     os.environ["VLLM_PLUGINS"] = "register_dummy_model"
     prompts = ["Hello, my name is", "The text does not matter"]
@@ -50,7 +54,8 @@ def test_oot_registration_embedding(dummy_gemma2_embedding_path):
 image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_oot_registration_multimodal(dummy_llava_path):
     os.environ["VLLM_PLUGINS"] = "register_dummy_model"
     prompts = [{

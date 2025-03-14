@@ -4,10 +4,10 @@ import pytest
 import ray
 
 import vllm
-from tests.utils import fork_new_process_for_each_test
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
-from ..utils import multi_gpu_test
+from ..utils import create_new_process_for_each_test, multi_gpu_test
 
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
@@ -80,7 +80,8 @@ def v1(run_with_both_engines_lora):
     pass
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_llama_lora(sql_lora_files):
 
     llm = vllm.LLM(MODEL_PATH,
@@ -95,7 +96,8 @@ def test_llama_lora(sql_lora_files):
 # Skipping for v1 as v1 doesn't have a good way to expose the num_gpu_blocks
 # used by the engine yet.
 @pytest.mark.skip_v1
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_llama_lora_warmup(sql_lora_files):
     """Test that the LLM initialization works with a warmup LORA path and
     is more conservative"""
@@ -124,7 +126,8 @@ def test_llama_lora_warmup(sql_lora_files):
 
 
 @multi_gpu_test(num_gpus=4)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_llama_lora_tp4(sql_lora_files):
 
     llm = vllm.LLM(
@@ -139,7 +142,8 @@ def test_llama_lora_tp4(sql_lora_files):
 
 
 @multi_gpu_test(num_gpus=4)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
 
     llm = vllm.LLM(
@@ -155,7 +159,8 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
 
 
 @multi_gpu_test(num_gpus=4)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_llama_lora_tp4_fully_sharded_enable_bias(sql_lora_files):
 
     llm = vllm.LLM(
