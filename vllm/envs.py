@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     VLLM_LOGITS_PROCESSOR_THREADS: Optional[int] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
-    VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
+    VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = False
     VLLM_USE_FLASHINFER_REJECTION_SAMPLER: bool = False
     VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
