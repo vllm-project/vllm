@@ -75,8 +75,8 @@ class Scheduler:
         # In this case, the deque will have multiple elements with the
         # computed tokens before each chunk was scheduled. This is used by
         # update_from_output() to determine the request status.
-        self.scheduled_req_ids_to_orig_computed_tokens: dict[
-            str, deque[int]] = defaultdict(deque)
+        self.orig_num_computed_tokens: dict[str,
+                                            deque[int]] = defaultdict(deque)
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -151,18 +151,9 @@ class Scheduler:
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-            if (request.num_computed_tokens >= request.num_tokens
-                    and self.scheduled_req_ids_to_orig_computed_tokens.get(
-                        request.request_id, deque())):
-                # We avoid re-scheduling the decoding requests because
-                # there is no tokens for decoding requests to be scheduled.
-                req_index += 1
-                continue
-
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
             num_new_tokens = min(num_new_tokens, token_budget)
-            assert num_new_tokens > 0
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule, num_new_tokens, new_encoder_budget = (
@@ -171,8 +162,13 @@ class Scheduler:
                                                   num_new_tokens,
                                                   encoder_budget))
             if num_new_tokens == 0:
-                # The request cannot be scheduled because the encoder budget
-                # or the encoder cache is exhausted.
+                # The request cannot be scheduled because one of the following
+                # reasons:
+                # 1. No new tokens to schedule. This may happen when PP>1 and
+                #    we have already scheduled all prompt tokens but they are
+                #    not finished yet.
+                # 2. The encoder budget is exhausted.
+                # 3. The encoder cache is exhausted.
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
@@ -209,8 +205,8 @@ class Scheduler:
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
-            self.scheduled_req_ids_to_orig_computed_tokens[
-                request.request_id].append(request.num_computed_tokens)
+            self.orig_num_computed_tokens[request.request_id].append(
+                request.num_computed_tokens)
             if request.use_structured_output:
                 # PERF: in case of chunked prefill,
                 # request might not include any new tokens.
@@ -333,8 +329,8 @@ class Scheduler:
                         request.request_id] = req_index
                 req_index += 1
                 self.running.append(request)
-                self.scheduled_req_ids_to_orig_computed_tokens[
-                    request.request_id].append(request.num_computed_tokens)
+                self.orig_num_computed_tokens[request.request_id].append(
+                    request.num_computed_tokens)
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED,
                                          scheduled_timestamp)
@@ -505,7 +501,7 @@ class Scheduler:
         limitations, the method adjusts `num_new_tokens` to schedule only the
         decoder tokens up to just before the unschedulable encoder input.
         """
-        if not request.has_encoder_inputs():
+        if not request.has_encoder_inputs() or num_new_tokens == 0:
             return [], num_new_tokens, encoder_budget
 
         encoder_inputs_to_schedule: list[int] = []
@@ -578,10 +574,9 @@ class Scheduler:
                 continue
 
             num_computed_tokens_with_output = (
-                self.scheduled_req_ids_to_orig_computed_tokens[req_id].popleft(
-                ))
-            if not self.scheduled_req_ids_to_orig_computed_tokens[req_id]:
-                del self.scheduled_req_ids_to_orig_computed_tokens[req_id]
+                self.orig_num_computed_tokens[req_id].popleft())
+            if not self.orig_num_computed_tokens[req_id]:
+                del self.orig_num_computed_tokens[req_id]
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
@@ -730,10 +725,8 @@ class Scheduler:
 
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
-                if (request.request_id
-                        in self.scheduled_req_ids_to_orig_computed_tokens):
-                    del self.scheduled_req_ids_to_orig_computed_tokens[
-                        request.request_id]
+                if request.request_id in self.orig_num_computed_tokens:
+                    del self.orig_num_computed_tokens[request.request_id]
             else:
                 self.waiting.remove(request)
             request.status = finished_status
