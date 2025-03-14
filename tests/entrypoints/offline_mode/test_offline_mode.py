@@ -53,7 +53,7 @@ def cache_models():
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.usefixtures("cache_models")
-def test_offline_mode(monkeypatch):
+def test_offline_mode(monkeypatch: pytest.MonkeyPatch):
     # Set HF to offline mode and ensure we can still construct an LLM
     try:
         monkeypatch.setenv("HF_HUB_OFFLINE", "1")

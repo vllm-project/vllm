@@ -176,7 +176,7 @@ def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
 
 
 @pytest.mark.asyncio(loop_scope="function")
-async def test_engine_core_client_asyncio(monkeypatch):
+async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")

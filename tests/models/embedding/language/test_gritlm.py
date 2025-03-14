@@ -29,7 +29,7 @@ def _arr(arr):
     return array("i", arr)
 
 
-def test_find_array(monkeypatch):
+def test_find_array(monkeypatch: pytest.MonkeyPatch):
     # GritLM embedding implementation is only supported by XFormers backend.
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "XFORMERS")
 
@@ -136,7 +136,7 @@ def validate_embed_output(q_rep: list[float], d_rep: list[float]):
     assert math.isclose(cosine_sim_q1_d1, 0.532, abs_tol=0.001)
 
 
-def test_gritlm_offline_embedding(monkeypatch):
+def test_gritlm_offline_embedding(monkeypatch: pytest.MonkeyPatch):
     # GritLM embedding implementation is only supported by XFormers backend.
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "XFORMERS")
 

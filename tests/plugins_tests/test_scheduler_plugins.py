@@ -22,7 +22,7 @@ class DummyV1Scheduler(V1Scheduler):
         raise Exception("Exception raised by DummyV1Scheduler")
 
 
-def test_scheduler_plugins_v0(monkeypatch):
+def test_scheduler_plugins_v0(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_V1", "0")
     with pytest.raises(Exception) as exception_info:
 
@@ -41,7 +41,7 @@ def test_scheduler_plugins_v0(monkeypatch):
     assert str(exception_info.value) == "Exception raised by DummyV0Scheduler"
 
 
-def test_scheduler_plugins_v1(monkeypatch):
+def test_scheduler_plugins_v1(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_V1", "1")
     # Explicitly turn off engine multiprocessing so that the scheduler runs in
     # this process

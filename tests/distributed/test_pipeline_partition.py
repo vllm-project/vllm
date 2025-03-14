@@ -7,7 +7,7 @@ import pytest
 from vllm.distributed.utils import get_pp_indices
 
 
-def test_custom_layer_partition(monkeypatch):
+def test_custom_layer_partition(monkeypatch: pytest.MonkeyPatch):
 
     def _verify(partition_str, num_layers, pp_size, goldens):
         bak = os.environ.get("VLLM_PP_LAYER_PARTITION", None)

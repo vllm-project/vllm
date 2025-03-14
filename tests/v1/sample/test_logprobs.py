@@ -334,7 +334,7 @@ def test_get_logprobs_and_prompt_logprobs(
             do_apc=do_apc)
 
 
-def test_max_logprobs(monkeypatch):
+def test_max_logprobs(monkeypatch: pytest.MonkeyPatch):
     """vLLM v1 engine should fail a request with `logprobs > max_logprobs`
     
     Should also fail for `prompt_logprobs > max_logprobs`

@@ -111,7 +111,7 @@ def test_deprecate_kwargs_additional_message():
         dummy(old_arg=1)
 
 
-def test_get_open_port(monkeypatch):
+def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_PORT", "5678")
     # make sure we can get multiple ports, even if the env var is set
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:

@@ -57,7 +57,7 @@ def test_env(name: str, device: str, monkeypatch):
             assert backend.get_name() == name
 
 
-def test_flash_attn(monkeypatch):
+def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
     """Test FlashAttn validation."""
     # TODO: When testing for v1, pipe in `use_v1` as an argument to
     # get_attn_backend
@@ -95,7 +95,7 @@ def test_flash_attn(monkeypatch):
     assert backend.get_name() != STR_FLASH_ATTN_VAL
 
 
-def test_invalid_env(monkeypatch):
+def test_invalid_env(monkeypatch: pytest.MonkeyPatch):
     """Ignore the invalid env variable if it is set."""
     override_backend_env_variable(monkeypatch, STR_INVALID_VAL)
     with patch("vllm.attention.selector.current_platform", CudaPlatform()):

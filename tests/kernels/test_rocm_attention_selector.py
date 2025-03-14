@@ -17,7 +17,7 @@ def clear_cache():
     _cached_get_attn_backend.cache_clear()
 
 
-def test_selector(monkeypatch):
+def test_selector(monkeypatch: pytest.MonkeyPatch):
     """Test that the attention selector for ROCm.
     """
     override_backend_env_variable(monkeypatch, "ROCM_FLASH")

@@ -235,7 +235,7 @@ async def test_bad_request(tmp_socket):
 
 
 @pytest.mark.asyncio
-async def test_mp_crash_detection(monkeypatch):
+async def test_mp_crash_detection(monkeypatch: pytest.MonkeyPatch):
 
     parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
     parser = make_arg_parser(parser)
