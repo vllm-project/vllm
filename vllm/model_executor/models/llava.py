@@ -38,7 +38,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import JSONTree, flatten_2d_lists, json_map_leaves
 
 from .clip import CLIPVisionModel
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
@@ -506,7 +506,7 @@ def init_vision_tower_for_llava(
     *,
     require_post_norm: Optional[bool] = None,
     prefix: str = "",
-):
+) -> Union[CLIPVisionModel, SiglipVisionModel, PixtralHFVisionModel]:
     vision_config = hf_config.vision_config
 
     # Initialize the vision tower only up to the deepest required feature layer
@@ -685,7 +685,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel,
                             PixtralHFVisionModel],
-        pixel_values: torch.Tensor,
+        pixel_values: Union[torch.Tensor, list[torch.Tensor]],
     ) -> torch.Tensor:
 
         # NOTE: we skip the step to select the vision feature layer since
@@ -770,7 +770,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         return embeds_in_batch
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -792,7 +793,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
