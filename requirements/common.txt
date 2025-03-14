@@ -1,3 +1,4 @@
+cachetools
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
 numpy < 2.0.0

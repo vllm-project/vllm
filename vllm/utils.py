@@ -35,9 +35,9 @@ from collections import OrderedDict, UserDict, defaultdict
 from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
                              Iterable, Iterator, Mapping)
 from dataclasses import dataclass, field
-from functools import cache, lru_cache, partial, wraps
+from functools import cache, lru_cache, partial, reduce, wraps
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TypeVar, Union)
+                    Optional, TypeVar, Union, overload)
 from uuid import uuid4
 
 import cloudpickle
@@ -856,6 +856,17 @@ JSONTree = Union[dict[str, "JSONTree[T]"], list["JSONTree[T]"],
 """A nested JSON structure where the leaves need not be JSON-serializable."""
 
 
+def json_iter_leaves(value: JSONTree[T]) -> Iterable[T]:
+    if isinstance(value, dict):
+        for v in value.values():
+            yield from json_iter_leaves(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from json_iter_leaves(v)
+    else:
+        yield value
+
+
 def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
     if isinstance(value, dict):
         return {k: json_map_leaves(func, v) for k, v in value.items()}
@@ -865,6 +876,37 @@ def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
         return tuple(json_map_leaves(func, v) for v in value)
     else:
         return func(value)
+
+
+@overload
+def json_reduce_leaves(
+    func: Callable[[T, T], T],
+    value: JSONTree[T],
+    /,
+) -> T:
+    ...
+
+
+@overload
+def json_reduce_leaves(
+    func: Callable[[U, T], U],
+    value: JSONTree[T],
+    initial: U,
+    /,
+) -> U:
+    ...
+
+
+def json_reduce_leaves(
+    func: Callable[..., Union[T, U]],
+    value: JSONTree[T],
+    initial: U = ...,
+    /,
+) -> Union[T, U]:
+    if initial is ...:
+        return reduce(func, json_iter_leaves(value))
+
+    return reduce(func, json_iter_leaves(value), initial)
 
 
 def flatten_2d_lists(lists: list[list[T]]) -> list[T]:

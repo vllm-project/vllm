@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import re
+import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import (Callable, Generator, ItemsView, Iterable, Mapping,
@@ -11,6 +11,9 @@ from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
+import numpy as np
+import torch
+from cachetools import LRUCache
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
@@ -18,7 +21,8 @@ from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
-from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
+from vllm.utils import (GiB_bytes, flatten_2d_lists, full_groupby,
+                        json_map_leaves, json_reduce_leaves)
 
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -812,25 +816,50 @@ def find_mm_placeholders(
     return dict(full_groupby_modality(it))
 
 
+_V = TypeVar("_V", bound="Union[MultiModalKwargs, MultiModalKwargsItem]")
+
+
 class ProcessingCache:
 
-    def __init__(self, capacity: int) -> None:
+    @staticmethod
+    def get_lru_cache(
+            capacity_gb: int,
+            value_type: type[_V],  # For type annotation only
+    ) -> "LRUCache[str, _V]":
+
+        def get_size(leaf: object):
+            if isinstance(leaf, (torch.Tensor, np.ndarray)):
+                return leaf.nbytes
+
+            return sys.getsizeof(leaf)
+
+        return LRUCache(
+            GiB_bytes * capacity_gb,
+            getsizeof=lambda x: json_reduce_leaves(
+                lambda a, b: a + b,
+                json_map_leaves(get_size, x),
+            ),
+        )
+
+    def __init__(self, capacity_gb: int) -> None:
         super().__init__()
 
         # DEBUG: Set to None to disable
         self.debug_cache_hit_ratio_steps: Optional[int] = None
+        self.cache_hits = 0
+        self.cache_total = 0
 
-        self._cache = LRUCache[str, MultiModalKwargsItem](capacity)
+        self._cache = self.get_lru_cache(capacity_gb, MultiModalKwargsItem)
 
     def _maybe_log_cache_stats(self) -> None:
         steps = self.debug_cache_hit_ratio_steps
         if not steps:
             return
 
-        cache_stats = self._cache.stat()
-        if cache_stats.total % steps == 0:
+        total = self.cache_total
+        if total > 0 and total % steps == 0:
             logger.debug("ProcessingCache: hit_ratio = %.2f",
-                         cache_stats.hit_ratio)
+                         self.cache_hits / total)
 
     def get(
         self,
@@ -853,6 +882,13 @@ class ProcessingCache:
         cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                  **{modality: input_item},
                                                  **input_kwargs)
+
+        if self.debug_cache_hit_ratio_steps:
+            if cache_key in self._cache:
+                self.cache_hits += 1
+
+            self.cache_total += 1
+
         return self._cache.get(cache_key)
 
     def put(
@@ -870,7 +906,7 @@ class ProcessingCache:
         cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                  **{modality: input_item},
                                                  **input_kwargs)
-        self._cache.put(cache_key, output_kwargs)
+        self._cache[cache_key] = output_kwargs
 
 
 class BaseProcessingInfo:

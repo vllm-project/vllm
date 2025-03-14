@@ -3,11 +3,11 @@
 from typing import Any, Optional
 
 from vllm.config import ModelConfig
-from vllm.envs import VLLM_MM_INPUT_CACHE_SIZE
+from vllm.envs import VLLM_MM_INPUT_CACHE_SPACE
 from vllm.logger import init_logger
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
                              MultiModalKwargs, MultiModalRegistry)
-from vllm.utils import LRUCache
+from vllm.multimodal.processing import ProcessingCache
 
 logger = init_logger(__name__)
 
@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 
 # Both Client and Server must use the same cache size
 # (to perform mirrored caching). This cache size is set by the environment
-# variable VLLM_MM_INPUT_CACHE_SIZE.
+# variable VLLM_MM_INPUT_CACHE_SPACE.
 
 
 # TODO(ywang96): Deprecate this class once all multimodal models migrate to use
@@ -50,8 +50,8 @@ class MMInputCacheClient:
 
         # Init cache
         self.use_cache = not model_config.disable_mm_preprocessor_cache
-        self.mm_cache = LRUCache[str,
-                                 MultiModalKwargs](VLLM_MM_INPUT_CACHE_SIZE)
+        self.mm_cache = ProcessingCache.get_lru_cache(
+            VLLM_MM_INPUT_CACHE_SPACE, MultiModalKwargs)
 
         # DEBUG: Set to None to disable
         self.mm_debug_cache_hit_ratio_steps = None
@@ -71,7 +71,7 @@ class MMInputCacheClient:
         mm_hashes: Optional[list[str]],
         mm_processor_kwargs: Optional[dict[str, Any]],
         precomputed_mm_inputs: Optional[list[MultiModalKwargs]],
-    ) -> list[MultiModalKwargs]:
+    ) -> list[Optional[MultiModalKwargs]]:
         if precomputed_mm_inputs is None:
             image_inputs = mm_data["image"]
             if not isinstance(image_inputs, list):
@@ -114,7 +114,7 @@ class MMInputCacheClient:
                 if self.use_cache:
                     # Add to cache
                     assert mm_hash is not None
-                    self.mm_cache.put(mm_hash, mm_input)
+                    self.mm_cache[mm_hash] = mm_input
             else:
                 self.mm_cache_hits += 1
                 mm_input = None  # Avoids sending mm_input to Server
@@ -128,14 +128,14 @@ class MMInputCacheServer:
 
     def __init__(self, model_config):
         self.use_cache = not model_config.disable_mm_preprocessor_cache
-        self.mm_cache = LRUCache[str,
-                                 MultiModalKwargs](VLLM_MM_INPUT_CACHE_SIZE)
+        self.mm_cache = ProcessingCache.get_lru_cache(
+            VLLM_MM_INPUT_CACHE_SPACE, MultiModalKwargs)
 
     def get_and_update(
         self,
         mm_inputs: list[Optional[MultiModalKwargs]],
         mm_hashes: list[str],
-    ) -> list[MultiModalKwargs]:
+    ) -> list[Optional[MultiModalKwargs]]:
         assert len(mm_inputs) == len(mm_hashes)
 
         if not self.use_cache:
@@ -148,7 +148,7 @@ class MMInputCacheServer:
                 mm_input = self.mm_cache.get(mm_hash)
                 assert mm_input is not None
             else:
-                self.mm_cache.put(mm_hash, mm_input)
+                self.mm_cache[mm_hash] = mm_input
 
             full_mm_inputs.append(mm_input)
 
