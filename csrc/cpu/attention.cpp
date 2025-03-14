@@ -819,13 +819,21 @@ void mla_decode_kvcache_cpu_impl(
   // sub-problem
   //   - chunk according to BLOCK_SIZE for convenience
 
+  using load_vec_type = typename KernelVecType<scalar_t>::k_load_vec_type;
+  using vec_type = typename KernelVecType<scalar_t>::k_vec_type;
+  static_assert(vec_type::VEC_ELEM_NUM == load_vec_type::VEC_ELEM_NUM);
+  constexpr int ELEM_NUM = vec_type::VEC_ELEM_NUM;
+  static_assert(HEAD_DIM % ELEM_NUM == 0);
+  static_assert(V_HEAD_DIM % ELEM_NUM == 0);
+
+#pragma omp parallel for schedule(static, 1)
   for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
     const int seq_len = seq_lens[seq_idx];
     const int block_num = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
     const int last_block_size = seq_len - (block_num - 1) * BLOCK_SIZE;
 
     std::vector<float> acc_lse(num_heads, -FLT_MAX);
-    std::vector<float> acc_out(num_heads * V_HEAD_DIM);
+    std::vector<vec_type> acc_out(num_heads * V_HEAD_DIM / ELEM_NUM);
 
     for (int block_idx = 0; block_idx < block_num; ++block_idx) {
       const int physical_block_idx =
@@ -841,12 +849,19 @@ void mla_decode_kvcache_cpu_impl(
 
         for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
           // dot product
-          float acc = 0.0f;
-          for (int i = 0; i < HEAD_DIM; ++i) {
-            const float q_val = q[seq_idx * q_stride + head_idx * HEAD_DIM + i];
-            const float k_val = this_kv_block[block_offset * HEAD_DIM + i];
-            acc += q_val * k_val;
+          vec_type acc_vec(0.0f);
+          for (int i = 0; i < HEAD_DIM; i += ELEM_NUM) {
+            load_vec_type q_load_vec(q + seq_idx * q_stride +
+                                     head_idx * HEAD_DIM + i);
+            vec_type q_vec(q_load_vec);
+
+            load_vec_type k_load_vec(this_kv_block + block_offset * HEAD_DIM +
+                                     i);
+            vec_type k_vec(k_load_vec);
+
+            vec_op::fma(acc_vec, q_vec, k_vec);
           }
+          float acc = acc_vec.reduce_sum();
 
           acc *= scale;  // softmax scale
           logits[block_offset] = acc;
@@ -860,16 +875,17 @@ void mla_decode_kvcache_cpu_impl(
           sum_exp += val;
         }
 
-        float out_vec[V_HEAD_DIM] = {};  // initialize to zeros
+        vec_type this_out[V_HEAD_DIM / ELEM_NUM];
         float inv_sum = 1.0f / sum_exp;
 
-        // v[BLOCK_SIZE][V_HEAD_DIM] should still be in L1/L2
         for (int block_offset = 0; block_offset < BLOCK_SIZE; ++block_offset) {
-          const float scale_ = logits[block_offset] * inv_sum;
+          vec_type scale_(logits[block_offset] * inv_sum);
 
-          for (int i = 0; i < V_HEAD_DIM; ++i) {
-            const float v_val = this_kv_block[block_offset * HEAD_DIM + i];
-            out_vec[i] += v_val * scale_;
+          for (int i = 0; i < V_HEAD_DIM; i += ELEM_NUM) {
+            load_vec_type v_load_vec(this_kv_block + block_offset * HEAD_DIM +
+                                     i);
+            vec_type v_vec(v_load_vec);
+            vec_op::fma(this_out[i / ELEM_NUM], v_vec, scale_);
           }
         }
 
@@ -878,33 +894,32 @@ void mla_decode_kvcache_cpu_impl(
         const float prev_lse = acc_lse[head_idx];
         const float curr_lse =
             std::log(sum_exp) + max_val;  // add back max_val to get true lse
-        max_val = std::max(prev_lse, curr_lse);
-        const float prev_sum_exp =
-            std::exp(prev_lse - max_val);  // softmax trick
+        max_val = std::max(prev_lse, curr_lse);  // softmax trick
+        const float prev_sum_exp = std::exp(prev_lse - max_val);
         const float curr_sum_exp = std::exp(curr_lse - max_val);
 
         const float new_sum_exp = prev_sum_exp + curr_sum_exp;
-        const float prev_scale = prev_sum_exp / new_sum_exp;
-        const float curr_scale = curr_sum_exp / new_sum_exp;
+        vec_type prev_scale(prev_sum_exp / new_sum_exp);
+        vec_type curr_scale(curr_sum_exp / new_sum_exp);
 
         acc_lse[head_idx] = std::log(new_sum_exp) +
                             max_val;  // add back max_val to get true lse
-        for (int i = 0; i < V_HEAD_DIM; ++i) {
-          const float prev_o = acc_out[head_idx * V_HEAD_DIM + i];
-          const float curr_o = out_vec[i];
-          acc_out[head_idx * V_HEAD_DIM + i] =
-              prev_o * prev_scale + curr_o * curr_scale;
+        for (int i = 0; i < V_HEAD_DIM; i += ELEM_NUM) {
+          acc_out[(head_idx * V_HEAD_DIM + i) / ELEM_NUM] =
+              acc_out[(head_idx * V_HEAD_DIM + i) / ELEM_NUM] * prev_scale +
+              this_out[i / ELEM_NUM] * curr_scale;
         }
       }
     }
 
-    for (int i = 0; i < num_heads * V_HEAD_DIM; ++i) {
-      out[seq_idx * o_stride + i] = acc_out[i];
+    for (int i = 0; i < num_heads * V_HEAD_DIM; i += ELEM_NUM) {
+      load_vec_type out_store(acc_out[i / ELEM_NUM]);
+      out_store.save(out + seq_idx * o_stride + i);
     }
   }
   return;
 
-  // #pragma omp parallel for collapse(2)
+#pragma omp parallel for collapse(2)
   for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
     for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
       const int seq_len = seq_lens[seq_idx];
@@ -929,13 +944,16 @@ void mla_decode_kvcache_cpu_impl(
           const scalar_t* __restrict__ k_ptr = kv_cache +
                                                physical_block_idx * kv_stride +
                                                block_offset * HEAD_DIM;
-          float acc = 0.0f;
+          vec_type acc_vec;
 
-          for (int dim_idx = 0; dim_idx < HEAD_DIM; ++dim_idx) {
-            const float q_val = q_ptr[dim_idx];
-            const float k_val = k_ptr[dim_idx];
-            acc += q_val * k_val;
+          for (int i = 0; i < HEAD_DIM; i += ELEM_NUM) {
+            load_vec_type q_load_vec(q_ptr + i);
+            load_vec_type k_load_vec(k_ptr + i);
+            vec_type q_vec(q_load_vec);
+            vec_type k_vec(k_load_vec);
+            vec_op::fma(acc_vec, q_vec, k_vec);
           }
+          float acc = acc_vec.reduce_sum();
 
           acc *= scale;
           max_val = std::max(max_val, acc);
@@ -951,12 +969,9 @@ void mla_decode_kvcache_cpu_impl(
         logits[tok_idx] = val;
       }
       const float inv_sum = 1.0f / sum;
-      for (int tok_idx = 0; tok_idx < seq_len; ++tok_idx) {
-        logits[tok_idx] *= inv_sum;
-      }
 
       // multiply with v
-      std::vector<float> out_token(V_HEAD_DIM);
+      std::vector<vec_type> out_token(V_HEAD_DIM / ELEM_NUM);
 
       for (int block_idx = 0; block_idx < block_num; ++block_idx) {
         const int64_t physical_block_idx = seq_block_table[block_idx];
@@ -967,19 +982,22 @@ void mla_decode_kvcache_cpu_impl(
           const scalar_t* __restrict__ v_ptr = kv_cache +
                                                physical_block_idx * kv_stride +
                                                block_offset * HEAD_DIM;
-          const float logit_val = logits[block_idx * BLOCK_SIZE + block_offset];
+          vec_type scale_(logits[block_idx * BLOCK_SIZE + block_offset] *
+                          inv_sum);
 
-          for (int dim_idx = 0; dim_idx < V_HEAD_DIM; ++dim_idx) {
-            const float v_val = v_ptr[dim_idx];
-            out_token[dim_idx] += v_val * logit_val;
+          for (int i = 0; i < V_HEAD_DIM; i += ELEM_NUM) {
+            load_vec_type v_load_vec(v_ptr + i);
+            vec_type v_vec(v_load_vec);
+            vec_op::fma(out_token[i / ELEM_NUM], v_vec, scale_);
           }
         }
       }
 
       scalar_t* __restrict__ o_ptr =
           out + seq_idx * o_stride + head_idx * V_HEAD_DIM;
-      for (int dim_idx = 0; dim_idx < V_HEAD_DIM; ++dim_idx) {
-        o_ptr[dim_idx] = out_token[dim_idx];
+      for (int i = 0; i < V_HEAD_DIM; i += ELEM_NUM) {
+        load_vec_type o_store(out_token[i / ELEM_NUM]);
+        o_store.save(o_ptr + i);
       }
     }
   }
