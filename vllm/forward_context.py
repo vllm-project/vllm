@@ -92,6 +92,9 @@ def set_forward_context(attn_metadata: Any,
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)
         dp_metadata = DPMetadata(cu_tokens_across_dp_cpu)
     
+    if vllm_config.parallel_config.enable_sequence_parallel:
+        assert vllm_config.parallel_config.pipeline_parallel_size == 1, "sequence parallel doesn't work when combined with pipeline" 
+    
     # only do sequence parallelism when it's enabled and num of tokens is divisible by parallel size
     # sequence parallelism uses torch.distributed.reduce_scatter which only supports the case when size is divisible by parallel size
     enable_sequence_parallel = vllm_config.parallel_config.enable_sequence_parallel \
