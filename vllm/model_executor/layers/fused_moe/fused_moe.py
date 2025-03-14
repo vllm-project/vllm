@@ -1334,7 +1334,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     chunked_dg = False
     if use_dg:
         if M % block_m != 0:
-            CHUNK_SIZE = min((M //block_m) * block_m, CHUNK_SIZE)
+            CHUNK_SIZE = min((M // block_m) * block_m, CHUNK_SIZE)
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
         chunked_dg = num_chunks > 1
@@ -1376,7 +1376,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                           dtype=hidden_states.dtype)
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
-
 
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
