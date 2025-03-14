@@ -214,7 +214,7 @@ MULTIMODAL_MODELS = {
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": PPTestSettings.fast(),
     "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(),
     "allenai/Molmo-7B-D-0924": PPTestSettings.fast(),
-    "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.fast(),
+    "microsoft/Phi-3.5-vision-instruct": PPTestSettings.fast(),
     "mistralai/Pixtral-12B-2409": PPTestSettings.fast(load_format="dummy"),
     "Qwen/Qwen-VL-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
@@ -237,7 +237,7 @@ TEST_MODELS = [
     "BAAI/bge-multilingual-gemma2",
     # [MULTIMODAL GENERATION]
     "OpenGVLab/InternVL2-1B",
-    "microsoft/Phi-3-vision-128k-instruct",
+    "microsoft/Phi-3.5-vision-instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     # [LANGUAGE GENERATION - HYBRID ARCH]
     "ai21labs/Jamba-tiny-dev",

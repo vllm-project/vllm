@@ -286,14 +286,18 @@ class ModelConfig:
         if rope_scaling is not None:
             hf_override: dict[str, Any] = {"rope_scaling": rope_scaling}
             hf_overrides_kw.update(hf_override)
-            msg = ("`--rope-scaling` will be removed in a future release. "
-                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            hf_overrides_str = json.dumps(hf_overrides)
+            msg = (
+                "`--rope-scaling` will be removed in a future release. "
+                f"'Please instead use `--hf-overrides '{hf_overrides_str}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
         if rope_theta is not None:
             hf_override = {"rope_theta": rope_theta}
             hf_overrides_kw.update(hf_override)
-            msg = ("`--rope-theta` will be removed in a future release. "
-                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            hf_overrides_str = json.dumps(hf_overrides)
+            msg = (
+                "`--rope-theta` will be removed in a future release. "
+                f"'Please instead use `--hf-overrides '{hf_overrides_str}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_s3(model, tokenizer)
@@ -2283,9 +2287,14 @@ class LoRAConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # LoRA is not compatible with `torch.compile` .
         factors: list[Any] = []
+        factors.append(self.max_lora_rank)
+        factors.append(self.max_loras)
+        factors.append(self.fully_sharded_loras)
+        factors.append(self.lora_dtype)
+        factors.append(self.lora_extra_vocab_size)
+        factors.append(self.long_lora_scaling_factors)
+        factors.append(self.bias_enabled)
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -2837,6 +2846,9 @@ class KVTransferConfig(BaseModel):
     # The KV connector port, used to build distributed connection
     kv_port: int = 14579
 
+    # any extra config that the connector may need
+    kv_connector_extra_config: dict[str, Any] = {}
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2895,6 +2907,9 @@ class KVTransferConfig(BaseModel):
     def is_kv_consumer(self) -> bool:
         return self.kv_connector is not None and \
             self.kv_role in ["kv_consumer", "kv_both"]
+
+    def get_from_extra_config(self, key, default) -> Any:
+        return self.kv_connector_extra_config.get(key, default)
 
 
 class CompilationLevel:
@@ -3293,6 +3308,11 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
+            # LoRA creates static buffers based on max_num_batched_tokens.
+            # The tensor sizes and strides get captured in the torch.compile
+            # graph explicitly.
+            vllm_factors.append(
+                str(self.scheduler_config.max_num_batched_tokens))
         else:
             vllm_factors.append("None")
         if self.speculative_config:
@@ -3443,11 +3463,14 @@ class VllmConfig:
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        if self.lora_config is not None and self.compilation_config.level !=\
-             CompilationLevel.NO_COMPILATION:
-            logger.warning("LoRA is not supported with `torch.compile` yet. "
-                           "Disabling `torch.compile`.")
+        if ((not envs.VLLM_USE_V1) and self.lora_config is not None
+                and self.compilation_config.level
+                != CompilationLevel.NO_COMPILATION):
+            logger.warning(
+                "LoRA for V0 is not supported with `torch.compile` yet. "
+                "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
 
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
