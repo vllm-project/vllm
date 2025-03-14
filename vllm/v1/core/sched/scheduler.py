@@ -13,10 +13,13 @@ from vllm.logger import init_logger
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
-                                           SchedulerOutput)
-from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
-                            EngineCoreOutput, EngineCoreOutputs)
+from vllm.v1.core.sched.common import CommonSchedulerStates
+from vllm.v1.core.sched.interface import SchedulerInterface
+from vllm.v1.core.sched.logging import (record_preempted, record_queued,
+                                        record_scheduled)
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.utils import check_stop
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -25,7 +28,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 logger = init_logger(__name__)
 
 
-class Scheduler:
+class Scheduler(SchedulerInterface):
 
     def __init__(
         self,
@@ -71,16 +74,8 @@ class Scheduler:
         # by the executor.
         self.scheduled_req_ids: set[str] = set()
 
-        # The request IDs that are finished in between the previous and the
-        # current steps. This is used to notify the workers about the finished
-        # requests so that they can free the cached states for those requests.
-        # This is flushed at the end of each scheduling step.
-        self.finished_req_ids: set[str] = set()
-
-        # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
-        # them at each scheduling step.
-        # Request id -> CachedRequestData
-        self._cached_reqs_data: dict[str, CachedRequestData] = {}
+        # Misc states for the scheduler.
+        self.states = CommonSchedulerStates()
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -178,7 +173,8 @@ class Scheduler:
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
-                    self.request_preempted(preempted_req, scheduled_timestamp)
+                    if self.log_stats:
+                        record_preempted(preempted_req, scheduled_timestamp)
 
                     self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
@@ -320,7 +316,8 @@ class Scheduler:
                 req_index += 1
                 self.running.append(request)
                 self.scheduled_req_ids.add(request.request_id)
-                self.request_scheduled(request, scheduled_timestamp)
+                if self.log_stats:
+                    record_scheduled(request, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -384,7 +381,7 @@ class Scheduler:
             for req in scheduled_new_reqs
         ]
         resumed_reqs_data = [
-            self._make_cached_request_data(
+            self.states.make_cached_request_data(
                 req,
                 num_scheduled_tokens[req.request_id],
                 len(scheduled_spec_decode_tokens.get(req.request_id, ())),
@@ -393,7 +390,7 @@ class Scheduler:
             ) for req in scheduled_resumed_reqs
         ]
         running_reqs_data = [
-            self._make_cached_request_data(
+            self.states.make_cached_request_data(
                 req,
                 num_scheduled_tokens[req.request_id],
                 len(scheduled_spec_decode_tokens.get(req.request_id, ())),
@@ -413,42 +410,14 @@ class Scheduler:
             # instead of being newly scheduled in this step.
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
-            finished_req_ids=self.finished_req_ids,
+            finished_req_ids=self.states.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
 
-        self.finished_req_ids = set()
+        self.states.finished_req_ids = set()
         return scheduler_output
-
-    def _make_cached_request_data(
-        self,
-        request: Request,
-        num_scheduled_tokens: int,
-        num_scheduled_spec_tokens: int,
-        new_block_ids: list[int],
-        resumed_from_preemption: bool,
-    ) -> CachedRequestData:
-        # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
-        # them at each scheduling step.
-        num_computed_tokens = request.num_computed_tokens
-        num_regular_tokens = num_scheduled_tokens - num_scheduled_spec_tokens
-        new_token_ids = request.all_token_ids[
-            num_computed_tokens:num_computed_tokens + num_regular_tokens]
-        req_data = self._cached_reqs_data.get(request.request_id)
-        if req_data is not None:
-            req_data.resumed_from_preemption = resumed_from_preemption
-            req_data.new_token_ids = new_token_ids
-            req_data.new_block_ids = new_block_ids
-            req_data.num_computed_tokens = num_computed_tokens
-        else:
-            req_data = CachedRequestData.from_request(request,
-                                                      resumed_from_preemption,
-                                                      new_token_ids,
-                                                      new_block_ids)
-            self._cached_reqs_data[request.request_id] = req_data
-        return req_data
 
     def _try_schedule_encoder_inputs(
         self,
@@ -598,7 +567,7 @@ class Scheduler:
 
                     # Check for stop and update request state.
                     # This must be called before we make the EngineCoreOutput.
-                    stopped = self._check_stop(request)
+                    stopped = check_stop(request, self.max_model_len)
                     if stopped:
                         self._free_request(request)
                         break
@@ -644,29 +613,11 @@ class Scheduler:
             scheduler_stats=self.make_stats(),
         )
 
-    def _check_stop(self, request: Request) -> bool:
-        if (request.num_tokens >= self.max_model_len
-                or request.num_output_tokens >= request.max_tokens):
-            request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-            return True
-
-        sampling_params = request.sampling_params
-        last_token_id = request.output_token_ids[-1]
-        if (not sampling_params.ignore_eos
-                and last_token_id == request.eos_token_id):
-            request.status = RequestStatus.FINISHED_STOPPED
-            return True
-
-        if last_token_id in (sampling_params.stop_token_ids or ()):
-            request.status = RequestStatus.FINISHED_STOPPED
-            request.stop_reason = last_token_id
-            return True
-        return False
-
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
         self.requests[request.request_id] = request
-        self.request_queued(request)
+        if self.log_stats:
+            record_queued(request)
 
     def finish_requests(
         self,
@@ -703,23 +654,14 @@ class Scheduler:
         self.kv_cache_manager.free(request)
         self.kv_cache_manager.free_block_hashes(request)
         self.encoder_cache_manager.free(request)
-        self._cached_reqs_data.pop(request.request_id, None)
+        self.states.free_request(request)
         del self.requests[request.request_id]
-        self.finished_req_ids.add(request.request_id)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
 
-    def has_unfinished_requests(self) -> bool:
-        return self.get_num_unfinished_requests() > 0
-
     def has_finished_requests(self) -> bool:
-        return len(self.finished_req_ids) > 0
-
-    def has_requests(self):
-        """Returns True if there are unfinished requests, or finished requests
-        not yet returned in SchedulerOutputs."""
-        return self.has_unfinished_requests() or self.has_finished_requests()
+        return len(self.states.finished_req_ids) > 0
 
     def get_num_unscheduled_requests(self) -> int:
         """Number of requests that are not being processed by the executor."""
@@ -727,26 +669,6 @@ class Scheduler:
 
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()
-
-    def request_queued(self, request: Request):
-        if not self.log_stats:
-            return
-        request.events.append(
-            EngineCoreEvent.new_event(EngineCoreEventType.QUEUED))
-
-    def request_scheduled(self, request: Request, timestamp: float):
-        if not self.log_stats:
-            return
-        request.events.append(
-            EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED,
-                                      timestamp))
-
-    def request_preempted(self, request: Request, timestamp: float):
-        if not self.log_stats:
-            return
-        request.events.append(
-            EngineCoreEvent.new_event(EngineCoreEventType.PREEMPTED,
-                                      timestamp))
 
     def make_stats(self) -> Optional[SchedulerStats]:
         if not self.log_stats:
