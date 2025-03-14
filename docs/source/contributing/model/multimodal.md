@@ -34,7 +34,8 @@ Further update the model as follows:
             image_features = self.vision_encoder(image_input)
             return self.multi_modal_projector(image_features)
 
-        def get_multimodal_embeddings(self, **kwargs: object) -> Optional[NestedTensors]:
+        def get_multimodal_embeddings(
+                self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
 
             # Validate the multimodal input keyword arguments
             image_input = self._parse_and_validate_image_input(**kwargs)
@@ -61,7 +62,7 @@ Further update the model as follows:
         def get_input_embeddings(
             self,
             input_ids: torch.Tensor,
-            multimodal_embeddings: Optional[NestedTensors] = None,
+            multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
         ) -> torch.Tensor:
 
             # `get_input_embeddings` should already be implemented for the language 
