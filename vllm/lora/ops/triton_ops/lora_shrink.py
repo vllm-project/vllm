@@ -8,25 +8,25 @@ https://arxiv.org/abs/2310.18547
 
 from typing import List
 
-import torch
 import triton
 import triton.language as tl
 
+import torch
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr
 from vllm.utils import direct_register_custom_op
 
 
 @triton.jit
-def _v1_shrink_kernel(input_ptr, lora_ptr, out_ptr, M, N, K,
-                      token_indices_sorted_by_lora_ids, num_tokens_per_lora,
-                      lora_token_start_loc, lora_ids, scaling, input_d0_stride,
-                      input_d1_stride, lora_d0_stride, lora_d1_stride,
-                      lora_d2_stride, output_d0_stride, output_d1_stride,
-                      output_d2_stride, BLOCK_M: tl.constexpr,
-                      BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-                      EVEN_K: tl.constexpr, SPLIT_K: tl.constexpr,
-                      SLICE_NUM: tl.constexpr):
+def _lora_shrink_kernel(input_ptr, lora_ptr, out_ptr, M, N, K,
+                        token_indices_sorted_by_lora_ids, num_tokens_per_lora,
+                        lora_token_start_loc, lora_ids, scaling,
+                        input_d0_stride, input_d1_stride, lora_d0_stride,
+                        lora_d1_stride, lora_d2_stride, output_d0_stride,
+                        output_d1_stride, output_d2_stride,
+                        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+                        BLOCK_K: tl.constexpr, EVEN_K: tl.constexpr,
+                        SPLIT_K: tl.constexpr, SLICE_NUM: tl.constexpr):
 
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
@@ -96,7 +96,7 @@ def _v1_shrink_kernel(input_ptr, lora_ptr, out_ptr, M, N, K,
 
 
 @torch.inference_mode()
-def _v1_shrink(
+def _lora_shrink(
     inputs: torch.Tensor,  #  shape [num_tokens, hidden_size]
     lora_a_weights: List[
         torch.Tensor],  # shape [num_loras, lora_rank, hidden_size]
@@ -174,7 +174,7 @@ def _v1_shrink(
         MAX_LORAS,
     )
 
-    _v1_shrink_kernel[grid](
+    _lora_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,
         output_tensor,
@@ -209,7 +209,7 @@ def _v1_shrink(
     return
 
 
-def _v1_shrink_fake(
+def _lora_shrink_fake(
     inputs: torch.Tensor,
     lora_a_weights: List[torch.Tensor],
     output_tensor: torch.Tensor,
@@ -225,12 +225,12 @@ def _v1_shrink_fake(
 
 try:
     direct_register_custom_op(
-        op_name="v1_shrink",
-        op_func=_v1_shrink,
+        op_name="lora_shrink",
+        op_func=_lora_shrink,
         mutates_args=["output_tensor"],
-        fake_impl=_v1_shrink_fake,
+        fake_impl=_lora_shrink_fake,
     )
-    v1_shrink = torch.ops.vllm.v1_shrink
+    lora_shrink = torch.ops.vllm.lora_shrink
 
 except AttributeError:
-    v1_shrink = _v1_shrink
+    lora_shrink = _lora_shrink

@@ -11,13 +11,13 @@ from itertools import product
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-import torch
 import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
 from utils import ArgPool, Bench, CudaGraphBenchParams
 from weight_shapes import WEIGHT_SHAPES
 
-from vllm.lora.ops.triton_ops import V1KernelMeta, v1_expand, v1_shrink
+import torch
+from vllm.lora.ops.triton_ops import LoRAKernelMeta, lora_expand, lora_shrink
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.utils import FlexibleArgumentParser
 
@@ -162,22 +162,22 @@ class OpType(Enum):
     """
     LoRA Ops to benchmark and its properties.
     """
-    V1_SHRINK = auto()
-    V1_EXPAND = auto()
+    LORA_SHRINK = auto()
+    LORA_EXPAND = auto()
 
     @staticmethod
     def from_str(s: str) -> "OpType":
-        if s.lower() == "v1_shrink":
-            return OpType.V1_SHRINK
-        if s.lower() == "v1_expand":
-            return OpType.V1_EXPAND
+        if s.lower() == "lora_shrink":
+            return OpType.LORA_SHRINK
+        if s.lower() == "lora_expand":
+            return OpType.LORA_EXPAND
         raise ValueError(f"Unrecognized str {s} to convert to OpType")
 
     def is_shrink_fn(self) -> bool:
-        return self in [OpType.V1_SHRINK]
+        return self in [OpType.LORA_SHRINK]
 
     def is_expand_fn(self) -> bool:
-        return self in [OpType.V1_EXPAND]
+        return self in [OpType.LORA_EXPAND]
 
     def num_slices(self) -> list[int]:
         return [1, 2, 3]
@@ -219,19 +219,19 @@ class OpType(Enum):
         m, k, n = self.mkn(batch_size, seq_length, hidden_size, lora_rank)
 
         b_shape = (num_loras, n, k)  # col-major
-        if self in [OpType.V1_SHRINK]:
-            # V1 shrink kernels support num_slices inherently in the kernel.
+        if self in [OpType.LORA_SHRINK]:
+            # LoRA shrink kernels support num_slices inherently in the kernel.
             return ((m, k), b_shape, (num_slices, m, n))
-        if self in [OpType.V1_EXPAND]:
-            # V1 expand kernels support num_slices inherently in the kernel
+        if self in [OpType.LORA_EXPAND]:
+            # LoRA expand kernels support num_slices inherently in the kernel
             return ((num_slices, m, k), b_shape, (m, n * num_slices))
         raise ValueError(f"Unrecognized op_type {self}")
 
     def bench_fn(self) -> Callable:
-        if self == OpType.V1_SHRINK:
-            return v1_shrink
-        if self == OpType.V1_EXPAND:
-            return v1_expand
+        if self == OpType.LORA_SHRINK:
+            return lora_shrink
+        if self == OpType.LORA_EXPAND:
+            return lora_expand
 
         raise ValueError(f"Unrecognized optype {self}")
 
@@ -245,13 +245,13 @@ class OpType(Enum):
         """
         w_dtype = lora_weights[0].dtype
         num_slices = len(lora_weights)
-        if self in [OpType.V1_SHRINK]:
+        if self in [OpType.LORA_SHRINK]:
             for slice_idx in range(num_slices):
                 ref_group_gemm(ref_out=output[slice_idx, :],
                                input=input,
                                lora_weights=lora_weights[slice_idx],
                                **kwargs)
-        elif self in [OpType.V1_EXPAND]:
+        elif self in [OpType.LORA_EXPAND]:
             hidden_size = lora_weights[0].shape[1]
             for slice_idx in range(num_slices):
                 slice_offset = slice_idx * hidden_size
@@ -317,13 +317,11 @@ class BenchmarkTensors:
     input: torch.Tensor
     lora_weights_lst: list[torch.Tensor]
     output: torch.Tensor
-    # metadata tensors
+    # LoRA kernel metadata
+    lora_kernel_meta: LoRAKernelMeta
+    # Metadata tensors used in testing correctness
     seq_lens: torch.Tensor
-    seq_start_loc: torch.Tensor
     prompt_lora_mapping: torch.Tensor
-    token_lora_mapping: torch.Tensor
-    # v1 kernel metadata
-    v1_kernel_meta: Optional[V1KernelMeta] = None
 
     def io_types(self) -> str:
         return (f"{dtype_to_str(self.input.dtype)}x"
@@ -350,35 +348,29 @@ class BenchmarkTensors:
         assert ctx.num_active_loras <= ctx.num_loras
         total_tokens = ctx.batch_size * ctx.seq_length
 
+        # Make metadata tensors involved in correctness testing.
         # Prepare seq lens tensor
         seq_len_tensor = torch.randint(ctx.seq_length, ctx.seq_length + 1,
                                        (ctx.batch_size, ))
-        # Prepare seq_start_loc tensor
-        seq_start_loc_tensor = torch.cumsum(torch.tensor(
-            [0] + seq_len_tensor[:-1].tolist(), dtype=torch.long),
-                                            dim=0)
         assert total_tokens == seq_len_tensor.sum()
         # Prepare prompt lora indices tensor
         prompt_lora_indices_tensor = make_prompt_lora_mapping(
             ctx.batch_size, ctx.num_active_loras, ctx.sort_by_lora_id, "cpu")
-        # Prepare token lora indices tensor
+
+        # Make LoRAKernelMeta
         token_lora_indices_tensor = make_token_lora_mapping(
             total_tokens, ctx.batch_size, prompt_lora_indices_tensor,
             seq_len_tensor, "cpu")
-
-        v1_kernel_meta = None
-        if op_type in [OpType.V1_SHRINK, OpType.V1_EXPAND]:
-            v1_kernel_meta = V1KernelMeta.make(
-                max_loras=ctx.num_loras,
-                max_num_tokens=token_lora_indices_tensor.size(0),
-                device="cpu")
-            v1_kernel_meta.prepare_tensors(
-                token_lora_mapping=token_lora_indices_tensor)
+        lora_kernel_meta = LoRAKernelMeta.make(
+            max_loras=ctx.num_loras,
+            max_num_tokens=token_lora_indices_tensor.size(0),
+            device="cpu")
+        lora_kernel_meta.prepare_tensors(
+            token_lora_mapping=token_lora_indices_tensor)
 
         return BenchmarkTensors(input_tensor, lora_weights, output_tensor,
-                                seq_len_tensor, seq_start_loc_tensor,
-                                prompt_lora_indices_tensor,
-                                token_lora_indices_tensor, v1_kernel_meta)
+                                lora_kernel_meta, seq_len_tensor,
+                                prompt_lora_indices_tensor)
 
     def sanity_check(self) -> None:
         """
@@ -388,9 +380,9 @@ class BenchmarkTensors:
         # check metadata tensors
         assert torch.sum(self.seq_lens) == num_tokens
         num_seqs = self.seq_lens.shape[0]
-        assert self.seq_start_loc.shape[0] == num_seqs
+        #assert self.seq_start_loc.shape[0] == num_seqs
         assert self.prompt_lora_mapping.shape[0] == num_seqs
-        assert self.token_lora_mapping.shape[0] == num_tokens
+        assert self.lora_kernel_meta.token_lora_mapping.shape[0] == num_tokens
 
     def to_device(self, device: str):
         """
@@ -405,31 +397,27 @@ class BenchmarkTensors:
         self.input = to_device(self.input)
         self.output = to_device(self.output)
         self.seq_lens = to_device(self.seq_lens)
-        self.seq_start_loc = to_device(self.seq_start_loc)
         self.prompt_lora_mapping = to_device(self.prompt_lora_mapping)
-        self.token_lora_mapping = to_device(self.token_lora_mapping)
         for i in range(len(self.lora_weights_lst)):
             self.lora_weights_lst[i] = to_device(self.lora_weights_lst[i])
 
-        # v1 meta
-        if self.v1_kernel_meta:
-            for field_name in V1KernelMeta.__dataclass_fields__:
-                field = getattr(self.v1_kernel_meta, field_name)
-                assert isinstance(field, torch.Tensor)
-                setattr(self.v1_kernel_meta, field_name, to_device(field))
+        # LoRA meta
+        for field_name in LoRAKernelMeta.__dataclass_fields__:
+            field = getattr(self.lora_kernel_meta, field_name)
+            assert isinstance(field, torch.Tensor)
+            setattr(self.lora_kernel_meta, field_name, to_device(field))
 
     def metadata(self) -> tuple[int, int, int]:
         """
         Return num_seqs, num_tokens and max_seq_len
         """
         num_seqs = self.seq_lens.shape[0]
-        num_tokens = self.token_lora_mapping.shape[0]
+        num_tokens = self.lora_kernel_meta.token_lora_mapping.shape[0]
         max_seq_len = torch.max(self.seq_lens).item()
         num_slices = len(self.lora_weights_lst)
         return num_seqs, num_tokens, max_seq_len, num_slices
 
-    def as_v1_shrink_kwargs(self) -> dict[str, Any]:
-        assert self.v1_kernel_meta is not None
+    def as_lora_shrink_kwargs(self) -> dict[str, Any]:
         self.sanity_check()
         self.to_device(self.input.device)
 
@@ -454,17 +442,16 @@ class BenchmarkTensors:
             'inputs': self.input,
             'lora_a_weights': self.lora_weights_lst,
             'output_tensor': self.output,
-            'token_lora_mapping': self.v1_kernel_meta.token_lora_mapping,
+            'token_lora_mapping': self.lora_kernel_meta.token_lora_mapping,
             'token_indices_sorted_by_lora_ids':
-            self.v1_kernel_meta.token_indices_sorted_by_lora_ids,
-            'num_tokens_per_lora': self.v1_kernel_meta.num_tokens_per_lora,
-            'lora_token_start_loc': self.v1_kernel_meta.lora_token_start_loc,
-            'lora_ids': self.v1_kernel_meta.active_lora_ids,
+            self.lora_kernel_meta.token_indices_sorted_by_lora_ids,
+            'num_tokens_per_lora': self.lora_kernel_meta.num_tokens_per_lora,
+            'lora_token_start_loc': self.lora_kernel_meta.lora_token_start_loc,
+            'lora_ids': self.lora_kernel_meta.active_lora_ids,
             'scaling': 1.0,
         }
 
-    def as_v1_expand_kwargs(self, add_inputs: bool) -> dict[str, Any]:
-        assert self.v1_kernel_meta is not None
+    def as_lora_expand_kwargs(self, add_inputs: bool) -> dict[str, Any]:
         self.sanity_check()
         self.to_device(self.input.device)
 
@@ -490,12 +477,12 @@ class BenchmarkTensors:
             'inputs': self.input,
             'lora_b_weights': self.lora_weights_lst,
             'output_tensor': self.output,
-            'token_lora_mapping': self.v1_kernel_meta.token_lora_mapping,
+            'token_lora_mapping': self.lora_kernel_meta.token_lora_mapping,
             'token_indices_sorted_by_lora_ids':
-            self.v1_kernel_meta.token_indices_sorted_by_lora_ids,
-            'num_tokens_per_lora': self.v1_kernel_meta.num_tokens_per_lora,
-            'lora_token_start_loc': self.v1_kernel_meta.lora_token_start_loc,
-            'lora_ids': self.v1_kernel_meta.active_lora_ids,
+            self.lora_kernel_meta.token_indices_sorted_by_lora_ids,
+            'num_tokens_per_lora': self.lora_kernel_meta.num_tokens_per_lora,
+            'lora_token_start_loc': self.lora_kernel_meta.lora_token_start_loc,
+            'lora_ids': self.lora_kernel_meta.active_lora_ids,
             'offset_start': 0,
             'add_inputs': add_inputs,
         }
@@ -508,10 +495,10 @@ class BenchmarkTensors:
         else:
             assert add_inputs is not None
 
-        if op_type == OpType.V1_SHRINK:
-            return self.as_v1_shrink_kwargs()
-        if op_type == OpType.V1_EXPAND:
-            return self.as_v1_expand_kwargs(add_inputs)
+        if op_type == OpType.LORA_SHRINK:
+            return self.as_lora_shrink_kwargs()
+        if op_type == OpType.LORA_EXPAND:
+            return self.as_lora_expand_kwargs(add_inputs)
         raise ValueError(f"Unrecognized optype {self}")
 
     def test_correctness(self, op_type: OpType,

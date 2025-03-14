@@ -8,17 +8,17 @@ https://arxiv.org/abs/2310.18547
 
 from typing import List
 
-import torch
 import triton
 import triton.language as tl
 
+import torch
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr
 from vllm.utils import direct_register_custom_op
 
 
 @triton.jit
-def _v1_expand_kernel(
+def _lora_expand_kernel(
         input_ptr,
         lora_ptr,
         out_ptr,
@@ -125,7 +125,7 @@ def _v1_expand_kernel(
 
 
 @torch.inference_mode()
-def _v1_expand(
+def _lora_expand(
     inputs: torch.Tensor,  # shape [num_slices, num_tokens, lora_rank]
     lora_b_weights: List[
         torch.Tensor],  # shape [num_lora, hidden_size, lora_rank]
@@ -216,7 +216,7 @@ def _v1_expand(
         MAX_LORAS,
     )
 
-    _v1_expand_kernel[grid](
+    _lora_expand_kernel[grid](
         inputs,
         lora_ptr_tensor,
         output_tensor,
@@ -254,7 +254,7 @@ def _v1_expand(
     return
 
 
-def _v1_expand_fake(
+def _lora_expand_fake(
     inputs: torch.Tensor,
     lora_b_weights: List[torch.Tensor],
     output_tensor: torch.Tensor,
@@ -271,12 +271,12 @@ def _v1_expand_fake(
 
 try:
     direct_register_custom_op(
-        op_name="v1_expand",
-        op_func=_v1_expand,
+        op_name="lora_expand",
+        op_func=_lora_expand,
         mutates_args=["output_tensor"],
-        fake_impl=_v1_expand_fake,
+        fake_impl=_lora_expand_fake,
     )
-    v1_expand = torch.ops.vllm.v1_expand
+    lora_expand = torch.ops.vllm.lora_expand
 
 except AttributeError:
-    v1_expand = _v1_expand
+    lora_expand = _lora_expand
