@@ -20,6 +20,8 @@ docker run --privileged --net host --shm-size=16G -it \
     && python3 -m pip install pytest \
     && python3 -m pip install lm_eval[api]==0.4.4 \
     && pytest -v -s /workspace/vllm/tests/tpu/test_custom_dispatcher.py \
+    && pytest -v -s /workspace/vllm/tests/v1/tpu/test_basic.py \
+    && pytest -v -s /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine \
     && python3 /workspace/vllm/tests/tpu/test_compilation.py \
     && python3 /workspace/vllm/tests/tpu/test_quantization_accuracy.py \
     && python3 /workspace/vllm/examples/offline_inference/tpu.py"
