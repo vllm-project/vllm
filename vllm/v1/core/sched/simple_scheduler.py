@@ -373,8 +373,7 @@ class SimpleScheduler(SchedulerInterface):
 
             if request.status == RequestStatus.RUNNING:
                 self.running.remove(request)
-                if request.request_id in self.scheduled_req_ids:
-                    self.scheduled_req_ids.remove(request.request_id)
+                self.scheduled_req_ids.discard(request.request_id)
             else:
                 self.waiting.remove(request)
             request.status = finished_status
