@@ -294,6 +294,20 @@ class repackage_wheel(build_ext):
             ]).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
 
+            # Check if the upstream_main_commit exists in the local repo
+            try:
+                subprocess.check_output(
+                    ["git", "cat-file", "-e", f"{upstream_main_commit}"])
+            except subprocess.CalledProcessError:
+                # If not present, fetch it from the remote repository.
+                # Note that this does not update any local branches,
+                # but ensures that this commit ref and its history are
+                # available in our local repo.
+                subprocess.check_call([
+                    "git", "fetch", "https://github.com/vllm-project/vllm",
+                    "main"
+                ])
+
             # Then get the commit hash of the current branch that is the same as
             # the upstream main commit.
             current_branch = subprocess.check_output(
