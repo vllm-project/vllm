@@ -60,7 +60,7 @@ def encode_tokens(
                                 max_length=max_length,
                                 truncation=truncation,
                                 add_special_tokens=add_special_tokens)
-    return tokenizer.encode(text, max_length=max_length, truncation=truncation)
+    return tokenizer.encode(text, truncation=truncation, max_length=max_length)
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:

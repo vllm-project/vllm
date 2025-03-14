@@ -89,8 +89,11 @@ class OpenAIServingEmbedding(OpenAIServing):
         request_id = f"embd-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        truncate_prompt_tokens = _validate_truncation_size(
-            self.max_model_len, request.truncate_prompt_tokens)
+        truncate_prompt_tokens = request.truncate_prompt_tokens
+
+        if truncate_prompt_tokens is not None:
+            truncate_prompt_tokens = _validate_truncation_size(
+                self.max_model_len, truncate_prompt_tokens)
 
         try:
             (
