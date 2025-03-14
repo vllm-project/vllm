@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import List
 
 import torch
 import torch.nn as nn
@@ -25,9 +24,18 @@ class RejectionSampler(nn.Module):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda:
+        if current_platform.is_cuda():
             if is_flashinfer_available:
                 if envs.VLLM_USE_FLASHINFER_SAMPLER is not False:
+                    # FIXME(woosuk): Currently, we have errors when using
+                    # FlashInfer for rejection sampling. As a workaround, we
+                    # disable FlashInfer for rejection sampling by default.
+                    logger.info("Currently, FlashInfer rejection sampler is "
+                                "disabled because of a bug. Falling back to "
+                                "the PyTorch-native implementation of "
+                                "rejection sampling.")
+                    self.forward_method = self.forward_native
+
                     # NOTE(woosuk): The V0 sampler doesn't use FlashInfer for
                     # sampling unless VLLM_USE_FLASHINFER_SAMPLER=1 (i.e., by
                     # default it is unused). For backward compatibility, we set
@@ -36,8 +44,8 @@ class RejectionSampler(nn.Module):
                     # None means False, while in V1, None means True. This is
                     # why we use the condition
                     # `envs.VLLM_USE_FLASHINFER_SAMPLER is not False` here.
-                    logger.info("Using FlashInfer for rejection sampling.")
-                    self.forward_method = self.flashinfer_sample
+                    # logger.info("Using FlashInfer for rejection sampling.")
+                    # self.forward_method = self.flashinfer_sample
                 else:
                     logger.warning(
                         "FlashInfer is available, but it is not enabled. "
@@ -54,7 +62,7 @@ class RejectionSampler(nn.Module):
         else:
             self.forward_method = self.forward_native
 
-    def forward(self, draft_token_ids: List[List[int]],
+    def forward(self, draft_token_ids: list[list[int]],
                 target_probs: torch.Tensor,
                 sampling_metadata: SamplingMetadata) -> SamplerOutput:
         if not sampling_metadata.all_greedy:
@@ -66,7 +74,7 @@ class RejectionSampler(nn.Module):
 
     def flashinfer_sample(
         self,
-        draft_token_ids: List[List[int]],
+        draft_token_ids: list[list[int]],
         target_probs: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
@@ -119,7 +127,7 @@ class RejectionSampler(nn.Module):
     # TODO: The following method can be optimized for better performance.
     def forward_native(
         self,
-        draft_token_ids: List[List[int]],
+        draft_token_ids: list[list[int]],
         target_probs: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:

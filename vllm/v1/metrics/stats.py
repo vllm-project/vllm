@@ -2,10 +2,9 @@
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from vllm.outputs import RequestOutput
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
     from vllm.v1.output_processor import RequestState
 
@@ -39,8 +38,8 @@ class SchedulerStats:
 
 @dataclass
 class LoRAStats:
-    waiting_requests: Set[str] = field(default_factory=set)
-    running_requests: Set[str] = field(default_factory=set)
+    waiting_requests: set[str] = field(default_factory=set)
+    running_requests: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -67,6 +66,7 @@ class FinishedRequestStats:
     e2e_latency: float = 0.0
     num_prompt_tokens: int = 0
     num_generation_tokens: int = 0
+    max_tokens_param: Optional[int] = None
     queued_time: float = 0.0
     prefill_time: float = 0.0
     inference_time: float = 0.0
@@ -81,11 +81,13 @@ class IterationStats:
         self.num_generation_tokens = 0
         self.num_prompt_tokens = 0
         self.num_preempted_reqs = 0
-        self.finished_requests: List[FinishedRequestStats] = []
-        self.time_to_first_tokens_iter: List[float] = []
-        self.time_per_output_tokens_iter: List[float] = []
-        self.waiting_lora_adapters: Dict[str, int] = {}
-        self.running_lora_adapters: Dict[str, int] = {}
+        self.finished_requests: list[FinishedRequestStats] = []
+        self.max_num_generation_tokens_iter: list[int] = []
+        self.n_params_iter: list[int] = []
+        self.time_to_first_tokens_iter: list[float] = []
+        self.time_per_output_tokens_iter: list[float] = []
+        self.waiting_lora_adapters: dict[str, int] = {}
+        self.running_lora_adapters: dict[str, int] = {}
 
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
@@ -132,7 +134,7 @@ class IterationStats:
         if num_new_generation_tokens > 0:
             req_stats.last_token_ts = engine_core_timestamp
 
-    def update_from_events(self, req_id: str, events: List["EngineCoreEvent"],
+    def update_from_events(self, req_id: str, events: list["EngineCoreEvent"],
                            is_prefilling: bool, req_stats: RequestStateStats,
                            lora_stats: Optional[LoRAStats]):
         # Avoid circular dependency
@@ -148,9 +150,11 @@ class IterationStats:
                 LoRARequestStates.scheduled_request(lora_stats, req_id)
             elif event.type == EngineCoreEventType.PREEMPTED:
                 self.num_preempted_reqs += 1
+                LoRARequestStates.preempted_request(lora_stats, req_id)
 
     def update_from_finished_request(self, finish_reason: "FinishReason",
-                                     request_output: "RequestOutput",
+                                     num_prompt_tokens: int,
+                                     max_tokens_param: Optional[int],
                                      req_stats: RequestStateStats):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
@@ -172,8 +176,9 @@ class IterationStats:
         finished_req = \
             FinishedRequestStats(finish_reason=finish_reason,
                                  e2e_latency=e2e_latency,
-                                 num_prompt_tokens=len(request_output.prompt_token_ids),
+                                 num_prompt_tokens=num_prompt_tokens,
                                  num_generation_tokens=req_stats.num_generation_tokens,
+                                 max_tokens_param=max_tokens_param,
                                  queued_time=queued_time,
                                  prefill_time=prefill_time,
                                  inference_time=inference_time,
@@ -185,7 +190,7 @@ class LoRARequestStates:
     """Per-LoRA request state stats."""
 
     def __init__(self):
-        self.lora_name_to_stats: Dict[str, LoRAStats] = {}
+        self.lora_name_to_stats: dict[str, LoRAStats] = {}
 
     def get_stats(self, req_state: 'RequestState') -> Optional[LoRAStats]:
         if req_state.lora_name is None:
@@ -219,6 +224,13 @@ class LoRARequestStates:
             return
         lora_stats.waiting_requests.remove(request_id)
         lora_stats.running_requests.add(request_id)
+
+    @staticmethod
+    def preempted_request(lora_stats: Optional[LoRAStats], request_id: str):
+        if lora_stats is None:
+            return
+        lora_stats.running_requests.remove(request_id)
+        lora_stats.waiting_requests.add(request_id)
 
     def update_iteration_stats(self,
                                iteration_stats: Optional[IterationStats]):

@@ -6,7 +6,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import aiohttp
 import huggingface_hub.constants
@@ -27,7 +27,6 @@ class RequestFuncInput:
     output_len: int
     model: str
     model_name: Optional[str] = None
-    best_of: int = 1
     logprobs: Optional[int] = None
     extra_body: Optional[dict] = None
     multi_modal_content: Optional[dict] = None
@@ -41,8 +40,8 @@ class RequestFuncOutput:
     latency: float = 0.0
     output_tokens: int = 0
     ttft: float = 0.0  # Time to first token
-    itl: List[float] = field(
-        default_factory=list)  # List of inter-token latencies
+    itl: list[float] = field(
+        default_factory=list)  # list of inter-token latencies
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
@@ -58,7 +57,6 @@ async def async_request_tgi(
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
         params = {
-            "best_of": request_func_input.best_of,
             "max_new_tokens": request_func_input.output_len,
             "do_sample": True,
             "temperature": 0.01,  # TGI does not accept 0.0 temperature.
@@ -130,7 +128,6 @@ async def async_request_trt_llm(
 
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
-        assert request_func_input.best_of == 1
         payload = {
             "accumulate_tokens": True,
             "text_input": request_func_input.prompt,
@@ -195,7 +192,6 @@ async def async_request_deepspeed_mii(
 ) -> RequestFuncOutput:
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
-        assert request_func_input.best_of == 1
 
         payload = {
             "prompt": request_func_input.prompt,
@@ -249,7 +245,6 @@ async def async_request_openai_completions(
                 if request_func_input.model_name else request_func_input.model,
             "prompt": request_func_input.prompt,
             "temperature": 0.0,
-            "best_of": request_func_input.best_of,
             "max_tokens": request_func_input.output_len,
             "logprobs": request_func_input.logprobs,
             "stream": True,
