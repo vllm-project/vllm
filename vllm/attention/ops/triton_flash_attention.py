@@ -27,8 +27,9 @@ import triton.language as tl
 
 SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
 
-QKV_DTYPE_TRITON = tl.float8e4b8
-QKV_DTYPE_TORCH = torch.float8_e4m3fnuz
+default_eight_bit_dtype_triton = tl.float8e4b8
+default_eight_bit_dtype_torch = torch.float8_e4m3fnuz
+default_float8_info = torch.finfo(default_eight_bit_dtype_torch)
 
 
 class MetaData:
@@ -45,8 +46,8 @@ class MetaData:
     eight_bit = False
     layout = None
     dropout_p, return_encoded_softmax = 0.0, False
-    eight_bit_dtype_triton = QKV_DTYPE_TRITON
-    eight_bit_dtype_torch = QKV_DTYPE_TORCH
+    eight_bit_dtype_triton = default_eight_bit_dtype_triton
+    eight_bit_dtype_torch = default_eight_bit_dtype_torch
 
     def __init__(self, sm_scale=1.0):
         self.sm_scale = sm_scale
@@ -262,50 +263,54 @@ def compute_alibi_tensor(alibi_slopes, seqlen_q, seqlen_k):
 
 
 @triton.jit
-def _attn_fwd_inner(acc,
-                    l_i,
-                    m_i,
-                    q,
-                    k_ptrs,
-                    v_ptrs,
-                    bias_ptrs,
-                    stride_kn,
-                    stride_vk,
-                    stride_bn,
-                    start_m,
-                    actual_seqlen_k,
-                    actual_seqlen_q,
-                    dropout_p,
-                    philox_seed,
-                    batch_philox_offset,
-                    encoded_sm_ptrs,
-                    block_min,
-                    block_max,
-                    offs_n_causal,
-                    masked_blocks,
-                    n_extra_tokens,
-                    alibi_slope,
-                    q_descale,
-                    k_descale,
-                    v_descale,
-                    p_scale,
-                    IS_CAUSAL: tl.constexpr,
-                    BLOCK_M: tl.constexpr,
-                    BLOCK_DMODEL: tl.constexpr,
-                    BLOCK_N: tl.constexpr,
-                    OFFS_M: tl.constexpr,
-                    OFFS_N: tl.constexpr,
-                    PRE_LOAD_V: tl.constexpr,
-                    MASK_STEPS: tl.constexpr,
-                    ENABLE_DROPOUT: tl.constexpr,
-                    RETURN_ENCODED_SOFTMAX: tl.constexpr,
-                    PADDED_HEAD: tl.constexpr,
-                    ACTUAL_BLOCK_DMODEL: tl.constexpr,
-                    QK_SCALE: tl.constexpr,
-                    EIGHT_BIT_GEMM: tl.constexpr,
-                    USE_P_SCALE: tl.constexpr,
-                    EIGHT_BIT_KV: tl.constexpr,
-                    EIGHT_BIT_DTYPE: tl.constexpr = QKV_DTYPE_TRITON):
+def _attn_fwd_inner(
+    acc,
+    l_i,
+    m_i,
+    q,
+    k_ptrs,
+    v_ptrs,
+    bias_ptrs,
+    stride_kn,
+    stride_vk,
+    stride_bn,
+    start_m,
+    actual_seqlen_k,
+    actual_seqlen_q,
+    dropout_p,
+    philox_seed,
+    batch_philox_offset,
+    encoded_sm_ptrs,
+    block_min,
+    block_max,
+    offs_n_causal,
+    masked_blocks,
+    n_extra_tokens,
+    alibi_slope,
+    q_descale,
+    k_descale,
+    v_descale,
+    p_scale,
+    IS_CAUSAL: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    OFFS_M: tl.constexpr,
+    OFFS_N: tl.constexpr,
+    PRE_LOAD_V: tl.constexpr,
+    MASK_STEPS: tl.constexpr,
+    ENABLE_DROPOUT: tl.constexpr,
+    RETURN_ENCODED_SOFTMAX: tl.constexpr,
+    PADDED_HEAD: tl.constexpr,
+    ACTUAL_BLOCK_DMODEL: tl.constexpr,
+    QK_SCALE: tl.constexpr,
+    EIGHT_BIT_GEMM: tl.constexpr,
+    USE_P_SCALE: tl.constexpr,
+    EIGHT_BIT_KV: tl.constexpr,
+    EIGHT_BIT_DTYPE: tl.constexpr = default_eight_bit_dtype_triton,
+    FP8_MIN: tl.constexpr = default_float8_info.min,
+    FP8_MAX: tl.constexpr = default_float8_info.max,
+):
     # loop over k, v, and update accumulator
     for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
@@ -586,8 +591,6 @@ def get_autotune_configs():
 
 autotune_configs, autotune_keys = get_autotune_configs()
 
-float8_info = torch.finfo(torch.float8_e4m3fnuz)
-
 
 @triton.autotune(
     configs=autotune_configs,
@@ -662,9 +665,9 @@ def attn_fwd(
     EIGHT_BIT: tl.constexpr,
     USE_P_SCALE: tl.constexpr,
     EIGHT_BIT_KV: tl.constexpr,
-    FP8_MIN: tl.constexpr = float8_info.min,
-    FP8_MAX: tl.constexpr = float8_info.max,
-    EIGHT_BIT_DTYPE: tl.constexpr = QKV_DTYPE_TRITON,
+    FP8_MIN: tl.constexpr = default_float8_info.min,
+    FP8_MAX: tl.constexpr = default_float8_info.max,
+    EIGHT_BIT_DTYPE: tl.constexpr = default_eight_bit_dtype_triton,
 ):
 
     if PERSISTENT:  # if persistent, kernel loops over multiple tiles
@@ -944,7 +947,9 @@ def attn_fwd(
                         EIGHT_BIT_GEMM,
                         USE_P_SCALE,
                         EIGHT_BIT_KV,
-                        EIGHT_BIT_DTYPE)
+                        EIGHT_BIT_DTYPE,
+                        FP8_MIN=FP8_MIN,
+                        FP8_MAX=FP8_MAX)
                     block_min = block_max
                     block_max = n_blocks * BLOCK_N
 
@@ -1006,7 +1011,9 @@ def attn_fwd(
                         EIGHT_BIT_GEMM,
                         USE_P_SCALE,
                         EIGHT_BIT_KV,
-                        EIGHT_BIT_DTYPE)
+                        EIGHT_BIT_DTYPE,
+                        FP8_MIN=FP8_MIN,
+                        FP8_MAX=FP8_MAX)
 
                 if EIGHT_BIT and not EIGHT_BIT_KV:
                     if USE_P_SCALE:
@@ -1210,6 +1217,8 @@ class _attention(torch.autograd.Function):
 
         atomic_counter = torch.zeros([1], device=q.device, dtype=torch.int32)
 
+        float8_info = torch.finfo(metadata.eight_bit_dtype_torch)
+
         attn_fwd[grid](q,
                        k,
                        v,
@@ -1257,7 +1266,9 @@ class _attention(torch.autograd.Function):
                        NUM_CU=NUM_CU,
                        atomic_counter=atomic_counter,
                        B=batch,
-                       EIGHT_BIT_DTYPE=metadata.eight_bit_dtype_triton)
+                       EIGHT_BIT_DTYPE=metadata.eight_bit_dtype_triton,
+                       FP8_MIN=float8_info.min,
+                       FP8_MAX=float8_info.max)
 
         ctx.grid = grid
         ctx.sm_scale = metadata.sm_scale
@@ -1280,6 +1291,7 @@ objects = {'tensors': {}}
 
 
 def quantize_fp8(x, scale, eight_bit_dtype):
+    float8_info = torch.finfo(eight_bit_dtype)
     x *= scale
     x = x.clamp(min=float8_info.min, max=float8_info.max).to(eight_bit_dtype)
     return x
@@ -1302,8 +1314,6 @@ def triton_attention(
     sm_scale=1.0,
     bias=None,
     fp8_scales=None,
-    FP8_MIN: tl.constexpr = float8_info.min,
-    FP8_MAX: tl.constexpr = float8_info.max,
     eight_bit_dtype=torch.float8_e4m3fnuz,
 ) -> torch.Tensor:
     num_seqs, num_heads, head_size = q.shape
@@ -1312,11 +1322,7 @@ def triton_attention(
     attn_metadata.max_seqlens_k = max_seqlens_q
     attn_metadata.causal = causal
     attn_metadata.bias = bias
-    attn_metadata.eight_bit_dtype_torch = eight_bit_dtype
     attn_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
-
-    global float8_info
-    float8_info = torch.finfo(eight_bit_dtype)
 
     if fp8_scales is not None:
         (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
@@ -1343,5 +1349,6 @@ def triton_attention(
                              device=q.device)
         attn_metadata.set_eight_bit_params(q_scale, k_scale, v_scale,
                                            1.0 / p_scale, p_scale, o_scale)
+        attn_metadata.eight_bit_dtype_torch = eight_bit_dtype
 
     return triton_attention_rocm(q, k, v, o, attn_metadata)
