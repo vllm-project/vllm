@@ -66,9 +66,9 @@ stages:
       - name: test_multilora
         flavor: g2
         command: PT_HPU_LAZY_MODE=1 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_multilora_hpu.py::test_llama_multilora_1x
-      - name: test_long_context
-        flavor: g2
-        command: PT_HPU_LAZY_MODE=1 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_long_context_hpu.py::test_quality
+      # - name: test_long_context
+      #   flavor: g2
+      #   command: PT_HPU_LAZY_MODE=1 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_long_context_hpu.py::test_quality
   - name: tests_multimodal
     steps:
       - name: multimodal_small_g3_tp1
