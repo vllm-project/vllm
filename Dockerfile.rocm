@@ -61,6 +61,7 @@ RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
     && pip install -U -r requirements/rocm.txt \
+    && pip install -U -r requirements/rocm-test.txt \
     && pip uninstall -y vllm \
     && pip install *.whl
 
