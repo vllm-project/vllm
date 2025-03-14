@@ -174,8 +174,6 @@ class SimpleConnector(KVConnectorBase):
         else:
             head_size = getattr(model_config, "head_dim",
                         int(hidden_size // num_attention_heads))
-        logger.info(f"head_size = {head_size}")
-        logger.info(f"num_heads = {num_heads}")
 
         # query_lens contains new KV caches that are added to vLLM.
         # so we will send them to decode instance
@@ -322,7 +320,6 @@ class SimpleConnector(KVConnectorBase):
                         layer.self_attn.attn._k_scale,
                     )
                 else:
-
                     key_cache, value_cache = kv_cache[0], kv_cache[1]
                     ops.reshape_and_cache_flash(
                         keys[i - model_executable.model.start_layer].to(
