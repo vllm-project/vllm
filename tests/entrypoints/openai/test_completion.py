@@ -2,6 +2,7 @@
 
 # imports for guided decoding tests
 import json
+import random
 import re
 import shutil
 from tempfile import TemporaryDirectory
@@ -61,7 +62,7 @@ def zephyr_pa_files():
 
 @pytest.fixture(scope="module")
 def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
-                        zephyr_pa_files):
+                        zephyr_pa_files, adapter_cache):
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -80,6 +81,8 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
         "64",
         "--max-cpu-loras",
         "2",
+        "--lora-cache-dir",
+        str(adapter_cache),
         # pa config
         "--enable-prompt-adapter",
         "--prompt-adapters",
@@ -97,7 +100,12 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
 def server(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+
+    lora_env = {
+        "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
+    }
+    with RemoteOpenAIServer(MODEL_NAME, default_server_args,
+                            env_dict=lora_env) as remote_server:
         yield remote_server
 
 
@@ -142,6 +150,27 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str,
     )
     assert len(completion.choices[0].text) >= 1
     assert completion.choices[0].prompt_logprobs is None
+
+
+@pytest.mark.asyncio
+async def test_cached_lora_completion(client: openai.AsyncOpenAI,
+                                      adapter_cache, zephyr_lora_files):
+    cached_lora_name = f"zephyr-7b-beta-lora-{random.random()}"
+    model_files = adapter_cache / cached_lora_name
+    shutil.copytree(zephyr_lora_files, model_files)
+
+    completion = await client.completions.create(model=MODEL_NAME,
+                                                 prompt="Hello, my name is",
+                                                 max_tokens=5,
+                                                 temperature=0.0)
+    assert completion.choices[0].text == " Sarah and I am a"
+
+    lora_completion = await client.completions.create(
+        model=cached_lora_name,
+        prompt="Hello, my name is",
+        max_tokens=5,
+        temperature=0.0)
+    assert completion.choices[0].text != lora_completion.choices[0].text
 
 
 @pytest.mark.asyncio

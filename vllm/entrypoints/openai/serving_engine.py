@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures.thread import ThreadPoolExecutor
 from http import HTTPStatus
@@ -27,8 +28,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeRequest,
                                               EmbeddingChatRequest,
                                               EmbeddingCompletionRequest,
-                                              ErrorResponse, RerankRequest,
-                                              ScoreRequest,
+                                              ErrorResponse,
+                                              LoadLoRAAdapterRequest,
+                                              RerankRequest, ScoreRequest,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
                                               TranscriptionRequest)
@@ -78,6 +80,7 @@ class OpenAIServing:
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
+        lora_cache_dir: Optional[str] = None,
         return_tokens_as_token_ids: bool = False,
     ):
         super().__init__()
@@ -88,6 +91,7 @@ class OpenAIServing:
 
         self.models = models
 
+        self.lora_cache_dir = lora_cache_dir
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
@@ -121,6 +125,23 @@ class OpenAIServing:
         })
         return json_str
 
+    def _check_for_cached_lora(
+        self,
+        request: AnyRequest,
+    ) -> bool:
+        if request.model and self.lora_cache_dir is not None and \
+                os.path.exists(
+                        os.path.join(self.lora_cache_dir, request.model)):
+            adapter_config_path = os.path.join(self.lora_cache_dir,
+                                               request.model,
+                                               "adapter_config.json")
+            if os.path.exists(adapter_config_path):
+                with open(adapter_config_path) as file:
+                    adapter_config = json.load(file)
+                if adapter_config["peft_type"] == "LORA":
+                    return True
+        return False
+
     async def _check_model(
         self,
         request: AnyRequest,
@@ -136,12 +157,14 @@ class OpenAIServing:
                 for prompt_adapter in self.models.prompt_adapter_requests
         ]:
             return None
+        if self._check_for_cached_lora(request):
+            return None
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
-    def _maybe_get_adapters(
+    async def _maybe_get_adapters(
         self, request: AnyRequest
     ) -> Union[tuple[None, None], tuple[LoRARequest, None], tuple[
             None, PromptAdapterRequest]]:
@@ -153,6 +176,20 @@ class OpenAIServing:
         for prompt_adapter in self.models.prompt_adapter_requests:
             if request.model == prompt_adapter.prompt_adapter_name:
                 return None, prompt_adapter
+        if self._check_for_cached_lora(
+                request
+        ) and request.model is not None and self.lora_cache_dir is not None:
+            lora_request = LoadLoRAAdapterRequest(
+                lora_name=request.model,
+                lora_path=os.path.join(self.lora_cache_dir, request.model),
+            )
+            response = await self.models.load_lora_adapter(lora_request)
+            if isinstance(response, ErrorResponse):
+                raise ValueError(
+                    f"Failed to load LoRA adapter: {response.message}")
+            for lora in self.models.lora_requests:
+                if request.model == lora.lora_name:
+                    return lora, None
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
 
