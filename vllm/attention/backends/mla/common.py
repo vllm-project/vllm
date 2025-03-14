@@ -55,7 +55,7 @@ W_UQ        project q_c to q_nope               shape [Lq, N * P]
 W_QR        project q_c to q_pe                 shape [Lq, N * R]
 W_DKV       project h_t to kv_c                 shape [H, Lkv]
 W_UK        project kv_c to k_nope              shape [Lkv, N * P]
-W_KR        project h_t to k_pe                 shape [H, N * R]
+W_KR        project h_t to k_pe                 shape [H, R]
 W_UV        project kv_c to v                   shape [Lkv, N * V]
 W_O         project v to h_t                    shape [N * V, H]
 
@@ -1085,9 +1085,13 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
                 output = output_parallel
             return output
         else:
-            x = torch.einsum("bnl,lnv->bnv", x, self.W_UV)
-            return self.o_proj(x.reshape(-1,
-                                         self.num_heads * self.v_head_dim))[0]
+            # Convert from (B, N, L) to (N, B, L)
+            x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+            # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+            x = torch.bmm(x, self.W_UV)
+            # Convert from (N, B, V) to (B, N * V)
+            x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+            return self.o_proj(x)[0]
 
     def _q_proj_and_k_up_proj(self, x):
         if envs.VLLM_MLA_PERFORM_MATRIX_ABSORPTION:
@@ -1102,11 +1106,14 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         else:
             x = torch.matmul(x, self.W_Q)\
                 .view(-1, self.num_heads, self.qk_nope_head_dim)
-            return torch.einsum("bnp,lnp->bnl", x, self.W_UK)\
-                .view(-1, self.num_heads, self.kv_lora_rank)
+            # Convert from (B, N, P) to (N, B, P)
+            x = x.transpose(0, 1)
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            x = torch.bmm(x, self.W_UK_T)
+            # Convert from (N, B, L) to (B, N, L)
+            return x.transpose(0, 1)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-
         # TODO(lucas) This is very gross, we need a more wide scale refactor of
         # all the FP8 code with a more standard way of
         # defining schemes/group-shapes, we should also potentially force
@@ -1265,12 +1272,10 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
 
             self.tp_size = get_tensor_model_parallel_world_size()
         else:
-            if is_fp8(weight_dtype):
-                raise NotImplementedError(
-                    "Currently fp8 requires matrix absorption")
-
-            self.W_UV = W_UV
-            self.W_UK = W_UK
+            # Convert from (L, N, V) to (N, L, V)
+            self.W_UV = W_UV.transpose(0, 1)
+            # Convert from (L, N, P) to (N, P, L)
+            self.W_UK_T = W_UK.permute(1, 2, 0)
             self.W_Q = W_Q.flatten(start_dim=1)
 
     def _compute_prefill_context(
