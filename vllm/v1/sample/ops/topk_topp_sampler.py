@@ -22,7 +22,7 @@ class TopKTopPSampler(nn.Module):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda:
+        if current_platform.is_cuda():
             if is_flashinfer_available:
                 if envs.VLLM_USE_FLASHINFER_SAMPLER is not False:
                     # NOTE(woosuk): The V0 sampler doesn't use FlashInfer for
