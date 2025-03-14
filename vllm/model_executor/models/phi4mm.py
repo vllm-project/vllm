@@ -448,16 +448,11 @@ class Phi4MMImageEncoder(nn.Module):
     def get_img_features(self,
                          img_embeds: torch.FloatTensor,
                          attention_mask=None) -> torch.FloatTensor:
-        LAYER_IDX = self.layer_idx
-        TYPE_FEATURE = self.type_feature
 
-        img_processor_output = self.img_processor(
-            img_embeds,
-            output_hidden_states=True,
-            patch_attention_mask=attention_mask)
-        img_feature = img_processor_output.hidden_states[LAYER_IDX]
+        img_feature = self.img_processor(img_embeds,
+                                         patch_attention_mask=attention_mask)
 
-        if TYPE_FEATURE == "patch":
+        if self.type_feature == "patch":
             patch_feature = img_feature
 
             use_token_compression = self.image_token_compression is not None

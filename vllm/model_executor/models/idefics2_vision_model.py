@@ -332,14 +332,6 @@ class Idefics2VisionTransformer(nn.Module):
                                        prefix=f"{prefix}.encoder")
         self.post_layernorm = nn.LayerNorm(embed_dim,
                                            eps=config.layer_norm_eps)
-        self.use_head = (False if not hasattr(config, "vision_use_head") else
-                         config.vision_use_head)
-        if self.use_head:
-            self.head = Idefics2MultiheadAttentionPoolingHead(
-                config=config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.head",
-            )
 
     def get_input_embeddings(self):
         return self.embeddings
@@ -357,8 +349,6 @@ class Idefics2VisionTransformer(nn.Module):
         )
         encoder_outputs = self.encoder(hidden_states)
         last_hidden_state = self.post_layernorm(encoder_outputs)
-        if self.use_head:
-            last_hidden_state = self.head(last_hidden_state)
         return last_hidden_state
 
     def load_weights(self, weights: Iterable[Tuple[str,
@@ -372,6 +362,8 @@ class Idefics2VisionTransformer(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
+            if name.startswith("head."):
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
