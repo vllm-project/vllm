@@ -203,11 +203,17 @@ class InputPreprocessor:
                     "do_lower_case", False)):
             prompt = prompt.lower()
 
+        if tokenization_kwargs is not None:
+            return tokenizer.encode(request_id=request_id,
+                                    prompt=prompt,
+                                    lora_request=lora_request,
+                                    add_special_tokens=add_special_tokens,
+                                    **tokenization_kwargs)
+
         return tokenizer.encode(request_id=request_id,
                                 prompt=prompt,
                                 lora_request=lora_request,
-                                add_special_tokens=add_special_tokens,
-                                **tokenization_kwargs)
+                                add_special_tokens=add_special_tokens)
 
     async def _tokenize_prompt_async(
         self,
