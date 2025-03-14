@@ -377,6 +377,8 @@ def main(args: argparse.Namespace):
         raise ValueError(f"Unknown backend: {args.backend}")
 
     if request_outputs:
+        # Note: with the vllm and vllm-chat backends,
+        # we have request_outputs, which we use to count tokens.
         total_prompt_tokens = 0
         total_output_tokens = 0
         for ro in request_outputs:
