@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
+import vllm.envs as envs
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
@@ -297,7 +298,11 @@ def initialize_ray_cluster(
                      ignore_reinit_error=True,
                      num_gpus=parallel_config.world_size)
     else:
-        ray.init(address=ray_address, ignore_reinit_error=True)
+        logger.info(
+            f"Init ray with ray_address: {ray_address}, namespace: rlhf")
+        ray.init(address=ray_address,
+                 ignore_reinit_error=True,
+                 namespace="rlhf")
 
     if parallel_config.placement_group:
         # Placement group is already set.
@@ -310,7 +315,15 @@ def initialize_ray_cluster(
             "support ray.")
 
     # Create placement group for worker processes
-    current_placement_group = ray.util.get_current_placement_group()
+    if envs.VLLM_RAY_PG_NAME:
+        # the placement group is specified by the user
+        logger.info(
+            "Looking for the placement group specified by"
+            " VLLM_RAY_PG_NAME: %s", envs.VLLM_RAY_PG_NAME)
+        current_placement_group = ray.util.get_placement_group(
+            envs.VLLM_RAY_PG_NAME)
+    else:
+        current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:
         # We are in a placement group
         bundles = current_placement_group.bundle_specs

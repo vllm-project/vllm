@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
+    VLLM_RAY_PG_NAME: Optional[str] = None
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     VLLM_DP_RANK: int = 0
@@ -407,7 +408,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
-    lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "fork"),
+    lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
 
     # Path to the cache for storing downloaded assets
     "VLLM_ASSETS_CACHE":
@@ -578,6 +579,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Format: comma-separated list of integers, e.g. "0,1,2,3"
     "VLLM_RAY_BUNDLE_INDICES":
     lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
+
+    # ray placement group name, if it is set, it can control the
+    # placement group for vLLM to use.
+    "VLLM_RAY_PG_NAME":
+    lambda: os.getenv("VLLM_RAY_PG_NAME", None),
 
     # When on a Nvidia GPU aligns single entries (within a page) so they are 256
     # byte aligned for better performance, this increases the memory usage of
