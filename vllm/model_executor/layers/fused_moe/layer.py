@@ -109,11 +109,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         super().process_weights_after_loading(layer)
 
         if aiter_moe_enabled():
+            layout = (32, 32) if aiter_2stage_moe_enabled() else None
             layer.w13_weight = torch.nn.Parameter(shuffle_weight(
-                layer.w13_weight.data),
+                layer.w13_weight.data, layout=layout),
                                                   requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(shuffle_weight(
-                layer.w2_weight.data),
+                layer.w2_weight.data, layout=layout),
                                                  requires_grad=False)
 
         if envs.VLLM_MOE_PADDING:
