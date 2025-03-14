@@ -33,12 +33,13 @@ class TopKTopPSampler(nn.Module):
                     # The sampling API removes the success return value
                     # of all sampling API, which is not compatible with
                     # earlier design.
-                    # https://github.com/flashinfer-ai/flashinfer/releases/tag/v0.2.3
+                    # https://github.com/flashinfer-ai/flashinfer/releases/
+                    # tag/v0.2.3
                     logger.info(
-                        "Currently, FlashInfer top-p & top-k sampling sampler is "
-                        f"disabled because {flashinfer_version} is not backward "
-                        "compatible. Falling back to the PyTorch-native "
-                        "implementation of top-p & top-k sampling.")
+                        "Currently, FlashInfer top-p & top-k sampling sampler "
+                        "is disabled because FlashInfer>=v0.2.3 is not "
+                        "backward compatible. Falling back to the PyTorch-"
+                        "native implementation of top-p & top-k sampling.")
                     self.forward = self.forward_native
                 elif envs.VLLM_USE_FLASHINFER_SAMPLER is not False:
                     # NOTE(woosuk): The V0 sampler doesn't use FlashInfer for
