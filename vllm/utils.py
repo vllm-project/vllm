@@ -906,7 +906,11 @@ def json_reduce_leaves(
     if initial is ...:
         return reduce(func, json_iter_leaves(value))  # type: ignore[arg-type]
 
-    return reduce(func, json_iter_leaves(value), initial)
+    return reduce(
+        func,
+        json_iter_leaves(value),  # type: ignore[arg-type]
+        initial,
+    )
 
 
 def flatten_2d_lists(lists: list[list[T]]) -> list[T]:
