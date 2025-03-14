@@ -329,8 +329,6 @@ class Scheduler:
                         request.request_id] = req_index
                 req_index += 1
                 self.running.append(request)
-                self.orig_num_computed_tokens[request.request_id].append(
-                    request.num_computed_tokens)
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED,
                                          scheduled_timestamp)
@@ -351,6 +349,8 @@ class Scheduler:
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                self.orig_num_computed_tokens[request.request_id].append(
+                    request.num_computed_tokens)
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
