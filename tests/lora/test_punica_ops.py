@@ -4,8 +4,8 @@ from threading import Lock
 import pytest
 
 import torch
-import vllm.lora.ops.triton_ops  # noqa: F401
-from vllm.lora.ops.torch_ops import sgmv_expand, sgmv_expand_slice, sgmv_shrink
+import vllm.lora.ops.torch_ops as torch_ops
+import vllm.lora.ops.triton_ops as triton_ops
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
@@ -21,10 +21,10 @@ def sgmv_shrink_for_nslices(
         prompt_lora_mapping: torch.Tensor, batches: int, max_seq_length: int,
         num_tokens: int, scaling: float):
     """
-    Wrapper around sgmv_shrink that handles any nslices.
+    Wrapper around torch_ops.sgmv_shrink that handles any nslices.
     """
     for index in range(nslices):
-        sgmv_shrink(
+        torch_ops.sgmv_shrink(
             inputs_tensor,
             lora_weights_lst[index],
             out_tensor[index],
@@ -48,11 +48,11 @@ def sgmv_expand_for_nslices(nslices: int, hidden_size: int,
                             max_seq_length: int, num_tokens: int,
                             add_inputs: bool) -> None:
     """
-    Wrapper around sgmv_expand that handles any nslices.
+    Wrapper around torch_ops.sgmv_expand that handles any nslices.
     """
     if nslices == 1:
         # Verify the torch's sgmv_expand op
-        sgmv_expand(
+        torch_ops.sgmv_expand(
             inputs_tensor[0],
             lora_weights_lst[0],
             out_tensor,
@@ -68,7 +68,7 @@ def sgmv_expand_for_nslices(nslices: int, hidden_size: int,
         slice_offset = 0
         for index in range(nslices):
             lora_weights = lora_weights_lst[index]
-            sgmv_expand_slice(
+            torch_ops.sgmv_expand_slice(
                 inputs_tensor[index],
                 lora_weights,
                 out_tensor,
@@ -93,8 +93,8 @@ def check_lora_shrink_kernel(batches: int, num_loras: int, rank: int,
                              dtype: torch.dtype, device: str, seq_length: int,
                              scaling: float):
     """
-    Compare outputs of vllm.sgmv_shrink and vllm.lora_shrink kernel against a
-    reference implementation.
+    Compare outputs of torch_ops.sgmv_shrink and triton_ops.lora_shrink
+    kernels.
     """
     data: PunicaTensors = generate_data_for_nslices(
         batches,
@@ -127,7 +127,7 @@ def check_lora_shrink_kernel(batches: int, num_loras: int, rank: int,
     with _dict_lock:
         # lora_shrink kernel
         _LORA_A_PTR_DICT.clear()
-        torch.ops.vllm.lora_shrink(
+        triton_ops.lora_shrink(
             data.inputs_tensor,
             data.lora_weights,
             out_tensor,
@@ -153,8 +153,8 @@ def check_lora_expand_kernel(batches: int, num_loras: int, rank: int,
                              dtype: torch.dtype, device: str, seq_length: int,
                              add_inputs: bool):
     """
-    Compare outputs of vllm.sgmv_expand and vllm.lora_expand kernels against a
-    reference implementation.
+    Compare outputs of torch_ops.sgmv_expand and triton_ops.lora_expand
+    kernels.
     """
     data: PunicaTensors = generate_data_for_nslices(
         batches,
@@ -188,12 +188,12 @@ def check_lora_expand_kernel(batches: int, num_loras: int, rank: int,
     with _dict_lock:
         # lora_expand kernel
         _LORA_B_PTR_DICT.clear()
-        torch.ops.vllm.lora_expand(data.inputs_tensor,
-                                   data.lora_weights,
-                                   out_tensor,
-                                   *lora_meta.meta_args(token_nums=token_nums),
-                                   offset_start=0,
-                                   add_inputs=add_inputs)
+        triton_ops.lora_expand(data.inputs_tensor,
+                               data.lora_weights,
+                               out_tensor,
+                               *lora_meta.meta_args(token_nums=token_nums),
+                               offset_start=0,
+                               add_inputs=add_inputs)
 
     # Reference
     sgmv_expand_for_nslices(nslices,
