@@ -105,7 +105,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
     def _maybe_force_supported_attention_backend(self):
         '''
-        Force vLLM to use XFormers, FLASH_ATTN or ROCM_FLASH(for ROCm) attention backend,
+        Force vLLM to use XFormers,
+        FLASH_ATTN or ROCM_FLASH(for ROCm) attention backend,
         '''
 
         def raise_backend_err():
