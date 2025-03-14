@@ -33,10 +33,6 @@ if current_platform.is_rocm():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 REQUIRES_V0_MODELS = [
-    # V1 Test: llava-hf/llava-1.5-7b-hf is broken on V1
-    # https://github.com/vllm-project/vllm/issues/14523
-    "llava",
-    "llava-broadcast",
     # V1 Test: no way to fall back for head_dim = 80
     # https://github.com/vllm-project/vllm/issues/14524
     "qwen_vl",
