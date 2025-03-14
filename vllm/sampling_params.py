@@ -338,29 +338,23 @@ class SamplingParams(
 
         if self.seed == -1:
             self.seed = None
-        else:
-            self.seed = self.seed
 
         if self.stop is None:
             self.stop = []
         elif isinstance(self.stop, str):
             self.stop = [self.stop]
-        else:
-            self.stop = list(self.stop)
 
         if self.stop_token_ids is None:
             self.stop_token_ids = []
-        else:
-            self.stop_token_ids = list(self.stop_token_ids)
 
         if self.bad_words is None:
             self.bad_words = []
-        else:
-            self.bad_words = list(self.bad_words)
 
-        self.logprobs = 1 if self.logprobs is True else self.logprobs
-        self.prompt_logprobs = (1 if self.prompt_logprobs is True else
-                                self.prompt_logprobs)
+        if self.logprobs is True:
+            self.logprobs = 1
+
+        if self.prompt_logprobs is True:
+            self.prompt_logprobs = 1
 
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
