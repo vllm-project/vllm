@@ -36,11 +36,11 @@ from transformers.models.whisper.modeling_whisper import (
 
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
 from vllm.multimodal.parse import (AudioItem, DictEmbeddingItems, ModalityData,
                                    ModalityDataItems, MultiModalDataItems,
                                    MultiModalDataParser)
-from vllm.multimodal.processing import PromptReplacement
+from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.multimodal.profiling import ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
@@ -272,8 +272,13 @@ class MiniCPMOMultiModalProcessor(
                 tokenizer.audio_end_id)
         return special_tokens
 
-    def process_audios(self, mm_data: Mapping[str, object],
-                       mm_kwargs: Mapping[str, object]) -> Dict[str, object]:
+    def process_audios(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        mm_data = dict(mm_data)
+
         audios = mm_data.pop("audios", [])
         audio_embeds = mm_data.pop("audio_embeds", [])
         if isinstance(audios, (list, torch.Tensor)) and len(audios) > 0:
@@ -332,11 +337,15 @@ class MiniCPMOMultiModalProcessor(
     def get_placeholder_split_pattern(self) -> str:
         return r"\(<(?:image|video|audio)>./</(?:image|video|audio)>\)"
 
-    def process_mm_inputs(self, mm_data, mm_kwargs) -> object:
+    def process_mm_inputs(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, Mapping[str, NestedTensors]]:
         return {
             "image": self.process_images(mm_data, mm_kwargs),
             "video": self.process_videos(mm_data, mm_kwargs),
-            "audio": self.process_audios(mm_data, mm_kwargs)
+            "audio": self.process_audios(mm_data, mm_kwargs),
         }
 
     def get_modality_num_counter(self, modality: str) -> str:
@@ -358,9 +367,11 @@ class MiniCPMOMultiModalProcessor(
         return super().get_prompt_texts_by_modality(inputs, modality, index)
 
     def _get_prompt_updates(
-            self, mm_items: MultiModalDataItems,
-            hf_processor_mm_kwargs: Mapping[str, Any],
-            out_mm_kwargs: MultiModalKwargs) -> Sequence[PromptReplacement]:
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> Sequence[PromptUpdate]:
         placeholder = {
             "image": self.info.image_pattern,
             "video": self.info.video_pattern,
