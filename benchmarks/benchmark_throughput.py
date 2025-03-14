@@ -318,7 +318,8 @@ def get_requests(args, tokenizer):
         dataset_cls = BurstGPTDataset
     elif args.dataset_name == "hf":
         if args.backend != "vllm-chat":
-            ValueError("hf datasets only are supported by vllm-chat backend")
+            raise ValueError(
+                "hf datasets only are supported by vllm-chat backend")
         # Choose between VisionArenaDataset and HuggingFaceDataset based on
         # provided parameters.
         dataset_cls = (VisionArenaDataset if args.dataset_path
