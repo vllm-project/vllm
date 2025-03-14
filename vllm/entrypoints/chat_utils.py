@@ -1072,17 +1072,16 @@ def apply_hf_chat_template(
     **kwargs: Any,
 ) -> str:
     if chat_template is None:
-        if tokenizer.chat_template is not None:
-            chat_template = tokenizer.chat_template
-        else:
-            # FIXME: Temporary workaround for
-            # https://huggingface.co/mistral-community/pixtral-12b/discussions/31
-            try:
-                processor = cached_get_processor(tokenizer.name_or_path)
-                if processor.chat_template is not None:
-                    chat_template = processor.chat_template
-            except Exception:
-                pass
+        chat_template = tokenizer.chat_template
+
+    # FIXME: Temporary workaround for
+    # https://huggingface.co/mistral-community/pixtral-12b/discussions/31
+    if chat_template is None:
+        try:
+            processor = cached_get_processor(tokenizer.name_or_path)
+            chat_template = processor.chat_template
+        except Exception:
+            pass
 
     if chat_template is None:
         raise ValueError(
