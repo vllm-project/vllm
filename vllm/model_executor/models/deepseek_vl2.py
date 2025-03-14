@@ -14,7 +14,6 @@ from einops import rearrange, repeat
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -25,8 +24,8 @@ from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, ProcessingCache,
-                                        PromptReplacement, PromptUpdate)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_vl2 import (DeepseekVLV2Config,
@@ -41,8 +40,6 @@ from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
-
-logger = init_logger(__name__)
 
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
@@ -216,30 +213,6 @@ class DeepseekVL2DummyInputsBuilder(
 class DeepseekVL2MultiModalProcessor(
         BaseMultiModalProcessor[DeepseekVL2ProcessingInfo]):
 
-    def __init__(
-            self,
-            info: DeepseekVL2ProcessingInfo,
-            dummy_inputs: "BaseDummyInputsBuilder[DeepseekVL2ProcessingInfo]",
-            *,
-            cache: Optional[ProcessingCache] = None,
-            enable_sanity_checks: bool = True) -> None:
-        super().__init__(
-            info,
-            dummy_inputs,
-            cache=cache,
-            enable_sanity_checks=enable_sanity_checks,
-        )
-
-        mm_limit = self.info.ctx.model_config.multimodal_config.limit_per_prompt
-        if self.cache is not None and mm_limit["image"] > 2:
-            # The processor output depends on the number of images passed,
-            # making it incompatible with processing cache which is supposed
-            # to be invariant of how many images are passed per prompt
-            self.cache = None
-            logger.warning_once(
-                f"{type(self).__name__} does not support processing cache with "
-                "image limit larger than 2.")
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -315,6 +288,31 @@ class DeepseekVL2MultiModalProcessor(
                 replacement=get_replacement_deepseek_vl2,
             )
         ]
+
+    def _cached_apply_hf_processor(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], MultiModalKwargs, bool]:
+        # The processor logic is different for len(images) <= 2 vs > 2
+        # Since the processing cache assumes that the processor output is
+        # invariant of how many images are passed per prompt, we only
+        # perform caching for the most common case
+        if mm_data_items.get_count("image", strict=False) > 2:
+            # This code path corresponds to the cache being disabled
+            return self._apply_hf_processor_main(
+                prompt=prompt,
+                mm_items=mm_data_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                enable_hf_prompt_update=True,
+            )
+
+        return super()._cached_apply_hf_processor(
+            prompt=prompt,
+            mm_data_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -606,7 +604,9 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self._pixel_values_to_embedding(
             pixel_values=pixel_values, images_spatial_crop=images_spatial_crop)
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> torch.Tensor:
+    def get_multimodal_embeddings(
+        self, **kwargs: object
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

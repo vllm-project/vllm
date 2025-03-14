@@ -354,11 +354,18 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.download_dir,
                 hf_folder,
                 hf_weights_files,
+                self.load_config.use_tqdm_on_load,
             )
         elif use_safetensors:
-            weights_iterator = safetensors_weights_iterator(hf_weights_files)
+            weights_iterator = safetensors_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+            )
         else:
-            weights_iterator = pt_weights_iterator(hf_weights_files)
+            weights_iterator = pt_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+            )
 
         if current_platform.is_tpu():
             # In PyTorch XLA, we should call `xm.mark_step` frequently so that
@@ -806,9 +813,15 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def _hf_weight_iter(self, hf_weights_files, use_safetensors: bool):
         if use_safetensors:
-            iterator = safetensors_weights_iterator(hf_weights_files)
+            iterator = safetensors_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+            )
         else:
-            iterator = pt_weights_iterator(hf_weights_files)
+            iterator = pt_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+            )
         for org_name, param in iterator:
             # mapping weight names from transformers to vllm while preserving
             # original names.
@@ -1317,11 +1330,14 @@ class GGUFModelLoader(BaseModelLoader):
                 local_model_path, gguf_weights_map):
             model_config.hf_config.update({"tie_word_embeddings": True})
 
+        target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
-            with torch.device(device_config.device):
+            with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
             model.load_weights(
                 self._get_weights_iterator(local_model_path, gguf_weights_map))
+
+            _process_weights_after_loading(model, model_config, target_device)
         return model
 
 
@@ -1396,7 +1412,10 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             revision: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
-        return runai_safetensors_weights_iterator(hf_weights_files)
+        return runai_safetensors_weights_iterator(
+            hf_weights_files,
+            self.load_config.use_tqdm_on_load,
+        )
 
     def download_model(self, model_config: ModelConfig) -> None:
         """Download model if necessary"""
