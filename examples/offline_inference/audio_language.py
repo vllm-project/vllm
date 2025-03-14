@@ -142,7 +142,6 @@ def run_whisper(question: str, audio_count: int):
     prompt = "<|startoftranscript|>"
 
     llm = LLM(model=model_name,
-              max_model_len=448,
               max_num_seqs=5,
               limit_mm_per_prompt={"audio": audio_count})
     stop_token_ids = None
