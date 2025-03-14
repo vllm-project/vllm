@@ -27,7 +27,6 @@ logger = init_logger(__name__)
 class StructuredOutputManager:
 
     def __init__(self, vllm_config: VllmConfig):
-        self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.vllm_config = vllm_config
         self.init_complete = False
 
@@ -41,6 +40,7 @@ class StructuredOutputManager:
         tokenizer_group.ping()
 
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
+        self.vocab_size = tokenizer.max_token_id
         if isinstance(tokenizer, MistralTokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
             # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
