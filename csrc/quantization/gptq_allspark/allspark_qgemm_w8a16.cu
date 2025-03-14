@@ -437,9 +437,10 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
       for (int n_idx = 0; n_idx < WARP_NITER; ++n_idx) {
   #pragma unroll
         for (int k_idx = 0; k_idx < 2; ++k_idx) {
-          FType low16 = static_cast<FType>(C_frag[m_idx][n_idx][k_idx * 2]);
+          FType low16 =
+              ScalarType<FType>::float2num(C_frag[m_idx][n_idx][k_idx * 2]);
           FType high16 =
-              static_cast<FType>(C_frag[m_idx][n_idx][k_idx * 2 + 1]);
+              ScalarType<FType>::float2num(C_frag[m_idx][n_idx][k_idx * 2 + 1]);
           uint32_t tmp = (reinterpret_cast<uint32_t&>(low16) & 0xffff) |
                          (reinterpret_cast<uint32_t&>(high16) << 16);
           int sts_offset =
@@ -793,7 +794,7 @@ __global__ void restore_N32_K16_dequantize_rhs_w8a16_perc_kernel(
   FT scale_reg[4];
   *(reinterpret_cast<uint2*>(scale_reg)) =
       *(reinterpret_cast<const uint2*>(scales + params_nidx));
-  FT zero_reg[4] = {0};
+  FT zero_reg[4];
   if (zeros != nullptr) {
     *(reinterpret_cast<uint2*>(zero_reg)) =
         *(reinterpret_cast<const uint2*>(zeros + params_nidx));
@@ -809,8 +810,10 @@ __global__ void restore_N32_K16_dequantize_rhs_w8a16_perc_kernel(
         reinterpret_cast<typename HalfType<FT>::T2*>(&(fval_reg[ni * 4])));
   #pragma unroll
     for (int ki = 0; ki < 4; ++ki) {
-      fval_reg[ni * 4 + ki] =
-          (fval_reg[ni * 4 + ki] - zero_reg[ni]) * scale_reg[ni];
+      if (zeros != nullptr) {
+        fval_reg[ni * 4 + ki] = __hsub(fval_reg[ni * 4 + ki], zero_reg[ni]);
+      }
+      fval_reg[ni * 4 + ki] = __hmul(fval_reg[ni * 4 + ki], scale_reg[ni]);
       int sts_offset = sts_base_offset + ((ki / 2) * 8 + (ki % 2)) * 32 +
                        ((ni + lane_id % 4) % 4) * 8;
       smem[sts_offset] = fval_reg[ni * 4 + ki];
