@@ -20,8 +20,12 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
     """
     Reasoning parser for DeepSeek R1 model.
 
-    The DeepSeek R1 model uses <think>...</think> tokens to denote reasoning 
-    text. This parser extracts the reasoning content from the model output.
+    The DeepSeek R1 model uses a chat_template that includes a starting
+    <think> token as input, resulting in the output not having <think>
+    token to denote thinking content.
+
+    This parser extracts the reasoning content from the model output
+    adjusted to this behaviour.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
@@ -30,17 +34,15 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         self.think_end_token = "</think>"
 
         self.reasoning_regex = re.compile(
-            rf"{self.think_start_token}(.*?){self.think_end_token}", re.DOTALL)
+            rf'\n*{self.think_end_token}\n*', re.DOTALL)
 
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ReasoningParser "
                 "constructor during construction.")
 
-        self.think_start_token_id = self.vocab.get(self.think_start_token)
         self.think_end_token_id = self.vocab.get(self.think_end_token)
-        if (self.think_start_token_id is None
-                or self.think_end_token_id is None):
+        if self.think_end_token_id is None:
             raise RuntimeError(
                 "DeepSeek R1 reasoning parser could not locate think start/end "
                 "tokens in the tokenizer!")
@@ -58,68 +60,34 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
-        For text <think>abc</think>xyz:
+        For text abc</think>xyz:
         - 'abc' goes to reasoning_content
         - 'xyz' goes to content
         """
         # Skip single special tokens
         if len(delta_token_ids) == 1 and (delta_token_ids[0] in [
-                self.think_start_token_id, self.think_end_token_id
+                self.think_end_token_id
         ]):
             return None
 
-        # Check if <think> is present in previous or delta.
-        # Keep compatibility with models that don't generate <think> tokens.
-        if self.think_start_token_id in previous_token_ids:
-            if self.think_end_token_id in delta_token_ids:
-                # <think> in previous, </think> in delta,
-                # extract reasoning content
-                end_index = delta_text.find(self.think_end_token)
-                reasoning_content = delta_text[:end_index]
-                content = delta_text[end_index + len(self.think_end_token):]
-                return DeltaMessage(reasoning_content=reasoning_content,
-                                    content=content if content else None)
-            elif self.think_end_token_id in previous_token_ids:
-                # <think> in previous, </think> in previous,
-                # reasoning content continues
-                return DeltaMessage(content=delta_text)
-            else:
-                # <think> in previous, no </think> in previous or delta,
-                # reasoning content continues
-                return DeltaMessage(reasoning_content=delta_text)
-        elif self.think_start_token_id in delta_token_ids:
-            if self.think_end_token_id in delta_token_ids:
-                # <think> in delta, </think> in delta, extract reasoning content
-                start_index = delta_text.find(self.think_start_token)
-                end_index = delta_text.find(self.think_end_token)
-                reasoning_content = delta_text[start_index +
-                                               len(self.think_start_token
-                                                   ):end_index]
-                content = delta_text[end_index + len(self.think_end_token):]
-                return DeltaMessage(reasoning_content=reasoning_content,
-                                    content=content if content else None)
-            else:
-                # <think> in delta, no </think> in delta,
-                # reasoning content continues
-                return DeltaMessage(reasoning_content=delta_text)
+        # <think> is effectively present in previous with new chat_template
+        # Incompatible with models not include <think> token in chat_template
+        if self.think_end_token_id in delta_token_ids:
+            # </think> in delta,
+            # extract reasoning content
+            end_index = delta_text.find(self.think_end_token)
+            reasoning_content = delta_text[:end_index]
+            content = delta_text[end_index + len(self.think_end_token):]
+            return DeltaMessage(reasoning_content=reasoning_content,
+                                content=content if content else None)
+        elif self.think_end_token_id in previous_token_ids:
+            # </think> in previous,
+            # content continues
+            return DeltaMessage(reasoning_content=None, content=delta_text)
         else:
-            # No <think> in previous or delta, also need to check for </think>.
-            # Because the model may have generated </think> without <think>
-            # Ref https://huggingface.co/deepseek-ai/DeepSeek-R1/commit/8a58a132790c9935686eb97f042afa8013451c9f
-            if self.think_end_token_id in delta_token_ids:
-                # </think> in delta with more tokens,
-                # extract reasoning content and content
-                end_index = delta_text.find(self.think_end_token)
-                reasoning_content = delta_text[:end_index]
-                content = delta_text[end_index + len(self.think_end_token):]
-                return DeltaMessage(reasoning_content=reasoning_content,
-                                    content=content if content else None)
-            elif self.think_end_token_id in previous_token_ids:
-                # </think> in previous, thinking content ends
-                return DeltaMessage(content=delta_text)
-            else:
-                # no </think> in previous or delta, reasoning content continues
-                return DeltaMessage(reasoning_content=delta_text)
+            # no </think> in previous or delta,
+            # reasoning content continues
+            return DeltaMessage(reasoning_content=delta_text, content=None)
 
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
@@ -128,21 +96,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         # DeepSeek R1 doesn't generate <think> now.
         # Thus we assume the reasoning content is always at the start.
         # Ref https://huggingface.co/deepseek-ai/DeepSeek-R1/commit/8a58a132790c9935686eb97f042afa8013451c9f
-        if self.think_end_token not in model_output:
-            return model_output, None
-        else:
-            # Add a start token if it's missing to keep compatibility.
-            if self.think_start_token not in model_output:
-                model_output = f"{self.think_start_token}{model_output}"
-            # Use a regex to find the reasoning content
-            reasoning_content = self.reasoning_regex.findall(model_output)[0]
-
-            end_index = len(
-                f"{self.think_start_token}{reasoning_content}{self.think_end_token}"
-            )
-            final_output = model_output[end_index:]
-
-            if len(final_output) == 0:
-                return reasoning_content, None
-
-            return reasoning_content, final_output
+        if search := self.reasoning_regex.search(model_output):
+            reasoning_content = model_output[:search.start()]
+            content = model_output[search.end():]
+            return reasoning_content, content
+        return model_output, None
