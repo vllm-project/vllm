@@ -36,7 +36,6 @@ namespace MARLIN_NAMESPACE_NAME {
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
-
 template <typename scalar_t,  // compute dtype, half or nv_float16
           const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
           const int threads,          // number of threads in a threadblock
@@ -47,11 +46,11 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
           const int thread_k_blocks,  // same for k dimension (reduction)
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
-          const bool has_act_order,     // whether act_order is enabled
-          const bool has_zp,            // whether zero-points are enabled
-          const int group_blocks,       // number of consecutive 16x16 blocks
-                                        // with a separate quantization scale
-          const bool is_zp_float        // is zero point of float16 type?
+          const bool has_act_order,  // whether act_order is enabled
+          const bool has_zp,         // whether zero-points are enabled
+          const int group_blocks,    // number of consecutive 16x16 blocks
+                                     // with a separate quantization scale
+          const bool is_zp_float     // is zero point of float16 type?
           >
 __global__ void Marlin(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
@@ -472,11 +471,11 @@ template <typename scalar_t,  // compute dtype, half or nv_float16
           const int thread_k_blocks,  // same for k dimension (reduction)
           const int stages,  // number of stages for the async global->shared
                              // fetch pipeline
-          const bool has_act_order,     // whether act_order is enabled
-          const bool has_zp,            // whether zero-points are enabled
-          const int group_blocks,       // number of consecutive 16x16 blocks
-                                        // with a separate quantization scale
-          const bool is_zp_float        // is zero point of float16 type?
+          const bool has_act_order,  // whether act_order is enabled
+          const bool has_zp,         // whether zero-points are enabled
+          const int group_blocks,    // number of consecutive 16x16 blocks
+                                     // with a separate quantization scale
+          const bool is_zp_float     // is zero point of float16 type?
           >
 __global__ void Marlin(
     const int4* __restrict__ A,  // fp16 input matrix of shape mxk
@@ -1898,7 +1897,6 @@ __global__ void Marlin(
     }
   }
 }
-
 
 }  // namespace MARLIN_NAMESPACE_NAME
 

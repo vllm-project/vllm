@@ -23,7 +23,6 @@
   #define MARLIN_NAMESPACE_NAME marlin_moe_wna16
 #endif
 
-
 #include "kernel.h"
 #include "core/registration.h"
 
@@ -43,10 +42,9 @@ __global__ void permute_cols_kernel(
     const int32_t* __restrict__ sorted_token_ids_ptr,
     const int32_t* __restrict__ expert_ids_ptr,
     const int32_t* __restrict__ num_tokens_past_padded_ptr, int size_m,
-    int size_k, int top_k) {};
+    int size_k, int top_k){};
 
 }  // namespace marlin
-
 
 torch::Tensor moe_wna16_marlin_gemm(
     torch::Tensor& a, std::optional<torch::Tensor> const& c_or_none,
@@ -144,7 +142,6 @@ __global__ void permute_cols_kernel(
       permute_row(block_sorted_ids[i]);
   }
 }
-
 
   #define __CALL_IF(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, \
                     HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS, NUM_THREADS,          \
