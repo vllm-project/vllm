@@ -203,7 +203,7 @@ class EngineCore:
         1. Try to schedule a new batch if the batch queue is not full.
         If a new batch is scheduled, directly return an empty engine core
         output. In other words, fulfilling the batch queue has a higher priority
-        then getting model outputs.
+        than getting model outputs.
         2. If there is no new scheduled batch, meaning that the batch queue
         is full or no other requests can be scheduled, we block until the first
         batch in the job queue is finished.
@@ -228,6 +228,10 @@ class EngineCore:
 
         # If no more requests can be scheduled and the job queue is not empty,
         # block until the first batch in the job queue is finished.
+        # TODO(comaniac): Ideally we should peek the first batch in the
+        # job queue to check if it's finished before scheduling a new batch,
+        # but peeking the first element in a queue is not thread-safe,
+        # so we need more work.
         if not scheduled_batch and not self.batch_queue.empty():
             future, scheduler_output = self.batch_queue.get_nowait()
             # Blocking until the first result is available.
