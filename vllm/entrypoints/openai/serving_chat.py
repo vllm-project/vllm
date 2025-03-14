@@ -50,6 +50,7 @@ class OpenAIServingChat(OpenAIServing):
         models: OpenAIServingModels,
         response_role: str,
         *,
+        lora_cache_dir: Optional[str],
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -63,6 +64,7 @@ class OpenAIServingChat(OpenAIServing):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
+                         lora_cache_dir=lora_cache_dir,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
 
@@ -142,7 +144,7 @@ class OpenAIServingChat(OpenAIServing):
             (
                 lora_request,
                 prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            ) = await self._maybe_get_adapters(request)
 
             model_name = self._get_model_name(request.model, lora_request)
 
