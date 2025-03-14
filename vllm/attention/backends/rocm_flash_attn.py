@@ -479,6 +479,13 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 "ROCmFlashAttention does not support blocksparse attention.")
         self.aiter_kv_scales_initialized = False
 
+        if USE_AITER_PAGED_ATTN and kv_cache_dtype not in [
+                "int8", "fp8", "fp8_e4m3"
+        ]:
+            logger.warning("ROCM AITER paged attention does not "
+                           "support non-8-bit kv_cache data types. "
+                           "kv_cache_dtype: {kv_cache_dtype}. "
+                           "Falling back to Triton PagedAttention")
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             self.logits_soft_cap = 0.0

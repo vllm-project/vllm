@@ -20,7 +20,12 @@ class AiterPagedAttention(PagedAttention):
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
     ) -> None:
-        if key_cache.dtype.itemsize == 1:
+        if kv_cache_dtype not in ["int8", "fp8", "fp8_e4m3"]:
+            PagedAttention.write_to_paged_cache(key, value, key_cache,
+                                                value_cache, slot_mapping,
+                                                kv_cache_dtype, k_scale,
+                                                v_scale)
+        else:
             if "fp8" in kv_cache_dtype:
                 key_cache = key_cache.view(torch.float8_e4m3fnuz)
                 value_cache = value_cache.view(torch.float8_e4m3fnuz)
@@ -30,12 +35,6 @@ class AiterPagedAttention(PagedAttention):
             rocm_aiter.reshape_and_cache_with_pertoken_quant(
                 key, value, key_cache, value_cache, k_scale, v_scale,
                 slot_mapping.flatten(), True)
-        else:
-            rocm_aiter.reshape_and_cache(key, value, key_cache, value_cache,
-                                         slot_mapping.flatten(),
-                                         kv_cache_dtype,
-                                         k_scale.view(-1)[0].item(),
-                                         v_scale.view(-1)[0].item(), True)
 
     @staticmethod
     def forward_decode(
@@ -59,11 +58,26 @@ class AiterPagedAttention(PagedAttention):
     ) -> torch.Tensor:
         # print("RUNNING CORRECT KERNEL")
         if kv_cache_dtype not in ["int8", "fp8", "fp8_e4m3"]:
-            raise NotImplementedError(f"ROCM AITER paged attention does not \
-                    support non-8-bit kv_cache data types. \
-                    kv_cache_dtype: {kv_cache_dtype}")
+            return PagedAttention.forward_decode(
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                block_tables=block_tables,
+                seq_lens=seq_lens,
+                max_seq_len=max_seq_len,
+                kv_cache_dtype=kv_cache_dtype,
+                num_kv_heads=num_kv_heads,
+                scale=scale,
+                alibi_slopes=alibi_slopes,
+                k_scale=k_scale,
+                v_scale=v_scale,
+                tp_rank=tp_rank,
+                blocksparse_local_blocks=blocksparse_local_blocks,
+                blocksparse_vert_stride=blocksparse_vert_stride,
+                blocksparse_block_size=blocksparse_block_size,
+                blocksparse_head_sliding_step=blocksparse_head_sliding_step)
 
-        elif "fp8" in kv_cache_dtype:
+        if "fp8" in kv_cache_dtype:
             key_cache = key_cache.view(torch.float8_e4m3fnuz)
             value_cache = value_cache.view(torch.float8_e4m3fnuz)
 
