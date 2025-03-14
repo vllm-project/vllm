@@ -891,7 +891,7 @@ def json_reduce_leaves(
 def json_reduce_leaves(
     func: Callable[[U, T], U],
     value: JSONTree[T],
-    initial: U,
+    initial: U,  # type: ignore[assignment]
     /,
 ) -> U:
     ...
@@ -904,7 +904,7 @@ def json_reduce_leaves(
     /,
 ) -> Union[T, U]:
     if initial is ...:
-        return reduce(func, json_iter_leaves(value))
+        return reduce(func, json_iter_leaves(value))  # type: ignore[arg-type]
 
     return reduce(func, json_iter_leaves(value), initial)
 
