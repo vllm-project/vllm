@@ -7,7 +7,6 @@ torchvision==0.20.1
 torchaudio==2.5.1
 
 cmake>=3.26
-ninja
 packaging
 setuptools>=61
 setuptools-scm>=8
