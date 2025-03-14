@@ -4,7 +4,7 @@ import copy
 import time
 from collections import Counter as collectionsCounter
 from collections import deque
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from functools import partial
 from typing import (TYPE_CHECKING, Callable, ClassVar, Deque, Dict, Iterable,
@@ -1423,14 +1423,18 @@ class LLMEngine:
                 # Raise so the caller is notified that this request failed
                 raise
             except BaseException as err:
-                stats = self._get_stats(scheduler_outputs=scheduler_outputs)
-                dump_engine_exception_v0(
-                    err=err,
-                    config=self.vllm_config,
-                    use_cached_outputs=self.use_cached_outputs,
-                    stats=stats,
-                    execute_model_req=execute_model_req,
-                )
+                # NOTE: ensure we can log extra info without risking raises
+                # raises unexpected errors during logging
+                with suppress(BaseException):
+                    stats = self._get_stats(
+                        scheduler_outputs=scheduler_outputs)
+                    dump_engine_exception_v0(
+                        err=err,
+                        config=self.vllm_config,
+                        use_cached_outputs=self.use_cached_outputs,
+                        stats=stats,
+                        execute_model_req=execute_model_req,
+                    )
                 # Re-raise exception
                 raise err
 

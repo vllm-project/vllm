@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 import queue
 import signal
 import threading
@@ -200,11 +201,15 @@ class EngineCore:
         try:
             output = self.model_executor.execute_model(scheduler_output)
         except BaseException as err:
-            err = ModelExecutionError(
-                f"Model execution failure,"
-                f"reason: {repr(err)}",
-                scheduler_output=scheduler_output)
-            dump_engine_exception(err, self.vllm_config)
+            # NOTE: ensure we can log extra info without risking raises
+            # raises unexpected errors during logging
+            with contextlib.suppress(BaseException):
+                err = ModelExecutionError(
+                    f"Model execution failure,"
+                    f"reason: {repr(err)}",
+                    scheduler_output=scheduler_output)
+                dump_engine_exception(err, self.vllm_config)
+            # Re-raise exception
             raise err
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
