@@ -580,13 +580,48 @@ def get_rdna_autotune_configs():
     ]
 
 
+def get_general_autotune_configs():
+    return [
+        triton.Config(
+            {
+                'BLOCK_M': 128,
+                'BLOCK_N': 128,
+                'PRE_LOAD_V': False,
+                'GRID_CU_MULTIP': 2
+            },
+            num_stages=1,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_M': 128,
+                'BLOCK_N': 64,
+                'PRE_LOAD_V': False,
+                'GRID_CU_MULTIP': 2
+            },
+            num_stages=1,
+            num_warps=4),
+        triton.Config(
+            {
+                'BLOCK_M': 128,
+                'BLOCK_N': 32,
+                'PRE_LOAD_V': False,
+                'GRID_CU_MULTIP': 2
+            },
+            num_stages=1,
+            num_warps=4),
+    ], [
+        'IS_CAUSAL', 'dropout_p', 'MAX_SEQLENS_Q', 'MAX_SEQLENS_K',
+        'ACTUAL_BLOCK_DMODEL', 'VARLEN', 'HQ', 'HK'
+    ]
+
+
 def get_autotune_configs():
     if is_rdna():
         return get_rdna_autotune_configs()
     elif is_cdna():
         return get_cdna_autotune_configs()
     else:
-        raise ValueError("Unknown Device Type")
+        return get_general_autotune_configs()
 
 
 autotune_configs, autotune_keys = get_autotune_configs()
