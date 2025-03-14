@@ -254,7 +254,9 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
         y_org = y
         y = y.view(-1, y.shape[-1])
         if lora_bias_stacked is not None:
-            self._apply_bias(self.token_lora_indices, y, output_slices,
+            token_lora_indices = torch.narrow(self._token_lora_indices, 0, 0,
+                                              y.size(0))
+            self._apply_bias(token_lora_indices, y, output_slices,
                              lora_bias_stacked)
 
         if env.VLLM_USE_V1:
@@ -365,7 +367,9 @@ class PunicaWrapperGPU(PunicaWrapperBase, V1KernelMixin):
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
         if lora_bias_stacked is not None:
             assert len(lora_bias_stacked) == len(output_slices)
-            y = self._apply_bias(self.token_lora_indices, y, output_slices,
+            token_lora_indices = torch.narrow(self._token_lora_indices, 0, 0,
+                                              y.size(0))
+            y = self._apply_bias(token_lora_indices, y, output_slices,
                                  lora_bias_stacked)
 
         if buffer is None:
