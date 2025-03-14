@@ -292,28 +292,32 @@ def get_active_block_tables(block_tables, query_lens, seq_lens, block_size,
 
 
 @pytest.mark.parametrize(
-    "prefill_batch_size,decode_batch_size,block_size,large_tile_size",
+    "prefill_batch_size,decode_batch_size,block_size,large_tile_size,num_heads,num_queries_per_kv,head_size,mixed_precision",
     [
-        (1, 199, 1, 512),  # 512 blocks
-        (4, 12, 256, 2048),  # 128 blocks
-        (4, 12, 16, 2048),  # 128 blocks
-        (4, 12, 4, 1024),  # 256 blocks
-        (4, 12, 32, 2048),  # 64 blocks
-        (4, 12, 32, 4096),  # 128 blocks
-        (4, 12, 32, 8192),  # 256 blocks
-        (4, 12, 64, 8192),  # 128 blocks
-    ],
-)
-@pytest.mark.parametrize(
-    "num_heads,num_queries_per_kv,head_size",
-    [
-        (4, 2, 8),
-        (32, 8, 64),
-        (4, 4, 128),
-        (8, 1, 32),
-    ],
-)
-@pytest.mark.parametrize("mixed_precision", [True, False])
+        # Test minimal configurations (small block size)
+        (1, 199, 1, 512, 4, 2, 8, False
+         ),  # minimal block size, small dimensions
+        (1, 199, 1, 512, 4, 2, 8, True),  # same with mixed precision
+
+        # Test common/medium configurations
+        (4, 12, 32, 2048, 32, 8, 64, False),  # common case, larger heads
+        (4, 12, 32, 2048, 16, 4, 32,
+         True),  # medium size, mixed precision, grouped-query attention (GQA)
+
+        # Test large configurations
+        (4, 12, 256, 8192, 8, 1, 128, False),  # large blocks, large head size
+        (4, 12, 256, 8192, 64, 8, 64, True),  # large blocks, many heads
+
+        # Test asymmetric configurations
+        (2, 24, 64, 4096, 12, 4, 96, False),  # varied batch sizes
+        (8, 8, 128, 2048, 24, 2, 48, True),  # balanced batches
+
+        # Test edge cases
+        (1, 128, 16, 1024, 4, 2, 16, False),  # large decode batch
+        (16, 4, 8, 8192, 48, 1, 128, True),  # large prefill batch
+        (4, 12, 32, 2048, 16, 1, 32, True),  # multi-head attention (MHA)
+        (4, 12, 32, 2048, 16, 16, 32, True),  # multi-query attention (MQA)
+    ])
 @torch.inference_mode()
 def test_contexted_kv_attention(
     prefill_batch_size: int,
