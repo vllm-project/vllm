@@ -83,8 +83,8 @@ class PixtralHFImagePixelInputs(TypedDict):
     Shape: `(batch_size, num_embeds)`
     """
 
-    num_crops: torch.Tensor
-    """Shape: `(batch_size * num_images)`"""
+    num_crops: Union[torch.Tensor, list[torch.Tensor]]
+    """Shape: `(batch_size, num_images)`"""
 
 
 class LlavaImageEmbeddingInputs(TypedDict):
