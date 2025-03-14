@@ -21,11 +21,14 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import aiter_moe_enabled
+from vllm.utils import aiter_2stage_moe_enabled, aiter_moe_enabled
 
 if aiter_moe_enabled():
     from aiter import ck_moe
     from aiter.ops.shuffle import shuffle_weight
+    if aiter_2stage_moe_enabled():
+        from aiter.fused_moe_bf16_asm import ck_moe_2stages
+
 from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda_alike():
@@ -197,6 +200,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             e_score_correction_bias=e_score_correction_bias)
 
         if aiter_moe_enabled():
+            if aiter_2stage_moe_enabled():
+                return ck_moe_2stages(a1=x,
+                                      w1=layer.w13_weight,
+                                      w2=layer.w2_weight,
+                                      topk_weight=topk_weights,
+                                      topk_ids=topk_ids)
+
             return ck_moe(hidden_states=x,
                           w1=layer.w13_weight,
                           w2=layer.w2_weight,
