@@ -19,7 +19,9 @@ Specifically, V1 aims to:
 - **Combine key optimizations** into a unified architecture.
 - Require **zero configs** by enabling features/optimizations by default.
 
-We see significant performance improvements from upgrading to V1 core engine, in particular for long context scenarios. Please see performance benchmark [here](TODO:placeholder for now).
+We see significant performance improvements from upgrading to V1 core engine, in
+particular for long context scenarios. Please see performance benchmark [here](To be
+added).
 
 For more details, check out the vLLM V1 blog post [vLLM V1: A Major
 Upgrade to vLLM’s Core Architecture](https://blog.vllm.ai/2025/01/27/v1-alpha-release.html) (published Jan 27, 2025).
@@ -38,6 +40,8 @@ This living user guide outlines a few known **important changes and limitations*
 
 | Feature / Model | Status |
 |-----------------|-----------------------------------------------------------------------------------|
+| **Prefix Caching**                    | <nobr>🚀 Optimized</nobr>                                                        |
+| **Chunked Prefill**                    | <nobr>🚀 Optimized</nobr>                                                        |
 | **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
 | **LoRA**                                    | <nobr>🟢 Functional ([PR #13096](https://github.com/vllm-project/vllm/pull/13096))</nobr>|
 | **Multimodal Models**                       | <nobr>🟢 Functional</nobr>                                                        |
@@ -58,6 +62,13 @@ This living user guide outlines a few known **important changes and limitations*
 - **🚧 WIP**: Under active development.  
 - **🟡 Planned**: Scheduled for future implementation (some may have open PRs/RFCs).  
 - **🔴 Deprecated**: Not planned for v1 unless there is strong demand.
+
+
+**Note**: vLLM V1’s unified scheduler treats both prompt and output tokens the same
+way by using a simple dictionary (e.g., {request_id: num_tokens}) to dynamically
+allocate a fixed token budget per request, enabling features like chunked prefills,
+prefix caching, and speculative decoding without a strict separation between prefill
+and decode phases.
 
 ### Semantic Changes and Deprecated Features
 
