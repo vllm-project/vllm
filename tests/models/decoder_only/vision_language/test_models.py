@@ -9,7 +9,8 @@ from pathlib import PosixPath
 
 import pytest
 from packaging.version import Version
-from transformers import AutoModelForPreTraining, AutoModelForVision2Seq
+from transformers import (AutoModelForImageTextToText, AutoModelForPreTraining,
+                          AutoModelForVision2Seq)
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
@@ -163,6 +164,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
         max_model_len=4096,
         max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
         single_image_prompts=IMAGE_ASSETS.prompts({
             "stop_sign": "<vlm_image>Please describe the image shortly.",
             "cherry_blossom": "<vlm_image>Please infer the season with reason.",
