@@ -26,7 +26,15 @@ Upgrade to vLLM’s Core Architecture](https://blog.vllm.ai/2025/01/27/v1-alpha-
 
 This living user guide outlines a few known **important changes and limitations** introduced by vLLM V1. The team has been working actively to bring V1 as the default engine, therefore this guide will be updated constantly as more features get supported on vLLM V1.
 
-### Feature / Model Supports Overview
+### Supports Overview
+#### Hardware
+
+| Hardware | Status                                   |
+|----------|------------------------------------------|
+| **NVIDIA** | <nobr>🚀 Natively Supported</nobr>         |
+| **AMD**    | <nobr>🚧 WIP</nobr>           |
+| **TPU**    | <nobr>🚧 WIP</nobr>           |
+#### Feature / Model
 
 | Feature / Model | Status |
 |-----------------|-----------------------------------------------------------------------------------|
