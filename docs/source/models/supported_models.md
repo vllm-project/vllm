@@ -101,7 +101,7 @@ class MyAttention(nn.Module):
 
   def forward(self, hidden_states, **kwargs): # <- kwargs are required
     ...
-    attention_interface = attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+    attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
     attn_output, attn_weights = attention_interface(
       self,
       query_states,
