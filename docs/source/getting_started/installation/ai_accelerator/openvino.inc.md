@@ -19,7 +19,7 @@ Currently, there are no pre-built OpenVINO wheels.
 
 ### Build wheel from source
 
-First, install Python and ensure you lave the latest pip. For example, on Ubuntu 22.04, you can run:
+First, install Python and ensure you have the latest pip. For example, on Ubuntu 22.04, you can run:
 
 ```console
 sudo apt-get update  -y

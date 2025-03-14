@@ -20,7 +20,7 @@ There is one edge case: if the model fits in a single node with multiple GPUs, b
 
 ## Running vLLM on a single node
 
-vLLM supports distributed tensor-parallel and pipeline-parallel inference and serving. Currently, we support [Megatron-LM's tensor parallel algorithm](https://arxiv.org/pdf/1909.08053.pdf). We manage the distributed runtime with either [Ray](https://github.com/ray-project/ray) or python native multiprocessing. Multiprocessing can be used when deploying on a single node, multi-node inferencing currently requires Ray.
+vLLM supports distributed tensor-parallel and pipeline-parallel inference and serving. Currently, we support [Megatron-LM's tensor parallel algorithm](https://arxiv.org/pdf/1909.08053.pdf). We manage the distributed runtime with either [Ray](https://github.com/ray-project/ray) or python native multiprocessing. Multiprocessing can be used when deploying on a single node, multi-node inference currently requires Ray.
 
 Multiprocessing will be used by default when not running in a Ray placement group and if there are sufficient GPUs available on the same node for the configured `tensor_parallel_size`, otherwise Ray will be used. This default can be overridden via the `LLM` class `distributed_executor_backend` argument or `--distributed-executor-backend` API server argument. Set it to `mp` for multiprocessing or `ray` for Ray. It's not required for Ray to be installed for the multiprocessing case.
 
@@ -29,7 +29,7 @@ To run multi-GPU inference with the `LLM` class, set the `tensor_parallel_size` 
 ```python
 from vllm import LLM
 llm = LLM("facebook/opt-13b", tensor_parallel_size=4)
-output = llm.generate("San Franciso is a")
+output = llm.generate("San Francisco is a")
 ```
 
 To run multi-GPU serving, pass in the `--tensor-parallel-size` argument when starting the server. For example, to run API server on 4 GPUs:

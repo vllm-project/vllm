@@ -1,6 +1,6 @@
 # Reinforcement Learning from Human Feedback
 
-Reinforcement Learning from Human Feedback (RLHF) is a technique that fine-tunes language models using human-generated preference data to align model outputs with desired behaviours.
+Reinforcement Learning from Human Feedback (RLHF) is a technique that fine-tunes language models using human-generated preference data to align model outputs with desired behaviors.
 
 vLLM can be used to generate the completions for RLHF. The best way to do this is with libraries like [TRL](https://github.com/huggingface/trl), [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) and [verl](https://github.com/volcengine/verl).
 

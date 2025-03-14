@@ -15,7 +15,7 @@ more are listed [here](#supported-models).
 
 By extracting hidden states, vLLM can automatically convert text generation models like [Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B),
 [Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3) into embedding models,
-but they are expected be inferior to models that are specifically trained on embedding tasks.
+but they are expected to be inferior to models that are specifically trained on embedding tasks.
 
 ______________________________________________________________________
 
