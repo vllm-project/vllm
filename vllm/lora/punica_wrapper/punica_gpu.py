@@ -23,58 +23,8 @@ if TYPE_CHECKING:
     from vllm.lora.models import LongContextLoRAContext
 
 
-# TODO (varun) : Collapse this mixin
-class LoRAKernelMixin:
-
-    def _make_metadata(self, max_loras: int, max_num_batched_tokens: int,
-                       max_batches: int, device: Union[torch.device, str]):
-        self.token_mapping_meta = LoRAKernelMeta.make(max_loras,
-                                                      max_num_batched_tokens,
-                                                      device=device)
-        self.prompt_mapping_meta = LoRAKernelMeta.make(max_loras,
-                                                       max_batches,
-                                                       device=device)
-
-    def _prepare_metadata_tensors(self, token_lora_indices: torch.Tensor,
-                                  sampler_indices: torch.Tensor):
-        self.token_mapping_meta.prepare_tensors(token_lora_indices)
-        self.prompt_mapping_meta.prepare_tensors(sampler_indices)
-
-    def _apply_shrink(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: Tuple[torch.Tensor, ...],
-        scale: float,
-    ):
-        lora_shrink(
-            x,
-            w_t_all,
-            y,
-            *self.token_mapping_meta.meta_args(x.size(0)),
-            scale,
-        )
-
-    def _apply_expand(
-        self,
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: Tuple[torch.Tensor, ...],
-        offset_start: int,
-        add_inputs: bool,
-    ):
-        lora_expand(
-            x,
-            w_t_all,
-            y,
-            *self.token_mapping_meta.meta_args(x.size(0)),
-            offset_start=offset_start,
-            add_inputs=add_inputs,
-        )
-
-
 @final
-class PunicaWrapperGPU(PunicaWrapperBase, LoRAKernelMixin):
+class PunicaWrapperGPU(PunicaWrapperBase):
     """
     PunicaWrapperGPU is designed to manage and provide metadata for the punica 
     kernel. The main function is to maintain the state information for 
@@ -88,8 +38,12 @@ class PunicaWrapperGPU(PunicaWrapperBase, LoRAKernelMixin):
 
         self.max_loras = kwargs['max_loras']
 
-        self._make_metadata(self.max_loras, max_num_batched_tokens,
-                            max_batches, device)
+        self.token_mapping_meta = LoRAKernelMeta.make(self.max_loras,
+                                                      max_num_batched_tokens,
+                                                      device=device)
+        self.prompt_mapping_meta = LoRAKernelMeta.make(self.max_loras,
+                                                       max_batches,
+                                                       device=device)
 
     def update_metadata(
             self,
@@ -105,8 +59,10 @@ class PunicaWrapperGPU(PunicaWrapperBase, LoRAKernelMixin):
         self._update_base_metadata(mapping, lora_index_to_id, max_loras,
                                    vocab_size, extra_vocab_size,
                                    long_lora_context)
-        self._prepare_metadata_tensors(self.token_lora_indices,
-                                       self.sampler_indices)
+
+        # Prepare cuda kernel metadata tensors
+        self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
+        self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
     def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
                    x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
@@ -130,8 +86,13 @@ class PunicaWrapperGPU(PunicaWrapperBase, LoRAKernelMixin):
         """
 
         x = x.view(-1, x.shape[-1])
-
-        self._apply_shrink(y, x, lora_a_stacked, scale)  # type: ignore
+        lora_shrink(
+            x,
+            lora_a_stacked,
+            y,
+            *self.token_mapping_meta.meta_args(x.size(0)),
+            scale,
+        )
 
     def add_expand(self,
                    y: torch.Tensor,
@@ -169,12 +130,14 @@ class PunicaWrapperGPU(PunicaWrapperBase, LoRAKernelMixin):
             self._apply_bias(token_lora_indices, y, output_slices,
                              lora_bias_stacked)
 
-        self._apply_expand(
-            y,
-            x,  # type: ignore
+        lora_expand(
+            x,
             lora_b_stacked,
-            offset_start,
-            add_inputs=True)
+            y,
+            *self.token_mapping_meta.meta_args(x.size(0)),
+            offset_start=offset_start,
+            add_inputs=True,
+        )
 
         y = y.view_as(y_org)
 
@@ -197,10 +160,14 @@ class PunicaWrapperGPU(PunicaWrapperBase, LoRAKernelMixin):
             add_inputs (bool): Default to True.
         """
 
-        self._apply_expand(y,
-                           x.unsqueeze(dim=0), (lora_b_stacked, ),
-                           offset_start=0,
-                           add_inputs=add_inputs)
+        lora_expand(
+            x.unsqueeze(dim=0),
+            (lora_b_stacked, ),
+            y,
+            *self.token_mapping_meta.meta_args(x.size(0)),
+            offset_start=0,
+            add_inputs=add_inputs,
+        )
 
     def add_lora_linear(self,
                         y: torch.Tensor,
