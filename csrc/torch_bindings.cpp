@@ -627,6 +627,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.def("register_buffer", &register_buffer);
   custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
   custom_ar.def("register_graph_buffers", &register_graph_buffers);
+
+  custom_ar.def("allocate_shared_buffer_and_handle",
+                &allocate_shared_buffer_and_handle);
+  custom_ar.def("open_mem_handle(Tensor mem_handle) -> int", &open_mem_handle);
+  custom_ar.impl("open_mem_handle", torch::kCPU, &open_mem_handle);
+
+  custom_ar.def("free_shared_buffer", &free_shared_buffer);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

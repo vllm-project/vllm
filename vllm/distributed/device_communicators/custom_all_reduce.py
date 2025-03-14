@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import ctypes
 from contextlib import contextmanager
 from typing import List, Optional, Union
 
@@ -10,10 +9,8 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
-from vllm.distributed.device_communicators.rocm_wrapper import RocmLibrary
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -48,7 +45,7 @@ def is_weak_contiguous(inp: torch.Tensor):
                                    == inp.numel() * inp.element_size())
 
 
-class BaseCustomAllreduce:
+class CustomAllreduce:
 
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
 
@@ -96,12 +93,12 @@ class BaseCustomAllreduce:
             # No need to initialize custom allreduce for single GPU case.
             return
 
-        if world_size not in BaseCustomAllreduce._SUPPORTED_WORLD_SIZES:
+        if world_size not in CustomAllreduce._SUPPORTED_WORLD_SIZES:
             logger.warning(
                 "Custom allreduce is disabled due to an unsupported world"
                 " size: %d. Supported world sizes: %s. To silence this "
                 "warning, specify disable_custom_all_reduce=True explicitly.",
-                world_size, str(BaseCustomAllreduce._SUPPORTED_WORLD_SIZES))
+                world_size, str(CustomAllreduce._SUPPORTED_WORLD_SIZES))
             return
 
         if isinstance(device, int):
@@ -278,29 +275,7 @@ class BaseCustomAllreduce:
     def create_shared_buffer(size_in_bytes: int,
                              group: Optional[ProcessGroup] = None,
                              uncached: Optional[bool] = False) -> List[int]:
-        raise NotImplementedError()
-
-    @staticmethod
-    def free_shared_buffer(pointers: List[int],
-                           group: Optional[ProcessGroup] = None,
-                           rank: Optional[int] = 0) -> None:
-        raise NotImplementedError()
-
-
-class CudaCustomAllreduce(BaseCustomAllreduce):
-
-    @staticmethod
-    def create_shared_buffer(size_in_bytes: int,
-                             group: Optional[ProcessGroup] = None,
-                             uncached: Optional[bool] = False) -> List[int]:
-        """
-        Creates a shared buffer and returns a list of pointers
-        representing the buffer on all processes in the group.
-        uncached - ignored for CUDA GPUs
-        """
-        lib = CudaRTLibrary()  # type: ignore
-        pointer = lib.cudaMalloc(size_in_bytes)  # type: ignore
-        handle = lib.cudaIpcGetMemHandle(pointer)  # type: ignore
+        pointer, handle = ops.allocate_shared_buffer_and_handle(size_in_bytes)
 
         world_size = dist.get_world_size(group=group)
         rank = dist.get_rank(group=group)
@@ -310,10 +285,9 @@ class CudaCustomAllreduce(BaseCustomAllreduce):
         pointers: List[int] = []
         for i, h in enumerate(handles):
             if i == rank:
-                pointers.append(pointer.value)  # type: ignore
+                pointers.append(pointer)  # type: ignore
             else:
-                pointers.append(
-                    lib.cudaIpcOpenMemHandle(h).value)  # type: ignore
+                pointers.append(ops.open_mem_handle(h))
         return pointers
 
     @staticmethod
@@ -322,47 +296,4 @@ class CudaCustomAllreduce(BaseCustomAllreduce):
                            rank: Optional[int] = 0) -> None:
         if rank is None:
             rank = dist.get_rank(group=group)
-        lib = CudaRTLibrary()  # type: ignore
-        lib.cudaFree(ctypes.c_void_p(pointers[rank]))  # type: ignore
-
-
-class RocmCustomAllreduce(BaseCustomAllreduce):
-
-    @staticmethod
-    def create_shared_buffer(size_in_bytes: int,
-                             group: Optional[ProcessGroup] = None,
-                             uncached: Optional[bool] = False) -> List[int]:
-        """
-        Creates a shared buffer and returns a list of pointers
-        representing the buffer on all processes in the group.
-        uncached - meta data buffers need to be "uncached" for signal on MI200
-        """
-        lib = RocmLibrary()  # type: ignore
-        if uncached:
-            pointer = lib.hipMallocUncached(size_in_bytes)  # type: ignore
-        else:
-            pointer = lib.hipMalloc(size_in_bytes)  # type: ignore
-        handle = lib.hipIpcGetMemHandle(pointer)  # type: ignore
-
-        world_size = dist.get_world_size(group=group)
-        rank = dist.get_rank(group=group)
-        handles = [None] * world_size
-        dist.all_gather_object(handles, handle, group=group)
-
-        pointers: List[int] = []
-        for i, h in enumerate(handles):
-            if i == rank:
-                pointers.append(pointer.value)  # type: ignore
-            else:
-                pointers.append(
-                    lib.hipIpcOpenMemHandle(h).value)  # type: ignore
-        return pointers
-
-    @staticmethod
-    def free_shared_buffer(pointers: List[int],
-                           group: Optional[ProcessGroup] = None,
-                           rank: Optional[int] = 0) -> None:
-        if rank is None:
-            rank = dist.get_rank(group=group)
-        lib = RocmLibrary()  # type: ignore
-        lib.hipFree(ctypes.c_void_p(pointers[rank]))  # type: ignore
+        ops.free_shared_buffer(pointers[rank])

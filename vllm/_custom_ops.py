@@ -1369,6 +1369,18 @@ def register_graph_buffers(fa: int, handles: list[list[int]],
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
 
 
+def allocate_shared_buffer_and_handle(size: int) -> tuple[int, torch.Tensor]:
+    return torch.ops._C_custom_ar.allocate_shared_buffer_and_handle(size)
+
+
+def open_mem_handle(mem_handle: torch.Tensor):
+    return torch.ops._C_custom_ar.open_mem_handle(mem_handle)
+
+
+def free_shared_buffer(ptr: int) -> None:
+    torch.ops._C_custom_ar.free_shared_buffer(ptr)
+
+
 def get_flash_mla_metadata(
     cache_seqlens: torch.Tensor,
     num_heads_per_head_k: int,
