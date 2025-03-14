@@ -1137,7 +1137,7 @@ class CacheConfig:
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
             pass
-        elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
+        elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"):
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
@@ -2138,6 +2138,8 @@ class SpeculativeConfig:
             ray_workers_use_nsight=target_parallel_config.
             ray_workers_use_nsight,
             placement_group=target_parallel_config.placement_group,
+            enable_expert_parallel=target_parallel_config.
+            enable_expert_parallel,
         )
 
         return draft_parallel_config

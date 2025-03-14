@@ -32,7 +32,10 @@ class HpuPlatform(Platform):
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
         logger.info("Using HPUAttention backend.")
-        return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
+        if use_mla:
+            return "vllm.attention.backends.hpu_attn.HPUMLAAttentionBackend"
+        else:
+            return "vllm.attention.backends.hpu_attn.HPUAttentionBackend"
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -50,13 +53,15 @@ class HpuPlatform(Platform):
             raise NotImplementedError(
                 "Multi-step execution is not implemented for HPU")
 
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "Speculative decoding is not implemented for HPU")
-
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
+            if vllm_config.speculative_config:
+                parallel_config.worker_cls = \
+                    "vllm.spec_decode.spec_decode_worker.create_spec_worker"
+                parallel_config.sd_worker_cls = \
+                    "vllm.worker.hpu_worker.HPUWorker"
+            else:
+                parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
 
         # NOTE(kzawora): default block size for Gaudi should be 128
         # smaller sizes still work, but very inefficiently
