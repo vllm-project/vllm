@@ -20,7 +20,7 @@ Specifically, V1 aims to:
 - Require **zero configs** by enabling features/optimizations by default.
 
 We see significant performance improvements from upgrading to V1 core engine, in
-particular for long context scenarios. Please see performance benchmark [here](To be
+particular for long context scenarios. Please see performance benchmark (To be
 added).
 
 For more details, check out the vLLM V1 blog post [vLLM V1: A Major
@@ -62,7 +62,6 @@ This living user guide outlines a few known **important changes and limitations*
 - **🚧 WIP**: Under active development.  
 - **🟡 Planned**: Scheduled for future implementation (some may have open PRs/RFCs).  
 - **🔴 Deprecated**: Not planned for v1 unless there is strong demand.
-
 
 **Note**: vLLM V1’s unified scheduler treats both prompt and output tokens the same
 way by using a simple dictionary (e.g., {request_id: num_tokens}) to dynamically
@@ -132,7 +131,7 @@ in progress.
 
 - **FP8 KV Cache**: While vLLM V1 introduces new FP8 kernels for model weight quantization, support for an FP8 key–value cache is not yet available. Users must continue using FP16 (or other supported precisions) for the KV cache.
 
-- **Structured Output Alternative Backends**: For structured output tasks, V1 currently
+- **Structured Output Alternative Backends**: Structured output alternative backends (outlines, guidance) support is planned. V1 currently
   supports only the `xgrammar:no_fallback` mode, meaning that it will error out if the output schema is unsupported by xgrammar.
   Details about the structured outputs can be found
   [here](https://docs.vllm.ai/en/latest/features/structured_outputs.html).
