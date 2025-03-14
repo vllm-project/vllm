@@ -215,7 +215,7 @@ def test_processing_correctness(
 
 
 # yapf: disable
-@pytest.mark.parametrize("model_id", ["microsoft/Phi-3-vision-128k-instruct"])
+@pytest.mark.parametrize("model_id", ["microsoft/Phi-3.5-vision-instruct"])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
 @pytest.mark.parametrize("simplify_rate", [1.0])

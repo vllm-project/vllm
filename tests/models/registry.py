@@ -274,7 +274,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                               trust_remote_code=True),
     "PaliGemmaForConditionalGeneration": _HfExamplesInfo("google/paligemma-3b-mix-224",  # noqa: E501
                                                          extras={"v2": "google/paligemma2-3b-ft-docci-448"}),  # noqa: E501
-    "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3-vision-128k-instruct",
+    "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-vision-instruct",
                                         trust_remote_code=True),
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
