@@ -205,11 +205,8 @@ class VocabParallelEmbedding(torch.nn.Module):
                  org_num_embeddings: Optional[int] = None,
                  padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = "",
-                 is_model_last=True):
+                 prefix: str = ""):
         super().__init__()
-
-        self.is_model_last = is_model_last
         # Keep the input dimensions.
         tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()

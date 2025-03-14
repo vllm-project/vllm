@@ -437,7 +437,7 @@ class EngineArgs:
                             help='Number of tensor parallel replicas.')
         parser.add_argument('--enable-sequence-parallel',
                             '-sp',
-                            type=bool,
+                            action='store_true',
                             default=False,
                             help='If enable sequence parallel')
         parser.add_argument(

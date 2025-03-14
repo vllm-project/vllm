@@ -1740,7 +1740,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config, virtual_engine, 
                                      model_input.input_tokens.shape[0]):
-                print(f"model executable num_tokens={model_input.input_tokens.shape[0]}")
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,

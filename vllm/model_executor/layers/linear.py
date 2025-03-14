@@ -471,6 +471,7 @@ class ColumnParallelLinear(LinearBase):
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
         
+        before_all_gather = input_.size()
         if get_forward_context().enable_sequence_parallel:
             input_shape = input_.shape
             input_ = tensor_model_parallel_all_gather(input_, 0)
