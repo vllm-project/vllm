@@ -132,10 +132,10 @@ class Processor:
                              "supported in V1.")
         if params.guided_decoding.backend:
             if params.guided_decoding.backend != engine_level_backend:
-                raise ValueError("Request-level structured output backend must"
-                                 " match engine-level backend. "
-                                 "{params.guided_decoding.backend}"
-                                 " != {engine_level_backend}")
+                raise ValueError("Request-level structured output backend "
+                                 "must match engine-level backend. "
+                                 f"{params.guided_decoding.backend}"
+                                 f" != {engine_level_backend}")
         else:
             params.guided_decoding.backend = engine_level_backend
 
