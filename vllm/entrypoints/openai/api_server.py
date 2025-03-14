@@ -80,7 +80,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.utils import with_cancellation
+from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
@@ -347,6 +347,24 @@ async def health(raw_request: Request) -> Response:
     return Response(status_code=200)
 
 
+@router.get("/load")
+async def get_server_load_metrics(request: Request):
+    # This endpoint returns the current server load metrics.
+    # It tracks requests utilizing the GPU from the following routes:
+    # - /v1/chat/completions
+    # - /v1/completions
+    # - /v1/audio/transcriptions
+    # - /v1/embeddings
+    # - /pooling
+    # - /score
+    # - /v1/score
+    # - /rerank
+    # - /v1/rerank
+    # - /v2/rerank
+    return JSONResponse(
+        content={'server_load': request.app.state.server_load_metrics})
+
+
 @router.api_route("/ping", methods=["GET", "POST"])
 async def ping(raw_request: Request) -> Response:
     """Ping check. Endpoint required for SageMaker"""
@@ -400,6 +418,7 @@ async def show_version():
 @router.post("/v1/chat/completions",
              dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     handler = chat(raw_request)
@@ -421,6 +440,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
 @router.post("/v1/completions", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
@@ -439,6 +459,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 @router.post("/v1/embeddings", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
@@ -485,6 +506,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 
 @router.post("/pooling", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_pooling(request: PoolingRequest, raw_request: Request):
     handler = pooling(raw_request)
     if handler is None:
@@ -503,6 +525,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
 
 @router.post("/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
     if handler is None:
@@ -521,6 +544,7 @@ async def create_score(request: ScoreRequest, raw_request: Request):
 
 @router.post("/v1/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
     logger.warning(
         "To indicate that Score API is not part of standard OpenAI API, we "
@@ -531,10 +555,10 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
 
 @router.post("/v1/audio/transcriptions")
 @with_cancellation
+@load_aware_call
 async def create_transcriptions(request: Annotated[TranscriptionRequest,
                                                    Form()],
                                 raw_request: Request):
-
     handler = transcription(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
@@ -556,6 +580,7 @@ async def create_transcriptions(request: Annotated[TranscriptionRequest,
 
 @router.post("/rerank", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def do_rerank(request: RerankRequest, raw_request: Request):
     handler = rerank(raw_request)
     if handler is None:
@@ -893,6 +918,9 @@ async def init_app_state(
         request_logger=request_logger,
     ) if model_config.runner_type == "transcription" else None
     state.task = model_config.task
+
+    state.enable_server_load_tracking = args.enable_server_load_tracking
+    state.server_load_metrics = 0
 
 
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
