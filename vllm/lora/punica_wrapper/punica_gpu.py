@@ -64,9 +64,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
-    def add_shrink(self, y: Union[Tuple[torch.Tensor, ...], torch.Tensor],
-                   x: torch.Tensor, lora_a_stacked: Tuple[torch.Tensor, ...],
-                   scale: float, **kwargs):
+    def add_shrink(self, y: torch.Tensor, x: torch.Tensor,
+                   lora_a_stacked: Tuple[torch.Tensor,
+                                         ...], scale: float, **kwargs):
         """
         Performs GEMM  for multiple slices of lora_a.
         When `is_prefill is` true, it indicates that it is currently the
@@ -79,7 +79,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             y[i] += (x @ lora_a_stacked[i]) * scale
         
         Args:
-            y (Union[Tuple[torch.Tensor, ...], torch.Tensor]): Output tensors
+            y (torch.Tensor): Output tensors
             x (torch.Tensor): Input tensor
             lora_a_stacked (Tuple[torch.Tensor, ...]): lora_a's weights
             scale (float): Scaling factor for the operation
@@ -96,7 +96,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
     def add_expand(self,
                    y: torch.Tensor,
-                   x: Union[Tuple[torch.Tensor, ...], torch.Tensor],
+                   x: torch.Tensor,
                    lora_b_stacked: Tuple[torch.Tensor, ...],
                    lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
                    output_slices: Tuple[int, ...],
@@ -115,7 +115,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             
         Args:
             y (torch.Tensor): Output tensor.
-            x (Union[Tuple[torch.Tensor, ...], torch.Tensor]): Input tensors
+            x (torch.Tensor): Input tensors
             lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight
             lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): 
                 bias's weight
@@ -130,11 +130,15 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             self._apply_bias(token_lora_indices, y, output_slices,
                              lora_bias_stacked)
 
+        assert x.ndim == 3
+        assert x.size(0) == len(output_slices)
+        num_tokens = x.size(1)  # first dimension is the num slices
+
         lora_expand(
             x,
             lora_b_stacked,
             y,
-            *self.token_mapping_meta.meta_args(x.size(0)),
+            *self.token_mapping_meta.meta_args(num_tokens),
             offset_start=offset_start,
             add_inputs=True,
         )
@@ -178,7 +182,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                         scale: float,
                         output_slices: Tuple[int, ...],
                         *,
-                        buffer: Optional[Tuple[torch.Tensor, ...]] = None,
+                        buffer: Optional[torch.Tensor] = None,
                         **kwargs) -> None:
         """
         Applicable to linear-related lora. 
@@ -200,7 +204,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): lora's bias.
             scale (float): Scaling factor.
             output_slices (Tuple[int, ...]): Every slice's size.
-            buffer (Optional[Tuple[torch.Tensor, ...]]): Defaults to None.
+            buffer (Optional[torch.Tensor]): Defaults to None.
         """
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
