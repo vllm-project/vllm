@@ -110,7 +110,7 @@ In addition to serving LoRA adapters at server startup, the vLLM server now supp
 LoRA adapters at runtime through dedicated API endpoints. This feature can be particularly useful when the flexibility
 to change models on-the-fly is needed.
 
-Note: Enabling this feature in production environments is risky as user may participate model adapter management.
+Note: Enabling this feature in production environments is risky as users may participate in model adapter management.
 
 To enable dynamic LoRA loading and unloading, ensure that the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING`
 is set to `True`. When this option is enabled, the API server will log a warning to indicate that dynamic loading is active.
