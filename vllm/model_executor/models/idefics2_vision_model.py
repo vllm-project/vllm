@@ -113,7 +113,7 @@ class Idefics2VisionAttention(nn.Module):
 
     def __init__(
         self,
-        config: Idefics2Config,
+        config: Idefics2VisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -164,7 +164,7 @@ class Idefics2VisionMLP(nn.Module):
 
     def __init__(
         self,
-        config: Idefics2Config,
+        config: Idefics2VisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -191,6 +191,39 @@ class Idefics2VisionMLP(nn.Module):
         hidden_states = self.activation_fn(hidden_states)
         hidden_states, _ = self.fc2(hidden_states)
         return hidden_states
+
+
+class Idefics2MultiheadAttentionPoolingHead(nn.Module):
+    """Multihead Attention Pooling."""
+
+    def __init__(
+        self,
+        config: Idefics2VisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+
+        self.probe = nn.Parameter(torch.randn(1, 1, config.hidden_size))
+        self.attention = torch.nn.MultiheadAttention(
+            config.hidden_size, config.num_attention_heads, batch_first=True)
+        self.layernorm = nn.LayerNorm(config.hidden_size,
+                                      eps=config.layer_norm_eps)
+        self.mlp = Idefics2VisionMLP(config=config,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.mlp")
+
+    def forward(self, hidden_state):
+        batch_size = hidden_state.shape[0]
+        probe = self.probe.repeat(batch_size, 1, 1)
+
+        hidden_state = self.attention(probe, hidden_state, hidden_state)[0]
+
+        residual = hidden_state
+        hidden_state = self.layernorm(hidden_state)
+        hidden_state = residual + self.mlp(hidden_state)
+
+        return hidden_state[:, 0]
 
 
 class Idefics2EncoderLayer(nn.Module):
@@ -299,6 +332,14 @@ class Idefics2VisionTransformer(nn.Module):
                                        prefix=f"{prefix}.encoder")
         self.post_layernorm = nn.LayerNorm(embed_dim,
                                            eps=config.layer_norm_eps)
+        self.use_head = (False if not hasattr(config, "vision_use_head") else
+                         config.vision_use_head)
+        if self.use_head:
+            self.head = Idefics2MultiheadAttentionPoolingHead(
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.head",
+            )
 
     def get_input_embeddings(self):
         return self.embeddings
@@ -316,6 +357,8 @@ class Idefics2VisionTransformer(nn.Module):
         )
         encoder_outputs = self.encoder(hidden_states)
         last_hidden_state = self.post_layernorm(encoder_outputs)
+        if self.use_head:
+            last_hidden_state = self.head(last_hidden_state)
         return last_hidden_state
 
     def load_weights(self, weights: Iterable[Tuple[str,
