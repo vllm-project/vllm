@@ -18,11 +18,11 @@ from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
 from vllm.inputs import InputProcessingContext
+from vllm.jsontree import json_map_leaves, json_reduce_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
-from vllm.utils import (GiB_bytes, flatten_2d_lists, full_groupby,
-                        json_map_leaves, json_reduce_leaves)
+from vllm.utils import GiB_bytes, flatten_2d_lists, full_groupby
 
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
