@@ -5,7 +5,7 @@ from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
 
 import torch
 from torch import Tensor
-from typing_extensions import TypeIs
+from typing_extensions import Self, TypeIs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -451,7 +451,7 @@ class SupportsQuant:
     packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
     quant_config: Optional[QuantizationConfig] = None
 
-    def __new__(cls, *args, **kwargs) -> "SupportsQuant":
+    def __new__(cls, *args, **kwargs) -> Self:
         instance = super().__new__(cls)
         quant_config = cls._find_quant_config(*args, **kwargs)
         if quant_config is not None:
