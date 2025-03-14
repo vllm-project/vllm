@@ -675,14 +675,19 @@ def moe_align_block_size(
 
 
 def valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
-                    w2: torch.Tensor, use_fp8_w8a8: bool) -> bool:
+                    w2: torch.Tensor, block_shape: Optional[List[int]],
+                    use_fp8_w8a8: bool) -> bool:
     if not has_deep_gemm or not use_fp8_w8a8:
         return False
 
     align = dg.get_m_alignment_for_contiguous_layout()
     M, K = hidden_states.shape
     N = w2.shape[-1]
-    if M < align or  N % align != 0 or K % align != 0:
+    if align > M or N % align != 0 or K % align != 0:
+        return False
+
+    if block_shape is not None and (block_shape[0] != align
+                                    or block_shape[1] != align):
         return False
 
     return (hidden_states.is_contiguous() and w1.is_contiguous()
@@ -725,21 +730,19 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                 -2], f"{B.shape[-2]}/{block_n}, {B_scale.shape[-2]}"
             assert triton.cdiv(B.shape[-1], block_k) == B_scale.shape[-1]
 
-        if use_dg:
-            if not mul_routed_weight:
-                # Replicate activations
-                A = A.view(A.shape[0], -1,
-                           A.shape[1]).repeat(1, top_k,
-                                              1).reshape(-1, A.shape[1])
-                A_scale = A_scale.view(A_scale.shape[0],
-                                       -1, A_scale.shape[1]).repeat(
-                                           1, top_k,
-                                           1).reshape(-1, A_scale.shape[1])
+        if use_dg and not mul_routed_weight:
+            # Replicate activations
+            A = A.view(A.shape[0], -1,
+                       A.shape[1]).repeat(1, top_k, 1).reshape(-1, A.shape[1])
+            A_scale = A_scale.view(A_scale.shape[0], -1,
+                                   A_scale.shape[1]).repeat(
+                                       1, top_k,
+                                       1).reshape(-1, A_scale.shape[1])
 
-                # Permute according to sorted token ids.
-                A = A.view(dtype=torch.uint8)[sorted_token_ids,
-                                              ...].view(dtype=A.dtype)
-                A_scale = A_scale[sorted_token_ids]
+            # Permute according to sorted token ids.
+            A = A.view(dtype=torch.uint8)[sorted_token_ids,
+                                          ...].view(dtype=A.dtype)
+            A_scale = A_scale[sorted_token_ids]
 
     elif use_int8_w8a16 or use_int4_w4a16:
         assert B_scale is not None
@@ -1450,7 +1453,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                         dtype=hidden_states.dtype)
 
     use_dg = allow_deep_gemm and valid_deep_gemm(hidden_states, w1, w2,
-                                                 use_fp8_w8a8)
+                                                 block_shape, use_fp8_w8a8)
 
     get_config_func = functools.partial(
         try_get_optimal_moe_config,
@@ -1503,7 +1506,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     chunked_dg = False
     if use_dg:
         if M % block_m != 0:
-            CHUNK_SIZE = min((M //block_m) * block_m, CHUNK_SIZE)
+            CHUNK_SIZE = min((M // block_m) * block_m, CHUNK_SIZE)
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
         chunked_dg = num_chunks > 1
@@ -1546,7 +1549,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
-
     for chunk in range(num_chunks):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
@@ -1568,7 +1570,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
         if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or chunked_dg:
             if chunked_dg:
-                slice_size = ((sorted_token_ids.numel() + block_m - 1) // block_m) * block_m
+                slice_size = ((sorted_token_ids.numel() + block_m - 1) //
+                              block_m) * block_m
                 slice_topk = 1
             else:
                 slice_size = tokens_in_chunk
@@ -1579,13 +1582,21 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             # so the cache size and config are already set correctly and
             # do not need to be adjusted.
             if skip_dg:
-                assert tokens_in_chunk * top_k_num < intermediate_cache1.shape[0]
-                intermediate_cache1 = intermediate_cache1[:(tokens_in_chunk*top_k_num)].view(-1, top_k_num, N)
+                assert tokens_in_chunk * top_k_num < intermediate_cache1.shape[
+                    0]
+                intermediate_cache1 = intermediate_cache1[:(tokens_in_chunk *
+                                                            top_k_num)].view(
+                                                                -1, top_k_num,
+                                                                N)
                 intermediate_cache2 = intermediate_cache2.view(-1, N // 2)
-                intermediate_cache3 = intermediate_cache3[:(tokens_in_chunk*top_k_num)].view(-1, top_k_num, w2.shape[1])
+                intermediate_cache3 = intermediate_cache3[:(tokens_in_chunk *
+                                                            top_k_num)].view(
+                                                                -1, top_k_num,
+                                                                w2.shape[1])
             else:
                 intermediate_cache1 = intermediate_cache1[:slice_size]
-                intermediate_cache2 = intermediate_cache2[:slice_size * slice_topk]
+                intermediate_cache2 = intermediate_cache2[:slice_size *
+                                                          slice_topk]
                 intermediate_cache3 = intermediate_cache3[:slice_size]
 
             config = get_config_func(slice_size)
@@ -1593,8 +1604,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         inv_perm: Optional[torch.Tensor] = None
 
         if use_dg and not skip_dg:
-            inv_perm = torch.argsort(sorted_token_ids)
-
             max_token_id = top_k_num * tokens_in_chunk
             pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) *
                         block_m) - sorted_token_ids.numel()
@@ -1603,6 +1612,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                     sorted_token_ids, (0, pad_size), "constant", max_token_id)
 
             sorted_token_ids = sorted_token_ids.clamp(max=max_token_id - 1)
+            inv_perm = torch.argsort(sorted_token_ids)
+
             expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
 
         invoke_fused_moe_kernel(curr_hidden_states,
