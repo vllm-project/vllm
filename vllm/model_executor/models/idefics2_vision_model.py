@@ -282,16 +282,24 @@ class Idefics2Encoder(nn.Module):
         self,
         config: Idefics2Config,
         quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
 
         self.config = config
+
+        if num_hidden_layers_override is None:
+            num_hidden_layers = config.num_hidden_layers
+        else:
+            num_hidden_layers = num_hidden_layers_override
+
         self.layers = nn.ModuleList([
             Idefics2EncoderLayer(config,
                                  quant_config=quant_config,
                                  prefix=f"{prefix}.layers.{layer_idx}")
-            for layer_idx in range(config.num_hidden_layers)
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(
@@ -320,6 +328,8 @@ class Idefics2VisionTransformer(nn.Module):
         self,
         config: Idefics2VisionConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -327,9 +337,19 @@ class Idefics2VisionTransformer(nn.Module):
         embed_dim = config.hidden_size
         self.config = config
         self.embeddings = Idefics2VisionEmbeddings(config)
-        self.encoder = Idefics2Encoder(config,
-                                       quant_config=quant_config,
-                                       prefix=f"{prefix}.encoder")
+        self.encoder = Idefics2Encoder(
+            config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers_override,
+            prefix=f"{prefix}.encoder")
+
+        num_hidden_layers = config.num_hidden_layers
+        if len(self.encoder.layers) > config.num_hidden_layers:
+            raise ValueError(
+                f"The original encoder only has {num_hidden_layers} "
+                f"layers, but you requested {len(self.encoder.layers)} layers."
+            )
+
         self.post_layernorm = nn.LayerNorm(embed_dim,
                                            eps=config.layer_norm_eps)
 

@@ -348,12 +348,20 @@ def get_navit_vision_model(**kwargs):
         "num_attention_heads": 16,
         "num_hidden_layers": 27,
         "patch_size": 14,
-        "vision_use_head": True,
+        "layer_idx": -2,
     }
 
     model_config = SiglipVisionConfig(**vision_config, **kwargs)
+    if (layer_idx := model_config.layer_idx) < 0:
+        num_hidden_layers = model_config.num_hidden_layers \
+            + layer_idx + 1
+    else:
+        num_hidden_layers = layer_idx + 1
 
-    vision_model = Idefics2VisionTransformer(config=model_config)
+    vision_model = Idefics2VisionTransformer(
+        config=model_config,
+        num_hidden_layers_override=num_hidden_layers,
+    )
 
     return vision_model
 
