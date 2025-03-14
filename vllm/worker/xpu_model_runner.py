@@ -165,6 +165,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         num_prefills = 0
         num_prefill_tokens = 0
         num_decode_tokens = 0
+        mrope_input_positions = None
 
         if len(self.seq_group_metadata_list) == 0:
             return None
@@ -266,13 +267,13 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                                 context_len=0,
                             )
                         seq_data.mrope_position_delta = mrope_position_delta
-                        mrope_input_positions = [[] for _ in range(3)]
+                        if mrope_input_positions is None:
+                            mrope_input_positions = [[] for _ in range(3)]
                         for idx in range(3):
                             # msections = temp_mrope_input_positions
                             # for _seq_mrope_input_positions in msections:
                             mrope_input_positions[idx].extend(
                                 temp_mrope_input_positions[idx])
-                        input_positions = mrope_input_positions
                 if is_prompt:
                     assert len(seq_ids) == 1
                     num_prefills += 1
@@ -318,12 +319,20 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 dtype=torch.int,
                 device=self.device,
             )
+
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
                                            device=self.device)
-        input_positions_tensor = torch.tensor(input_positions,
-                                              dtype=torch.long,
-                                              device=self.device)
+
+        if self.runner.model_is_mrope and mrope_input_positions is not None:
+            input_positions_tensor = torch.tensor(mrope_input_positions,
+                                                  dtype=torch.long,
+                                                  device=self.device)
+        else:
+            input_positions_tensor = torch.tensor(input_positions,
+                                                  dtype=torch.long,
+                                                  device=self.device)
+
         slot_mapping_tensor = torch.tensor(slot_mapping,
                                            dtype=torch.long,
                                            device=self.device)
