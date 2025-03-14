@@ -119,7 +119,7 @@ If you're observing the following error: `docker: Error response from daemon: Un
 
 ## Supported configurations
 
-The following configurations have been validated to be function with
+The following configurations have been validated to function with
 Gaudi2 devices. Configurations that are not listed may or may not work.
 
 - [meta-llama/Llama-2-7b](https://huggingface.co/meta-llama/Llama-2-7b)

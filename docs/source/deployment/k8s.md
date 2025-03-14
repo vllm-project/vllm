@@ -14,7 +14,7 @@ Alternatively, you can also deploy Kubernetes using [helm chart](https://docs.vl
 
 ## Pre-requisite
 
-Ensure that you have a running Kubernetes environment with GPU (you can follow [this tutorial](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) to install a Kubernetes environment on a bare-medal GPU machine).
+Ensure that you have a running Kubernetes environment with GPU (you can follow [this tutorial](https://github.com/vllm-project/production-stack/blob/main/tutorials/00-install-kubernetes-env.md) to install a Kubernetes environment on a bare-metal GPU machine).
 
 ## Deployment using native K8s
 
