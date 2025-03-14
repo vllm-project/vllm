@@ -823,17 +823,17 @@ class ProcessingCache:
 
     @staticmethod
     def get_lru_cache(
-            capacity_gb: int,
-            value_type: type[_V],  # For type annotation only
-    ) -> "LRUCache[str, _V]":
+        capacity_gb: int,
+        value_type: type[_V],
+    ) -> LRUCache[str, _V]:
 
-        def get_size(leaf: object):
+        def get_size(leaf: object) -> int:
             if isinstance(leaf, (torch.Tensor, np.ndarray)):
                 return leaf.nbytes
 
             return sys.getsizeof(leaf)
 
-        return LRUCache(
+        return LRUCache[str, _V](
             GiB_bytes * capacity_gb,
             getsizeof=lambda x: json_reduce_leaves(
                 lambda a, b: a + b,
