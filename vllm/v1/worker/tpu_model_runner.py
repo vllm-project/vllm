@@ -69,6 +69,7 @@ class TPUModelRunner:
         parallel_config = self.parallel_config
         self.device = device
         self.num_xla_graphs = xr.get_num_cached_compilation_graph()
+        self.enforce_eager = model_config.enforce_eager
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
 
@@ -650,7 +651,8 @@ class TPUModelRunner:
         )
         # check there is no new graph compilation, all the graphs should be
         # captured and compiled during warming up.
-        assert self.num_xla_graphs == xr.get_num_cached_compilation_graph()
+        if not self.enforce_eager:
+            assert self.num_xla_graphs == xr.get_num_cached_compilation_graph()
         return model_runner_output
 
     def load_model(self) -> None:
