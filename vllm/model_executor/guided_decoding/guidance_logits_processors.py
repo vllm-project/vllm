@@ -145,3 +145,51 @@ class GuidanceLogitsProcessor:
         self.new_sampling = True
 
         return scores
+
+
+class JsonGuidanceLogitsProcessor(GuidanceLogitsProcessor):
+    """Json Guidance Logits Processor"""
+
+    def __init__(
+        self,
+        guide: Union[dict, Type[BaseModel], str],
+        tokenizer: PreTrainedTokenizerBase,
+        whitespace_pattern: Union[str, None] = None,
+    ):
+        super().__init__("json", guide, tokenizer, whitespace_pattern)
+
+
+class RegexGuidanceLogitsProcessor(GuidanceLogitsProcessor):
+    """Regex Guidance Logits Processor"""
+
+    def __init__(
+        self,
+        guide: str,
+        tokenizer: PreTrainedTokenizerBase,
+        whitespace_pattern: Union[str, None] = None,
+    ):
+        super().__init__("regex", guide, tokenizer, whitespace_pattern)
+
+
+class ChoiceGuidanceLogitsProcessor(GuidanceLogitsProcessor):
+    """Choice Guidance Logits Processor"""
+
+    def __init__(
+        self,
+        guide: str,
+        tokenizer: PreTrainedTokenizerBase,
+        whitespace_pattern: Union[str, None] = None,
+    ):
+        super().__init__("choice", guide, tokenizer, whitespace_pattern)
+
+
+class GrammarGuidanceLogitsProcessor(GuidanceLogitsProcessor):
+    """Grammar Guidance Logits Processor"""
+
+    def __init__(
+        self,
+        guide: str,
+        tokenizer: PreTrainedTokenizerBase,
+        whitespace_pattern: Union[str, None] = None,
+    ):
+        super().__init__("grammar", guide, tokenizer, whitespace_pattern)

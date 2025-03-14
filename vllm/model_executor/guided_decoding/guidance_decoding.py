@@ -1,21 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-from enum import Enum
 from re import escape as regex_escape
 from typing import Union
 
 from transformers import PreTrainedTokenizerBase
 
 from vllm.model_executor.guided_decoding.guidance_logits_processors import (
-    GuidanceLogitsProcessor)
+    ChoiceGuidanceLogitsProcessor, GrammarGuidanceLogitsProcessor,
+    GuidanceLogitsProcessor, JsonGuidanceLogitsProcessor,
+    RegexGuidanceLogitsProcessor)
 from vllm.sampling_params import GuidedDecodingParams
-
-
-class GuidedDecodingMode(Enum):
-    JSON = "json"
-    JSON_OBJECT = "json_object"
-    REGEX = "regex"
-    CHOICE = "choice"
-    GRAMMAR = "grammar"
 
 
 def get_local_guidance_guided_decoding_logits_processor(
@@ -27,31 +20,24 @@ def get_local_guidance_guided_decoding_logits_processor(
     We cache logit processors by (guide, tokenizer), and on cache hit
     we make a shallow copy to reuse the same underlying FSM.
     """
-    guide = None
-    mode = None
 
     if guided_params.json:
-        guide = guided_params.json
-        mode = GuidedDecodingMode.JSON.value
+        return JsonGuidanceLogitsProcessor(guided_params.json, tokenizer,
+                                           guided_params.whitespace_pattern)
     elif guided_params.json_object:
-        guide = '{"type": "object"}'
-        mode = GuidedDecodingMode.JSON_OBJECT.value
+        return JsonGuidanceLogitsProcessor('{"type": "object"}', tokenizer,
+                                           guided_params.whitespace_pattern)
     elif guided_params.regex:
-        guide = guided_params.regex
-        mode = GuidedDecodingMode.REGEX.value
+        return RegexGuidanceLogitsProcessor(guided_params.regex, tokenizer,
+                                            None)
     elif guided_params.choice:
         # choice just uses regex
         choices = (regex_escape(str(choice))
                    for choice in guided_params.choice)
         choices_regex = "(" + "|".join(choices) + ")"
-        guide = choices_regex
-        mode = GuidedDecodingMode.CHOICE.value
+        return ChoiceGuidanceLogitsProcessor(choices_regex, tokenizer, None)
     elif guided_params.grammar:
-        guide = guided_params.grammar
-        mode = GuidedDecodingMode.GRAMMAR.value
+        return GrammarGuidanceLogitsProcessor(guided_params.grammar, tokenizer,
+                                              None)
 
-    if not guide or not mode:
-        return None
-
-    return GuidanceLogitsProcessor(mode, guide, tokenizer,
-                                   guided_params.whitespace_pattern)
+    return None
