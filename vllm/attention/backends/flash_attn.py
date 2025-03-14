@@ -19,10 +19,10 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 # yapf: enable
 from vllm.attention.backends.utils import (
     PAD_SLOT_ID, CommonAttentionState, compute_slot_mapping,
-    compute_slot_mapping_start_idx, get_flash_attn_version,
-    get_num_prefill_decode_query_kv_tokens, get_seq_len_block_table_args,
-    is_all_cross_attn_metadata_set, is_all_encoder_attn_metadata_set,
-    is_block_tables_empty)
+    compute_slot_mapping_start_idx, get_num_prefill_decode_query_kv_tokens,
+    get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
+    is_all_encoder_attn_metadata_set, is_block_tables_empty)
+from vllm.fa_utils import get_flash_attn_version
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
@@ -630,9 +630,11 @@ class FlashAttentionImpl(AttentionImpl):
         self.sliding_window = ((sliding_window - 1,
                                 0) if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        self.vllm_flash_attn_version = get_flash_attn_version()
+        if (is_quantized_kv_cache(self.kv_cache_dtype)
+                and self.vllm_flash_attn_version != 3):
             raise NotImplementedError(
-                "FlashAttention with FP8 KV cache not yet supported")
+                "Only FlashAttention3 supports FP8 KV cache")
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -647,7 +649,6 @@ class FlashAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by FlashAttention. "
                 f"Supported head sizes are: {support_head_sizes}.")
         self.attn_type = attn_type
-        self.vllm_flash_attn_version = get_flash_attn_version()
 
     def forward(
         self,

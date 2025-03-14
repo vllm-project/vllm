@@ -212,11 +212,11 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionState, MLAAttentionImpl)
 from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
-                                           get_flash_attn_version,
                                            is_block_tables_empty)
 from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.distributed import (get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.fa_utils import get_flash_attn_version
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
