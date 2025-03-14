@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields
 from functools import cached_property
-from typing import Iterable, List, Mapping, Optional, Set, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -683,79 +684,6 @@ class VisionLanguageAdapter(nn.Module):
 # and [`MistralForCausalLM`] for its language decoder.
 
 
-def get_pixtral_hf_patch_grid_length(*, image_size: int,
-                                     patch_size: int) -> int:
-    # Since interpolation is applied, the image size need not be divisible
-    # assert image_size % patch_size == 0
-    return image_size // patch_size
-
-
-def get_pixtral_hf_image_feature_size(
-    *,
-    image_size: int,
-    patch_size: int,
-) -> int:
-    grid_length = get_pixtral_hf_patch_grid_length(
-        image_size=image_size,
-        patch_size=patch_size,
-    )
-
-    # Consider the image_break_token
-    return (grid_length + 1) * grid_length
-
-
-def get_max_pixtral_hf_image_tokens(hf_config: PixtralVisionConfig) -> int:
-    grid_length = get_pixtral_hf_patch_grid_length(
-        image_size=hf_config.image_size,
-        patch_size=hf_config.patch_size,
-    )
-
-    # Consider the image_break_token
-    return (grid_length + 1) * grid_length
-
-
-def dummy_image_for_pixtral_hf(
-    hf_config: PixtralVisionConfig,
-    num_images: int,
-    *,
-    image_width_override: Optional[int] = None,
-    image_height_override: Optional[int] = None,
-):
-    width = height = hf_config.image_size
-    if image_width_override is not None:
-        width = image_width_override
-    if image_height_override is not None:
-        height = image_height_override
-
-    image = Image.new("RGB", (width, height), color=0)
-    return {"image": image if num_images == 1 else [image] * num_images}
-
-
-# Adapted from transformers.models.pixtral.image_processing_pixtral.get_resize_output_image_size # noqa: E501
-# https://github.com/huggingface/transformers/blob/2bd4d5897dc73e8b172832070a6f9e567a0df017/src/transformers/models/pixtral/image_processing_pixtral.py#L180
-def get_pixtral_hf_image_feature_grid_size(
-    hf_config: PixtralVisionConfig,
-    *,
-    image_width: int,
-    image_height: int,
-) -> tuple[int, int]:
-    max_width = max_height = hf_config.image_size
-    patch_width = patch_height = hf_config.patch_size
-
-    ratio = max(image_width / max_width, image_height / max_height)
-
-    if ratio > 1:
-        image_width = int(math.ceil(image_width / ratio))
-        image_height = int(math.ceil(image_height / ratio))
-
-    nrows, ncols = _get_pixtral_hf_num_image_tokens(
-        (image_height, image_width),
-        (patch_height, patch_width),
-    )  # type: ignore
-
-    return ncols, nrows
-
-
 class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
 
     def get_num_image_tokens(
@@ -764,13 +692,21 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         image_width: int,
         image_height: int,
     ) -> int:
-        return get_pixtral_hf_image_feature_size(
-            image_size=self.vision_config.image_size,
-            patch_size=self.vision_config.patch_size,
+        ncols, nrows = self.get_patch_grid_size(
+            image_width=image_width,
+            image_height=image_height,
         )
 
+        # Consider the image_break_token
+        return (ncols + 1) * nrows
+
     def get_max_image_tokens(self) -> int:
-        return get_max_pixtral_hf_image_tokens(self.vision_config)
+        image_size = self.get_image_size()
+
+        return self.get_num_image_tokens(
+            image_width=image_size,
+            image_height=image_size,
+        )
 
     def get_image_size(self) -> int:
         return self.vision_config.image_size
@@ -779,10 +715,34 @@ class PixtralHFEncoderInfo(VisionEncoderInfo[PixtralVisionConfig]):
         return self.vision_config.patch_size
 
     def get_patch_grid_length(self) -> int:
-        return get_pixtral_hf_patch_grid_length(
-            image_size=self.vision_config.image_size,
-            patch_size=self.vision_config.patch_size,
-        )
+        image_size, patch_size = self.get_image_size(), self.get_patch_size()
+
+        # Since interpolation is applied, the image size need not be divisible
+        # assert image_size % patch_size == 0
+        return image_size // patch_size
+
+    # Adapted from: https://github.com/huggingface/transformers/blob/v4.49.0/src/transformers/models/pixtral/image_processing_pixtral.py#L99
+    def get_patch_grid_size(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> tuple[int, int]:
+        max_width = max_height = self.get_image_size()
+        patch_width = patch_height = self.get_patch_size()
+
+        ratio = max(image_width / max_width, image_height / max_height)
+
+        if ratio > 1:
+            image_width = int(math.ceil(image_width / ratio))
+            image_height = int(math.ceil(image_height / ratio))
+
+        nrows, ncols = _get_pixtral_hf_num_image_tokens(
+            (image_height, image_width),
+            (patch_height, patch_width),
+        )  # type: ignore
+
+        return ncols, nrows
 
 
 class PixtralHFMLP(nn.Module):

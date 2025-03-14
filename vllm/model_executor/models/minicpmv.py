@@ -24,7 +24,6 @@
 """Inference-only MiniCPM-V model compatible with HuggingFace weights."""
 import math
 import re
-from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property, partial
 from typing import (Any, Callable, Dict, List, Literal, Optional, Set, Tuple,
@@ -51,13 +50,16 @@ from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, PlaceholderRange)
-from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem, ImageSize,
+                                    MultiModalInputs, NestedTensors,
+                                    PlaceholderRange)
+from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
+                                   ImageProcessorItems, ImageSize,
                                    ModalityData, ModalityDataItems,
                                    MultiModalDataItems, MultiModalDataParser,
-                                   VideoItem)
+                                   VideoItem, VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -557,8 +559,13 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         outputs = {key: outputs[key][0] for key in valid_keys}
         return outputs
 
-    def process_images(self, mm_data: Mapping[str, object],
-                       mm_kwargs: Mapping[str, object]) -> Dict[str, object]:
+    def process_images(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        mm_data = dict(mm_data)
+
         images = mm_data.pop("images", [])
         image_embeds = mm_data.pop("image_embeds", [])
         if isinstance(images, Image.Image):
@@ -568,8 +575,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 prompt=self.info.image_pattern * len(images),
                 mm_data={"images": images},
                 mm_kwargs=mm_kwargs)
-            image_outputs = MiniCPMVMultiModalProcessor.\
-                repack_processor_outputs(image_outputs)
+            image_outputs = self.repack_processor_outputs(image_outputs)
         elif len(image_embeds) > 0:
             image_sizes = mm_data.pop("image_sizes", None)
             image_outputs = {
@@ -580,8 +586,13 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             image_outputs = {}
         return image_outputs
 
-    def process_videos(self, mm_data: Mapping[str, object],
-                       mm_kwargs: Mapping[str, object]) -> Dict[str, object]:
+    def process_videos(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, NestedTensors]:
+        mm_data = dict(mm_data)
+
         videos = mm_data.pop("videos", [])
         video_embeds = mm_data.pop("video_embeds", [])
         if len(videos) > 0 and isinstance(videos[0], Image.Image):
@@ -635,10 +646,14 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
     def get_placeholder_split_pattern(self) -> str:
         return r"\(<(?:image|video)>./</(?:image|video)>\)"
 
-    def process_mm_inputs(self, mm_data, mm_kwargs) -> object:
+    def process_mm_inputs(
+        self,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, Mapping[str, NestedTensors]]:
         return {
             "image": self.process_images(mm_data, mm_kwargs),
-            "video": self.process_videos(mm_data, mm_kwargs)
+            "video": self.process_videos(mm_data, mm_kwargs),
         }
 
     def get_input_modalities(self, mm_data) -> List[str]:
@@ -655,8 +670,10 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         elif modality == "video":
             return "video_image_sizes"
 
-    def get_num_slices_by_modality(self, inputs: Dict[str, object],
-                                   modality: str, index: int) -> int:
+        raise NotImplementedError(modality)
+
+    def get_num_slices_by_modality(self, inputs: dict[str, Any], modality: str,
+                                   index: int) -> int:
         if modality == "image":
             return self.info.get_image_slice_nums(
                 inputs[modality]["image_sizes"][index],
@@ -669,20 +686,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         else:
             raise ValueError(f"Unexpected modality: {modality}")
 
-    def check_mm_inputs(self, inputs: Dict[str, object],
-                        matches: List[str]) -> None:
-        counts = Counter(matches)
-        for modality, count in counts.items():
-            if modality not in inputs or not inputs[modality]:
-                raise ValueError(f"None input data of {modality}."
-                                 " But prompt requires.")
-            counter_key = self.get_modality_num_counter(modality)
-            if len(inputs[modality][counter_key]) != count:
-                raise ValueError(f"The prompt requires {count} "
-                                 f"{modality} inputs while you pass "
-                                 f"{len(inputs[modality][counter_key])}")
-
-    def get_prompt_texts_by_modality(self, inputs: Dict[str, object],
+    def get_prompt_texts_by_modality(self, inputs: dict[str, Any],
                                      modality: str, index: int) -> str:
         if modality == "image":
             return self.get_image_prompt_texts(
@@ -715,13 +719,23 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         tokenizer = self.info.get_tokenizer()
         inputs = self.process_mm_inputs(mm_data, mm_kwargs)
         mm_input_modalities = self.get_input_modalities(inputs)
-        num_mm_slices = {modality: [] for modality in mm_input_modalities}
+
+        num_mm_slices_lst = {
+            modality: list[int]()
+            for modality in mm_input_modalities
+        }
         for modality in mm_input_modalities:
             num_counter_key = self.get_modality_num_counter(modality)
             for index in range(len(inputs[modality][num_counter_key])):
-                num_mm_slices[modality].append(
+                num_mm_slices_lst[modality].append(
                     self.get_num_slices_by_modality(inputs, modality, index))
-        return {
+
+        num_mm_slices = {
+            modality: torch.tensor(v)
+            for modality, v in num_mm_slices_lst.items()
+        }
+
+        return BatchFeature({
             "input_ids": np.array([tokenizer.encode(prompt)]),
             **{
                 key: value
@@ -732,7 +746,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 f"{modality}_num_slices": num_mm_slices[modality]
                 for modality in mm_input_modalities
             }
-        }
+        })
 
     def _hf_processor_applies_updates(
         self,
@@ -743,28 +757,42 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         return False
 
     def _get_prompt_updates(
-            self, mm_items: MultiModalDataItems,
-            hf_processor_mm_kwargs: Mapping[str, Any],
-            out_mm_kwargs: MultiModalKwargs) -> Sequence[PromptReplacement]:
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
+    ) -> Sequence[PromptUpdate]:
         placeholder = {
             "image": self.info.image_pattern,
             "video": self.info.video_pattern,
         }
 
-        def get_replacement_minicpmv(item_idx: int, modality: str):
-            if modality == "image":
-                return self.get_image_prompt_texts(
-                    mm_items["image"].get_image_size(item_idx), item_idx)
-            else:  # video
-                return self.get_video_prompt_texts(
-                    mm_items["video"].get_frame_size(item_idx),
-                    mm_items["video"].get_num_frames(item_idx))
+        def get_image_replacement(item_idx: int):
+            images = mm_items.get_items(
+                "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems))
+
+            image_size = images.get_image_size(item_idx)
+
+            return self.get_image_prompt_texts(image_size, item_idx)
+
+        def get_video_replacement(item_idx: int):
+            videos = mm_items.get_items(
+                "video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems))
+
+            frame_size = videos.get_frame_size(item_idx)
+            num_frames = videos.get_num_frames(item_idx)
+
+            return self.get_video_prompt_texts(frame_size, num_frames)
+
+        get_replacement = {
+            "image": get_image_replacement,
+            "video": get_video_replacement,
+        }
 
         return [
             PromptReplacement(modality=modality,
                               target=placeholder[modality],
-                              replacement=partial(get_replacement_minicpmv,
-                                                  modality=modality))
+                              replacement=get_replacement[modality])
             for modality in ("image", "video")
         ]
 
