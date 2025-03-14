@@ -693,10 +693,7 @@ def fork_new_process_for_each_test(
             assert _exitcode == 0, (f"function {f} failed when called with"
                                     f" args {args} and kwargs {kwargs}")
 
-        return wrapper
-
-
-_P = ParamSpec("_P")
+    return wrapper
 
 
 def spawn_new_process_for_each_test(
@@ -738,11 +735,9 @@ def spawn_new_process_for_each_test(
     return wrapper
 
 
-_P = ParamSpec("_P")
-
-
 def create_new_process_for_each_test(
-        method: str = "fork") -> Callable[_P, None]:
+    method: str = "fork"
+) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
     """creates a new process for each test function.
 
     Args:
