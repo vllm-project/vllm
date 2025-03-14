@@ -176,5 +176,5 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
             content = model_output[end_token_index +
                                    len(self.think_end_token):]
             if len(content) == 0:
-                content = None
+                return reasoning_content, None
             return reasoning_content, content
