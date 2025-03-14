@@ -162,6 +162,7 @@ def _test_processing_correctness(
     "deepseek-ai/deepseek-vl2-tiny",
     "microsoft/Florence-2-base",
     "adept/fuyu-8b",
+    "google/gemma-3-4b-it",
     "THUDM/glm-4v-9b",
     "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",
@@ -214,7 +215,7 @@ def test_processing_correctness(
 
 
 # yapf: disable
-@pytest.mark.parametrize("model_id", ["microsoft/Phi-3-vision-128k-instruct"])
+@pytest.mark.parametrize("model_id", ["microsoft/Phi-3.5-vision-instruct"])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
 @pytest.mark.parametrize("simplify_rate", [1.0])

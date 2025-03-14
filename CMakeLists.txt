@@ -319,7 +319,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # Only build AllSpark kernels if we are building for at least some compatible archs.
   cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
-  if (${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND ALLSPARK_ARCHS)
+  if (ALLSPARK_ARCHS)
     set(ALLSPARK_SRCS
        "csrc/quantization/gptq_allspark/allspark_repack.cu"
        "csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
@@ -330,7 +330,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building AllSpark kernels for archs: ${ALLSPARK_ARCHS}")
   else()
     message(STATUS "Not building AllSpark kernels as no compatible archs found"
-                   " in CUDA target architectures, or CUDA not >= 12.0")
+                   " in CUDA target architectures")
   endif()
 
 
@@ -560,6 +560,10 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu")
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_MOE_EXT_SRC "csrc/moe/moe_wna16.cu")
+endif()
 
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"

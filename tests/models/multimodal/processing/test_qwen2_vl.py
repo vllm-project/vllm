@@ -30,8 +30,7 @@ def test_processor_override(
 ):
     """Ensure Qwen2VLMultiModalProcessor handles min/max pixels properly."""
     ctx = build_model_context(
-        model_name=model_id,
-        tokenizer_name=model_id,
+        model_id,
         mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
         limit_mm_per_prompt={"image": num_imgs},
     )
