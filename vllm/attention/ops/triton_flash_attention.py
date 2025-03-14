@@ -1314,7 +1314,6 @@ def triton_attention(
     sm_scale=1.0,
     bias=None,
     fp8_scales=None,
-    eight_bit_dtype=torch.float8_e4m3fnuz,
 ) -> torch.Tensor:
     num_seqs, num_heads, head_size = q.shape
     attn_metadata = MetaData(sm_scale=sm_scale)
@@ -1325,6 +1324,9 @@ def triton_attention(
     attn_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
 
     if fp8_scales is not None:
+        from vllm.platforms import current_platform
+        eight_bit_dtype = current_platform.fp8_dtype()
+
         (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
         if q.dtype != eight_bit_dtype:
             q = quantize_fp8(q, 1.0 / q_scale, eight_bit_dtype)
