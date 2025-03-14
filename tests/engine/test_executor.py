@@ -13,17 +13,17 @@ from vllm.executor.uniproc_executor import UniProcExecutor
 from vllm.sampling_params import SamplingParams
 
 
-class Mock:
-    ...
+class Mock: ...
 
 
 class CustomUniExecutor(UniProcExecutor):
-
-    def collective_rpc(self,
-                       method: Union[str, Callable],
-                       timeout: Optional[float] = None,
-                       args: tuple = (),
-                       kwargs: Optional[dict] = None) -> list[Any]:
+    def collective_rpc(
+        self,
+        method: Union[str, Callable],
+        timeout: Optional[float] = None,
+        args: tuple = (),
+        kwargs: Optional[dict] = None,
+    ) -> list[Any]:
         # Drop marker to show that this was ran
         with open(".marker", "w"):
             ...
@@ -36,12 +36,12 @@ CustomUniExecutorAsync = CustomUniExecutor
 @pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 def test_custom_executor_type_checking(model):
     with pytest.raises(ValueError):
-        engine_args = EngineArgs(model=model,
-                                 distributed_executor_backend=Mock)
+        engine_args = EngineArgs(model=model, distributed_executor_backend=Mock)
         LLMEngine.from_engine_args(engine_args)
     with pytest.raises(ValueError):
-        engine_args = AsyncEngineArgs(model=model,
-                                      distributed_executor_backend=Mock)
+        engine_args = AsyncEngineArgs(
+            model=model, distributed_executor_backend=Mock
+        )
         AsyncLLMEngine.from_engine_args(engine_args)
 
 

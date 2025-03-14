@@ -25,13 +25,15 @@ def test_can_initialize(model_arch):
         else:
             text_config = hf_config
 
-        text_config.update({
-            "num_layers": 1,
-            "num_hidden_layers": 1,
-            "num_experts": 2,
-            "num_experts_per_tok": 2,
-            "num_local_experts": 2,
-        })
+        text_config.update(
+            {
+                "num_layers": 1,
+                "num_hidden_layers": 1,
+                "num_experts": 2,
+                "num_experts_per_tok": 2,
+                "num_local_experts": 2,
+            }
+        )
 
         return hf_config
 
@@ -40,8 +42,9 @@ def test_can_initialize(model_arch):
         self.cache_config.num_gpu_blocks = 0
         self.cache_config.num_cpu_blocks = 0
 
-    with patch.object(LLM.get_engine_class(), "_initialize_kv_caches",
-                      _initialize_kv_caches):
+    with patch.object(
+        LLM.get_engine_class(), "_initialize_kv_caches", _initialize_kv_caches
+    ):
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,

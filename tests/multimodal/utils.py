@@ -5,7 +5,7 @@ from PIL import Image
 
 
 def random_image(rng: np.random.RandomState, min_wh: int, max_wh: int):
-    w, h = rng.randint(min_wh, max_wh, size=(2, ))
+    w, h = rng.randint(min_wh, max_wh, size=(2,))
     arr = rng.randint(0, 255, size=(w, h, 3), dtype=np.uint8)
     return Image.fromarray(arr)
 
@@ -18,7 +18,7 @@ def random_video(
     max_wh: int,
 ):
     num_frames = rng.randint(min_frames, max_frames)
-    w, h = rng.randint(min_wh, max_wh, size=(2, ))
+    w, h = rng.randint(min_wh, max_wh, size=(2,))
     return rng.randint(0, 255, size=(num_frames, w, h, 3), dtype=np.uint8)
 
 

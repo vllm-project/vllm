@@ -11,13 +11,11 @@ from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
 
 
 class DummyV0Scheduler(Scheduler):
-
     def schedule(self):
         raise Exception("Exception raised by DummyV0Scheduler")
 
 
 class DummyV1Scheduler(V1Scheduler):
-
     def schedule(self):
         raise Exception("Exception raised by DummyV1Scheduler")
 
@@ -25,7 +23,6 @@ class DummyV1Scheduler(V1Scheduler):
 def test_scheduler_plugins_v0(monkeypatch):
     monkeypatch.setenv("VLLM_USE_V1", "0")
     with pytest.raises(Exception) as exception_info:
-
         engine_args = EngineArgs(
             model="facebook/opt-125m",
             enforce_eager=True,  # reduce test time
@@ -48,7 +45,6 @@ def test_scheduler_plugins_v1(monkeypatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     with pytest.raises(Exception) as exception_info:
-
         engine_args = EngineArgs(
             model="facebook/opt-125m",
             enforce_eager=True,  # reduce test time

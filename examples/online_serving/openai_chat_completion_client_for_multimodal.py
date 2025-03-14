@@ -14,6 +14,7 @@ vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
 (audio inference with Ultravox)
 vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b --max-model-len 4096
 """
+
 import base64
 
 import requests
@@ -40,7 +41,7 @@ def encode_base64_content_from_url(content_url: str) -> str:
 
     with requests.get(content_url) as response:
         response.raise_for_status()
-        result = base64.b64encode(response.content).decode('utf-8')
+        result = base64.b64encode(response.content).decode("utf-8")
 
     return result
 
@@ -48,10 +49,7 @@ def encode_base64_content_from_url(content_url: str) -> str:
 # Text-only inference
 def run_text_only() -> None:
     chat_completion = client.chat.completions.create(
-        messages=[{
-            "role": "user",
-            "content": "What's the capital of France?"
-        }],
+        messages=[{"role": "user", "content": "What's the capital of France?"}],
         model=model,
         max_completion_tokens=64,
     )
@@ -62,26 +60,21 @@ def run_text_only() -> None:
 
 # Single-image input inference
 def run_single_image() -> None:
-
     ## Use image url in the payload
     image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
     chat_completion_from_url = client.chat.completions.create(
-        messages=[{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What's in this image?"
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": image_url
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
                     },
-                },
-            ],
-        }],
+                ],
+            }
+        ],
         model=model,
         max_completion_tokens=64,
     )
@@ -92,22 +85,20 @@ def run_single_image() -> None:
     ## Use base64 encoded image in the payload
     image_base64 = encode_base64_content_from_url(image_url)
     chat_completion_from_base64 = client.chat.completions.create(
-        messages=[{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What's in this image?"
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{image_base64}"
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_base64}"
+                        },
                     },
-                },
-            ],
-        }],
+                ],
+            }
+        ],
         model=model,
         max_completion_tokens=64,
     )
@@ -121,28 +112,25 @@ def run_multi_image() -> None:
     image_url_duck = "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg"
     image_url_lion = "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg"
     chat_completion_from_url = client.chat.completions.create(
-        messages=[{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What are the animals in these images?"
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": image_url_duck
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "What are the animals in these images?",
                     },
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": image_url_lion
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url_duck},
                     },
-                },
-            ],
-        }],
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url_lion},
+                    },
+                ],
+            }
+        ],
         model=model,
         max_completion_tokens=64,
     )
@@ -158,22 +146,18 @@ def run_video() -> None:
 
     ## Use video url in the payload
     chat_completion_from_url = client.chat.completions.create(
-        messages=[{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What's in this video?"
-                },
-                {
-                    "type": "video_url",
-                    "video_url": {
-                        "url": video_url
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this video?"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": video_url},
                     },
-                },
-            ],
-        }],
+                ],
+            }
+        ],
         model=model,
         max_completion_tokens=64,
     )
@@ -183,22 +167,20 @@ def run_video() -> None:
 
     ## Use base64 encoded video in the payload
     chat_completion_from_base64 = client.chat.completions.create(
-        messages=[{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What's in this video?"
-                },
-                {
-                    "type": "video_url",
-                    "video_url": {
-                        "url": f"data:video/mp4;base64,{video_base64}"
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this video?"},
+                    {
+                        "type": "video_url",
+                        "video_url": {
+                            "url": f"data:video/mp4;base64,{video_base64}"
+                        },
                     },
-                },
-            ],
-        }],
+                ],
+            }
+        ],
         model=model,
         max_completion_tokens=64,
     )
@@ -216,24 +198,22 @@ def run_audio() -> None:
 
     # OpenAI-compatible schema (`input_audio`)
     chat_completion_from_base64 = client.chat.completions.create(
-        messages=[{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What's in this audio?"
-                },
-                {
-                    "type": "input_audio",
-                    "input_audio": {
-                        # Any format supported by librosa is supported
-                        "data": audio_base64,
-                        "format": "wav"
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this audio?"},
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            # Any format supported by librosa is supported
+                            "data": audio_base64,
+                            "format": "wav",
+                        },
                     },
-                },
-            ],
-        }],
+                ],
+            }
+        ],
         model=model,
         max_completion_tokens=64,
     )
@@ -243,23 +223,21 @@ def run_audio() -> None:
 
     # HTTP URL
     chat_completion_from_url = client.chat.completions.create(
-        messages=[{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What's in this audio?"
-                },
-                {
-                    "type": "audio_url",
-                    "audio_url": {
-                        # Any format supported by librosa is supported
-                        "url": audio_url
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this audio?"},
+                    {
+                        "type": "audio_url",
+                        "audio_url": {
+                            # Any format supported by librosa is supported
+                            "url": audio_url
+                        },
                     },
-                },
-            ],
-        }],
+                ],
+            }
+        ],
         model=model,
         max_completion_tokens=64,
     )
@@ -269,23 +247,21 @@ def run_audio() -> None:
 
     # base64 URL
     chat_completion_from_base64 = client.chat.completions.create(
-        messages=[{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What's in this audio?"
-                },
-                {
-                    "type": "audio_url",
-                    "audio_url": {
-                        # Any format supported by librosa is supported
-                        "url": f"data:audio/ogg;base64,{audio_base64}"
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this audio?"},
+                    {
+                        "type": "audio_url",
+                        "audio_url": {
+                            # Any format supported by librosa is supported
+                            "url": f"data:audio/ogg;base64,{audio_base64}"
+                        },
                     },
-                },
-            ],
-        }],
+                ],
+            }
+        ],
         model=model,
         max_completion_tokens=64,
     )
@@ -310,13 +286,16 @@ def main(args) -> None:
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description='Demo on using OpenAI client for online serving with '
-        'multimodal language models served with vLLM.')
-    parser.add_argument('--chat-type',
-                        '-c',
-                        type=str,
-                        default="single-image",
-                        choices=list(example_function_map.keys()),
-                        help='Conversation type with multimodal data.')
+        description="Demo on using OpenAI client for online serving with "
+        "multimodal language models served with vLLM."
+    )
+    parser.add_argument(
+        "--chat-type",
+        "-c",
+        type=str,
+        default="single-image",
+        choices=list(example_function_map.keys()),
+        help="Conversation type with multimodal data.",
+    )
     args = parser.parse_args()
     main(args)

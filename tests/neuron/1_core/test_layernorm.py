@@ -7,13 +7,16 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 
 
-@pytest.mark.parametrize("num_tokens,hidden_size,add_residual,dtype", [
-    (7, 8, False, torch.half),
-    (83, 768, False, torch.half),
-    (83, 768, True, torch.half),
-    (83, 768, True, torch.bfloat16),
-    (83, 768, True, torch.float32),
-])
+@pytest.mark.parametrize(
+    "num_tokens,hidden_size,add_residual,dtype",
+    [
+        (7, 8, False, torch.half),
+        (83, 768, False, torch.half),
+        (83, 768, True, torch.half),
+        (83, 768, True, torch.bfloat16),
+        (83, 768, True, torch.float32),
+    ],
+)
 @torch.inference_mode()
 def test_rms_norm(
     num_tokens: int,
@@ -43,14 +46,12 @@ def test_rms_norm(
     # Therefore, we use a larger tolerance.
     if add_residual:
         assert out[0].is_xla, "output tensor is expected to be XLA tensor"
-        torch.testing.assert_close(out[0].cpu(),
-                                   ref_out[0],
-                                   atol=1e-2,
-                                   rtol=1e-2)
-        torch.testing.assert_close(out[1].cpu(),
-                                   ref_out[1],
-                                   atol=1e-2,
-                                   rtol=1e-2)
+        torch.testing.assert_close(
+            out[0].cpu(), ref_out[0], atol=1e-2, rtol=1e-2
+        )
+        torch.testing.assert_close(
+            out[1].cpu(), ref_out[1], atol=1e-2, rtol=1e-2
+        )
     else:
         assert out.is_xla, "output tensor is expected to be XLA tensor"
         torch.testing.assert_close(out.cpu(), ref_out, atol=1e-2, rtol=1e-2)

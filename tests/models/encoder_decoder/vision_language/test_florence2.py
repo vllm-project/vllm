@@ -16,12 +16,12 @@ MODELS = ["microsoft/Florence-2-base"]
 # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
 # Therefore, we borrow the BartTokenizer from the original Bart model
 TOKENIZER = "facebook/bart-base"
-HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign":
-    "<CAPTION>",  # special task token
-    "cherry_blossom":
-    "Describe in detail what is shown in the image.",
-})
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
+    {
+        "stop_sign": "<CAPTION>",  # special task token
+        "cherry_blossom": "Describe in detail what is shown in the image.",
+    }
+)
 
 
 def get_hf_images_prompts(
@@ -34,13 +34,15 @@ def get_hf_images_prompts(
             ExplicitEncoderDecoderPrompt(
                 encoder_prompt=encoder_prompt["prompt"],
                 decoder_prompt=None,
-            ))
+            )
+        )
         images.append(encoder_prompt["multi_modal_data"]["image"])
     return prompts, images
 
 
-def hf_to_vllm_output(hf_output: tuple[list[int], str,
-                                       Optional[SampleLogprobs]]):
+def hf_to_vllm_output(
+    hf_output: tuple[list[int], str, Optional[SampleLogprobs]],
+):
     """Sanitize hf output to be comparable with vllm output."""
     output_ids, output_str, out_logprobs = hf_output
 
@@ -62,32 +64,38 @@ def run_test(
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ) -> None:
-    with vllm_runner(model,
-                     max_num_seqs=8,
-                     tokenizer_name=TOKENIZER,
-                     dtype=dtype,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(
+        model,
+        max_num_seqs=8,
+        tokenizer_name=TOKENIZER,
+        dtype=dtype,
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend=distributed_executor_backend,
+        enforce_eager=True,
+    ) as vllm_model:
         vllm_outputs_per_case = [
             vllm_model.generate_encoder_decoder_greedy_logprobs(
-                prompts, max_tokens, num_logprobs=num_logprobs)
+                prompts, max_tokens, num_logprobs=num_logprobs
+            )
             for prompts in inputs
         ]
 
     hf_inputs = [get_hf_images_prompts(prompts) for prompts in inputs]
 
     with hf_runner(model, dtype=dtype, skip_tokenizer_init=True) as hf_model:
-        hf_model.model.get_output_embeddings = lambda: \
-            hf_model.model.language_model.lm_head
+        hf_model.model.get_output_embeddings = (
+            lambda: hf_model.model.language_model.lm_head
+        )
         hf_outputs_per_case = [
             hf_model.generate_encoder_decoder_greedy_logprobs_limit(
-                prompts, max_tokens, num_logprobs=num_logprobs, images=images)
+                prompts, max_tokens, num_logprobs=num_logprobs, images=images
+            )
             for prompts, images in hf_inputs
         ]
 
-    for hf_outputs, vllm_outputs in zip(hf_outputs_per_case,
-                                        vllm_outputs_per_case):
+    for hf_outputs, vllm_outputs in zip(
+        hf_outputs_per_case, vllm_outputs_per_case
+    ):
         check_logprobs_close(
             outputs_0_lst=[hf_to_vllm_output(output) for output in hf_outputs],
             outputs_1_lst=vllm_outputs,
@@ -114,20 +122,33 @@ def run_test(
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
-                image_assets: _ImageAssets, model: str,
-                size_factors: list[int], dtype: str, max_tokens: int,
-                num_logprobs: int) -> None:
+def test_models(
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    image_assets: _ImageAssets,
+    model: str,
+    size_factors: list[int],
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_image = [[
-        ExplicitEncoderDecoderPrompt(
-            encoder_prompt=TextPrompt(
-                prompt=prompt,
-                multi_modal_data={"image": rescale_image_size(image, factor)}),
-            decoder_prompt=None,
-        ) for factor in size_factors
-    ] for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    inputs_per_image = [
+        [
+            ExplicitEncoderDecoderPrompt(
+                encoder_prompt=TextPrompt(
+                    prompt=prompt,
+                    multi_modal_data={
+                        "image": rescale_image_size(image, factor)
+                    },
+                ),
+                decoder_prompt=None,
+            )
+            for factor in size_factors
+        ]
+        for image, prompt in zip(images, HF_IMAGE_PROMPTS)
+    ]
 
     run_test(
         hf_runner,

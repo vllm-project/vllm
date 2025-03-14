@@ -3,6 +3,7 @@
 
 Run `pytest tests/models/embedding/language/test_scoring.py`.
 """
+
 import math
 
 import pytest
@@ -36,14 +37,14 @@ def model_name(request):
 
 @pytest.mark.parametrize("dtype", ["half"])
 def test_llm_1_to_1(vllm_runner, hf_runner, model_name, dtype: str):
-
     text_pair = [TEXTS_1[0], TEXTS_2[0]]
 
     with hf_runner(model_name, dtype=dtype, is_cross_encoder=True) as hf_model:
         hf_outputs = hf_model.predict([text_pair]).tolist()
 
-    with vllm_runner(model_name, task="score", dtype=dtype,
-                     max_model_len=None) as vllm_model:
+    with vllm_runner(
+        model_name, task="score", dtype=dtype, max_model_len=None
+    ) as vllm_model:
         vllm_outputs = vllm_model.score(text_pair[0], text_pair[1])
 
     assert len(vllm_outputs) == 1
@@ -54,7 +55,6 @@ def test_llm_1_to_1(vllm_runner, hf_runner, model_name, dtype: str):
 
 @pytest.mark.parametrize("dtype", ["half"])
 def test_llm_1_to_N(vllm_runner, hf_runner, model_name, dtype: str):
-
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[0], TEXTS_2[1]],
@@ -63,8 +63,9 @@ def test_llm_1_to_N(vllm_runner, hf_runner, model_name, dtype: str):
     with hf_runner(model_name, dtype=dtype, is_cross_encoder=True) as hf_model:
         hf_outputs = hf_model.predict(text_pairs).tolist()
 
-    with vllm_runner(model_name, task="score", dtype=dtype,
-                     max_model_len=None) as vllm_model:
+    with vllm_runner(
+        model_name, task="score", dtype=dtype, max_model_len=None
+    ) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1[0], TEXTS_2)
 
     assert len(vllm_outputs) == 2
@@ -76,7 +77,6 @@ def test_llm_1_to_N(vllm_runner, hf_runner, model_name, dtype: str):
 
 @pytest.mark.parametrize("dtype", ["half"])
 def test_llm_N_to_N(vllm_runner, hf_runner, model_name, dtype: str):
-
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[1], TEXTS_2[1]],
@@ -85,8 +85,9 @@ def test_llm_N_to_N(vllm_runner, hf_runner, model_name, dtype: str):
     with hf_runner(model_name, dtype=dtype, is_cross_encoder=True) as hf_model:
         hf_outputs = hf_model.predict(text_pairs).tolist()
 
-    with vllm_runner(model_name, task="score", dtype=dtype,
-                     max_model_len=None) as vllm_model:
+    with vllm_runner(
+        model_name, task="score", dtype=dtype, max_model_len=None
+    ) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1, TEXTS_2)
 
     assert len(vllm_outputs) == 2
@@ -102,22 +103,22 @@ def emb_model_name(request):
 
 
 @pytest.mark.parametrize("dtype", ["half"])
-def test_llm_1_to_1_embedding(vllm_runner, hf_runner, emb_model_name,
-                              dtype: str):
-
+def test_llm_1_to_1_embedding(
+    vllm_runner, hf_runner, emb_model_name, dtype: str
+):
     text_pair = [TEXTS_1[0], TEXTS_2[0]]
 
-    with hf_runner(emb_model_name, dtype=dtype,
-                   is_sentence_transformer=True) as hf_model:
+    with hf_runner(
+        emb_model_name, dtype=dtype, is_sentence_transformer=True
+    ) as hf_model:
         hf_embeddings = hf_model.encode(text_pair)
         hf_outputs = [
             F.cosine_similarity(*map(torch.tensor, hf_embeddings), dim=0)
         ]
 
-    with vllm_runner(emb_model_name,
-                     task="embed",
-                     dtype=dtype,
-                     max_model_len=None) as vllm_model:
+    with vllm_runner(
+        emb_model_name, task="embed", dtype=dtype, max_model_len=None
+    ) as vllm_model:
         vllm_outputs = vllm_model.score(text_pair[0], text_pair[1])
 
     assert len(vllm_outputs) == 1
@@ -127,28 +128,26 @@ def test_llm_1_to_1_embedding(vllm_runner, hf_runner, emb_model_name,
 
 
 @pytest.mark.parametrize("dtype", ["half"])
-def test_llm_1_to_N_embedding(vllm_runner, hf_runner, emb_model_name,
-                              dtype: str):
-
+def test_llm_1_to_N_embedding(
+    vllm_runner, hf_runner, emb_model_name, dtype: str
+):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[0], TEXTS_2[1]],
     ]
 
-    with hf_runner(emb_model_name, dtype=dtype,
-                   is_sentence_transformer=True) as hf_model:
-        hf_embeddings = [
-            hf_model.encode(text_pair) for text_pair in text_pairs
-        ]
+    with hf_runner(
+        emb_model_name, dtype=dtype, is_sentence_transformer=True
+    ) as hf_model:
+        hf_embeddings = [hf_model.encode(text_pair) for text_pair in text_pairs]
         hf_outputs = [
             F.cosine_similarity(*map(torch.tensor, pair), dim=0)
             for pair in hf_embeddings
         ]
 
-    with vllm_runner(emb_model_name,
-                     task="embed",
-                     dtype=dtype,
-                     max_model_len=None) as vllm_model:
+    with vllm_runner(
+        emb_model_name, task="embed", dtype=dtype, max_model_len=None
+    ) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1[0], TEXTS_2)
 
     assert len(vllm_outputs) == 2
@@ -159,28 +158,26 @@ def test_llm_1_to_N_embedding(vllm_runner, hf_runner, emb_model_name,
 
 
 @pytest.mark.parametrize("dtype", ["half"])
-def test_llm_N_to_N_embedding(vllm_runner, hf_runner, emb_model_name,
-                              dtype: str):
-
+def test_llm_N_to_N_embedding(
+    vllm_runner, hf_runner, emb_model_name, dtype: str
+):
     text_pairs = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[1], TEXTS_2[1]],
     ]
 
-    with hf_runner(emb_model_name, dtype=dtype,
-                   is_sentence_transformer=True) as hf_model:
-        hf_embeddings = [
-            hf_model.encode(text_pair) for text_pair in text_pairs
-        ]
+    with hf_runner(
+        emb_model_name, dtype=dtype, is_sentence_transformer=True
+    ) as hf_model:
+        hf_embeddings = [hf_model.encode(text_pair) for text_pair in text_pairs]
         hf_outputs = [
             F.cosine_similarity(*map(torch.tensor, pair), dim=0)
             for pair in hf_embeddings
         ]
 
-    with vllm_runner(emb_model_name,
-                     task="embed",
-                     dtype=dtype,
-                     max_model_len=None) as vllm_model:
+    with vllm_runner(
+        emb_model_name, task="embed", dtype=dtype, max_model_len=None
+    ) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1, TEXTS_2)
 
     assert len(vllm_outputs) == 2

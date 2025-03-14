@@ -37,18 +37,20 @@ def run_test(more_args=None):
     )
 
     measured_value = results["results"][TASK][FILTER]
-    assert (measured_value - RTOL < EXPECTED_VALUE
-            and measured_value + RTOL > EXPECTED_VALUE
-            ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+    assert (
+        measured_value - RTOL < EXPECTED_VALUE
+        and measured_value + RTOL > EXPECTED_VALUE
+    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
 # TODO: [AlexM] Fix it with new CI/CD tests
-TPU_TP_TEST_STR = ""  #"tensor_parallel_size=4"
+TPU_TP_TEST_STR = ""  # "tensor_parallel_size=4"
 
 
-@pytest.mark.skipif(not current_platform.is_cuda()
-                    and not current_platform.is_tpu(),
-                    reason="V1 is currently only supported on CUDA and TPU")
+@pytest.mark.skipif(
+    not current_platform.is_cuda() and not current_platform.is_tpu(),
+    reason="V1 is currently only supported on CUDA and TPU",
+)
 def test_lm_eval_accuracy_v1_engine(monkeypatch):
     """Run with the V1 Engine."""
 

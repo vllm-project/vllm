@@ -8,9 +8,12 @@ import torch
 
 from tests.kernels.utils import override_backend_env_variable
 from tests.v1.sample.utils import (
-    BatchLogprobsComposition, BatchLogprobsSpecType,
+    BatchLogprobsComposition,
+    BatchLogprobsSpecType,
     assert_incr_detok_str_matches_non_incr_detok_str,
-    compute_correct_cumulative_logprob, get_test_batch)
+    compute_correct_cumulative_logprob,
+    get_test_batch,
+)
 from vllm import SamplingParams
 
 from ...conftest import HfRunner, VllmRunner
@@ -27,22 +30,23 @@ SAMPLE_PROMPT = BatchLogprobsComposition.SAMPLE_PROMPT
 @pytest.fixture(
     scope="module",
     # Parameterize APC
-    params=[False, True])
+    params=[False, True],
+)
 def vllm_model(vllm_runner, request) -> Generator[VllmRunner, None, None]:
     with vllm_runner(
-            MODEL,
-            dtype=DTYPE,
-            max_logprobs=7,
-            # Very small number of batched tokens to ensure
-            # that we test chunking.
-            max_num_batched_tokens=16,
-            max_num_seqs=16,
-            max_model_len=128,
-            enforce_eager=True,
-            #TODO: enable this once we support it for
-            # prompt logprobs.
-            enable_prefix_caching=request.param,
-            gpu_memory_utilization=0.5,
+        MODEL,
+        dtype=DTYPE,
+        max_logprobs=7,
+        # Very small number of batched tokens to ensure
+        # that we test chunking.
+        max_num_batched_tokens=16,
+        max_num_seqs=16,
+        max_model_len=128,
+        enforce_eager=True,
+        # TODO: enable this once we support it for
+        # prompt logprobs.
+        enable_prefix_caching=request.param,
+        gpu_memory_utilization=0.5,
     ) as vllm_model:
         yield vllm_model
 
@@ -58,7 +62,7 @@ def _repeat_logprob_config(
     logprob_prompt_logprob_list: BatchLogprobsSpecType,
 ) -> BatchLogprobsSpecType:
     """Ensure each test prompt has a logprob config.
-    
+
     A logprob config specifies the optional (i.e.
     may-be-`None`) number of sample logprobs and
     the optional number of prompt logprobs.
@@ -81,7 +85,7 @@ def _repeat_logprob_config(
                             (optional num sample logprob,
                              optional num prompt logprob)
                              tuples
-    
+
     Returns:
       list of
       (optional num sample logprob,optional num prompt logprob)
@@ -94,8 +98,10 @@ def _repeat_logprob_config(
     num_test_prompts = len(test_prompts)
     # Make sure there is a logprobs configuration for each test prompt
     logprob_prompt_logprob_list = list(
-        itertools.islice(itertools.cycle(logprob_prompt_logprob_list),
-                         num_test_prompts))
+        itertools.islice(
+            itertools.cycle(logprob_prompt_logprob_list), num_test_prompts
+        )
+    )
     # Now the number of prompts should match the number of sample params combos
     assert num_test_prompts == len(logprob_prompt_logprob_list)
     return logprob_prompt_logprob_list
@@ -113,24 +119,28 @@ def _run_and_validate(
     do_apc: bool,
 ) -> None:
     vllm_results = vllm_model.model.generate(
-        test_prompts, sampling_params=vllm_sampling_params)
+        test_prompts, sampling_params=vllm_sampling_params
+    )
 
     for vllm_result, hf_logprob, hf_output, logprob_prompt_logprob in zip(
-            vllm_results, hf_logprobs, hf_outputs,
-            logprob_prompt_logprob_list):
-
+        vllm_results, hf_logprobs, hf_outputs, logprob_prompt_logprob_list
+    ):
         # Extract request-level (prompt)logprobs config
         num_top_logprobs, num_top_prompt_logprobs = logprob_prompt_logprob
 
         # Test whether sampled token output is consistent between vLLM and HF
         # vLLM prompt+completion should match HF output
         if temperature == 0.0:
-            assert (vllm_result.prompt_token_ids +
-                    vllm_result.outputs[0].token_ids == hf_output[0])
+            assert (
+                vllm_result.prompt_token_ids + vllm_result.outputs[0].token_ids
+                == hf_output[0]
+            )
         else:
             # Sampled tokens won't match if not greedy
-            assert (vllm_result.prompt_token_ids == hf_output[0]
-                    [:len(vllm_result.prompt_token_ids)])
+            assert (
+                vllm_result.prompt_token_ids
+                == hf_output[0][: len(vllm_result.prompt_token_ids)]
+            )
 
         # Validate sample logprobs
         if num_top_logprobs is not None:
@@ -139,8 +149,10 @@ def _run_and_validate(
             # correct
             assert vllm_result.outputs[0].logprobs is not None
             assert len(vllm_result.outputs[0].logprobs) == max_tokens
-            for logprobs, token_id in zip(vllm_result.outputs[0].logprobs,
-                                          vllm_result.outputs[0].token_ids):
+            for logprobs, token_id in zip(
+                vllm_result.outputs[0].logprobs,
+                vllm_result.outputs[0].token_ids,
+            ):
                 assert logprobs is not None
 
                 # Confirm that the output token appears among the logprobs
@@ -157,23 +169,28 @@ def _run_and_validate(
                 if num_top_logprobs > 0:
                     # We should have an entry for each of the topk ranks
                     all_ranks = {lp.rank for lp in logprobs.values()}
-                    assert all(r in all_ranks
-                               for r in range(1, num_top_logprobs + 1))
+                    assert all(
+                        r in all_ranks for r in range(1, num_top_logprobs + 1)
+                    )
 
             output_text = vllm_result.outputs[0].text
             output_string_from_most_likely_tokens_lst: list[str] = []
             for top_logprobs in vllm_result.outputs[0].logprobs:
                 top_logprob = next(iter(top_logprobs.values()))
                 output_string_from_most_likely_tokens_lst.append(
-                    top_logprob.decoded_token)
+                    top_logprob.decoded_token
+                )
 
             output_string_from_most_likely_tokens = "".join(
-                output_string_from_most_likely_tokens_lst)
+                output_string_from_most_likely_tokens_lst
+            )
             assert_incr_detok_str_matches_non_incr_detok_str(
-                output_text, output_string_from_most_likely_tokens,
+                output_text,
+                output_string_from_most_likely_tokens,
                 "The output text from the top logprob for each token "
                 "position should be the same as the output text in the "
-                "result.")
+                "result.",
+            )
 
             # Compare vLLM sample logprobs to HF
             vllm_sample_logprobs = vllm_result.outputs[0].logprobs
@@ -185,11 +202,12 @@ def _run_and_validate(
                             logprob,
                             hf_logprob[i][-1][token_id].item(),
                             atol=1e-2,
-                            rtol=1e-2)
-                    assert isinstance(
-                        sample_logprob.decoded_token,
-                        str), ("The token should be decoded by the time it is"
-                               " returned to the user.")
+                            rtol=1e-2,
+                        )
+                    assert isinstance(sample_logprob.decoded_token, str), (
+                        "The token should be decoded by the time it is"
+                        " returned to the user."
+                    )
 
             # At this point we know the sample logprobs are correct for this
             # request. Validate that cumulative_logprob is actually the sum.
@@ -199,7 +217,8 @@ def _run_and_validate(
                 vllm_result.outputs[0].cumulative_logprob,
                 compute_correct_cumulative_logprob(vllm_result.outputs[0]),
                 atol=1e-6,
-                rtol=1e-6)
+                rtol=1e-6,
+            )
         else:
             # Logprobs disabled for this request; should be None
             assert vllm_result.outputs[0].logprobs is None
@@ -213,16 +232,20 @@ def _run_and_validate(
             # - Prompt logprobs are returned for all indices in
             #   the prompt
             assert len(vllm_result.prompt_logprobs) == len(
-                vllm_result.prompt_token_ids)
+                vllm_result.prompt_token_ids
+            )
             for prompt_logprobs, prompt_token_id in zip(
-                    vllm_result.prompt_logprobs[1:],
-                    vllm_result.prompt_token_ids[1:]):
+                vllm_result.prompt_logprobs[1:],
+                vllm_result.prompt_token_ids[1:],
+            ):
                 assert prompt_logprobs is not None
 
                 # Confirm that the prompt token appears among the logprobs
                 assert prompt_token_id in prompt_logprobs
-                token_in_topk = prompt_logprobs[
-                    prompt_token_id].rank <= num_top_prompt_logprobs
+                token_in_topk = (
+                    prompt_logprobs[prompt_token_id].rank
+                    <= num_top_prompt_logprobs
+                )
 
                 # If the prompt token is not included in the top K
                 # logprob, it can return 1 more data
@@ -234,8 +257,10 @@ def _run_and_validate(
                 if num_top_prompt_logprobs > 0:
                     # We should have an entry for each of the topk ranks
                     all_ranks = {lp.rank for lp in prompt_logprobs.values()}
-                    assert all(r in all_ranks
-                               for r in range(1, num_top_prompt_logprobs + 1))
+                    assert all(
+                        r in all_ranks
+                        for r in range(1, num_top_prompt_logprobs + 1)
+                    )
 
             # Compare prompt logprobs to HF
             # The first prompt logprob is always None, so we compare it from
@@ -247,13 +272,15 @@ def _run_and_validate(
                         logprob.logprob,
                         hf_logprob[0][i][token_id].item(),
                         atol=2e-2,
-                        rtol=2e-2)
+                        rtol=2e-2,
+                    )
         else:
             assert vllm_result.prompt_logprobs is None
 
 
-@pytest.mark.parametrize("batch_logprobs_composition",
-                         [NONE, SAMPLE, PROMPT, SAMPLE_PROMPT])
+@pytest.mark.parametrize(
+    "batch_logprobs_composition", [NONE, SAMPLE, PROMPT, SAMPLE_PROMPT]
+)
 @pytest.mark.parametrize("temperature", [0.0, 2.0])
 def test_get_logprobs_and_prompt_logprobs(
     hf_model,
@@ -263,7 +290,7 @@ def test_get_logprobs_and_prompt_logprobs(
     example_prompts,
 ) -> None:
     """Test V1 Engine logprobs & prompt logprobs
-    
+
     Exercise a variety of combinations of `logprobs` and `prompt_logprobs`
     settings and validate that
     * The generated logprobs and prompt logprobs are consistent with the
@@ -280,7 +307,7 @@ def test_get_logprobs_and_prompt_logprobs(
 
     To save time, only test one APC-enabled scenario
     (sample & prompt logprobs enabled, temperature>0.0).
-    
+
     Args:
       hf_model: HuggingFace reference model fixture
       vllm_model: vLLM model fixture
@@ -289,8 +316,9 @@ def test_get_logprobs_and_prompt_logprobs(
       example_prompts: example prompt fixture
     """
     do_apc = vllm_model.model.llm_engine.cache_config.enable_prefix_caching
-    if do_apc and (temperature < 2.0
-                   or batch_logprobs_composition != SAMPLE_PROMPT):
+    if do_apc and (
+        temperature < 2.0 or batch_logprobs_composition != SAMPLE_PROMPT
+    ):
         # Skip some test-cases to save time.
         pytest.skip()
     test_prompts = example_prompts
@@ -311,14 +339,17 @@ def test_get_logprobs_and_prompt_logprobs(
 
     # Ensure that each test prompt has a logprob config for testing
     logprob_prompt_logprob_list = _repeat_logprob_config(
-        test_prompts, logprob_prompt_logprob_list)
+        test_prompts, logprob_prompt_logprob_list
+    )
     # Generate SamplingParams
     vllm_sampling_params = [
-        SamplingParams(max_tokens=max_tokens,
-                       logprobs=num_lp,
-                       prompt_logprobs=num_plp,
-                       temperature=temperature,
-                       seed=1984)
+        SamplingParams(
+            max_tokens=max_tokens,
+            logprobs=num_lp,
+            prompt_logprobs=num_plp,
+            temperature=temperature,
+            seed=1984,
+        )
         for num_lp, num_plp in logprob_prompt_logprob_list
     ]
     for _ in range(2 if do_apc else 1):
@@ -331,25 +362,28 @@ def test_get_logprobs_and_prompt_logprobs(
             logprob_prompt_logprob_list=logprob_prompt_logprob_list,
             temperature=temperature,
             max_tokens=max_tokens,
-            do_apc=do_apc)
+            do_apc=do_apc,
+        )
 
 
 def test_max_logprobs(monkeypatch):
     """vLLM v1 engine should fail a request with `logprobs > max_logprobs`
-    
+
     Should also fail for `prompt_logprobs > max_logprobs`
 
     APC should not matter as this test checks basic request validation.
-    
+
     Args:
       monkeypatch
     """
     override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
-    runner = VllmRunner("facebook/opt-125m",
-                        max_logprobs=1,
-                        enable_prefix_caching=False,
-                        max_model_len=256)
+    runner = VllmRunner(
+        "facebook/opt-125m",
+        max_logprobs=1,
+        enable_prefix_caching=False,
+        max_model_len=256,
+    )
     vllm_sampling_params = SamplingParams(logprobs=1)
     # should pass
     runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
@@ -361,19 +395,22 @@ def test_max_logprobs(monkeypatch):
 
 def test_none_logprobs(vllm_model, example_prompts):
     """Engine should return `logprobs` and `prompt_logprobs` as `None`
-    
+
     Args:
       vllm_model: vLLM model fixture
       example_prompts: list of example prompts (test fixture)
     """
     max_tokens = 5
 
-    sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
-                                                   logprobs=None,
-                                                   prompt_logprobs=None,
-                                                   temperature=0.0)
+    sampling_params_logprobs_none = SamplingParams(
+        max_tokens=max_tokens,
+        logprobs=None,
+        prompt_logprobs=None,
+        temperature=0.0,
+    )
     results_logprobs_none = vllm_model.model.generate(
-        example_prompts, sampling_params=sampling_params_logprobs_none)
+        example_prompts, sampling_params=sampling_params_logprobs_none
+    )
 
     for i in range(len(results_logprobs_none)):
         # Check sample logprobs are None
@@ -385,19 +422,19 @@ def test_none_logprobs(vllm_model, example_prompts):
 
 def test_zero_logprobs(vllm_model, example_prompts):
     """Engine should return sampled token and prompt token logprobs
-    
+
     Args:
       vllm_model: vLLM model fixture
       example_prompts: list of example prompts (test fixture)
     """
     max_tokens = 5
 
-    sampling_params_logprobs_zero = SamplingParams(max_tokens=max_tokens,
-                                                   logprobs=0,
-                                                   prompt_logprobs=0,
-                                                   temperature=0.0)
+    sampling_params_logprobs_zero = SamplingParams(
+        max_tokens=max_tokens, logprobs=0, prompt_logprobs=0, temperature=0.0
+    )
     results_logprobs_zero = vllm_model.model.generate(
-        example_prompts, sampling_params=sampling_params_logprobs_zero)
+        example_prompts, sampling_params=sampling_params_logprobs_zero
+    )
 
     for i in range(len(results_logprobs_zero)):
         # Check that there is one sample logprob dict for each
@@ -408,8 +445,9 @@ def test_zero_logprobs(vllm_model, example_prompts):
         prompt_token_ids = results_logprobs_zero[i].prompt_token_ids
         assert logprobs is not None
         assert len(sampled_token_ids) == len(logprobs)
-        assert results_logprobs_zero[i].outputs[
-            0].cumulative_logprob is not None
+        assert (
+            results_logprobs_zero[i].outputs[0].cumulative_logprob is not None
+        )
         # Check that there is one prompt logprob dict for each
         # prompt token
         assert prompt_logprobs is not None

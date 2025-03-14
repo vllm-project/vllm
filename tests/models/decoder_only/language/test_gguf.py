@@ -75,14 +75,20 @@ DOLPHIN_CONFIG = GGUFTestConfig(
 )
 
 MODELS = [
-    LLAMA_CONFIG, QWEN2_CONFIG, PHI3_CONFIG, GPT2_CONFIG, STABLELM_CONFIG,
-    DOLPHIN_CONFIG
+    LLAMA_CONFIG,
+    QWEN2_CONFIG,
+    PHI3_CONFIG,
+    GPT2_CONFIG,
+    STABLELM_CONFIG,
+    DOLPHIN_CONFIG,
     # STARCODER_CONFIG, # broken
 ]
 
 
-@pytest.mark.skipif(not is_quant_method_supported("gguf"),
-                    reason="gguf is not supported on this GPU type.")
+@pytest.mark.skipif(
+    not is_quant_method_supported("gguf"),
+    reason="gguf is not supported on this GPU type.",
+)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
@@ -103,32 +109,37 @@ def test_models(
 
     tokenizer = AutoTokenizer.from_pretrained(model.original_model)
     if tokenizer.chat_template is not None:
-        messages = [[{
-            'role': 'user',
-            'content': prompt
-        }] for prompt in example_prompts]
+        messages = [
+            [{"role": "user", "content": prompt}] for prompt in example_prompts
+        ]
         example_prompts = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True)
+            messages, tokenize=False, add_generation_prompt=True
+        )
 
     # Run unquantized model.
     with vllm_runner(
-            model_name=model.original_model,
-            enforce_eager=True,  # faster tests
-            dtype=dtype,
-            max_model_len=MAX_MODEL_LEN,
-            tensor_parallel_size=tp_size) as original_model:
+        model_name=model.original_model,
+        enforce_eager=True,  # faster tests
+        dtype=dtype,
+        max_model_len=MAX_MODEL_LEN,
+        tensor_parallel_size=tp_size,
+    ) as original_model:
         original_outputs = original_model.generate_greedy_logprobs(
-            example_prompts[:-1], max_tokens, num_logprobs)
+            example_prompts[:-1], max_tokens, num_logprobs
+        )
 
     # Run gguf model.
-    with vllm_runner(model_name=model.gguf_model,
-                     enforce_eager=True,
-                     tokenizer_name=model.original_model,
-                     dtype=dtype,
-                     max_model_len=MAX_MODEL_LEN,
-                     tensor_parallel_size=tp_size) as gguf_model:
+    with vllm_runner(
+        model_name=model.gguf_model,
+        enforce_eager=True,
+        tokenizer_name=model.original_model,
+        dtype=dtype,
+        max_model_len=MAX_MODEL_LEN,
+        tensor_parallel_size=tp_size,
+    ) as gguf_model:
         gguf_outputs = gguf_model.generate_greedy_logprobs(
-            example_prompts[:-1], max_tokens, num_logprobs)
+            example_prompts[:-1], max_tokens, num_logprobs
+        )
 
     check_logprobs_close(
         outputs_0_lst=original_outputs,

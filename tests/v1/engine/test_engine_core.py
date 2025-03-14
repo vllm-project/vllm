@@ -20,8 +20,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
 if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.",
-                allow_module_level=True)
+    pytest.skip(
+        reason="V1 currently only supported on CUDA.", allow_module_level=True
+    )
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -46,7 +47,6 @@ def make_request() -> EngineCoreRequest:
 
 @fork_new_process_for_each_test
 def test_engine_core(monkeypatch):
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
         """Setup the EngineCore."""
@@ -54,9 +54,11 @@ def test_engine_core(monkeypatch):
         vllm_config = engine_args.create_engine_config()
         executor_class = Executor.get_class(vllm_config)
 
-        engine_core = EngineCore(vllm_config=vllm_config,
-                                 executor_class=executor_class,
-                                 log_stats=True)
+        engine_core = EngineCore(
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=True,
+        )
         """Test basic request lifecycle."""
 
         # First request.
@@ -161,8 +163,8 @@ def test_engine_core(monkeypatch):
 @fork_new_process_for_each_test
 def test_engine_core_advanced_sampling(monkeypatch):
     """
-    A basic end-to-end test to verify that the engine functions correctly 
-    when additional sampling parameters, such as top_p, min_tokens, and 
+    A basic end-to-end test to verify that the engine functions correctly
+    when additional sampling parameters, such as top_p, min_tokens, and
     presence_penalty, are set.
     """
     with monkeypatch.context() as m:
@@ -172,9 +174,11 @@ def test_engine_core_advanced_sampling(monkeypatch):
         vllm_config = engine_args.create_engine_config()
         executor_class = Executor.get_class(vllm_config)
 
-        engine_core = EngineCore(vllm_config=vllm_config,
-                                 executor_class=executor_class,
-                                 log_stats=True)
+        engine_core = EngineCore(
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=True,
+        )
         """Test basic request lifecycle."""
         # First request.
         request: EngineCoreRequest = make_request()
@@ -220,9 +224,9 @@ def test_engine_core_concurrent_batches(monkeypatch):
         return request
 
     class DummyExecutor(UniProcExecutor):
-
         def initialize_from_config(
-                self, kv_cache_configs: list[KVCacheConfig]) -> None:
+            self, kv_cache_configs: list[KVCacheConfig]
+        ) -> None:
             super().initialize_from_config(kv_cache_configs)
 
             # This executor actually can only run 1 batch at a time
@@ -237,15 +241,17 @@ def test_engine_core_concurrent_batches(monkeypatch):
 
             def _thread_wrapper(scheduler_output, future):
                 with self.semaphore:
-                    output = self.collective_rpc("execute_model",
-                                                 args=(scheduler_output, ))
+                    output = self.collective_rpc(
+                        "execute_model", args=(scheduler_output,)
+                    )
                     # Make a copy because output[0] may be reused
                     # by the next batch.
                     output = copy.deepcopy(output[0])
                     future.set_result(output)
 
-            threading.Thread(target=_thread_wrapper,
-                             args=(scheduler_output, future)).start()
+            threading.Thread(
+                target=_thread_wrapper, args=(scheduler_output, future)
+            ).start()
             return future
 
         @property
@@ -264,9 +270,11 @@ def test_engine_core_concurrent_batches(monkeypatch):
             max_num_batched_tokens=10,
         )
         vllm_config = engine_args.create_engine_config()
-        engine_core = EngineCore(vllm_config=vllm_config,
-                                 log_stats=False,
-                                 executor_class=DummyExecutor)
+        engine_core = EngineCore(
+            vllm_config=vllm_config,
+            log_stats=False,
+            executor_class=DummyExecutor,
+        )
         assert engine_core.batch_queue is not None
 
         # Add two requests in a row.

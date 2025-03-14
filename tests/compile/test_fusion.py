@@ -6,22 +6,36 @@ from compressed_tensors.quantization import FP8_DTYPE
 
 import vllm.envs as envs
 import vllm.plugins
-from vllm.compilation.fusion import (FUSED_OPS, QUANT_OPS, FusedRMSQuantKey,
-                                     FusionPass, QuantKey)
+from vllm.compilation.fusion import (
+    FUSED_OPS,
+    QUANT_OPS,
+    FusedRMSQuantKey,
+    FusionPass,
+    QuantKey,
+)
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    CUTLASS_FP8_SUPPORTED, Fp8LinearOp, maybe_create_device_identity)
+    CUTLASS_FP8_SUPPORTED,
+    Fp8LinearOp,
+    maybe_create_device_identity,
+)
 
 from .backend import TestBackend
 
 
 class TestModel(torch.nn.Module):
-
-    def __init__(self, hidden_size: int, eps: float, static: bool,
-                 cutlass_fp8_enabled: bool, *args, **kwargs):
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float,
+        static: bool,
+        cutlass_fp8_enabled: bool,
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.cutlass_fp8_enabled = cutlass_fp8_enabled
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(3)]
@@ -36,7 +50,8 @@ class TestModel(torch.nn.Module):
         ]
         self.fp8_linear = Fp8LinearOp(
             cutlass_fp8_supported=cutlass_fp8_enabled,
-            use_per_token_if_dynamic=True)
+            use_per_token_if_dynamic=True,
+        )
 
     def forward(self, x):
         resid = torch.sqrt(x)
@@ -46,8 +61,7 @@ class TestModel(torch.nn.Module):
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = self.fp8_linear.apply(y2, self.w[1], self.wscale[1],
-                                   self.scale[1])
+        x3 = self.fp8_linear.apply(y2, self.w[1], self.wscale[1], self.scale[1])
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
 
@@ -57,23 +71,30 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("num_tokens", [7, 256, 533, 2048, 2049])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("static", [True, False])
-@pytest.mark.parametrize("cutlass_fp8_enabled",
-                         [True, False] if CUTLASS_FP8_SUPPORTED else [False])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
-                    reason="Only test on CUDA")
-def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
-                              cutlass_fp8_enabled):
+@pytest.mark.parametrize(
+    "cutlass_fp8_enabled", [True, False] if CUTLASS_FP8_SUPPORTED else [False]
+)
+@pytest.mark.skipif(
+    envs.VLLM_TARGET_DEVICE != "cuda", reason="Only test on CUDA"
+)
+def test_fusion_rmsnorm_quant(
+    dtype, hidden_size, num_tokens, eps, static, cutlass_fp8_enabled
+):
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(1)
     maybe_create_device_identity()  # needed for certain non-cutlass fp8 paths
 
-    vllm_config = VllmConfig(compilation_config=CompilationConfig(
-        level=CompilationLevel.PIECEWISE, custom_ops=["+rms_norm"]))
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            level=CompilationLevel.PIECEWISE, custom_ops=["+rms_norm"]
+        )
+    )
     with vllm.config.set_current_vllm_config(vllm_config):
         # Reshape pass is needed for the fusion pass to work
-        config = CompilationConfig.PassConfig(enable_fusion=True,
-                                              enable_noop=True)
+        config = CompilationConfig.PassConfig(
+            enable_fusion=True, enable_noop=True
+        )
         noop_pass = NoOpEliminationPass(config)
         fusion_pass = FusionPass.instance(config)
 
@@ -104,10 +125,9 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
         post_nodes = backend.graph_post_pass.nodes
 
         # static is per-tensor, dynamic is per-token
-        key = QuantKey(dtype=FP8_DTYPE,
-                       static=static,
-                       per_tensor=static,
-                       symmetric=True)
+        key = QuantKey(
+            dtype=FP8_DTYPE, static=static, per_tensor=static, symmetric=True
+        )
         rms_quant = FUSED_OPS[FusedRMSQuantKey(key, False)]
         add_rms_quant = FUSED_OPS[FusedRMSQuantKey(key, True)]
         fp8_quant = QUANT_OPS[key]

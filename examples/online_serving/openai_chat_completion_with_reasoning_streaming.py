@@ -38,9 +38,9 @@ models = client.models.list()
 model = models.data[0].id
 
 messages = [{"role": "user", "content": "9.11 and 9.8, which is greater?"}]
-stream = client.chat.completions.create(model=model,
-                                        messages=messages,
-                                        stream=True)
+stream = client.chat.completions.create(
+    model=model, messages=messages, stream=True
+)
 
 print("client: Start streaming chat completions...")
 printed_reasoning_content = False

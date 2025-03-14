@@ -8,8 +8,10 @@ from transformers import AutoTokenizer
 
 from vllm.inputs import token_inputs
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
-from vllm.transformers_utils.detokenizer import (Detokenizer,
-                                                 detokenize_incrementally)
+from vllm.transformers_utils.detokenizer import (
+    Detokenizer,
+    detokenize_incrementally,
+)
 from vllm.transformers_utils.tokenizer_group import get_tokenizer_group
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
@@ -38,8 +40,9 @@ TOKENIZERS = [
 ]
 
 
-def _run_incremental_decode(tokenizer, all_input_ids,
-                            skip_special_tokens: bool, starting_index: int):
+def _run_incremental_decode(
+    tokenizer, all_input_ids, skip_special_tokens: bool, starting_index: int
+):
     decoded_text = ""
     offset = 0
     token_offset = 0
@@ -47,11 +50,12 @@ def _run_incremental_decode(tokenizer, all_input_ids,
     for i in range(starting_index, len(all_input_ids)):
         new_tokens, text, offset, token_offset = detokenize_incrementally(
             tokenizer,
-            all_input_ids[:i + 1],
+            all_input_ids[: i + 1],
             prev_tokens,
             offset,
             token_offset,
-            skip_special_tokens=skip_special_tokens)
+            skip_special_tokens=skip_special_tokens,
+        )
         decoded_text += text
         if prev_tokens is None:
             prev_tokens = new_tokens
@@ -62,9 +66,11 @@ def _run_incremental_decode(tokenizer, all_input_ids,
 
 @pytest.fixture
 def tokenizer(tokenizer_name):
-    return (MistralTokenizer.from_pretrained(tokenizer_name)
-            if "mistral" in tokenizer_name else
-            AutoTokenizer.from_pretrained(tokenizer_name))
+    return (
+        MistralTokenizer.from_pretrained(tokenizer_name)
+        if "mistral" in tokenizer_name
+        else AutoTokenizer.from_pretrained(tokenizer_name)
+    )
 
 
 @pytest.mark.parametrize("tokenizer_name", ["mistralai/Pixtral-12B-2409"])
@@ -76,7 +82,8 @@ def tokenizer(tokenizer_name):
         "ပုံပြင်လေးပြောပြပါ",
         # Using "URGENCY" since "CY" has token id 130282
         "URGENCY🌶️",
-    ])
+    ],
+)
 def test_mistral_edge_case(tokenizer, truth):
     """Test for a specific edge cases with V3-Tekken MistralTokenizer.
 
@@ -85,10 +92,12 @@ def test_mistral_edge_case(tokenizer, truth):
     starting_index = 0
     all_input_ids = tokenizer(truth, add_special_tokens=False).input_ids
 
-    decoded_text = _run_incremental_decode(tokenizer,
-                                           all_input_ids,
-                                           skip_special_tokens=True,
-                                           starting_index=starting_index)
+    decoded_text = _run_incremental_decode(
+        tokenizer,
+        all_input_ids,
+        skip_special_tokens=True,
+        starting_index=starting_index,
+    )
     assert decoded_text == truth
 
 
@@ -96,8 +105,12 @@ def test_mistral_edge_case(tokenizer, truth):
 def skip_special_tokens(request, tokenizer_name) -> Generator[bool, Any, None]:
     if "mistral" in tokenizer_name:
         yield (
-            True if request.param else
-            pytest.skip("mistral doesn't support skip_special_tokens=False"))
+            True
+            if request.param
+            else pytest.skip(
+                "mistral doesn't support skip_special_tokens=False"
+            )
+        )
     else:
         yield bool(request.param)
 
@@ -109,13 +122,14 @@ def skip_special_tokens(request, tokenizer_name) -> Generator[bool, Any, None]:
 def test_decode_streaming(tokenizer, truth, with_prompt, skip_special_tokens):
     if with_prompt:
         truth_tokens = tokenizer(truth, add_special_tokens=False).input_ids
-        prompt_input_ids = truth_tokens[:len(truth) // 2]
-        generated_input_ids = truth_tokens[len(truth) // 2:]
+        prompt_input_ids = truth_tokens[: len(truth) // 2]
+        generated_input_ids = truth_tokens[len(truth) // 2 :]
         all_input_ids = prompt_input_ids + generated_input_ids
         starting_index = len(prompt_input_ids)
-        prompt = tokenizer.decode(prompt_input_ids,
-                                  skip_special_tokens=skip_special_tokens)
-        generated = truth[len(prompt):]
+        prompt = tokenizer.decode(
+            prompt_input_ids, skip_special_tokens=skip_special_tokens
+        )
+        generated = truth[len(prompt) :]
     else:
         generated = truth
         starting_index = 0
@@ -130,16 +144,19 @@ def test_decode_streaming(tokenizer, truth, with_prompt, skip_special_tokens):
         tokenizer,
         all_input_ids,
         skip_special_tokens=skip_special_tokens,
-        starting_index=starting_index)
+        starting_index=starting_index,
+    )
 
     assert decoded_text == generated
 
     decoded_text = _run_incremental_decode(
-        tokenizer, [len(tokenizer)],
+        tokenizer,
+        [len(tokenizer)],
         skip_special_tokens=skip_special_tokens,
-        starting_index=starting_index)
+        starting_index=starting_index,
+    )
 
-    assert decoded_text == ''
+    assert decoded_text == ""
 
 
 @pytest.fixture
@@ -163,8 +180,9 @@ def detokenizer(tokenizer_name: str) -> Detokenizer:
 
 
 @pytest.fixture(name="complete_sequence_token_ids")
-def create_complete_sequence_token_ids(complete_sequence: str,
-                                       tokenizer) -> list[int]:
+def create_complete_sequence_token_ids(
+    complete_sequence: str, tokenizer
+) -> list[int]:
     complete_sequence_token_ids = tokenizer(complete_sequence).input_ids
     return complete_sequence_token_ids
 
@@ -179,15 +197,16 @@ def create_sequence(prompt_token_ids=None):
 
 
 def create_dummy_logprobs(
-        complete_sequence_token_ids: list[int]) -> list[dict[int, Logprob]]:
-    return [{
-        token_id: Logprob(logprob=0.0),
-        token_id + 1: Logprob(logprob=0.1)
-    } for token_id in complete_sequence_token_ids]
+    complete_sequence_token_ids: list[int],
+) -> list[dict[int, Logprob]]:
+    return [
+        {token_id: Logprob(logprob=0.0), token_id + 1: Logprob(logprob=0.1)}
+        for token_id in complete_sequence_token_ids
+    ]
 
 
 def create_dummy_prompt_logprobs(
-        complete_sequence_token_ids: list[int]
+    complete_sequence_token_ids: list[int],
 ) -> list[Optional[dict[int, Any]]]:
     # logprob for the first prompt token is None.
     logprobs: list[Optional[dict[int, Any]]] = [None]
@@ -198,27 +217,31 @@ def create_dummy_prompt_logprobs(
 @pytest.mark.parametrize("complete_sequence", TRUTH)
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
 @pytest.mark.parametrize("skip_special_tokens", [True, False], indirect=True)
-def test_decode_sequence_logprobs(complete_sequence: str,
-                                  complete_sequence_token_ids: list[int],
-                                  detokenizer: Detokenizer,
-                                  skip_special_tokens: bool):
+def test_decode_sequence_logprobs(
+    complete_sequence: str,
+    complete_sequence_token_ids: list[int],
+    detokenizer: Detokenizer,
+    skip_special_tokens: bool,
+):
     """Verify Detokenizer decodes logprobs correctly."""
-    sampling_params = SamplingParams(skip_special_tokens=skip_special_tokens,
-                                     logprobs=2)
+    sampling_params = SamplingParams(
+        skip_special_tokens=skip_special_tokens, logprobs=2
+    )
 
     # Run sequentially.
     seq = create_sequence()
     dummy_logprobs = create_dummy_logprobs(complete_sequence_token_ids)
     sequential_logprobs_text_chosen_token: list[str] = []
     sequential_logprobs_text_other_token: list[str] = []
-    for new_token, logprobs in zip(complete_sequence_token_ids,
-                                   dummy_logprobs):
+    for new_token, logprobs in zip(complete_sequence_token_ids, dummy_logprobs):
         seq.append_token_id(new_token, logprobs)
         detokenizer.decode_sequence_inplace(seq, sampling_params)
         sequential_logprobs_text_chosen_token.append(
-            seq.output_logprobs[-1][new_token].decoded_token)
+            seq.output_logprobs[-1][new_token].decoded_token
+        )
         sequential_logprobs_text_other_token.append(
-            seq.output_logprobs[-1][new_token + 1].decoded_token)
+            seq.output_logprobs[-1][new_token + 1].decoded_token
+        )
     sequential_result = seq.output_text
 
     assert sequential_result == "".join(sequential_logprobs_text_chosen_token)
@@ -233,43 +256,54 @@ def test_decode_sequence_logprobs(complete_sequence: str,
 
 @pytest.mark.parametrize("complete_sequence", TRUTH)
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
-def test_decode_prompt_logprobs(complete_sequence_token_ids: list[int],
-                                detokenizer: Detokenizer):
+def test_decode_prompt_logprobs(
+    complete_sequence_token_ids: list[int], detokenizer: Detokenizer
+):
     """Verify Detokenizer decodes prompt logprobs correctly."""
-    sampling_params = SamplingParams(skip_special_tokens=True,
-                                     prompt_logprobs=1)
+    sampling_params = SamplingParams(
+        skip_special_tokens=True, prompt_logprobs=1
+    )
 
     # Run sequentially.
     seq = create_sequence(complete_sequence_token_ids)
-    seq_group = SequenceGroup(request_id="1",
-                              seqs=[seq],
-                              sampling_params=sampling_params,
-                              arrival_time=0.0)
+    seq_group = SequenceGroup(
+        request_id="1",
+        seqs=[seq],
+        sampling_params=sampling_params,
+        arrival_time=0.0,
+    )
     dummy_logprobs = create_dummy_prompt_logprobs(complete_sequence_token_ids)
-    detokenizer.decode_prompt_logprobs_inplace(seq_group,
-                                               dummy_logprobs,
-                                               position_offset=0)
+    detokenizer.decode_prompt_logprobs_inplace(
+        seq_group, dummy_logprobs, position_offset=0
+    )
     # First logprob is None.
-    decoded_prompt_logprobs: list[dict[int, Any]] = dummy_logprobs[
-        1:]  # type: ignore
+    decoded_prompt_logprobs: list[dict[int, Any]] = dummy_logprobs[1:]  # type: ignore
 
     # decoded_prompt_logprobs doesn't contain the first token.
     token_ids = complete_sequence_token_ids
     tokenizer = detokenizer.get_tokenizer_for_seq(seq)
     text_full = tokenizer.decode(token_ids, skip_special_tokens=True)
     text_first = tokenizer.decode(token_ids[0], skip_special_tokens=True)
-    text = text_full[len(text_first):]
+    text = text_full[len(text_first) :]
 
     # Text for logprobs for the chosen token should be the same as the
     # prompt text. Note that the first logprob is None.
-    assert text == "".join([
-        logprobs[token_id].decoded_token
-        for token_id, logprobs in zip(token_ids[1:], decoded_prompt_logprobs)
-    ])
-    assert text != "".join([
-        logprobs[token_id + 1].decoded_token
-        for token_id, logprobs in zip(token_ids[1:], decoded_prompt_logprobs)
-    ])
+    assert text == "".join(
+        [
+            logprobs[token_id].decoded_token
+            for token_id, logprobs in zip(
+                token_ids[1:], decoded_prompt_logprobs
+            )
+        ]
+    )
+    assert text != "".join(
+        [
+            logprobs[token_id + 1].decoded_token
+            for token_id, logprobs in zip(
+                token_ids[1:], decoded_prompt_logprobs
+            )
+        ]
+    )
 
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
@@ -288,20 +322,21 @@ def test_decode_prompt_logprobs_chunked_prefill(
         max_num_seqs = min(chunked_prefill_token_size, max_num_seqs)
         max_num_batched_tokens = chunked_prefill_token_size
 
-    with vllm_runner(model,
-                     dtype="half",
-                     max_logprobs=5,
-                     gpu_memory_utilization=0.5,
-                     enable_chunked_prefill=enable_chunked_prefill,
-                     max_num_batched_tokens=max_num_batched_tokens,
-                     max_num_seqs=max_num_seqs) as vllm_model:
-
-        vllm_sampling_params = SamplingParams(max_tokens=10,
-                                              logprobs=5,
-                                              prompt_logprobs=5,
-                                              temperature=0.0)
+    with vllm_runner(
+        model,
+        dtype="half",
+        max_logprobs=5,
+        gpu_memory_utilization=0.5,
+        enable_chunked_prefill=enable_chunked_prefill,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+    ) as vllm_model:
+        vllm_sampling_params = SamplingParams(
+            max_tokens=10, logprobs=5, prompt_logprobs=5, temperature=0.0
+        )
         vllm_results = vllm_model.model.generate(
-            example_prompts, sampling_params=vllm_sampling_params)
+            example_prompts, sampling_params=vllm_sampling_params
+        )
 
         for idx, result in enumerate(vllm_results):
             assert result.prompt_logprobs is not None
@@ -309,9 +344,9 @@ def test_decode_prompt_logprobs_chunked_prefill(
 
             # Compared detokenized prompts ids to original prompt.
             generated_string = ""
-            for (prompt_token,
-                 prompt_logprobs) in zip(result.prompt_token_ids[1:],
-                                         result.prompt_logprobs[1:]):
+            for prompt_token, prompt_logprobs in zip(
+                result.prompt_token_ids[1:], result.prompt_logprobs[1:]
+            ):
                 # prompt_logprobs is a dict of the token_id: logprob
                 # We select the token_id corresponding to the actual prompt
                 # Decoded token in the detokenized string corresponding to this
@@ -319,4 +354,5 @@ def test_decode_prompt_logprobs_chunked_prefill(
                 generated_string += prompt_logprobs[prompt_token].decoded_token
 
             assert generated_string == example_prompts[idx], (
-                "Detokenized prompt logprobs do not match original prompt")
+                "Detokenized prompt logprobs do not match original prompt"
+            )

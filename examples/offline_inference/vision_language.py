@@ -6,6 +6,7 @@ the correct prompt format on vision language models for text generation.
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
+
 import os
 import random
 
@@ -29,15 +30,21 @@ def run_aria(questions: list[str], modality: str):
     model_name = "rhymes-ai/Aria"
 
     # NOTE: Need L40 (or equivalent) to avoid OOM
-    llm = LLM(model=model_name,
-              max_model_len=4096,
-              max_num_seqs=2,
-              dtype="bfloat16",
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype="bfloat16",
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
 
-    prompts = [(f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>{question}"
-                "<|im_end|>\n<|im_start|>assistant\n")
-               for question in questions]
+    prompts = [
+        (
+            f"<|im_start|>user\n<fim_prefix><|img|><fim_suffix>{question}"
+            "<|im_end|>\n<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
 
     stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
     return llm, prompts, stop_token_ids
@@ -50,8 +57,10 @@ def run_blip2(questions: list[str], modality: str):
     # BLIP-2 prompt format is inaccurate on HuggingFace model repository.
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
     prompts = [f"Question: {question} Answer:" for question in questions]
-    llm = LLM(model="Salesforce/blip2-opt-2.7b",
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model="Salesforce/blip2-opt-2.7b",
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -61,10 +70,12 @@ def run_chameleon(questions: list[str], modality: str):
     assert modality == "image"
 
     prompts = [f"{question}<image>" for question in questions]
-    llm = LLM(model="facebook/chameleon-7b",
-              max_model_len=4096,
-              max_num_seqs=2,
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model="facebook/chameleon-7b",
+        max_model_len=4096,
+        max_num_seqs=2,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -75,11 +86,13 @@ def run_deepseek_vl2(questions: list[str], modality: str):
 
     model_name = "deepseek-ai/deepseek-vl2-tiny"
 
-    llm = LLM(model=model_name,
-              max_model_len=4096,
-              max_num_seqs=2,
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
-              hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]})
+    llm = LLM(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]},
+    )
 
     prompts = [
         f"<|User|>: <image>\n{question}\n\n<|Assistant|>:"
@@ -93,12 +106,14 @@ def run_deepseek_vl2(questions: list[str], modality: str):
 def run_florence2(question: str, modality: str):
     assert modality == "image"
 
-    llm = LLM(model="microsoft/Florence-2-large",
-              tokenizer="facebook/bart-large",
-              max_num_seqs=8,
-              trust_remote_code=True,
-              dtype="bfloat16",
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model="microsoft/Florence-2-large",
+        tokenizer="facebook/bart-large",
+        max_num_seqs=8,
+        trust_remote_code=True,
+        dtype="bfloat16",
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
 
     prompt = "<MORE_DETAILED_CAPTION>"
     stop_token_ids = None
@@ -110,10 +125,12 @@ def run_fuyu(questions: list[str], modality: str):
     assert modality == "image"
 
     prompts = [f"{question}\n" for question in questions]
-    llm = LLM(model="adept/fuyu-8b",
-              max_model_len=2048,
-              max_num_seqs=2,
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model="adept/fuyu-8b",
+        max_model_len=2048,
+        max_num_seqs=2,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -132,9 +149,14 @@ def run_gemma3(questions: list[str], modality: str):
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
-    prompts = [("<bos><start_of_turn>user\n"
-                f"<start_of_image>{question}<end_of_turn>\n"
-                "<start_of_turn>model\n") for question in questions]
+    prompts = [
+        (
+            "<bos><start_of_turn>user\n"
+            f"<start_of_image>{question}<end_of_turn>\n"
+            "<start_of_turn>model\n"
+        )
+        for question in questions
+    ]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -144,17 +166,20 @@ def run_glm4v(questions: list[str], modality: str):
     assert modality == "image"
     model_name = "THUDM/glm-4v-9b"
 
-    llm = LLM(model=model_name,
-              max_model_len=2048,
-              max_num_seqs=2,
-              trust_remote_code=True,
-              enforce_eager=True,
-              hf_overrides={"architectures": ["GLM4VForCausalLM"]},
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model=model_name,
+        max_model_len=2048,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        enforce_eager=True,
+        hf_overrides={"architectures": ["GLM4VForCausalLM"]},
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
 
     prompts = [
         f"<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>\
-        {question}<|assistant|>" for question in questions
+        {question}<|assistant|>"
+        for question in questions
     ]
 
     stop_token_ids = [151329, 151336, 151338]
@@ -174,15 +199,16 @@ def run_h2ovl(questions: list[str], modality: str):
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
-    messages = [[{
-        'role': 'user',
-        'content': f"<image>\n{question}"
-    }] for question in questions]
-    prompts = tokenizer.apply_chat_template(messages,
-                                            tokenize=False,
-                                            add_generation_prompt=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, trust_remote_code=True
+    )
+    messages = [
+        [{"role": "user", "content": f"<image>\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
 
     # Stop tokens for H2OVL-Mississippi
     # https://huggingface.co/h2oai/h2ovl-mississippi-800m
@@ -203,15 +229,16 @@ def run_idefics3(questions: list[str], modality: str):
         # if you are running out of memory, you can reduce the "longest_edge".
         # see: https://huggingface.co/HuggingFaceM4/Idefics3-8B-Llama3#model-optimizations
         mm_processor_kwargs={
-            "size": {
-                "longest_edge": 3 * 364
-            },
+            "size": {"longest_edge": 3 * 364},
         },
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
-    prompts = [(
-        f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"
-    ) for question in questions]
+    prompts = [
+        (
+            f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"
+        )
+        for question in questions
+    ]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -229,15 +256,16 @@ def run_internvl(questions: list[str], modality: str):
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
-    messages = [[{
-        'role': 'user',
-        'content': f"<image>\n{question}"
-    }] for question in questions]
-    prompts = tokenizer.apply_chat_template(messages,
-                                            tokenize=False,
-                                            add_generation_prompt=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, trust_remote_code=True
+    )
+    messages = [
+        [{"role": "user", "content": f"<image>\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
 
     # Stop tokens for InternVL
     # models variants may have different stop tokens
@@ -256,9 +284,11 @@ def run_llava(questions: list[str], modality: str):
         f"USER: <image>\n{question}\nASSISTANT:" for question in questions
     ]
 
-    llm = LLM(model="llava-hf/llava-1.5-7b-hf",
-              max_model_len=4096,
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_model_len=4096,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -268,9 +298,11 @@ def run_llava_next(questions: list[str], modality: str):
     assert modality == "image"
 
     prompts = [f"[INST] <image>\n{question} [/INST]" for question in questions]
-    llm = LLM(model="llava-hf/llava-v1.6-mistral-7b-hf",
-              max_model_len=8192,
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model="llava-hf/llava-v1.6-mistral-7b-hf",
+        max_model_len=8192,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -283,31 +315,36 @@ def run_llava_next_video(questions: list[str], modality: str):
     prompts = [
         f"USER: <video>\n{question} ASSISTANT:" for question in questions
     ]
-    llm = LLM(model="llava-hf/LLaVA-NeXT-Video-7B-hf",
-              max_model_len=8192,
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model="llava-hf/LLaVA-NeXT-Video-7B-hf",
+        max_model_len=8192,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
 
 # LLaVA-OneVision
 def run_llava_onevision(questions: list[str], modality: str):
-
     if modality == "video":
         prompts = [
             f"<|im_start|>user <video>\n{question}<|im_end|> \
-        <|im_start|>assistant\n" for question in questions
+        <|im_start|>assistant\n"
+            for question in questions
         ]
 
     elif modality == "image":
         prompts = [
             f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n" for question in questions
+        <|im_start|>assistant\n"
+            for question in questions
         ]
 
-    llm = LLM(model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
-              max_model_len=16384,
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
+        max_model_len=16384,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -316,10 +353,9 @@ def run_llava_onevision(questions: list[str], modality: str):
 def run_mantis(questions: list[str], modality: str):
     assert modality == "image"
 
-    llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n'  # noqa: E501
+    llama3_template = "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"  # noqa: E501
     prompts = [
-        llama3_template.format(f"{question}\n<image>")
-        for question in questions
+        llama3_template.format(f"{question}\n<image>") for question in questions
     ]
 
     llm = LLM(
@@ -355,8 +391,9 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
     # 2.6: image, video
     # o2.6: image, video, audio
     # model_name = "openbmb/MiniCPM-o-2_6"
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, trust_remote_code=True
+    )
     llm = LLM(
         model=model_name,
         max_model_len=4096,
@@ -372,7 +409,7 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
     # stop_token_ids = [tokenizer.eos_id, tokenizer.eot_id]
 
     # 2.6 / o2.6
-    stop_tokens = ['<|im_end|>', '<|endoftext|>']
+    stop_tokens = ["<|im_end|>", "<|endoftext|>"]
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
 
     modality_placeholder = {
@@ -382,12 +419,16 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
 
     prompts = [
         tokenizer.apply_chat_template(
-            [{
-                'role': 'user',
-                'content': f"{modality_placeholder[modality]}\n{question}"
-            }],
+            [
+                {
+                    "role": "user",
+                    "content": f"{modality_placeholder[modality]}\n{question}",
+                }
+            ],
             tokenize=False,
-            add_generation_prompt=True) for question in questions
+            add_generation_prompt=True,
+        )
+        for question in questions
     ]
     return llm, prompts, stop_token_ids
 
@@ -419,19 +460,21 @@ def run_mllama(questions: list[str], modality: str):
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    messages = [[{
-        "role":
-        "user",
-        "content": [{
-            "type": "image"
-        }, {
-            "type": "text",
-            "text": question
-        }]
-    }] for question in questions]
-    prompts = tokenizer.apply_chat_template(messages,
-                                            add_generation_prompt=True,
-                                            tokenize=False)
+    messages = [
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": question},
+                ],
+            }
+        ]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False
+    )
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -451,7 +494,8 @@ def run_molmo(questions: list[str], modality: str):
 
     prompts = [
         f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n" for question in questions
+        <|im_start|>assistant\n"
+        for question in questions
     ]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
@@ -472,15 +516,16 @@ def run_nvlm_d(questions: list[str], modality: str):
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name,
-                                              trust_remote_code=True)
-    messages = [[{
-        'role': 'user',
-        'content': f"<image>\n{question}"
-    }] for question in questions]
-    prompts = tokenizer.apply_chat_template(messages,
-                                            tokenize=False,
-                                            add_generation_prompt=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name, trust_remote_code=True
+    )
+    messages = [
+        [{"role": "user", "content": f"<image>\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
     stop_token_ids = None
     return llm, prompts, stop_token_ids
 
@@ -491,8 +536,10 @@ def run_paligemma(question: str, modality: str):
 
     # PaliGemma has special prompt format for VQA
     prompt = ["caption en"]
-    llm = LLM(model="google/paligemma-3b-mix-224",
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model="google/paligemma-3b-mix-224",
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -503,8 +550,10 @@ def run_paligemma2(question: str, modality: str):
 
     # PaliGemma 2 has special prompt format for VQA
     prompt = ["caption en"]
-    llm = LLM(model="google/paligemma2-3b-ft-docci-448",
-              disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
+    llm = LLM(
+        model="google/paligemma2-3b-ft-docci-448",
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -616,7 +665,6 @@ def run_qwen_vl(questions: list[str], modality: str):
 
 # Qwen2-VL
 def run_qwen2_vl(questions: list[str], modality: str):
-
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
     llm = LLM(
@@ -637,10 +685,13 @@ def run_qwen2_vl(questions: list[str], modality: str):
         placeholder = "<|video_pad|>"
 
     prompts = [
-        ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-         f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
-         f"{question}<|im_end|>\n"
-         "<|im_start|>assistant\n") for question in questions
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
     ]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
@@ -648,7 +699,6 @@ def run_qwen2_vl(questions: list[str], modality: str):
 
 # Qwen2.5-VL
 def run_qwen2_5_vl(questions: list[str], modality: str):
-
     model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
 
     llm = LLM(
@@ -669,10 +719,13 @@ def run_qwen2_5_vl(questions: list[str], modality: str):
         placeholder = "<|video_pad|>"
 
     prompts = [
-        ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-         f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
-         f"{question}<|im_end|>\n"
-         "<|im_start|>assistant\n") for question in questions
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
     ]
     stop_token_ids = None
     return llm, prompts, stop_token_ids
@@ -720,8 +773,7 @@ def get_multi_modal_input(args):
     """
     if args.modality == "image":
         # Input image and question
-        image = ImageAsset("cherry_blossom") \
-            .pil_image.convert("RGB")
+        image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
         img_questions = [
             "What is the content of this image?",
             "Describe the content of this image in detail.",
@@ -736,8 +788,9 @@ def get_multi_modal_input(args):
 
     if args.modality == "video":
         # Input video and question
-        video = VideoAsset(name="sample_demo_1.mp4",
-                           num_frames=args.num_frames).np_ndarrays
+        video = VideoAsset(
+            name="sample_demo_1.mp4", num_frames=args.num_frames
+        ).np_ndarrays
         vid_questions = ["Why is this video funny?"]
 
         return {
@@ -749,12 +802,13 @@ def get_multi_modal_input(args):
     raise ValueError(msg)
 
 
-def apply_image_repeat(image_repeat_prob, num_prompts, data,
-                       prompts: list[str], modality):
-    """Repeats images with provided probability of "image_repeat_prob". 
+def apply_image_repeat(
+    image_repeat_prob, num_prompts, data, prompts: list[str], modality
+):
+    """Repeats images with provided probability of "image_repeat_prob".
     Used to simulate hit/miss for the MM preprocessor cache.
     """
-    assert (image_repeat_prob <= 1.0 and image_repeat_prob >= 0)
+    assert image_repeat_prob <= 1.0 and image_repeat_prob >= 0
     no_yes = [0, 1]
     probs = [1.0 - image_repeat_prob, image_repeat_prob]
 
@@ -769,12 +823,12 @@ def apply_image_repeat(image_repeat_prob, num_prompts, data,
                 new_val = (i // 256 // 256, i // 256, i % 256)
                 cur_image.putpixel((0, 0), new_val)
 
-        inputs.append({
-            "prompt": prompts[i % len(prompts)],
-            "multi_modal_data": {
-                modality: cur_image
+        inputs.append(
+            {
+                "prompt": prompts[i % len(prompts)],
+                "multi_modal_data": {modality: cur_image},
             }
-        })
+        )
 
     return inputs
 
@@ -789,46 +843,47 @@ def main(args):
     data = mm_input["data"]
     questions = mm_input["questions"]
 
-    llm, prompts, stop_token_ids = model_example_map[model](questions,
-                                                            modality)
+    llm, prompts, stop_token_ids = model_example_map[model](questions, modality)
     # Don't want to check the flag multiple times, so just hijack `prompts`.
-    prompts = prompts if args.use_different_prompt_per_request else [
-        prompts[0]
-    ]
+    prompts = prompts if args.use_different_prompt_per_request else [prompts[0]]
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
-    sampling_params = SamplingParams(temperature=0.2,
-                                     max_tokens=64,
-                                     stop_token_ids=stop_token_ids)
+    sampling_params = SamplingParams(
+        temperature=0.2, max_tokens=64, stop_token_ids=stop_token_ids
+    )
 
     assert args.num_prompts > 0
     if args.num_prompts == 1:
         # Single inference
         inputs = {
             "prompt": prompts[0],
-            "multi_modal_data": {
-                modality: data
-            },
+            "multi_modal_data": {modality: data},
         }
     else:
         # Batch inference
         if args.image_repeat_prob is not None:
             # Repeat images with specified probability of "image_repeat_prob"
-            inputs = apply_image_repeat(args.image_repeat_prob,
-                                        args.num_prompts, data, prompts,
-                                        modality)
+            inputs = apply_image_repeat(
+                args.image_repeat_prob,
+                args.num_prompts,
+                data,
+                prompts,
+                modality,
+            )
         else:
             # Use the same image for all prompts
-            inputs = [{
-                "prompt": prompts[i % len(prompts)],
-                "multi_modal_data": {
-                    modality: data
-                },
-            } for i in range(args.num_prompts)]
+            inputs = [
+                {
+                    "prompt": prompts[i % len(prompts)],
+                    "multi_modal_data": {modality: data},
+                }
+                for i in range(args.num_prompts)
+            ]
 
     if args.time_generate:
         import time
+
         start_time = time.time()
         outputs = llm.generate(inputs, sampling_params=sampling_params)
         elapsed_time = time.time() - start_time
@@ -844,50 +899,60 @@ def main(args):
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description='Demo on using vLLM for offline inference with '
-        'vision language models for text generation')
-    parser.add_argument('--model-type',
-                        '-m',
-                        type=str,
-                        default="llava",
-                        choices=model_example_map.keys(),
-                        help='Huggingface "model_type".')
-    parser.add_argument('--num-prompts',
-                        type=int,
-                        default=4,
-                        help='Number of prompts to run.')
-    parser.add_argument('--modality',
-                        type=str,
-                        default="image",
-                        choices=['image', 'video'],
-                        help='Modality of the input.')
-    parser.add_argument('--num-frames',
-                        type=int,
-                        default=16,
-                        help='Number of frames to extract from the video.')
+        description="Demo on using vLLM for offline inference with "
+        "vision language models for text generation"
+    )
+    parser.add_argument(
+        "--model-type",
+        "-m",
+        type=str,
+        default="llava",
+        choices=model_example_map.keys(),
+        help='Huggingface "model_type".',
+    )
+    parser.add_argument(
+        "--num-prompts", type=int, default=4, help="Number of prompts to run."
+    )
+    parser.add_argument(
+        "--modality",
+        type=str,
+        default="image",
+        choices=["image", "video"],
+        help="Modality of the input.",
+    )
+    parser.add_argument(
+        "--num-frames",
+        type=int,
+        default=16,
+        help="Number of frames to extract from the video.",
+    )
 
     parser.add_argument(
-        '--image-repeat-prob',
+        "--image-repeat-prob",
         type=float,
         default=None,
-        help='Simulates the hit-ratio for multi-modal preprocessor cache'
-        ' (if enabled)')
+        help="Simulates the hit-ratio for multi-modal preprocessor cache"
+        " (if enabled)",
+    )
 
     parser.add_argument(
-        '--disable-mm-preprocessor-cache',
-        action='store_true',
-        help='If True, disables caching of multi-modal preprocessor/mapper.')
+        "--disable-mm-preprocessor-cache",
+        action="store_true",
+        help="If True, disables caching of multi-modal preprocessor/mapper.",
+    )
 
     parser.add_argument(
-        '--time-generate',
-        action='store_true',
-        help='If True, then print the total generate() call time')
+        "--time-generate",
+        action="store_true",
+        help="If True, then print the total generate() call time",
+    )
 
     parser.add_argument(
-        '--use-different-prompt-per-request',
-        action='store_true',
-        help='If True, then use different prompt (with the same multi-modal '
-        'data) for each request.')
+        "--use-different-prompt-per-request",
+        action="store_true",
+        help="If True, then use different prompt (with the same multi-modal "
+        "data) for each request.",
+    )
 
     args = parser.parse_args()
     main(args)

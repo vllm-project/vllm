@@ -21,4 +21,5 @@ def test_custom_dispatcher():
         ],
         arg2=["--enforce-eager", f"-O{CompilationLevel.DYNAMO_AS_IS}"],
         env1={},
-        env2={})
+        env2={},
+    )

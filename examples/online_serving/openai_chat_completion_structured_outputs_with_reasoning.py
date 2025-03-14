@@ -34,14 +34,16 @@ models = client.models.list()
 model = models.data[0].id
 
 # Guided decoding by Regex
-prompt = ("What is the capital of France?")
+prompt = "What is the capital of France?"
 
 completion = client.chat.completions.create(
     model=model,
-    messages=[{
-        "role": "user",
-        "content": prompt,
-    }],
+    messages=[
+        {
+            "role": "user",
+            "content": prompt,
+        }
+    ],
     extra_body={
         "guided_regex": "(Paris|London)",
     },
@@ -57,13 +59,15 @@ class People(BaseModel):
 
 json_schema = People.model_json_schema()
 
-prompt = ("Generate a JSON with the name and age of one random person.")
+prompt = "Generate a JSON with the name and age of one random person."
 completion = client.chat.completions.create(
     model=model,
-    messages=[{
-        "role": "user",
-        "content": prompt,
-    }],
+    messages=[
+        {
+            "role": "user",
+            "content": prompt,
+        }
+    ],
     extra_body={"guided_json": json_schema},
 )
 print("reasoning_content: ", completion.choices[0].message.reasoning_content)
@@ -86,14 +90,18 @@ class CarDescription(BaseModel):
 
 json_schema = CarDescription.model_json_schema()
 
-prompt = ("Generate a JSON with the brand, model and car_type of"
-          "the most iconic car from the 90's")
+prompt = (
+    "Generate a JSON with the brand, model and car_type of"
+    "the most iconic car from the 90's"
+)
 completion = client.chat.completions.create(
     model=model,
-    messages=[{
-        "role": "user",
-        "content": prompt,
-    }],
+    messages=[
+        {
+            "role": "user",
+            "content": prompt,
+        }
+    ],
     extra_body={"guided_json": json_schema},
 )
 print("reasoning_content: ", completion.choices[0].message.reasoning_content)
@@ -115,14 +123,18 @@ simplified_sql_grammar = """
 """
 
 # This may be very slow https://github.com/vllm-project/vllm/issues/12122
-prompt = ("Generate an SQL query to show the 'username' and 'email'"
-          "from the 'users' table.")
+prompt = (
+    "Generate an SQL query to show the 'username' and 'email'"
+    "from the 'users' table."
+)
 completion = client.chat.completions.create(
     model=model,
-    messages=[{
-        "role": "user",
-        "content": prompt,
-    }],
+    messages=[
+        {
+            "role": "user",
+            "content": prompt,
+        }
+    ],
     extra_body={"guided_grammar": simplified_sql_grammar},
 )
 print("reasoning_content: ", completion.choices[0].message.reasoning_content)

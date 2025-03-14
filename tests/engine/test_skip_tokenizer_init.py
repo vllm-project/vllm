@@ -20,8 +20,9 @@ def test_skip_tokenizer_initialization(model: str):
     with pytest.raises(ValueError, match="cannot pass text prompts when"):
         llm.generate("abc", sampling_params)
 
-    outputs = llm.generate({"prompt_token_ids": [1, 2, 3]},
-                           sampling_params=sampling_params)
+    outputs = llm.generate(
+        {"prompt_token_ids": [1, 2, 3]}, sampling_params=sampling_params
+    )
     assert len(outputs) > 0
     completions = outputs[0].outputs
     assert len(completions) > 0

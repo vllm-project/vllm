@@ -69,20 +69,21 @@ def _test_processing_correctness(
     input_to_hit = {
         "image": Image.new("RGB", size=(128, 128)),
         "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
-        "audio": (np.zeros((512, )), 16000),
+        "audio": (np.zeros((512,)), 16000),
     }
     input_factory = {
-        "image":
-        partial(random_image, rng, min_wh=128, max_wh=256),
-        "video":
-        partial(random_video,
-                rng,
-                min_frames=2,
-                max_frames=8,
-                min_wh=128,
-                max_wh=256),
-        "audio":
-        partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
+        "image": partial(random_image, rng, min_wh=128, max_wh=256),
+        "video": partial(
+            random_video,
+            rng,
+            min_frames=2,
+            max_frames=8,
+            min_wh=128,
+            max_wh=256,
+        ),
+        "audio": partial(
+            random_audio, rng, min_len=512, max_len=1024, sr=16000
+        ),
     }
 
     tokenizer_encode_kwargs = {}
@@ -95,9 +96,14 @@ def _test_processing_correctness(
 
     for batch_idx in range(num_batches):
         mm_data = {
-            k:
-            [(input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
-             for _ in range(rng.randint(limit + 1))]
+            k: [
+                (
+                    input_to_hit[k]
+                    if rng.rand() < hit_rate
+                    else input_factory[k]()
+                )
+                for _ in range(rng.randint(limit + 1))
+            ]
             for k, limit in limit_mm_per_prompt.items()
         }
 
@@ -127,9 +133,10 @@ def _test_processing_correctness(
         )
 
         assert _drop_mm_kwargs_keys(
-            baseline_result, ignore_mm_keys) == _drop_mm_kwargs_keys(
-                cached_result, ignore_mm_keys), (
-                    f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+            baseline_result, ignore_mm_keys
+        ) == _drop_mm_kwargs_keys(cached_result, ignore_mm_keys), (
+            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})"
+        )
 
         baseline_tokenized_result = baseline_processor.apply(
             tokenizer.encode(prompt, **tokenizer_encode_kwargs),
@@ -138,9 +145,10 @@ def _test_processing_correctness(
         )
 
         assert _drop_mm_kwargs_keys(
-            baseline_result, ignore_mm_keys) == _drop_mm_kwargs_keys(
-                baseline_tokenized_result, ignore_mm_keys), (
-                    f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+            baseline_result, ignore_mm_keys
+        ) == _drop_mm_kwargs_keys(baseline_tokenized_result, ignore_mm_keys), (
+            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})"
+        )
 
         cached_tokenized_result = cached_processor.apply(
             tokenizer.encode(prompt, **tokenizer_encode_kwargs),
@@ -149,9 +157,10 @@ def _test_processing_correctness(
         )
 
         assert _drop_mm_kwargs_keys(
-            cached_result, ignore_mm_keys) == _drop_mm_kwargs_keys(
-                cached_tokenized_result, ignore_mm_keys), (
-                    f"Failed ({batch_idx=}, {prompt=}, {mm_data=})")
+            cached_result, ignore_mm_keys
+        ) == _drop_mm_kwargs_keys(cached_tokenized_result, ignore_mm_keys), (
+            f"Failed ({batch_idx=}, {prompt=}, {mm_data=})"
+        )
 
 
 # yapf: disable
@@ -228,8 +237,10 @@ def test_processing_correctness_phi3v(
 ):
     # HACK - this is an attempted workaround for the following bug
     # https://github.com/huggingface/transformers/issues/34307
-    from transformers import AutoImageProcessor  # noqa: F401
-    from transformers import AutoProcessor  # noqa: F401
+    from transformers import (
+        AutoImageProcessor,  # noqa: F401
+        AutoProcessor,  # noqa: F401
+    )
 
     AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
 

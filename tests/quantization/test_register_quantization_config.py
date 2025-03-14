@@ -5,18 +5,24 @@ See https://github.com/vllm-project/vllm/issues/11926 for more details.
 
 Run `pytest tests/quantization/test_register_quantization_config.py`.
 """
+
 from typing import Any, Optional
 
 import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.linear import LinearBase  # noqa: E501
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import (
+    LinearBase,  # noqa: E501
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization import (
-    get_quantization_config, register_quantization_config)
+    get_quantization_config,
+    register_quantization_config,
+)
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
-    QuantizationConfig)
+    QuantizationConfig,
+)
 
 
 class FakeQuantLinearMethod(UnquantizedLinearMethod):
@@ -27,10 +33,12 @@ class FakeQuantLinearMethod(UnquantizedLinearMethod):
         super().__init__()
         self.num_bits = num_bits
 
-    def apply(self,
-              layer: "torch.nn.Module",
-              x: "torch.Tensor",
-              bias: Optional["torch.Tensor"] = None) -> "torch.Tensor":
+    def apply(
+        self,
+        layer: "torch.nn.Module",
+        x: "torch.Tensor",
+        bias: Optional["torch.Tensor"] = None,
+    ) -> "torch.Tensor":
         """Perform fake quantization before the linear layer."""
 
         # Calculate the scales dynamically
@@ -39,8 +47,11 @@ class FakeQuantLinearMethod(UnquantizedLinearMethod):
         scales = (max_val - min_val) / (2**self.num_bits - 1)
 
         # Fake quantize the input
-        quant_x = torch.clamp(torch.round(x / scales), -2**(self.num_bits - 1),
-                              2**(self.num_bits - 1) - 1)
+        quant_x = torch.clamp(
+            torch.round(x / scales),
+            -(2 ** (self.num_bits - 1)),
+            2 ** (self.num_bits - 1) - 1,
+        )
         dequant_x = quant_x * scales
 
         return F.linear(dequant_x, layer.weight, bias)
@@ -77,8 +88,9 @@ class CustomQuantConfig(QuantizationConfig):
         """Create a config class from the model's quantization config."""
         return CustomQuantConfig(num_bits=config.get("num_bits", 8))
 
-    def get_quant_method(self, layer: "torch.nn.Module",
-                         prefix: str) -> Optional["FakeQuantLinearMethod"]:
+    def get_quant_method(
+        self, layer: "torch.nn.Module", prefix: str
+    ) -> Optional["FakeQuantLinearMethod"]:
         """Get the quantize method to use for the quantized layer."""
         if isinstance(layer, LinearBase):
             return FakeQuantLinearMethod(num_bits=self.num_bits)
@@ -97,17 +109,20 @@ def test_register_quantization_config():
         register_quantization_config("custom_quant")(CustomQuantConfig)
 
 
-@pytest.mark.parametrize(argnames="model",
-                         argvalues=[
-                             "meta-llama/Llama-3.2-1B-Instruct",
-                         ])
+@pytest.mark.parametrize(
+    argnames="model",
+    argvalues=[
+        "meta-llama/Llama-3.2-1B-Instruct",
+    ],
+)
 def test_custom_quant(vllm_runner, model):
     """Test infer with the custom quantization method."""
-    with vllm_runner(model_name=model,
-                     quantization="custom_quant",
-                     enforce_eager=True) as llm:
-
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+    with vllm_runner(
+        model_name=model, quantization="custom_quant", enforce_eager=True
+    ) as llm:
+        model = (
+            llm.model.llm_engine.model_executor.driver_worker.model_runner.model
+        )  # noqa: E501
         layer = model.model.layers[0]
         qkv_proj = layer.self_attn.qkv_proj
 

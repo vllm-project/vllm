@@ -3,6 +3,7 @@
 
 Run `pytest tests/test_cache_block_hashing.py`.
 """
+
 from typing import Optional
 
 import pytest
@@ -23,13 +24,16 @@ prefix_common = (
     "teaching role. They have 5 years of previous teaching experience "
     "as an assistant teacher at a co-ed, public school with experience "
     "in middle school math teaching. Based on this, fulfill "
-    "the following: ")
+    "the following: "
+)
 prefixes = [start + prefix_common for start in prefix_start]
 
 # Sample prompts.
 sample_prompts = [
-    "Hello, my name is", "The president of the United States is",
-    "The capital of France is", "The future of AI is"
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
 ]
 
 
@@ -41,11 +45,15 @@ def flatten_2d(li):
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.parametrize("max_num_seqs", [256])
-@pytest.mark.parametrize("concurrent_lora_int_ids",
-                         [[None], [1], [None, 1], [None, 1, 2], [1, 2]])
-def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
-                             concurrent_lora_int_ids: list[Optional[int]]):
-
+@pytest.mark.parametrize(
+    "concurrent_lora_int_ids", [[None], [1], [None, 1], [None, 1, 2], [1, 2]]
+)
+def test_auto_prefix_caching(
+    model: str,
+    block_size: int,
+    max_num_seqs: int,
+    concurrent_lora_int_ids: list[Optional[int]],
+):
     tokenizer = TokenizerGroup(
         tokenizer_id="facebook/opt-125m",
         enable_lora=False,
@@ -71,12 +79,13 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
             for seq_id, prompt in enumerate(prompts):
                 hashes[-1].append([])
                 prompt_token_ids = tokenizer.encode(prompt)
-                seq = Sequence(seq_id,
-                               inputs=token_inputs(prompt_token_ids,
-                                                   prompt=prompt),
-                               block_size=block_size,
-                               eos_token_id=tokenizer.tokenizer.eos_token_id,
-                               lora_request=lora_request)
+                seq = Sequence(
+                    seq_id,
+                    inputs=token_inputs(prompt_token_ids, prompt=prompt),
+                    block_size=block_size,
+                    eos_token_id=tokenizer.tokenizer.eos_token_id,
+                    lora_request=lora_request,
+                )
 
                 num_blocks = len(prompt_token_ids) // block_size
                 for idx in range(num_blocks):
@@ -85,12 +94,12 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
     # Check that hashes made with two prefixes with different first blocks are
     # different everywhere.
     for hash0, hash1 in zip(flatten_2d(hashes[0]), flatten_2d(hashes[1])):
-        assert (hash0 != hash1)
+        assert hash0 != hash1
 
     # Check that hashes of different prompts made with the same prefix are the
     # same until the hashes that contain the prompt.
     for hash_pref in hashes:
         same_hashes = [tuple(h[:-1]) for h in hash_pref]
         different_hashes = [h[-1] for h in hash_pref]
-        assert (len(set(same_hashes)) == 1)
-        assert (len(set(different_hashes)) == len(different_hashes))
+        assert len(set(same_hashes)) == 1
+        assert len(set(different_hashes)) == len(different_hashes)

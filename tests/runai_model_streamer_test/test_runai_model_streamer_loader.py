@@ -2,8 +2,10 @@
 
 from vllm import SamplingParams
 from vllm.config import LoadConfig, LoadFormat
-from vllm.model_executor.model_loader.loader import (RunaiModelStreamerLoader,
-                                                     get_model_loader)
+from vllm.model_executor.model_loader.loader import (
+    RunaiModelStreamerLoader,
+    get_model_loader,
+)
 
 test_model = "openai-community/gpt2"
 
