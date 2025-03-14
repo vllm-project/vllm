@@ -422,7 +422,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # 2:4 Sparse Kernels
 
   # The 2:4 sparse kernels cutlass_scaled_sparse_mm and cutlass_compressor
-  # require CUDA 12.2 or later (and only work on Hopper and Blackwell).
+  # require CUDA 12.2 or later (and only work on Hopper).
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.2 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
     set_gencode_flags_for_srcs(
@@ -558,8 +559,11 @@ target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
-  "csrc/moe/moe_wna16.cu"
   "csrc/moe/topk_softmax_kernels.cu")
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_MOE_EXT_SRC "csrc/moe/moe_wna16.cu")
+endif()
 
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
@@ -573,6 +577,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     SRCS "${VLLM_MOE_WNA16_SRC}"
     CUDA_ARCHS "${CUDA_ARCHS}")
 
+  list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
     set(MARLIN_MOE_SRC
