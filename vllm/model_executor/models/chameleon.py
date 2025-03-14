@@ -39,7 +39,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -986,8 +986,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         )
 
     def get_multimodal_embeddings(
-        self, **kwargs
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

@@ -39,7 +39,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
 
 from .chatglm import ChatGLMBaseModel, ChatGLMModel
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
 from .utils import flatten_bn, merge_multimodal_embeddings
 
 
@@ -596,8 +597,7 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         return self.transformer.vision(pixel_values)
 
     def get_multimodal_embeddings(
-        self, **kwargs
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

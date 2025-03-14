@@ -35,7 +35,7 @@ from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
@@ -221,8 +221,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         return get_sampler()
 
     def get_multimodal_embeddings(
-        self, **kwargs
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input, image_tokens = self._parse_and_validate_image_input(
             **kwargs)
         if image_input is None:

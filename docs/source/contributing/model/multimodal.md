@@ -34,7 +34,8 @@ Further update the model as follows:
             image_features = self.vision_encoder(image_input)
             return self.multi_modal_projector(image_features)
 
-        def get_multimodal_embeddings(self, **kwargs: object) -> Optional[NestedTensors]:
+        def get_multimodal_embeddings(
+                self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
 
             # Validate the multimodal input keyword arguments
             image_input = self._parse_and_validate_image_input(**kwargs)

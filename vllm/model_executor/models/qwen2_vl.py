@@ -71,7 +71,8 @@ from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import (
     cached_image_processor_from_config)
 
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -1262,7 +1263,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return modalities
 
     def get_multimodal_embeddings(
-            self, **kwargs) -> Optional[tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:

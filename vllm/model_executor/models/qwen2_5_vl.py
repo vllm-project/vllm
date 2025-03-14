@@ -59,7 +59,8 @@ from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
 from .qwen2_vl import (Qwen2VLMultiModalProcessor, Qwen2VLProcessingInfo,
                        apply_rotary_pos_emb_vision)
@@ -952,7 +953,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return modalities
 
     def get_multimodal_embeddings(
-            self, **kwargs) -> Optional[tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:

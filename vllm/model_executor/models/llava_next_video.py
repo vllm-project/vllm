@@ -27,7 +27,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import init_vision_tower_for_llava
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
@@ -421,8 +421,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                 f"Unsupported type of video input {type(video_pixels)}")
 
     def get_multimodal_embeddings(
-        self, **kwargs
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         video_input = self._parse_and_validate_video_input(**kwargs)
         if video_input is None:
             return None

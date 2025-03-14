@@ -21,7 +21,7 @@ from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
 
 from .clip import CLIPVisionModel
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
                     LlavaDummyInputsBuilder, LlavaLikeConfig,
                     LlavaMultiModalProjector, init_vision_tower_for_llava)
@@ -480,8 +480,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         ]
 
     def get_multimodal_embeddings(
-        self, **kwargs
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

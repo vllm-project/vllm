@@ -35,7 +35,7 @@ from .idefics2_vision_model import Idefics2VisionConfig
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as Idefics3VisionTransformer)
 # yapf: enable
-from .interfaces import SupportsMultiModal, SupportsQuant
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .llama import LlamaDecoderLayer, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     is_pp_missing_parameter, maybe_prefix,
@@ -607,8 +607,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         return self.multi_modal_projector(image_outputs, image_attn_mask)
 
     def get_multimodal_embeddings(
-        self, **kwargs
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

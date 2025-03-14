@@ -29,7 +29,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import CLIPVisionModel
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llava import LlavaDummyInputsBuilder, init_vision_tower_for_llava
 from .llava_next import (BaseLlavaNextMultiModalProcessor, LlavaNextLikeConfig,
                          LlavaNextProcessingInfo)
@@ -856,7 +856,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         return image_feature
 
     def get_multimodal_embeddings(
-            self, **kwargs) -> Optional[tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return None

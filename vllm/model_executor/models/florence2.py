@@ -30,7 +30,8 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsV0Only
+from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
+                         SupportsV0Only)
 from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
 
 
@@ -1037,8 +1038,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal):
         return self._encode_image(pixel_values)
 
     def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
