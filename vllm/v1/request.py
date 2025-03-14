@@ -88,21 +88,6 @@ class Request:
                 sampling_params=request.sampling_params),
         )
 
-    def queued(self, timestamp: Optional[float] = None) -> None:
-        self.events.append(
-            EngineCoreEvent.new_event(EngineCoreEventType.QUEUED, timestamp))
-
-    def scheduled(self, timestamp: Optional[float] = None) -> None:
-        self.events.append(
-            EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED,
-                                      timestamp))
-
-    def take_events(self) -> Optional[list[EngineCoreEvent]]:
-        if not self.events:
-            return None
-        events, self.events = self.events, []
-        return events
-
     def append_output_token_ids(
         self,
         token_ids: Union[int, list[int]],
@@ -145,6 +130,19 @@ class Request:
     @property
     def use_structured_output(self) -> bool:
         return self.sampling_params.guided_decoding is not None
+
+    def record_event(
+        self,
+        event_type: EngineCoreEventType,
+        timestamp: Optional[float] = None,
+    ) -> None:
+        self.events.append(EngineCoreEvent.new_event(event_type, timestamp))
+
+    def take_events(self) -> Optional[list[EngineCoreEvent]]:
+        if not self.events:
+            return None
+        events, self.events = self.events, []
+        return events
 
 
 class RequestStatus(enum.IntEnum):
