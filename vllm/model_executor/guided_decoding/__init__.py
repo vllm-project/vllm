@@ -130,10 +130,15 @@ async def get_guided_decoding_logits_processor(
             get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
             guided_params, tokenizer, model_config, reasoner)
-
+    if guided_params.backend_name == 'guidance':
+        from vllm.model_executor.guided_decoding.guidance_decoding import (
+            get_local_guidance_guided_decoding_logits_processor)
+        return get_local_guidance_guided_decoding_logits_processor(
+            guided_params, tokenizer)
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
-        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar'")
+        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar', 'guidance'"
+    )
 
 
 def get_local_guided_decoding_logits_processor(
@@ -163,7 +168,13 @@ def get_local_guided_decoding_logits_processor(
             get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
             guided_params, tokenizer, model_config, reasoner)
+    if guided_params.backend_name == 'guidance':
+        from vllm.model_executor.guided_decoding.guidance_decoding import (
+            get_local_guidance_guided_decoding_logits_processor)
+        return get_local_guidance_guided_decoding_logits_processor(
+            guided_params, tokenizer)
 
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
-        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar'")
+        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar', 'guidance'"
+    )

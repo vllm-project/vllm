@@ -2765,7 +2765,9 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        valid_guided_backends = ['outlines', 'lm-format-enforcer', 'xgrammar']
+        valid_guided_backends = [
+            'outlines', 'lm-format-enforcer', 'xgrammar', 'guidance'
+        ]
 
         backend = GuidedDecodingParams(
             backend=self.guided_decoding_backend).backend_name
