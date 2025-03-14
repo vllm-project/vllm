@@ -78,12 +78,18 @@ class NeuronPlatform(Platform):
             # neuron V1 only: the preferred block_size is 32
             vllm_config.cache_config.block_size = 32
 
-        vllm_config.model_config.enforce_eager = False
-        vllm_config.compilation_config.custom_ops = ["silu_and_mul"]
-        vllm_config.compilation_config.level = CompilationLevel.DYNAMO_AS_IS
-        vllm_config.compilation_config.cudagraph_capture_sizes = [
-            vllm_config.scheduler_config.max_num_batched_tokens
-        ]
+        model_config = vllm_config.model_config
+        if model_config:
+            model_config.enforce_eager = False
+
+        compilation_config = vllm_config.compilation_config
+        if compilation_config:
+            compilation_config.custom_ops = ["silu_and_mul"]
+            compilation_config.level = CompilationLevel.DYNAMO_AS_IS
+            compilation_config.cudagraph_capture_sizes = [
+                vllm_config.scheduler_config.max_num_batched_tokens
+                if vllm_config.scheduler_config else 128
+            ]
 
         # Disable functionalization on xla, due to https://github.com/pytorch/xla/issues/8640
         os.environ["XLA_DISABLE_FUNCTIONALIZATION"] = "0"
