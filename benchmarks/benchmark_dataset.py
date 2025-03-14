@@ -660,7 +660,7 @@ class VisionArenaDataset(HuggingFaceDataset):
     def sample(self,
                tokenizer: PreTrainedTokenizerBase,
                num_requests: int,
-               output_len: Optional[int] = DEFAULT_OUTPUT_LEN,
+               output_len: Optional[int] = None,
                enable_multimodal_chat: bool = False,
                **kwargs) -> list:
         output_len = (output_len
