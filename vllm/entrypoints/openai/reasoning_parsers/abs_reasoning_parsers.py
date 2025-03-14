@@ -82,8 +82,6 @@ class ReasoningParser:
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         """
         Check if the reasoning content ends in the input_ids.
-        It is used in structured engines like `xgrammar` to check if the 
-        reasoning content ends in the model output.
         Parameters:
         input_ids: list[int]
             The input_ids of the model output.
@@ -96,12 +94,11 @@ class ReasoningParser:
             "AbstractReasoningParser.is_reasoning_end has"
             "not been implemented!")
 
+    # TODO: need to rebase by PR #14428
     @abstractmethod
-    def extract_content(self, input_ids: list[int]) -> list[int]:
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
-        Extract content from the input_ids.
-        It is used in structured engines like `outlines` to extract the content
-        from the model output.
+        Extract content token ids from the input_ids.
         Parameters:
         input_ids: list[int]
             The input_ids of the model output.
@@ -111,8 +108,8 @@ class ReasoningParser:
         """
 
         raise NotImplementedError(
-            "AbstractReasoningParser.extract_content has not been implemented!"
-        )
+            "AbstractReasoningParser.extract_content_ids has"
+            " not been implemented!")
 
 
 class ReasoningParserManager:

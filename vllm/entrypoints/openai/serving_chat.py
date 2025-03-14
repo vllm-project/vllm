@@ -557,7 +557,7 @@ class OpenAIServingChat(OpenAIServing):
                                     list(output.token_ids)):
                                 reasoning_end_arr[i] = True
                                 current_token_ids =  \
-                                    reasoning_parser.extract_content(
+                                    reasoning_parser.extract_content_ids(
                                         list(output.token_ids))
                                 if delta_message and delta_message.content:
                                     current_text = delta_message.content

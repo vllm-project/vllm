@@ -49,7 +49,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.think_end_token_id in input_ids
 
-    def extract_content(self, input_ids: list[int]) -> list[int]:
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract the content after the end tokens
         """
