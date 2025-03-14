@@ -843,23 +843,28 @@ void mla_decode_kvcache_cpu_impl(
       const int num_tokens =
           block_idx < block_num - 1 ? BLOCK_SIZE : last_block_size;
 
+      // load k to registers
+      vec_type k_vecs[BLOCK_SIZE * HEAD_DIM / ELEM_NUM];
+      for (int block_offset = 0; block_offset < num_tokens; ++block_offset)
+        for (int i = 0; i < HEAD_DIM; i += ELEM_NUM) {
+          load_vec_type k_load_vec(this_kv_block + block_offset * HEAD_DIM + i);
+          vec_type k_vec(k_load_vec);
+          k_vecs[(block_offset * HEAD_DIM + i) / ELEM_NUM] = k_vec;
+        }
+
       for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
         float logits[BLOCK_SIZE] = {};  // initialize to zeros
         float max_val = -FLT_MAX;
 
         for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
           // dot product
-          vec_type acc_vec(0.0f);
+          vec_type acc_vec;
           for (int i = 0; i < HEAD_DIM; i += ELEM_NUM) {
             load_vec_type q_load_vec(q + seq_idx * q_stride +
                                      head_idx * HEAD_DIM + i);
             vec_type q_vec(q_load_vec);
-
-            load_vec_type k_load_vec(this_kv_block + block_offset * HEAD_DIM +
-                                     i);
-            vec_type k_vec(k_load_vec);
-
-            vec_op::fma(acc_vec, q_vec, k_vec);
+            vec_op::fma(acc_vec, q_vec,
+                        k_vecs[(block_offset * HEAD_DIM + i) / ELEM_NUM]);
           }
           float acc = acc_vec.reduce_sum();
 
@@ -880,12 +885,10 @@ void mla_decode_kvcache_cpu_impl(
 
         for (int block_offset = 0; block_offset < BLOCK_SIZE; ++block_offset) {
           vec_type scale_(logits[block_offset] * inv_sum);
-
           for (int i = 0; i < V_HEAD_DIM; i += ELEM_NUM) {
-            load_vec_type v_load_vec(this_kv_block + block_offset * HEAD_DIM +
-                                     i);
-            vec_type v_vec(v_load_vec);
-            vec_op::fma(this_out[i / ELEM_NUM], v_vec, scale_);
+            vec_op::fma(this_out[i / ELEM_NUM],
+                        k_vecs[(block_offset * HEAD_DIM + i) / ELEM_NUM],
+                        scale_);
           }
         }
 
