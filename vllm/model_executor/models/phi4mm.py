@@ -360,6 +360,7 @@ def get_navit_vision_model(**kwargs):
 
     vision_model = Idefics2VisionTransformer(
         config=model_config,
+        require_post_norm=False,
         num_hidden_layers_override=num_hidden_layers,
     )
 

@@ -330,6 +330,7 @@ class Idefics2VisionTransformer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         *,
         num_hidden_layers_override: Optional[int] = None,
+        require_post_norm: Optional[bool] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -350,8 +351,11 @@ class Idefics2VisionTransformer(nn.Module):
                 f"layers, but you requested {len(self.encoder.layers)} layers."
             )
 
-        self.post_layernorm = nn.LayerNorm(embed_dim,
-                                           eps=config.layer_norm_eps)
+        self.require_post_norm = require_post_norm
+        self.post_layernorm = nn.LayerNorm(
+            embed_dim,
+            eps=config.layer_norm_eps,
+        ) if require_post_norm else nn.Identity()
 
     def get_input_embeddings(self):
         return self.embeddings
@@ -381,9 +385,24 @@ class Idefics2VisionTransformer(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
+        layer_count = len(self.encoder.layers)
+
         for name, loaded_weight in weights:
+            # skip pooling header
             if name.startswith("head."):
                 continue
+
+            # post_layernorm is optional
+            if (name.startswith("post_layernorm.")
+                    and not self.require_post_norm):
+                continue
+
+            # omit layers when num_hidden_layers_override is set
+            if name.startswith("encoder.layers."):
+                layer_idx = int(name.split(".")[2])
+                if layer_idx >= layer_count:
+                    continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
