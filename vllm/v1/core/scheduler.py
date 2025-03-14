@@ -15,8 +15,8 @@ from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
                                            SchedulerOutput)
-from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
-                            EngineCoreOutput, EngineCoreOutputs)
+from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
+                            EngineCoreOutputs)
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -178,7 +178,9 @@ class Scheduler:
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
-                    self.request_preempted(preempted_req, scheduled_timestamp)
+                    if self.log_stats:
+                        preempted_req.record_event(
+                            EngineCoreEventType.PREEMPTED, scheduled_timestamp)
 
                     self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
@@ -320,7 +322,9 @@ class Scheduler:
                 req_index += 1
                 self.running.append(request)
                 self.scheduled_req_ids.add(request.request_id)
-                self.request_scheduled(request, scheduled_timestamp)
+                if self.log_stats:
+                    request.record_event(EngineCoreEventType.SCHEDULED,
+                                         scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -666,7 +670,8 @@ class Scheduler:
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
         self.requests[request.request_id] = request
-        self.request_queued(request)
+        if self.log_stats:
+            request.record_event(EngineCoreEventType.QUEUED)
 
     def finish_requests(
         self,
@@ -727,26 +732,6 @@ class Scheduler:
 
     def reset_prefix_cache(self) -> bool:
         return self.kv_cache_manager.reset_prefix_cache()
-
-    def request_queued(self, request: Request):
-        if not self.log_stats:
-            return
-        request.events.append(
-            EngineCoreEvent.new_event(EngineCoreEventType.QUEUED))
-
-    def request_scheduled(self, request: Request, timestamp: float):
-        if not self.log_stats:
-            return
-        request.events.append(
-            EngineCoreEvent.new_event(EngineCoreEventType.SCHEDULED,
-                                      timestamp))
-
-    def request_preempted(self, request: Request, timestamp: float):
-        if not self.log_stats:
-            return
-        request.events.append(
-            EngineCoreEvent.new_event(EngineCoreEventType.PREEMPTED,
-                                      timestamp))
 
     def make_stats(self) -> Optional[SchedulerStats]:
         if not self.log_stats:
