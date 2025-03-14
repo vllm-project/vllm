@@ -14,7 +14,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
-from ....utils import fork_new_process_for_each_test, large_gpu_test
+from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
@@ -112,7 +112,7 @@ def run_test(
         ]
 
     # use eager mode for hf runner, since phi3_v didn't work with flash_attn
-    hf_model_kwargs = {"_attn_implementation": "eager", "device_map": "auto"}
+    hf_model_kwargs = {"_attn_implementation": "eager"}
     with hf_runner(model, dtype=dtype,
                    model_kwargs=hf_model_kwargs) as hf_model:
         eos_token_id = hf_model.processor.tokenizer.eos_token_id
@@ -180,9 +180,7 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
     )
 
 
-@pytest.xfail(
-    reason="Phi-4-MM multi-image inference is divergent with hf model.")
-@large_gpu_test(min_gb=32)
+@large_gpu_test(min_gb=48)
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -201,7 +199,8 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
 @pytest.mark.parametrize("max_model_len", [10000])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-@fork_new_process_for_each_test
+@pytest.mark.xfail(
+    reason="Phi-4-MM multi-image inference is divergent with hf model.")
 def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
                              size_factors, dtype: str, max_model_len: int,
                              max_tokens: int, num_logprobs: int) -> None:
