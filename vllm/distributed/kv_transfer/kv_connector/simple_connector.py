@@ -309,8 +309,6 @@ class SimpleConnector(KVConnectorBase):
                     k_pe_sqz = values[i - model_executable.model.start_layer].to(kv_cache.device)
                     k_c_normed = k_c_normed.squeeze(1)
                     k_pe_sqz = k_pe_sqz.squeeze(1)
-                    logger.info(f"k_c_normed.shape = {k_c_normed.shape}")
-                    logger.info(f"k_pe_sqz.shape = {k_pe_sqz.shape}")
                     ops.concat_and_cache_mla(
                         k_c_normed[:, :model_config.kv_lora_rank],
                         k_pe_sqz[:, model_config.kv_lora_rank:],
