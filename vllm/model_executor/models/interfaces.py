@@ -451,7 +451,7 @@ class SupportsQuant:
     packed_modules_mapping: ClassVar[Dict[str, List[str]]] = {}
     quant_config: Optional[QuantizationConfig] = None
 
-    def __new__(cls, *args, **kwargs) -> "SupportsQuant":
+    def __new__(cls, *args, **kwargs):
         instance = super().__new__(cls)
         quant_config = cls._find_quant_config(*args, **kwargs)
         if quant_config is not None:
