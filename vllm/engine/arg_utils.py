@@ -1435,11 +1435,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        if self.scheduler_cls != EngineArgs.scheduler_cls:
-            _raise_or_fallback(feature_name="--scheduler-cls",
-                               recommend_to_remove=False)
-            return False
-
         if self.worker_cls != EngineArgs.worker_cls:
             _raise_or_fallback(feature_name="--worker-cls",
                                recommend_to_remove=False)
