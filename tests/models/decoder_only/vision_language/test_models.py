@@ -42,12 +42,6 @@ REQUIRES_V0_MODELS = [
     "fuyu",
 ]
 
-REQUIRES_V0_MODELS_VIDEO = [
-    # V1 Test: qwen2-vl is broken on V1 for video
-    # https://github.com/vllm-project/vllm/issues/14528
-    "qwen2_vl"
-]
-
 # yapf: disable
 COMMON_BROADCAST_SETTINGS = {
     "test_type": VLMTestType.IMAGE,
@@ -681,8 +675,7 @@ def test_image_embedding_models(model_type: str,
 def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
                       hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
                       video_assets: _VideoAssets, monkeypatch):
-    if (model_type in REQUIRES_V0_MODELS
-            or model_type in REQUIRES_V0_MODELS_VIDEO):
+    if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_video_test(
@@ -812,8 +805,7 @@ def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
                             video_assets: _VideoAssets, monkeypatch):
-    if (model_type in REQUIRES_V0_MODELS
-            or model_type in REQUIRES_V0_MODELS_VIDEO):
+    if model_type in REQUIRES_V0_MODELS:
         monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_video_test(
