@@ -24,9 +24,10 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .siglip import SiglipVisionModel, get_max_siglip_image_tokens
+from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
+from .vision import get_vision_encoder_info
 
 logger = init_logger(__name__)
 
@@ -67,6 +68,9 @@ class PaliGemmaProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(PaliGemmaConfig)
 
+    def get_vision_encoder_info(self):
+        return get_vision_encoder_info(self.get_hf_config())
+
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 
@@ -78,9 +82,8 @@ class PaliGemmaProcessingInfo(BaseProcessingInfo):
         return {"image": self.get_num_image_tokens()}
 
     def get_num_image_tokens(self) -> int:
-        hf_config = self.get_hf_config()
-        vision_config = hf_config.vision_config
-        return get_max_siglip_image_tokens(vision_config)
+        vision_encoder_info = self.get_vision_encoder_info()
+        return vision_encoder_info.get_max_image_tokens()
 
 
 class PaliGemmaDummyInputsBuilder(
@@ -173,8 +176,10 @@ class PaliGemmaMultiModalProcessor(
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
-        mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
+        mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
+                                  return_mm_hashes)
         prompt_token_ids = mm_inputs["prompt_token_ids"]
 
         tokenizer = self.info.get_tokenizer()
