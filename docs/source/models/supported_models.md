@@ -763,7 +763,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `google/gemma-3-4b-it`, `google/gemma-3-27b-it`, etc.
   * ✅︎
   * ✅︎
-  * ✅︎\*
+  * ⚠️
 - * `GLM4VForCausalLM`<sup>^</sup>
   * GLM-4V
   * T + I
@@ -786,9 +786,9 @@ See [this page](#generative-models) for more information on how to use generativ
   *
   * ✅︎
 - * `InternVLChatModel`
-  * InternVL 2.5, Mono-InternVL, InternVL 2.0
+  * InternVideo 2.5, InternVL 2.5, Mono-InternVL, InternVL 2.0
   * T + I<sup>E+</sup>
-  * `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
+  * `OpenGVLab/InternVideo2_5_Chat_8B`, `OpenGVLab/InternVL2_5-4B`, `OpenGVLab/Mono-InternVL-2B`, `OpenGVLab/InternVL2-4B`, etc.
   *
   * ✅︎
   * ✅︎
@@ -856,12 +856,12 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
 - * `PaliGemmaForConditionalGeneration`
-  * PaliGemma ⚠️, PaliGemma 2 ⚠️
+  * PaliGemma, PaliGemma 2
   * T + I<sup>E</sup>
   * `google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, `google/paligemma2-3b-ft-docci-448`, etc.
   *
   * ✅︎
-  * ✅︎
+  * ⚠️
 - * `Phi3VForCausalLM`
   * Phi-3-Vision, Phi-3.5-Vision
   * T + I<sup>E+</sup>
@@ -926,34 +926,15 @@ See [this page](#generative-models) for more information on how to use generativ
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.  
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
-:::{warning}
-vLLM does not currently support PrefixLM attention mask, so our PaliGemma implementation uses regular causal attention, which causes the model output to be unstable.
-
-We may deprecate this model series in a future release.
-:::
-
-:::{note}
-`h2oai/h2ovl-mississippi-2b` will be available in V1 once we support backends other than FlashAttention.
-:::
-
-:::{note}
-To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
-:::
-
-:::{note}
-The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
-For more details, please see: <gh-pr:4087#issuecomment-2250397630>
-:::
-
-:::{note}
-To use Qwen2.5-VL series models, you have to install Hugging Face Transformers library from source via `pip install git+https://github.com/huggingface/transformers`.
-:::
-
-:::{note}
+:::{important}
 To use Gemma3 series models, you have to install Hugging Face Transformers library from source via
 `pip install git+https://github.com/huggingface/transformers`.
-The earliest commit that supports this is [`50d3530aa04e7a7d003e6b255a98f79fd0447357`](https://github.com/huggingface/transformers/commit/50d3530aa04e7a7d003e6b255a98f79fd0447357).
 
+Pan-and-scan image pre-processing is currently supported on V0 (but not V1).
+You can enable it by passing `--mm-processor-kwargs '{"do_pan_and_scan": True}'`.
+:::
+
+:::{warning}
 Both V0 and V1 support `Gemma3ForConditionalGeneration` for text-only inputs.
 However, there are differences in how they handle text + image inputs:
 
@@ -969,9 +950,23 @@ V1 currently uses a simplified attention pattern:
 - Will be updated in the future to support the correct behavior
 
 This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
+:::
 
-Additionally, vLLM's current Gemma 3 implementation does not support the pan-and-scan image pre-processing algorithm, which helps handle images with skewed aspect ratios by intelligently cropping them into multiple views.
-Without this feature, model performance may degrade when processing images that deviate significantly from square dimensions.
+:::{note}
+`h2oai/h2ovl-mississippi-2b` will be available in V1 once we support backends other than FlashAttention.
+:::
+
+:::{note}
+To use `TIGER-Lab/Mantis-8B-siglip-llama3`, you have to pass `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
+:::
+
+:::{note}
+The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
+For more details, please see: <gh-pr:4087#issuecomment-2250397630>
+:::
+
+:::{warning}
+Our PaliGemma implementations have the same problem as Gemma 3 (see above) for both V0 and V1.
 :::
 
 ### Pooling Models
