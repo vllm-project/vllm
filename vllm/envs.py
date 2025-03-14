@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
@@ -83,10 +84,7 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
-    VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
-    VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
     VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
-    VLLM_TEST_ENABLE_EP: bool = False
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -96,6 +94,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
+    VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
 
 
 def get_default_cache_root():
@@ -164,7 +163,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VERBOSE":
     lambda: bool(int(os.getenv('VERBOSE', '0'))),
 
-    # Root directory for VLLM configuration files
+    # Root directory for vLLM configuration files
     # Defaults to `~/.config/vllm` unless `XDG_CONFIG_HOME` is set
     # Note that this not only affects how vllm finds its configuration files
     # during runtime, but also affects how vllm installs its configuration
@@ -178,7 +177,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # ================== Runtime Env Vars ==================
 
-    # Root directory for VLLM cache files
+    # Root directory for vLLM cache files
     # Defaults to `~/.cache/vllm` unless `XDG_CACHE_HOME` is set
     "VLLM_CACHE_ROOT":
     lambda: os.path.expanduser(
@@ -260,7 +259,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENGINE_ITERATION_TIMEOUT_S":
     lambda: int(os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60")),
 
-    # API key for VLLM API server
+    # API key for vLLM API server
     "VLLM_API_KEY":
     lambda: os.environ.get("VLLM_API_KEY", None),
 
@@ -321,6 +320,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "XFORMERS": use XFormers
     # - "ROCM_FLASH": use ROCmFlashAttention
     # - "FLASHINFER": use flashinfer
+    # - "FLASHMLA": use FlashMLA
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
@@ -347,6 +347,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
     "VLLM_CPU_OMP_THREADS_BIND":
     lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
+
+    # (CPU backend only) whether to use prepack for MoE layer. This will be
+    # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
+    # need to set this to "0" (False).
+    "VLLM_CPU_MOE_PREPACK":
+    lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
 
     # OpenVINO device selection
     # default is CPU
@@ -555,34 +561,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MLA_DISABLE":
     lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
 
-    # Flag that can control whether or not we perform matrix-absorption for MLA
-    # decode, i.e. absorb W_UK into W_Q/W_UK and W_UV into W_O, absorbing the
-    # matrices reduces the runtime FLOPs needed to compute MLA but requires
-    # storing more weights, W_Q_UK and W_UV_O, so can increase memory usage,
-    # the is enabled by default
-    "VLLM_MLA_PERFORM_MATRIX_ABSORPTION":
-    lambda: bool(int(os.getenv("VLLM_MLA_PERFORM_MATRIX_ABSORPTION", "1"))),
-
-    # When running MLA with matrix-absorption enabled and fp8 quantized weights
-    # we perform the matrix-absorption in float32 precision, after the matrices
-    # are absorbed we requantize the weights back to fp8, this flag can be used
-    # to disable the requantization step, and instead convert the absorbed
-    # matrices to match the activation type. This can lead to higher memory and
-    # compute usage but better preserves the accuracy of the original model.
-    "VLLM_MLA_DISABLE_REQUANTIZATION":
-    lambda: bool(int(os.getenv("VLLM_MLA_DISABLE_REQUANTIZATION", "0"))),
-
     # If set, vLLM will use the Triton implementation of moe_align_block_size,
     # i.e. moe_align_block_size_triton in fused_moe.py.
     "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
     lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
                  ),
-
-    # If set, vLLM will use the experimental expert parallel implementation on
-    # the FusedMoE layer, using tensor parallelism size as expert parallelism
-    # size.
-    "VLLM_TEST_ENABLE_EP":
-    lambda: bool(int(os.getenv("VLLM_TEST_ENABLE_EP", "0"))),
 
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
@@ -636,6 +619,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
+
+    # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
+    "VLLM_MARLIN_USE_ATOMIC_ADD":
+    lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
 }
 
 # end-env-vars-definition

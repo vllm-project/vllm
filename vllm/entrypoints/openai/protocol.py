@@ -242,7 +242,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ChatCompletionNamedToolChoiceParam,
     ]] = "none"
 
-    # NOTE this will be ignored by VLLM -- the model determines the behavior
+    # NOTE this will be ignored by vLLM -- the model determines the behavior
     parallel_tool_calls: Optional[bool] = False
     user: Optional[str] = None
 
@@ -1346,6 +1346,21 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
+class TranscriptionResponseStreamChoice(OpenAIBaseModel):
+    delta: DeltaMessage
+    finish_reason: Optional[str] = None
+    stop_reason: Optional[Union[int, str]] = None
+
+
+class TranscriptionStreamResponse(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"trsc-{random_uuid()}")
+    object: Literal["transcription.chunk"] = "transcription.chunk"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    choices: list[TranscriptionResponseStreamChoice]
+    usage: Optional[UsageInfo] = Field(default=None)
+
+
 class BatchRequestInput(OpenAIBaseModel):
     """
     The per-line object of the batch input file.
@@ -1571,6 +1586,15 @@ class TranscriptionRequest(OpenAIBaseModel):
     timestamps incurs additional latency.
     """
 
+    stream: Optional[bool] = False
+    """Custom field not present in the original OpenAI definition. When set, 
+    it will enable output to be streamed in a similar fashion as the Chat
+    Completion endpoint. 
+    """
+    # Flattened stream option to simplify form data.
+    stream_include_usage: Optional[bool] = False
+    stream_continuous_usage_stats: Optional[bool] = False
+
     # Default sampling parameters for transcription requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "temperature": 0,
@@ -1591,7 +1615,21 @@ class TranscriptionRequest(OpenAIBaseModel):
                 "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
 
         return SamplingParams.from_optional(temperature=temperature,
-                                            max_tokens=max_tokens)
+                                            max_tokens=max_tokens,
+                                            output_kind=RequestOutputKind.DELTA
+                                            if self.stream \
+                                            else RequestOutputKind.FINAL_ONLY)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_stream_options(cls, data):
+        stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
+        stream = data.get("stream", False)
+        if any(bool(data.get(so, False)) for so in stream_opts) and not stream:
+            raise ValueError(
+                "Stream options can only be defined when `stream=True`.")
+
+        return data
 
 
 # Transcription response objects

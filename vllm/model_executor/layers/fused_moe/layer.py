@@ -7,7 +7,7 @@ from typing import Callable, List, Optional, Tuple
 import torch
 from torch.nn.parameter import UninitializedParameter
 
-import vllm.envs as envs
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -105,7 +105,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
                     layer.w13_weight,
                     layer.w2_weight,
-                    use_prepack=True,
+                    use_prepack=envs.VLLM_CPU_MOE_PREPACK,
                 )
             else:
                 raise NotImplementedError("CPU MOE only supports x86 arch.")
@@ -194,10 +194,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
         activation: str = "silu",
         **kwargs,
     ):
-        assert custom_routing_function is None
         assert activation == "silu", f"{activation} is not supported."
         return layer.ipex_fusion(
             x,
@@ -207,6 +208,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             renormalize,
             topk_group,
             num_expert_group,
+            custom_routing_function,
+            scoring_func,
+            e_score_correction_bias,
         )
 
     def forward_tpu(
@@ -342,14 +346,6 @@ class FusedMoE(torch.nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
 
-        # For smuggling this layer into the fused moe custom op
-        compilation_config = get_current_vllm_config().compilation_config
-        if prefix in compilation_config.static_forward_context:
-            raise ValueError("Duplicate layer name: {}".format(prefix))
-        compilation_config.static_forward_context[prefix] = self
-        self.layer_name = prefix
-        self.use_direct_call = not envs.VLLM_TEST_ENABLE_EP
-
         # Note: here we guard against accessing the TP and DP groups when
         # uninitialized (this happens when testing)
         self.tp_size = (tp_size if tp_size is not None else
@@ -361,7 +357,21 @@ class FusedMoE(torch.nn.Module):
                         if self.dp_size == 1 else get_dp_group().rank_in_group)
         self.global_num_experts = num_experts
 
-        if envs.VLLM_TEST_ENABLE_EP:
+        # Use expert parallelism instead of tensor parallelism?
+        vllm_config = get_current_vllm_config()
+        use_ep = (vllm_config.parallel_config.enable_expert_parallel
+                  and self.tp_size > 1)
+
+        # For smuggling this layer into the fused moe custom op
+        self.use_direct_call = self.dp_size == 1
+        if not self.use_direct_call:
+            compilation_config = vllm_config.compilation_config
+            if prefix in compilation_config.static_forward_context:
+                raise ValueError("Duplicate layer name: {}".format(prefix))
+            compilation_config.static_forward_context[prefix] = self
+            self.layer_name = prefix
+
+        if use_ep:
             # Set TP size to 1 to adjust for EP and adjust EP size and rank
             # for DP attention.
             self.ep_rank = tp_rank + self.tp_size * self.dp_rank
