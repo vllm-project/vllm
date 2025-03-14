@@ -907,8 +907,8 @@ def json_reduce_leaves(
         return reduce(func, json_iter_leaves(value))  # type: ignore[arg-type]
 
     return reduce(
-        func,
-        json_iter_leaves(value),  # type: ignore[arg-type]
+        func,  # type: ignore[arg-type]
+        json_iter_leaves(value),
         initial,
     )
 
