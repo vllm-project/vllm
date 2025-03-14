@@ -36,8 +36,8 @@ class LMCacheConnector(KVConnectorBase):
         from lmcache.experimental.cache_engine import LMCacheEngineBuilder
         from lmcache.integration.vllm.utils import ENGINE_NAME
         from lmcache.integration.vllm.vllm_adapter import (
-            RetrieveStatus, StoreStatus, init_lmcache_engine,
-            lmcache_retrieve_kv, lmcache_should_store, lmcache_store_kv)
+            init_lmcache_engine, lmcache_retrieve_kv, lmcache_store_kv
+        )
         logger.info("Initializing LMCacheConfig under kv_transfer_config %s",
                     self.transfer_config)
 
@@ -53,9 +53,6 @@ class LMCacheConnector(KVConnectorBase):
         self.cache_config = config.cache_config
         self.lmcache_retrieve_kv = lmcache_retrieve_kv
         self.lmcache_store_kv = lmcache_store_kv
-        self.lmcache_should_store = lmcache_should_store
-        self.store_status = StoreStatus
-        self.retrieve_status = RetrieveStatus
 
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,
@@ -64,17 +61,14 @@ class LMCacheConnector(KVConnectorBase):
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
 
-        hidden_or_intermediate_states = None
-
-        # TODO (Jiayi): Only normal prefill is supported for now
-        # TODO: hardcode the retrieve status in vllm_adapter to avoid
-        # index error, need to fix this.
-        retrieve_status = []
-
         model_input, bypass_model_exec, hidden_or_intermediate_states = \
             self.lmcache_retrieve_kv(
-                model_executable, model_input, self.cache_config,
-                kv_caches, retrieve_status
+                self.model_config,
+                self.parallel_config,
+                self.cache_config,
+                model_executable,
+                model_input,
+                kv_caches
             )
 
         if hidden_or_intermediate_states is None:
@@ -90,16 +84,7 @@ class LMCacheConnector(KVConnectorBase):
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
-        num_reqs = 0
-        seq_group_list = model_input.sampling_metadata.seq_groups
-        assert seq_group_list is not None
-        for seq_group in seq_group_list:
-            seq_ids = seq_group.seq_ids
-            for seq_id in seq_ids:
-                num_reqs += 1
 
-        # TODO (Jiayi): Only normal prefill is supported for now
-        store_status = self.lmcache_should_store(model_input)
         self.lmcache_store_kv(
             self.model_config,
             self.parallel_config,
@@ -107,7 +92,6 @@ class LMCacheConnector(KVConnectorBase):
             model_executable,
             model_input,
             kv_caches,
-            store_status,
             hidden_or_intermediate_states,
         )
 
