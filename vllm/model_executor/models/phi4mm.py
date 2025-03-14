@@ -339,7 +339,7 @@ def preprocess(images, dynamic_hd_size, vit_resolution, vit_patch_size):
     return data
 
 
-def get_navit_vision_model(**kwargs):
+def get_navit_vision_model(layer_idx: int = -1, **kwargs):
     vision_config = {
         "hidden_size": 1152,
         "image_size": 448,
@@ -348,11 +348,10 @@ def get_navit_vision_model(**kwargs):
         "num_attention_heads": 16,
         "num_hidden_layers": 27,
         "patch_size": 14,
-        "layer_idx": -2,
     }
 
     model_config = SiglipVisionConfig(**vision_config, **kwargs)
-    if (layer_idx := model_config.layer_idx) < 0:
+    if layer_idx < 0:
         num_hidden_layers = model_config.num_hidden_layers \
             + layer_idx + 1
     else:
@@ -390,7 +389,7 @@ class Phi4MMImageEncoder(nn.Module):
             self.layer_idx = -2
             self.type_feature = 'patch'
 
-        self.img_processor = get_navit_vision_model()
+        self.img_processor = get_navit_vision_model(layer_idx=self.layer_idx)
 
         pe_weight = self.img_processor.embeddings.position_embedding.weight
         L, D = pe_weight.size()
