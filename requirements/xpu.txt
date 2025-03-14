@@ -3,7 +3,6 @@
 
 ray>=2.9
 cmake>=3.26
-ninja
 packaging
 setuptools-scm>=8
 setuptools>=75.8.0
