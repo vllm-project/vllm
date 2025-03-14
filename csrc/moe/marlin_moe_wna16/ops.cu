@@ -42,7 +42,7 @@ __global__ void permute_cols_kernel(
     const int32_t* __restrict__ sorted_token_ids_ptr,
     const int32_t* __restrict__ expert_ids_ptr,
     const int32_t* __restrict__ num_tokens_past_padded_ptr, int size_m,
-    int size_k, int top_k){};
+    int size_k, int top_k) {};
 
 }  // namespace marlin
 
