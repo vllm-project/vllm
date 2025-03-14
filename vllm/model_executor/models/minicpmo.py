@@ -23,7 +23,6 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from functools import partial
 from typing import (Any, Callable, Dict, List, Literal, Optional, Set, Tuple,
                     TypedDict, Union)
 
@@ -37,7 +36,8 @@ from transformers.models.whisper.modeling_whisper import (
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
-from vllm.multimodal.parse import (AudioItem, DictEmbeddingItems, ModalityData,
+from vllm.multimodal.parse import (AudioItem, AudioProcessorItems,
+                                   DictEmbeddingItems, ModalityData,
                                    ModalityDataItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
@@ -372,36 +372,33 @@ class MiniCPMOMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        placeholder = {
-            "image": self.info.image_pattern,
-            "video": self.info.video_pattern,
-            "audio": self.info.audio_pattern
-        }
+        base_updates = super()._get_prompt_updates(
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            out_mm_kwargs=out_mm_kwargs,
+        )
 
-        def get_replacement_minicpmv(item_idx: int, modality: str):
-            if modality == "image":
-                return self.get_image_prompt_texts(
-                    mm_items["image"].get_image_size(item_idx), item_idx)
-            elif modality == "video":
-                return self.get_video_prompt_texts(
-                    mm_items["video"].get_frame_size(item_idx),
-                    mm_items["video"].get_num_frames(item_idx))
-            else:  # audio
-                if isinstance(mm_items["audio"], MiniCPMOAudioEmbeddingItems):
-                    single_audio_embeds = mm_items["audio"].get(item_idx)
-                    audio_len = self.info.get_audio_len_by_num_chunks(
-                        sum(chunk_embeds.shape[0]
-                            for chunk_embeds in single_audio_embeds))
-                    return self.get_audio_prompt_texts(audio_len)
-                return self.get_audio_prompt_texts(
-                    len(mm_items["audio"].get(item_idx)))
+        audio_placeholder = self.info.audio_pattern
+
+        def get_audio_replacement(item_idx: int):
+            audios = mm_items.get_items(
+                "audio", (MiniCPMOAudioEmbeddingItems, AudioProcessorItems))
+
+            if isinstance(audios, MiniCPMOAudioEmbeddingItems):
+                single_audio_embeds = audios.get(item_idx)["audio_embeds"]
+                audio_len = self.info.get_audio_len_by_num_chunks(
+                    sum(chunk_embeds.shape[0]
+                        for chunk_embeds in single_audio_embeds))
+            else:
+                audio_len = audios.get_audio_length(item_idx)
+
+            return self.get_audio_prompt_texts(audio_len)
 
         return [
-            PromptReplacement(modality=modality,
-                              target=placeholder[modality],
-                              replacement=partial(get_replacement_minicpmv,
-                                                  modality=modality))
-            for modality in ("image", "video", "audio")
+            *base_updates,
+            PromptReplacement(modality="audio",
+                              target=audio_placeholder,
+                              replacement=get_audio_replacement),
         ]
 
     def _get_mm_fields_config(

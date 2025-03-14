@@ -52,10 +52,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, NestedTensors,
                                     PlaceholderRange)
-from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem, ImageSize,
+from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
+                                   ImageProcessorItems, ImageSize,
                                    ModalityData, ModalityDataItems,
                                    MultiModalDataItems, MultiModalDataParser,
-                                   VideoItem)
+                                   VideoItem, VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
@@ -766,20 +767,32 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             "video": self.info.video_pattern,
         }
 
-        def get_replacement_minicpmv(item_idx: int, modality: str):
-            if modality == "image":
-                return self.get_image_prompt_texts(
-                    mm_items["image"].get_image_size(item_idx), item_idx)
-            else:  # video
-                return self.get_video_prompt_texts(
-                    mm_items["video"].get_frame_size(item_idx),
-                    mm_items["video"].get_num_frames(item_idx))
+        def get_image_replacement(item_idx: int):
+            images = mm_items.get_items(
+                "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems))
+
+            image_size = images.get_image_size(item_idx)
+
+            return self.get_image_prompt_texts(image_size, item_idx)
+
+        def get_video_replacement(item_idx: int):
+            videos = mm_items.get_items(
+                "video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems))
+
+            frame_size = videos.get_frame_size(item_idx)
+            num_frames = videos.get_num_frames(item_idx)
+
+            return self.get_video_prompt_texts(frame_size, num_frames)
+
+        get_replacement = {
+            "image": get_image_replacement,
+            "video": get_video_replacement,
+        }
 
         return [
             PromptReplacement(modality=modality,
                               target=placeholder[modality],
-                              replacement=partial(get_replacement_minicpmv,
-                                                  modality=modality))
+                              replacement=get_replacement[modality])
             for modality in ("image", "video")
         ]
 
