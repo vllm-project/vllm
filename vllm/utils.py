@@ -2176,9 +2176,10 @@ def _check_multiproc_method():
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     try:
         import ray
-        if ray.is_initialized():
+        if (ray.is_initialized()
+                and ray.get_runtime_context().get_actor_id() is not None):
             logger.info(
-                "Ray is initialized. "
+                "vLLM is running as a Ray actor. "
                 "Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn', "
                 "because Ray process can only be spawned, but not forked.")
             os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
