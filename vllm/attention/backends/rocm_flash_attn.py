@@ -821,17 +821,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     device=output.device,
                 )
                 max_logits = torch.empty_like(exp_sums)
-                cpa_fp8_out = False
                 if num_prefill_tokens > 0:
                     out = output[num_prefill_tokens:]
                 else:
-                    # NOTE: Can't run in upstream for now, produces garbage.
-                    if False:
-                        out = torch.empty_like(output,
-                                               dtype=torch.float8_e4m3fnuz)
-                        cpa_fp8_out = True
-                    else:
-                        out = output
+                    out = output
                 ops.paged_attention_rocm(
                     out,
                     exp_sums,
@@ -855,8 +848,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     layer._k_scale,
                     layer._v_scale,
                 )
-                if cpa_fp8_out:
-                    return out.view(num_seqs, num_heads * head_size)
             else:
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
                     decode_query,
