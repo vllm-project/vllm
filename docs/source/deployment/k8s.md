@@ -5,9 +5,9 @@
 Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using native Kubernetes.
 
 Alternatively, you can deploy vLLM to Kubernetes using any of the following:
-* [helm/helm](frameworks/helm.md)
+* [Helm](frameworks/helm.md)
 * [InftyAI/llmaz](integrations/llmaz.md)
-* [kserve/kserve](integrations/kserve.md)
+* [KServe](integrations/kserve.md)
 * [kubernetes-sigs/lws](frameworks/lws.md)
 * [meta-llama/llama-stack](integrations/llamastack.md)
 * [substratusai/kubeai](integrations/kubeai.md)
