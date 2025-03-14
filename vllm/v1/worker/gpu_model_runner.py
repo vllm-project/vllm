@@ -1015,11 +1015,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             target_probs = self.model.sampler.compute_probs(
                 logits, sampling_metadata)
-            scheduled_request_ids = scheduler_output.num_scheduled_tokens.keys(
-            )
             draft_token_ids = [
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
-                for req_id in scheduled_request_ids
+                for req_id in self.input_batch.req_ids
             ]
             sampler_output = self.rejection_sampler(draft_token_ids,
                                                     target_probs,
@@ -1290,9 +1288,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
         )
-        sampler_output = self.model.sample(logits=logits,
-                                           sampling_metadata=dummy_metadata)
-
+        try:
+            sampler_output = self.model.sample(
+                logits=logits, sampling_metadata=dummy_metadata)
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                raise RuntimeError(
+                    "CUDA out of memory occurred when warming up sampler with "
+                    f"{num_reqs} dummy requests. Please try lowering "
+                    "`max_num_seqs` or `gpu_memory_utilization` when "
+                    "initializing the engine.") from e
+            else:
+                raise e
         return sampler_output
 
     def profile_run(self) -> None:
