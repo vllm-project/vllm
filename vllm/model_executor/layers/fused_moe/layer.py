@@ -7,6 +7,7 @@ from typing import Callable, List, Optional, Tuple
 import torch
 from torch.nn.parameter import UninitializedParameter
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -104,7 +105,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
                     layer.w13_weight,
                     layer.w2_weight,
-                    use_prepack=True,
+                    use_prepack=envs.VLLM_CPU_MOE_PREPACK,
                 )
             else:
                 raise NotImplementedError("CPU MOE only supports x86 arch.")

@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
@@ -348,6 +349,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
     "VLLM_CPU_OMP_THREADS_BIND":
     lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
+
+    # (CPU backend only) whether to use prepack for MoE layer. This will be
+    # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
+    # need to set this to "0" (False).
+    "VLLM_CPU_MOE_PREPACK":
+    lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
 
     # OpenVINO device selection
     # default is CPU
