@@ -21,8 +21,9 @@ sentence-transformers # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
 timm # required for internvl test
-torch==2.5.1
-torchaudio==2.5.1
+torch==2.6.0
+torchaudio==2.6.0
+torchvision==0.21.0
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[opencv] >= 1.5.0 # required for pixtral test
@@ -30,7 +31,7 @@ datamodel_code_generator # required for minicpm3 test
 lm-eval[api]==0.4.4 # required for model evaluation test
 transformers==4.48.2 
 # quantization
-bitsandbytes>=0.45.0
+bitsandbytes>=0.45.3
 buildkite-test-collector==0.1.9
 
 genai_perf==0.0.8
