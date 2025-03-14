@@ -179,12 +179,13 @@ VLM_TEST_SETTINGS = {
     #     img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
     #     max_model_len=4096,
     #     max_num_seqs=2,
+    #     auto_cls=AutoModelForImageTextToText,
     #     single_image_prompts=IMAGE_ASSETS.prompts({
     #         "stop_sign": "<vlm_image>Please describe the image shortly.",
     #         "cherry_blossom": "<vlm_image>Please infer the season with reason.",  # noqa: E501
     #     }),
     #     multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
-    #     postprocess_inputs=model_utils.cast_dtype_post_processor("pixel_values"),     # noqa: E501
+    #     postprocess_inputs=model_utils.cast_dtype_post_processor("pixel_values"), # noqa: E501
     #     stop_str=["<|im_end|>"],
     #     image_size_factors=[(0.10, 0.15)],
     #     max_tokens=64,
