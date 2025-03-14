@@ -92,15 +92,18 @@ class XPUPlatform(Platform):
                 "mode.")
             model_config.enforce_eager = True
 
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "XPU does not support speculative decoding")
-
         if vllm_config.device_config is not None:
             assert vllm_config.device_config.device_type == "xpu"
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
+        if vllm_config.speculative_config:
+            if envs.VLLM_USE_V1:
+                parallel_config.worker_cls = \
+                    "vllm.v1.worker.gpu_worker.Worker"
+            else:
+                raise NotImplementedError(
+                    "XPU v0 does not support speculative decoding")
         if envs.VLLM_USE_V1:
             parallel_config.worker_cls =\
                 "vllm.v1.worker.xpu_worker.XPUWorker"
