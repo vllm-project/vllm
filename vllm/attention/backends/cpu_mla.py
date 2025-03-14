@@ -1,32 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
 import vllm._custom_ops as ops
 from vllm._ipex_ops import ipex_ops
-from vllm.attention.backends.abstract import (AttentionMetadataBuilder,
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadataBuilder,
                                               AttentionType,
                                               is_quantized_kv_cache)
-from vllm.attention.backends.mla.common import (MLACommonBackend,
-                                                MLACommonImpl,
-                                                MLACommonMetadata)
+from vllm.attention.backends.mla.common import MLACommonImpl, MLACommonState
 from vllm.attention.backends.torch_sdpa import TorchSDPAMetadata
 from vllm.utils import make_tensor_with_pad
 from vllm.worker.cpu_model_runner import ModelInputForCPUBuilder
 
 
-class CPUMLABackend(MLACommonBackend):
+class CPUMLABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
         return "CPU_MLA"
-
-    @staticmethod
-    def get_impl_cls() -> Type["CPUMLAImpl"]:
-        return CPUMLAImpl
 
     @staticmethod
     def get_metadata_cls() -> Type["CPUMLAMetadata"]:
@@ -35,6 +30,42 @@ class CPUMLABackend(MLACommonBackend):
     @staticmethod
     def get_builder_cls() -> Type["CPUMLAMetadataBuilder"]:
         return CPUMLAMetadataBuilder
+
+    @staticmethod
+    def get_state_cls() -> Type["MLACommonState"]:
+        return MLACommonState
+
+    @staticmethod
+    def get_impl_cls() -> Type["CPUMLAImpl"]:
+        return CPUMLAImpl
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,  # assumed to be 1 for MLA
+        head_size: int,
+    ) -> Tuple[int, ...]:
+        return (num_blocks, block_size, head_size)
+
+    @staticmethod
+    def swap_blocks(
+        src_kv_cache: torch.Tensor,
+        dst_kv_cache: torch.Tensor,
+        src_to_dst: torch.Tensor,
+    ) -> None:
+        ops.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+
+    @staticmethod
+    def copy_blocks(
+        kv_caches: List[torch.Tensor],
+        src_to_dists: torch.Tensor,
+    ) -> None:
+        ops.copy_blocks_mla(kv_caches, src_to_dists)
+
+    @staticmethod
+    def get_supported_head_sizes() -> List[int]:
+        return [576]
 
 
 @dataclass
@@ -156,7 +187,7 @@ class CPUMLAMetadataBuilder(AttentionMetadataBuilder[CPUMLAMetadata]):
             input_positions=torch.tensor([self.input_data.input_positions]))
 
 
-class CPUMLAImpl(MLACommonImpl[MLACommonMetadata]):
+class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
 
     def __init__(
             self,
@@ -182,7 +213,7 @@ class CPUMLAImpl(MLACommonImpl[MLACommonMetadata]):
         ]
         if any(unsupported_features):
             raise NotImplementedError(
-                f"{__class__.__name__} does not support one of the following: "
+                "CPUMLAImpl does not support one of the following: "
                 "alibi_slopes, sliding_window, blocksparse_params, "
                 "logits_soft_cap")
 
@@ -190,12 +221,12 @@ class CPUMLAImpl(MLACommonImpl[MLACommonMetadata]):
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      f"{__class__.__name__}")
+                                      "CPUMLAImpl")
 
         # states is implemented.
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
-                f"{__class__.__name__} with FP8 KV cache not yet supported")
+                "CPUMLAImpl with FP8 KV cache not yet supported")
 
     def _forward_prefill(
         self,
