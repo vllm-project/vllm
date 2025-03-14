@@ -43,19 +43,25 @@ become available.
     <tr>
       <td><strong>HuggingFace</strong></td>
       <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">🚧</td>
+      <td style="text-align: center;">🟡</td>
       <td>Specify your dataset path on HuggingFace</td>
     </tr>
     <tr>
       <td><strong>VisionArena</strong></td>
       <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">🚧</td>
+      <td style="text-align: center;">✅</td>
       <td><code>lmarena-ai/vision-arena-bench-v0.1</code> (a HuggingFace dataset)</td>
     </tr>
   </tbody>
 </table>
-✅: supported  
+
+✅: supported
+
 🚧: to be supported
+
+🟡: Partial support. Currently, HuggingFaceDataset only supports dataset formats
+similar to `lmms-lab/LLaVA-OneVision-Data`. If you need support for other dataset
+formats, please consider contributing.
 
 **Note**: VisionArena’s `dataset-name` should be set to `hf`
 
@@ -79,7 +85,7 @@ NUM_PROMPTS=10
 BACKEND="openai-chat"
 DATASET_NAME="sharegpt"
 DATASET_PATH="<your data path>/ShareGPT_V3_unfiltered_cleaned_split.json"
-python3 benchmarks/benchmark_serving.py --backend ${BACKEND} --model ${MODEL_NAME} --endpoint /v1/chat/completions --dataset-name ${DATASET_NAME} --dataset-path ${DATASET_PATH} --num-prompts ${NUM_PROMPTS}
+python3 vllm/benchmarks/benchmark_serving.py --backend ${BACKEND} --model ${MODEL_NAME} --endpoint /v1/chat/completions --dataset-name ${DATASET_NAME} --dataset-path ${DATASET_PATH} --num-prompts ${NUM_PROMPTS}
 ```
 
 If successful, you will see the following output
@@ -123,7 +129,7 @@ DATASET_NAME="hf"
 DATASET_PATH="lmarena-ai/vision-arena-bench-v0.1"
 DATASET_SPLIT='train'
 
-python3 benchmarks/benchmark_serving.py \
+python3 vllm/benchmarks/benchmark_serving.py \
   --backend "${BACKEND}" \
   --model "${MODEL_NAME}" \
   --endpoint "/v1/chat/completions" \
@@ -140,35 +146,65 @@ python3 benchmarks/benchmark_serving.py \
 MODEL_NAME="NousResearch/Hermes-3-Llama-3.1-8B"
 NUM_PROMPTS=10
 DATASET_NAME="sonnet"
-DATASET_PATH="benchmarks/sonnet.txt"
+DATASET_PATH="vllm/benchmarks/sonnet.txt"
 
-python3 benchmarks/benchmark_throughput.py \
+python3 vllm/benchmarks/benchmark_throughput.py \
   --model "${MODEL_NAME}" \
   --dataset-name "${DATASET_NAME}" \
   --dataset-path "${DATASET_PATH}" \
   --num-prompts "${NUM_PROMPTS}"
-  ```
+```
 
 If successful, you will see the following output
 
 ```
-Throughput: 7.35 requests/s, 4789.20 total tokens/s, 1102.83 output tokens/s
+Throughput: 7.15 requests/s, 4656.00 total tokens/s, 1072.15 output tokens/s
+Total num prompt tokens:  5014
+Total num output tokens:  1500
+```
+
+### VisionArena Benchmark for Vision Language Models
+
+``` bash
+MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
+NUM_PROMPTS=10
+DATASET_NAME="hf"
+DATASET_PATH="lmarena-ai/vision-arena-bench-v0.1"
+DATASET_SPLIT="train"
+
+python3 vllm/benchmarks/benchmark_throughput.py \
+  --model "${MODEL_NAME}" \
+  --backend "vllm-chat" \
+  --dataset-name "${DATASET_NAME}" \
+  --dataset-path "${DATASET_PATH}" \
+  --num-prompts "${NUM_PROMPTS}" \
+  --hf-split "${DATASET_SPLIT}"
+```
+
+The `num prompt tokens` now includes image token counts
+
+```
+Throughput: 2.55 requests/s, 4036.92 total tokens/s, 326.90 output tokens/s
+Total num prompt tokens:  14527
+Total num output tokens:  1280
 ```
 
 ### Benchmark with LoRA Adapters
 
 ``` bash
+# download dataset
+# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 MODEL_NAME="meta-llama/Llama-2-7b-hf"
 BACKEND="vllm"
 DATASET_NAME="sharegpt"
-DATASET_PATH="/home/jovyan/data/vllm_benchmark_datasets/ShareGPT_V3_unfiltered_cleaned_split.json"
+DATASET_PATH="<your data path>/ShareGPT_V3_unfiltered_cleaned_split.json"
 NUM_PROMPTS=10
 MAX_LORAS=2
 MAX_LORA_RANK=8
 ENABLE_LORA="--enable-lora"
 LORA_PATH="yard1/llama-2-7b-sql-lora-test"
 
-python3 benchmarks/benchmark_throughput.py \
+python3 vllm/benchmarks/benchmark_throughput.py \
   --model "${MODEL_NAME}" \
   --backend "${BACKEND}" \
   --dataset_path "${DATASET_PATH}" \
