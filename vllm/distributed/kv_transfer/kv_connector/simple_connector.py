@@ -199,7 +199,6 @@ class SimpleConnector(KVConnectorBase):
             for layer_id in range(start_layer, end_layer):
                 kv_cache = kv_caches[layer_id - start_layer]
 
-                logger.info(f"before split kv_cache.shape: {kv_cache.shape}")
 
                 if hasattr(model_config, "kv_lora_rank"):
                     key_cache = kv_cache.reshape(-1, num_heads, head_size)
