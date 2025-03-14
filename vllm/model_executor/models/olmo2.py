@@ -46,7 +46,7 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.interfaces import SupportsPP, SupportsQuant
 from vllm.model_executor.models.utils import (
     is_pp_missing_parameter, make_empty_intermediate_tensors_factory,
     make_layers, maybe_prefix)
@@ -313,10 +313,14 @@ class Olmo2Model(nn.Module):
         return hidden_states
 
 
-class Olmo2ForCausalLM(nn.Module, SupportsPP):
+class Olmo2ForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     """
     Extremely barebones HF model wrapper.
     """
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

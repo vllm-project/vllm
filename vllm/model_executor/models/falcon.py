@@ -48,7 +48,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import RWConfig
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsPP, SupportsQuant
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -396,7 +396,7 @@ class FalconModel(nn.Module):
         return hidden_states
 
 
-class FalconForCausalLM(nn.Module, SupportsPP):
+class FalconForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
     }

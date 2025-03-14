@@ -42,7 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -320,7 +320,7 @@ class GemmaModel(nn.Module):
         return hidden_states
 
 
-class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

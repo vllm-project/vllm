@@ -46,7 +46,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsPP, SupportsQuant
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -286,7 +286,11 @@ class OlmoModel(nn.Module):
         return hidden_states
 
 
-class OlmoForCausalLM(nn.Module, SupportsPP):
+class OlmoForCausalLM(nn.Module, SupportsPP, SupportsQuant):
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
     """
     Extremely barebones HF model wrapper.
     """

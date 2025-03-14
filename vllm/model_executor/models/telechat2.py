@@ -25,13 +25,15 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaModel
 
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     is_pp_missing_parameter)
 
 
-class TeleChat2Model(LlamaModel):
+class TeleChat2Model(LlamaModel, SupportsQuant):
+    packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # 1. Initialize the LlamaModel with bias
