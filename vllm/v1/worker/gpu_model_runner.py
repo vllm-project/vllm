@@ -1297,7 +1297,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     "CUDA out of memory occurred when warming up sampler with "
                     f"{num_reqs} dummy requests. Please try lowering "
                     "`max_num_seqs` or `gpu_memory_utilization` when "
-                    "initializing the engine.") from None
+                    "initializing the engine.") from e
             else:
                 raise e
         return sampler_output
