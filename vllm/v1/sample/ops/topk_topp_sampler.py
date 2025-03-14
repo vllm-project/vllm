@@ -169,20 +169,38 @@ def flashinfer_sample(
     if generators:
         for i, generator in generators.items():
             uniform_samples[:, i].uniform_(generator=generator)
-
-    if k is None:
-        # Top-p only.
-        next_token_ids, success = flashinfer.sampling.top_p_sampling_from_probs(
-            probs, uniform_samples, p, deterministic=True)
-    elif p is None:
-        # Top-k only.
-        next_token_ids, success = flashinfer.sampling.top_k_sampling_from_probs(
-            probs, uniform_samples, k, deterministic=True)
+    
+    # The sampling API removes the success return value of all sampling API,
+    # which is not compatible with earlier design.
+    # https://github.com/flashinfer-ai/flashinfer/releases/tag/v0.2.3
+    if flashinfer.__version__ < "0.2.3":
+        if k is None:
+            # Top-p only.
+            next_token_ids, success = flashinfer.sampling.top_p_sampling_from_probs(
+                probs, uniform_samples, p, deterministic=True)
+        elif p is None:
+            # Top-k only.
+            next_token_ids, success = flashinfer.sampling.top_k_sampling_from_probs(
+                probs, uniform_samples, k, deterministic=True)
+        else:
+            # Both top-k and top-p.
+            next_token_ids, success = (
+                flashinfer.sampling.top_k_top_p_sampling_from_probs(
+                    probs, uniform_samples, k, p, deterministic=True))
     else:
-        # Both top-k and top-p.
-        next_token_ids, success = (
-            flashinfer.sampling.top_k_top_p_sampling_from_probs(
-                probs, uniform_samples, k, p, deterministic=True))
+        if k is None:
+            # Top-p only.
+            next_token_ids = flashinfer.sampling.top_p_sampling_from_probs(
+                probs, uniform_samples, p, deterministic=True)
+        elif p is None:
+            # Top-k only.
+            next_token_ids = flashinfer.sampling.top_k_sampling_from_probs(
+                probs, uniform_samples, k, deterministic=True)
+        else:
+            # Both top-k and top-p.
+            next_token_ids = (
+                flashinfer.sampling.top_k_top_p_sampling_from_probs(
+                    probs, uniform_samples, k, p, deterministic=True))
 
     # NOTE: CPU-GPU synchronization happens here.
     if not success.all():
