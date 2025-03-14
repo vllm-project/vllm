@@ -62,7 +62,7 @@ Further update the model as follows:
         def get_input_embeddings(
             self,
             input_ids: torch.Tensor,
-            multimodal_embeddings: Optional[NestedTensors] = None,
+            multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
         ) -> torch.Tensor:
 
             # `get_input_embeddings` should already be implemented for the language 

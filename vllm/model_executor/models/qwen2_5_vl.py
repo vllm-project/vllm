@@ -979,7 +979,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[tuple[torch.Tensor, ...]] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
@@ -991,10 +991,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings_v0(
         self,
         input_ids: torch.Tensor,
-        image_input: Optional[tuple[torch.Tensor, ...]] = None,
-        video_input: Optional[tuple[torch.Tensor, ...]] = None,
+        image_input: Optional[Qwen2_5_VLImageInputs] = None,
+        video_input: Optional[Qwen2_5_VLVideoInputs] = None,
     ) -> torch.Tensor:
-
         inputs_embeds = self.get_input_embeddings(input_ids)
         if image_input is not None:
             image_embeds = self._process_image_input(image_input)

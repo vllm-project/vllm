@@ -19,8 +19,7 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
                                    VideoEmbeddingItems, VideoProcessorItems)
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
@@ -882,7 +881,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[tuple[torch.Tensor, ...]] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
@@ -894,10 +893,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings_v0(
         self,
         input_ids: torch.Tensor,
-        image_input: Optional[NestedTensors] = None,
-        video_input: Optional[NestedTensors] = None,
+        image_input: Optional[LlavaOnevisionImagePixelInputs] = None,
+        video_input: Optional[LlavaOnevisionVideoPixelInputs] = None,
     ) -> torch.Tensor:
-
         inputs_embeds = self.get_input_embeddings(input_ids)
         if image_input is not None:
             image_embeds = self._process_image_input(image_input)

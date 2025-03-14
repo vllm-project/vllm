@@ -30,7 +30,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
@@ -254,7 +254,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:

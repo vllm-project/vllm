@@ -28,7 +28,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
+from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, BatchFeature,
@@ -608,7 +608,7 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.transformer.get_input_embeddings(input_ids)
 

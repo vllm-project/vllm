@@ -14,8 +14,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -492,7 +491,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         if multimodal_embeddings is None:
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
