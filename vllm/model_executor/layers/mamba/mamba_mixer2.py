@@ -466,11 +466,17 @@ class MambaMixer2(CustomOp):
         if has_prefill:
 
             initial_states = None
+
             if has_initial_states is not None and torch.any(
                     has_initial_states):
-                for idx in mamba_cache_params.state_indices_tensor[
-                        ~has_initial_states]:
-                    mamba_cache_params.ssm_state[idx].zero_()
+
+                # vectorized ssm_state zero init
+                batched_zero_init_func = torch.vmap(
+                    lambda idx: mamba_cache_params.ssm_state[idx].zero_())
+                batched_zero_init_func(
+                    mamba_cache_params.
+                    state_indices_tensor[~has_initial_states].unsqueeze(
+                        dim=-1), )
                 initial_states = mamba_cache_params.ssm_state[
                     mamba_cache_params.state_indices_tensor]
 
