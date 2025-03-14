@@ -8,7 +8,7 @@ accelerate==1.0.1
     #   peft
 aiohappyeyeballs==2.4.3
     # via aiohttp
-aiohttp==3.10.10
+aiohttp==3.10.11
     # via
     #   datasets
     #   fsspec
