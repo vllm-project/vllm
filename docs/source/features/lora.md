@@ -153,6 +153,13 @@ curl -X POST http://localhost:8000/v1/unload_lora_adapter \
 }'
 ```
 
+## Dynamically load LoRA Adapters from a directory
+
+vLLM also supports setting a local directory to check for cached LoRA adapters. While dynamic LoRA is enabled, set
+`--lora-cache-dir {path}`. When vLLM receives a request for a LoRA adapter `foobar` that it doesn't recognize, it
+will check `path/foobar` for that adapter, load the adapter if able, and then service the request using that adapter.
+Thereafter the adapter will be available for use by incoming requests as normal.
+
 ## New format for `--lora-modules`
 
 In the previous version, users would provide LoRA modules via the following format, either as a key-value pair or in JSON format. For example:

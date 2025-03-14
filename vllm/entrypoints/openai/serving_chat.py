@@ -59,10 +59,12 @@ class OpenAIServingChat(OpenAIServing):
         enable_auto_tools: bool = False,
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
+        lora_cache_dir: Optional[str] = None,
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
+                         lora_cache_dir=lora_cache_dir,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
 
@@ -142,7 +144,7 @@ class OpenAIServingChat(OpenAIServing):
             (
                 lora_request,
                 prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            ) = await self._maybe_get_adapters(request)
 
             model_name = self._get_model_name(request.model, lora_request)
 

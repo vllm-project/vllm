@@ -42,6 +42,7 @@ from vllm.entrypoints.chat_utils import (load_chat_template,
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
+                                              validate_lora_cache_args,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -951,6 +952,7 @@ async def init_app_state(
         args.response_role,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
+        lora_cache_dir=args.lora_cache_dir,
         chat_template_content_format=args.chat_template_content_format,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
@@ -963,6 +965,7 @@ async def init_app_state(
         engine_client,
         model_config,
         state.openai_serving_models,
+        lora_cache_dir=args.lora_cache_dir,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     ) if model_config.runner_type == "generate" else None
@@ -972,6 +975,7 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
+        lora_cache_dir=args.lora_cache_dir,
         chat_template_content_format=args.chat_template_content_format,
     ) if model_config.runner_type == "pooling" else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
@@ -980,24 +984,28 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
+        lora_cache_dir=args.lora_cache_dir,
         chat_template_content_format=args.chat_template_content_format,
     ) if model_config.task == "embed" else None
     state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
+        lora_cache_dir=args.lora_cache_dir,
         request_logger=request_logger) if model_config.task in (
             "score", "embed", "pooling") else None
     state.jinaai_serving_reranking = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
+        lora_cache_dir=args.lora_cache_dir,
         request_logger=request_logger
     ) if model_config.task == "score" else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
         state.openai_serving_models,
+        lora_cache_dir=args.lora_cache_dir,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -1006,6 +1014,7 @@ async def init_app_state(
         engine_client,
         model_config,
         state.openai_serving_models,
+        lora_cache_dir=args.lora_cache_dir,
         request_logger=request_logger,
     ) if model_config.runner_type == "transcription" else None
     state.task = model_config.task
@@ -1067,7 +1076,12 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         app = build_app(args)
 
         model_config = await engine_client.get_model_config()
-        await init_app_state(engine_client, model_config, app.state, args)
+        await init_app_state(
+            engine_client,
+            model_config,
+            app.state,
+            args,
+        )
 
         def _listen_addr(a: str) -> str:
             if is_valid_ipv6_address(a):
@@ -1113,5 +1127,6 @@ if __name__ == "__main__":
     parser = make_arg_parser(parser)
     args = parser.parse_args()
     validate_parsed_serve_args(args)
+    validate_lora_cache_args(args)
 
     uvloop.run(run_server(args))
