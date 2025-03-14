@@ -2906,7 +2906,6 @@ class KVTransferConfig(BaseModel):
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
 
-
 class CompilationLevel:
     # constants for the levels of the compilation process
     NO_COMPILATION = 0
