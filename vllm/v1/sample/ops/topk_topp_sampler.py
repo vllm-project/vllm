@@ -26,7 +26,7 @@ class TopKTopPSampler(nn.Module):
             if is_flashinfer_available:
                 flashinfer_version = flashinfer.__version__
                 if flashinfer_version >= "0.2.3":
-                    # FIXME(DefTrue): Currently, we have errors when using
+                    # FIXME(DefTruth): Currently, we have errors when using
                     # FlashInfer>=v0.2.3 for top-p & top-k sampling. As a
                     # workaround, we disable FlashInfer for top-p & top-k
                     # sampling by default while FlashInfer>=v0.2.3.
