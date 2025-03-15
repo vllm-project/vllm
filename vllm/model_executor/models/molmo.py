@@ -1585,15 +1585,13 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
 
         image_features = self._process_image_input(image_input)
 
-        nested_embeds = [
+        return flatten_2d_lists(
             self._get_mm_embeds(*args) for args in zip(
                 image_features,
                 image_input["feat_is_patch"],
                 image_input["num_crops"],
                 image_input["embed_is_patch"],
-            )
-        ]
-        return flatten_2d_lists(nested_embeds)
+            ))
 
     def get_input_embeddings(
         self,

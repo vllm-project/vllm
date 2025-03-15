@@ -77,7 +77,9 @@ class PromptIndexTargets:
             else:
                 if isinstance(prefix, str):
                     # Make both `list[int]`
-                    prefix = encode_tokens(tokenizer, prefix)
+                    prefix = encode_tokens(tokenizer,
+                                           prefix,
+                                           add_special_tokens=False)
 
             match_idx = len(prefix)
             return match_idx if prompt[:match_idx] == prefix else None
@@ -318,7 +320,7 @@ def _cached_encode(
     tokenizer: AnyTokenizer,
     text: str,
     *,
-    add_special_tokens: bool = False,
+    add_special_tokens: Optional[bool] = None,
 ) -> list[int]:
     return encode_tokens(tokenizer,
                          text,
@@ -330,7 +332,7 @@ def _cached_decode(
     tokenizer: AnyTokenizer,
     token_ids: tuple[int, ...],
     *,
-    skip_special_tokens: bool = False,
+    skip_special_tokens: Optional[bool] = None,
 ) -> str:
     return decode_tokens(tokenizer,
                          list(token_ids),
@@ -395,7 +397,9 @@ class _BoundPromptSequence:
     def token_ids(self) -> list[int]:
         if self._token_ids is None:
             assert self._text is not None
-            self._token_ids = _cached_encode(self.tokenizer, self._text)
+            self._token_ids = _cached_encode(self.tokenizer,
+                                             self._text,
+                                             add_special_tokens=False)
 
         return self._token_ids
 
@@ -1046,7 +1050,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptUpdate]:
+    ) -> Sequence[PromptUpdate]:
         """
         Given the original multi-modal items for this modality
         and HF-processed data, output the updates to perform.
