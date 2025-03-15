@@ -14,6 +14,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -376,17 +377,16 @@ class MambaMixer2(CustomOp):
                                        eps=rms_norm_eps)
 
     def forward_native(self, hidden_states: torch.Tensor,
-                       attn_metadata: AttentionMetadata,
                        conv_state: torch.Tensor, ssm_state: torch.Tensor):
         pass
 
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
         sequence_idx: Optional[torch.Tensor] = None,
     ):
+        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
         seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
@@ -466,10 +466,17 @@ class MambaMixer2(CustomOp):
         if has_prefill:
 
             initial_states = None
-            if has_initial_states is not None and any(has_initial_states):
-                for idx in mamba_cache_params.state_indices_tensor[
-                        ~has_initial_states]:
-                    mamba_cache_params.ssm_state[idx].zero_()
+
+            if has_initial_states is not None and torch.any(
+                    has_initial_states):
+
+                # vectorized ssm_state zero init
+                batched_zero_init_func = torch.vmap(
+                    lambda idx: mamba_cache_params.ssm_state[idx].zero_())
+                batched_zero_init_func(
+                    mamba_cache_params.
+                    state_indices_tensor[~has_initial_states].unsqueeze(
+                        dim=-1), )
                 initial_states = mamba_cache_params.ssm_state[
                     mamba_cache_params.state_indices_tensor]
 
@@ -493,10 +500,17 @@ class MambaMixer2(CustomOp):
                 dt_limit=(0.0, float("inf")),
             )
 
-            # update ssm states
-            # - varlen state is a (batch, nheads, headdim, dstate) tensor
-            for i, idx in enumerate(mamba_cache_params.state_indices_tensor):
-                mamba_cache_params.ssm_state[idx].copy_(varlen_state[i])
+            # vectorized ssm state update using vmap
+            # the 1d state_indices_tensor needs to be unsqueezed to avoid vmap
+            # limitation which doesn't allow use of `item()`
+            # Note: the lambda capture can happen where ssm_state is initialized
+            #       instead of here
+            batched_copy = torch.vmap(
+                lambda idx, source_state: mamba_cache_params.ssm_state[
+                    idx].copy_(source_state))
+            batched_copy(
+                mamba_cache_params.state_indices_tensor.unsqueeze(dim=-1),
+                varlen_state)
 
             # - reshape
             hidden_states = scan_output.view(seq_len, -1)

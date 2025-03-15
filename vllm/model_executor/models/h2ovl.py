@@ -7,21 +7,20 @@
 # Copyright (c) 2024 H2O.AI
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
-from typing import Mapping, Optional
+from collections.abc import Mapping, Sequence
+from typing import Optional, Union
 
 import torch
 from PIL import Image
 from transformers import PretrainedConfig
 
-from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
-from vllm.multimodal.processing import (ProcessingCache, PromptReplacement,
-                                        PromptReplacementDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
+                                        PromptUpdateDetails)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .intern_vit import InternVisionModel
@@ -30,8 +29,6 @@ from .internvl import (IMG_CONTEXT, IMG_END, IMG_START,
                        InternVLChatModel, InternVLDummyInputsBuilder,
                        InternVLMultiModalProcessor, build_transform,
                        find_closest_aspect_ratio, get_internvl_target_ratios)
-
-logger = init_logger(__name__)
 
 
 def resolve_h2ovl_min_max_num(
@@ -464,33 +461,12 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
 class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
                                ):
 
-    def __init__(self,
-                 info: H2OVLProcessingInfo,
-                 dummy_inputs: "BaseDummyInputsBuilder[H2OVLProcessingInfo]",
-                 *,
-                 cache: Optional[ProcessingCache] = None,
-                 enable_sanity_checks: bool = True) -> None:
-        super().__init__(
-            info,
-            dummy_inputs,
-            cache=cache,
-            enable_sanity_checks=enable_sanity_checks,
-        )
-
-        if self.cache is not None:
-            # The processor output depends on the number of images passed,
-            # making it incompatible with processing cache which is supposed
-            # to be invariant of how many images are passed per prompt
-            self.cache = None
-            logger.warning_once(
-                f"{type(self).__name__} does not support processing cache.")
-
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         if "image_num_patches" in out_mm_kwargs:
@@ -525,7 +501,7 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            return PromptReplacementDetails(
+            return PromptUpdateDetails(
                 full=hf_processor.get_image_repl_full(feature_size,
                                                       num_patches),
                 features=hf_processor.get_image_repl_features(
@@ -539,6 +515,31 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
                 replacement=get_replacement_internvl,
             )
         ]
+
+    def _cached_apply_hf_processor(
+        self,
+        prompt: Union[str, list[int]],
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[list[int], MultiModalKwargs, bool]:
+        # The processor logic is different for len(images) <= 1 vs > 1
+        # Since the processing cache assumes that the processor output is
+        # invariant of how many images are passed per prompt, we only
+        # perform caching for the most common case
+        if mm_data_items.get_count("image", strict=False) > 1:
+            # This code path corresponds to the cache being disabled
+            return self._apply_hf_processor_main(
+                prompt=prompt,
+                mm_items=mm_data_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                enable_hf_prompt_update=True,
+            )
+
+        return super()._cached_apply_hf_processor(
+            prompt=prompt,
+            mm_data_items=mm_data_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(

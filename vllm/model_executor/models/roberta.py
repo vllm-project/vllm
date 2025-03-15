@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 import torch
 from torch import nn
 from transformers import RobertaConfig
 
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler import CrossEncodingPooler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -20,7 +19,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
-from .interfaces import SupportsCrossEncoding
+from .interfaces import SupportsCrossEncoding, SupportsV0Only
 
 
 def roberta_task_weights_filter(
@@ -192,7 +191,8 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         assert len(loaded), "Unable to load RobertaEmbeddingModel"
 
 
-class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
+class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
+                                       SupportsV0Only):
     """A model that uses Roberta to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -243,16 +243,12 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self.roberta(input_ids=input_ids,
                             position_ids=positions,
-                            kv_caches=kv_caches,
                             inputs_embeds=inputs_embeds,
                             intermediate_tensors=intermediate_tensors,
-                            attn_metadata=attn_metadata,
                             token_type_ids=token_type_ids)

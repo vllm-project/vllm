@@ -6,7 +6,7 @@ Run `pytest tests/models/test_mistral.py`.
 import json
 import uuid
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional
 
 import pytest
 from mistral_common.multimodal import download_image
@@ -38,7 +38,7 @@ IMG_URLS = [
 PROMPT = "Describe each image in one short sentence."
 
 
-def _create_msg_format(urls: List[str]) -> List[Dict[str, Any]]:
+def _create_msg_format(urls: list[str]) -> list[dict[str, Any]]:
     return [{
         "role":
         "user",
@@ -54,7 +54,7 @@ def _create_msg_format(urls: List[str]) -> List[Dict[str, Any]]:
     }]
 
 
-def _create_msg_format_hf(urls: List[str]) -> List[Dict[str, Any]]:
+def _create_msg_format_hf(urls: list[str]) -> list[dict[str, Any]]:
     return [{
         "role":
         "user",
@@ -68,7 +68,7 @@ def _create_msg_format_hf(urls: List[str]) -> List[Dict[str, Any]]:
     }]
 
 
-def _create_engine_inputs(urls: List[str]) -> TokensPrompt:
+def _create_engine_inputs(urls: list[str]) -> TokensPrompt:
     msg = _create_msg_format(urls)
 
     tokenizer = MistralTokenizer.from_model("pixtral")
@@ -89,7 +89,7 @@ def _create_engine_inputs(urls: List[str]) -> TokensPrompt:
     return engine_inputs
 
 
-def _create_engine_inputs_hf(urls: List[str]) -> TextPrompt:
+def _create_engine_inputs_hf(urls: list[str]) -> TextPrompt:
     msg = _create_msg_format_hf(urls)
 
     tokenizer = AutoProcessor.from_pretrained("mistral-community/pixtral-12b")
@@ -128,7 +128,7 @@ assert FIXTURES_PATH.exists()
 FIXTURE_LOGPROBS_CHAT = FIXTURES_PATH / "pixtral_chat.json"
 FIXTURE_LOGPROBS_ENGINE = FIXTURES_PATH / "pixtral_chat_engine.json"
 
-OutputsLogprobs = List[Tuple[List[int], str, Optional[SampleLogprobs]]]
+OutputsLogprobs = list[tuple[list[int], str, Optional[SampleLogprobs]]]
 
 
 # For the test author to store golden output in JSON
