@@ -3,6 +3,7 @@
 pynvml. However, it should not initialize cuda context.
 """
 
+import math
 import os
 from functools import wraps
 from typing import (TYPE_CHECKING, Callable, List, Optional, Tuple, TypeVar,
@@ -446,3 +447,20 @@ try:
         CudaPlatform.log_warnings()
 except ModuleNotFoundError:
     CudaPlatform.log_warnings()
+
+
+def set_cpu_affinity():
+    if nvml_available:
+        # The below code is based on https://github.com/NVIDIA/DeepLearningExamples/blob/master/TensorFlow2/LanguageModeling/BERT/gpu_affinity.py
+        pynvml.nvmlInit()
+        num_elements = math.ceil((os.cpu_count() or 2) / 64)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(envs.LOCAL_RANK)
+        affinity_string = ""
+        for j in pynvml.nvmlDeviceGetCpuAffinity(handle, num_elements):
+            # assume nvml returns list of 64 bit ints
+            affinity_string = f"{j:064b}{affinity_string}"
+        affinity_list = [int(x) for x in affinity_string]
+        affinity_list.reverse()  # so core 0 is the 0th element
+        affinity_to_set = [i for i, e in enumerate(affinity_list) if e != 0]
+        os.sched_setaffinity(0, affinity_to_set)
+        pynvml.nvmlShutdown()
