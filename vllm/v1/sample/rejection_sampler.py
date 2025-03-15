@@ -127,7 +127,8 @@ def rejection_sample(
         # Set probabilities to 0 for draft token positions
         probs.scatter_(2, safe_draft_token_ids.unsqueeze(-1), 0)
     else:
-        probs = torch.clamp(target_probs[:, :-1] - draft_probs, min=1e-8)
+        probs = torch.clamp(target_probs[:, :-1] - draft_probs,
+                            min=torch.finfo(torch.float32).tiny)
     probs /= probs.sum(dim=-1, keepdim=True)
 
     # NOTE(woosuk): Create only one distribution for each request.
