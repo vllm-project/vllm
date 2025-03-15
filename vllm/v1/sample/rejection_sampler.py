@@ -8,7 +8,7 @@ from torch.nn.utils.rnn import pad_sequence
 from vllm.logger import init_logger
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.ops.topk_topp_sampler import random_sample
+from vllm.v1.spec_decode.utils import random_sample
 
 logger = init_logger(__name__)
 INVALID_TOKEN_ID = -1
