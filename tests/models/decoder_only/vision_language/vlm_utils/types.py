@@ -130,7 +130,7 @@ class VLMTestInfo(NamedTuple):
     # is all combinations of .models + all fields below
     max_tokens: Union[int, tuple[int]] = 128
     num_logprobs: Union[int, tuple[int]] = 5
-    dtype: Union[str, Iterable[str]] = "half"
+    dtype: Union[str, Union[list[str], tuple[str, ...]]] = "auto"
     distributed_executor_backend: Optional[Union[str, Iterable[str]]] = None
     # Only expanded in video tests
     num_video_frames: Union[int, tuple[int]] = 16
