@@ -16,8 +16,9 @@ PLACEHOLDER_TOKEN_ID: tl.constexpr = -1
 
 class RejectionSampler(nn.Module):
 
-    def __init__(self, max_num_tokens: int = 16 * 1024):
+    def __init__(self, max_num_tokens: int = 32 * 1024):
         super().__init__()
+        self.max_num_tokens = max_num_tokens
         self.buffer = torch.empty(
             max_num_tokens,
             dtype=torch.int64,
@@ -29,13 +30,33 @@ class RejectionSampler(nn.Module):
     def forward(
         self,
         draft_token_ids: list[list[int]],
-        # [batch_size, max_spec_len + 1, vocab_size]
-        target_probs: torch.Tensor,
+        # [batch_size, max_spec_len, vocab_size]
+        target_logits: torch.Tensor,
+        # [batch_size]
+        bonus_token_ids: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
         num_draft_tokens = [len(ids) for ids in draft_token_ids]
         batch_size = len(draft_token_ids)
         max_spec_len = max(num_draft_tokens)
+        assert batch_size * max_spec_len <= self.max_num_tokens
+
+        if sampling_metadata.all_greedy:
+            # [batch_size, max_spec_len, vocab_size]
+            target_probs = target_logits.contiguous()
+        else:
+            # [batch_size, max_spec_len, vocab_size]
+            target_probs = torch.softmax(
+                target_logits / sampling_metadata.temperature.unsqueeze(-1),
+                dim=-1,
+                dtype=torch.float32,
+            )
+            target_probs = torch.where(
+                sampling_metadata.temperature == -1,
+                target_logits,
+                target_probs,
+            )
+
         draft_token_ids_np = self.buffer_np[:batch_size * max_spec_len]
         for i, token_ids in enumerate(draft_token_ids):
             start = i * max_spec_len
@@ -52,7 +73,7 @@ class RejectionSampler(nn.Module):
             num_draft_tokens,
             None,  # draft_probs
             target_probs,
-            None,  # bonus_token_ids
+            bonus_token_ids,
             sampling_metadata,
         )
         return output_token_ids
@@ -65,7 +86,7 @@ def rejection_sample(
     num_draft_tokens: list[int],
     # [batch_size, max_spec_len, vocab_size]
     draft_probs: Optional[torch.Tensor],
-    # [batch_size, max_spec_len + 1, vocab_size]
+    # [batch_size, max_spec_len, vocab_size]
     target_probs: torch.Tensor,
     # [batch_size]
     bonus_token_ids: torch.Tensor,
@@ -120,14 +141,14 @@ def rejection_sample(
     is_ngram = draft_probs is None
     if is_ngram:
         # [batch_size, max_spec_len, vocab_size]
-        probs = target_probs[:, :-1].clone()
+        probs = target_probs.clone()
         # [batch_size, max_spec_len]
         safe_draft_token_ids = torch.where(
             draft_token_ids == PLACEHOLDER_TOKEN_ID, 0, draft_token_ids)
         # Set probabilities to 0 for draft token positions
         probs.scatter_(2, safe_draft_token_ids.unsqueeze(-1), 0)
     else:
-        probs = torch.clamp(target_probs[:, :-1] - draft_probs,
+        probs = torch.clamp(target_probs - draft_probs,
                             min=torch.finfo(torch.float32).tiny)
     probs /= probs.sum(dim=-1, keepdim=True)
 
@@ -167,7 +188,7 @@ def rejection_random_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     draft_token_ids_ptr,  # [batch_size, max_spec_len]
     draft_probs_ptr,  # [batch_size, max_spec_len, vocab_size] or None
-    target_probs_ptr,  # [batch_size, max_spec_len + 1, vocab_size]
+    target_probs_ptr,  # [batch_size, max_spec_len, vocab_size]
     bonus_token_ids_ptr,  # [batch_size]
     recovered_token_ids_ptr,  # [batch_size, max_spec_len]
     uniform_probs_ptr,  # [batch_size, UNIFORM_PROBS_LEN]
@@ -199,8 +220,8 @@ def rejection_random_sample_kernel(
                     draft_prob = tl.load(draft_probs_ptr +
                                          seq_idx * max_spec_len * vocab_size +
                                          pos * vocab_size + token_id)
-                target_prob = tl.load(target_probs_ptr + seq_idx *
-                                      (max_spec_len + 1) * vocab_size +
+                target_prob = tl.load(target_probs_ptr +
+                                      seq_idx * max_spec_len * vocab_size +
                                       pos * vocab_size + token_id)
                 uniform_prob = tl.load(uniform_probs_ptr +
                                        seq_idx * max_spec_len + pos)
@@ -233,7 +254,7 @@ def rejection_random_sample_kernel(
 def rejection_greedy_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     draft_token_ids_ptr,  # [batch_size, max_spec_len]
-    target_argmax_ptr,  # [batch_size, max_spec_len + 1]
+    target_argmax_ptr,  # [batch_size, max_spec_len]
     bonus_token_ids_ptr,  # [batch_size]
     is_greedy_ptr,  # [batch_size]
     max_spec_len,
@@ -256,8 +277,8 @@ def rejection_greedy_sample_kernel(
             else:
                 draft_token_id = tl.load(draft_token_ids_ptr +
                                          seq_idx * max_spec_len + pos)
-                target_argmax = tl.load(target_argmax_ptr + seq_idx *
-                                        (max_spec_len + 1) + pos)
+                target_argmax = tl.load(target_argmax_ptr +
+                                        seq_idx * max_spec_len + pos)
                 if draft_token_id == target_argmax:
                     # Accept.
                     tl.store(
