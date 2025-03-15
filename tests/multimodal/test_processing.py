@@ -853,7 +853,7 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
         tokenizer_mode="auto",
         trust_remote_code=False,
         seed=0,
-        dtype="half",
+        dtype="auto",
         revision=None,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
@@ -892,7 +892,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
         tokenizer_mode="auto",
         trust_remote_code=False,
         seed=0,
-        dtype="half",
+        dtype="auto",
         revision=None,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
@@ -965,7 +965,7 @@ def test_hf_processor_kwargs(model_id, call_kwargs, expected_kwargs):
         tokenizer_mode="auto",
         trust_remote_code=False,
         seed=0,
-        dtype="half",
+        dtype="auto",
         revision=None,
     )
 
