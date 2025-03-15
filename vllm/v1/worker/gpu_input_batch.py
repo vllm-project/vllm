@@ -524,11 +524,11 @@ class InputBatch:
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
-        if not self.all_greedy:
-            temperature = copy_slice(self.temperature_cpu_tensor,
-                                     self.temperature, num_reqs)
-        else:
-            temperature = None
+        # NOTE(woosuk): Even if all requests are greedy, we copy the
+        # temperature tensor for simplicity. The temperature tensor is used
+        # for speculative decoding.
+        temperature = copy_slice(self.temperature_cpu_tensor, self.temperature,
+                                 num_reqs)
         if not self.no_top_p:
             copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
         if not self.no_top_k:

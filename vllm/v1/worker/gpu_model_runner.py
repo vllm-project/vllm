@@ -35,7 +35,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
+from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
+                                              RejectionSampler)
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -1057,7 +1058,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             valid_sampled_token_ids = sampled_token_ids.tolist()
         else:
             # Includes spec decode tokens.
-            valid_mask = sampled_token_ids != INVALID_TOKEN_ID
+            valid_mask = sampled_token_ids != PLACEHOLDER_TOKEN_ID
             gen_lens = valid_mask.sum(dim=1).tolist()
             # TODO(woosuk): Optimize this.
             valid_sampled_token_ids = [

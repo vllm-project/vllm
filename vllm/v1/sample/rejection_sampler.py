@@ -1,201 +1,280 @@
 # SPDX-License-Identifier: Apache-2.0
+from typing import Optional
 
 import torch
 import torch.nn as nn
-from torch.nn.utils.rnn import pad_sequence
+import triton
+import triton.language as tl
 
-from vllm import envs
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.v1.outputs import SamplerOutput
+from vllm.utils import is_pin_memory_available
 from vllm.v1.sample.metadata import SamplingMetadata
 
-try:
-    import flashinfer.sampling as fs
-    is_flashinfer_available = True
-except ImportError:
-    is_flashinfer_available = False
-
 logger = init_logger(__name__)
-INVALID_TOKEN_ID = -1
+PLACEHOLDER_TOKEN_ID: tl.constexpr = -1
 
 
 class RejectionSampler(nn.Module):
 
-    def __init__(self):
+    def __init__(self, max_num_tokens: int = 16 * 1024):
         super().__init__()
-        if current_platform.is_cuda():
-            if is_flashinfer_available:
-                if envs.VLLM_USE_FLASHINFER_SAMPLER is not False:
-                    # FIXME(woosuk): Currently, we have errors when using
-                    # FlashInfer for rejection sampling. As a workaround, we
-                    # disable FlashInfer for rejection sampling by default.
-                    logger.info("Currently, FlashInfer rejection sampler is "
-                                "disabled because of a bug. Falling back to "
-                                "the PyTorch-native implementation of "
-                                "rejection sampling.")
-                    self.forward_method = self.forward_native
-
-                    # NOTE(woosuk): The V0 sampler doesn't use FlashInfer for
-                    # sampling unless VLLM_USE_FLASHINFER_SAMPLER=1 (i.e., by
-                    # default it is unused). For backward compatibility, we set
-                    # `VLLM_USE_FLASHINFER_SAMPLER` as None by default and
-                    # interpret it differently in V0 and V1 samplers: In V0,
-                    # None means False, while in V1, None means True. This is
-                    # why we use the condition
-                    # `envs.VLLM_USE_FLASHINFER_SAMPLER is not False` here.
-                    # logger.info("Using FlashInfer for rejection sampling.")
-                    # self.forward_method = self.flashinfer_sample
-                else:
-                    logger.warning(
-                        "FlashInfer is available, but it is not enabled. "
-                        "Falling back to the PyTorch-native implementation of "
-                        "rejection sampling. For the best performance, "
-                        "please set VLLM_USE_FLASHINFER_SAMPLER=1.")
-                    self.forward_method = self.forward_native
-            else:
-                logger.warning(
-                    "FlashInfer is not available. Falling back to the PyTorch-"
-                    "native implementation of rejection sampling. For the "
-                    "best performance, please install FlashInfer.")
-                self.forward_method = self.forward_native
-        else:
-            self.forward_method = self.forward_native
-
-    def forward(self, draft_token_ids: list[list[int]],
-                target_probs: torch.Tensor,
-                sampling_metadata: SamplingMetadata) -> SamplerOutput:
-        if not sampling_metadata.all_greedy:
-            raise NotImplementedError(
-                "Currently, only greedy sampling is supported by "
-                "rejection sampler.")
-        return self.forward_method(draft_token_ids, target_probs,
-                                   sampling_metadata)
-
-    def flashinfer_sample(
-        self,
-        draft_token_ids: list[list[int]],
-        target_probs: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
-        # NOTE: The following input preparationg can be moved
-        # to the model runner with a persistent manner for better
-        # performance.
-        sample_lens = [len(x) + 1 for x in draft_token_ids]
-        # Convert draft token IDs to a tensor, split by sample_lens, then pad.
-        draft_token_ids = [
-            torch.tensor(x, dtype=int, device='cpu') for x in draft_token_ids
-        ]
-        draft_token_ids_tensor = pad_sequence(draft_token_ids,
-                                              batch_first=True,
-                                              padding_value=INVALID_TOKEN_ID)
-
-        if sampling_metadata.all_greedy:
-            target_token_ids = target_probs.argmax(dim=-1).view(-1)
-            target_token_ids = target_token_ids.split(sample_lens)
-            target_token_ids = pad_sequence(target_token_ids,
-                                            batch_first=True,
-                                            padding_value=INVALID_TOKEN_ID)
-
-            vocab_size = target_probs.size(-1)
-            # NOTE: CPU <-> GPU synchronization happens here.
-            draft_token_ids_tensor = draft_token_ids_tensor.to(
-                target_probs.device)
-            draft_probs = _create_greedy_token_probs(draft_token_ids_tensor,
-                                                     vocab_size,
-                                                     target_probs.device)
-            target_probs = _create_greedy_token_probs(target_token_ids,
-                                                      vocab_size,
-                                                      target_probs.device)
-            uniform_samples = torch.zeros(draft_token_ids_tensor.size(0),
-                                          draft_token_ids_tensor.size(1) + 1,
-                                          device=target_probs.device)
-        else:
-            raise NotImplementedError(
-                "Currently, only greedy sampling is supported by "
-                "rejection sampler.")
-
-        sampled_token_ids, _, _ = fs.chain_speculative_sampling(
-            draft_probs,
-            draft_token_ids_tensor,
-            uniform_samples,
-            target_probs,
+        self.buffer = torch.empty(
+            max_num_tokens,
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=is_pin_memory_available(),
         )
-        return SamplerOutput(sampled_token_ids=sampled_token_ids,
-                             logprobs_tensors=None)
+        self.buffer_np = self.buffer.numpy()
 
-    # TODO: The following method can be optimized for better performance.
-    def forward_native(
+    def forward(
         self,
         draft_token_ids: list[list[int]],
+        # [batch_size, max_spec_len + 1, vocab_size]
         target_probs: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
-        sample_lens = [len(x) + 1 for x in draft_token_ids]
-        # Convert draft token IDs to a tensor, split by sample_lens, then pad.
-        draft_token_ids = [
-            torch.tensor(x, dtype=int, device='cpu') for x in draft_token_ids
-        ]
-        draft_token_ids_tensor = pad_sequence(draft_token_ids,
-                                              batch_first=True,
-                                              padding_value=INVALID_TOKEN_ID)
-        draft_token_ids_tensor = draft_token_ids_tensor.to(target_probs.device)
-        # Add 1 to include the 'bonus' token.
-        if sampling_metadata.all_greedy:
-            output_token_ids = target_probs.argmax(dim=-1).view(-1)
-            output_token_ids = output_token_ids.split(sample_lens)
-            output_token_ids = pad_sequence(output_token_ids,
-                                            batch_first=True,
-                                            padding_value=INVALID_TOKEN_ID)
-            # Produce a mask that remains 1 (True) until the first
-            # mismatch (cumprod turns 0 after a mismatch).
-            accept_mask = (
-                output_token_ids[:, :-1] == draft_token_ids_tensor).cumprod(
-                    dim=1)
-        else:
-            raise NotImplementedError(
-                "Currently, only greedy sampling is supported by "
-                "rejection sampler.")
-        # Identify valid positions (non-padding).
-        valid_mask = output_token_ids != INVALID_TOKEN_ID
-        # Generate mask with bonus token.
-        generate_mask = torch.cat([
-            accept_mask,
-            torch.zeros(accept_mask.size(0), 1, device=accept_mask.device)
-        ],
-                                  dim=1).to(torch.bool) & valid_mask
-        zeros_mask = (generate_mask == 0)
-        first_zero_idx = zeros_mask.float().argmax(dim=1)
-        # Figure out which rows actually contain at least one zero.
-        rows_with_zero = zeros_mask.any(dim=1)
-        # Use indexing to set the first zero in each of those rows to 1.
-        generate_mask[rows_with_zero, first_zero_idx[rows_with_zero]] = 1
+    ) -> torch.Tensor:
+        num_draft_tokens = [len(ids) for ids in draft_token_ids]
+        batch_size = len(draft_token_ids)
+        max_spec_len = max(num_draft_tokens)
+        draft_token_ids_np = self.buffer_np[:batch_size * max_spec_len]
+        for i, token_ids in enumerate(draft_token_ids):
+            start = i * max_spec_len
+            end = start + len(token_ids)
+            draft_token_ids_np[start:end] = token_ids
 
-        output_token_ids[~generate_mask] = INVALID_TOKEN_ID
-        return SamplerOutput(sampled_token_ids=output_token_ids,
-                             logprobs_tensors=None)
+        draft_token_ids_cpu = self.buffer[:batch_size * max_spec_len]
+        draft_token_ids_cpu = draft_token_ids_cpu.view(batch_size,
+                                                       max_spec_len)
+        draft_token_ids = draft_token_ids_cpu.to(device=target_probs.device,
+                                                 non_blocking=True)
+        output_token_ids = rejection_sample(
+            draft_token_ids,
+            num_draft_tokens,
+            None,  # draft_probs
+            target_probs,
+            None,  # bonus_token_ids
+            sampling_metadata,
+        )
+        return output_token_ids
 
 
-def _create_greedy_token_probs(
-    token_ids: torch.Tensor,
-    vocab_size: int,
-    out_device: torch.device,
+def rejection_sample(
+    # [batch_size, max_spec_len]
+    draft_token_ids: torch.Tensor,
+    # [batch_size]
+    num_draft_tokens: list[int],
+    # [batch_size, max_spec_len, vocab_size]
+    draft_probs: Optional[torch.Tensor],
+    # [batch_size, max_spec_len + 1, vocab_size]
+    target_probs: torch.Tensor,
+    # [batch_size]
+    bonus_token_ids: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    batch_size, num_tokens = token_ids.shape
+    batch_size = draft_token_ids.shape[0]
+    max_spec_len = draft_token_ids.shape[1]
+    vocab_size = target_probs.shape[-1]
+    device = target_probs.device
+    assert draft_token_ids.is_contiguous()
+    assert draft_probs is None or draft_probs.is_contiguous()
+    assert target_probs.is_contiguous()
+    assert bonus_token_ids.is_contiguous()
 
-    token_probs = torch.zeros(batch_size,
-                              num_tokens,
-                              vocab_size,
-                              dtype=torch.float,
-                              device=out_device)
+    # Rejection sampling.
+    output_token_ids = torch.empty(
+        (batch_size, max_spec_len + 1),
+        dtype=torch.int64,
+        device=device,
+    )
+    output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
+    is_greedy = sampling_metadata.temperature == -1
+    if not sampling_metadata.all_random:
+        # Rejection sampling for greedy sampling requests.
+        target_argmax = target_probs.argmax(dim=-1)
+        rejection_greedy_sample_kernel[(batch_size, )](
+            output_token_ids,
+            draft_token_ids,
+            target_argmax,
+            bonus_token_ids,
+            is_greedy,
+            max_spec_len,
+        )
+        if sampling_metadata.all_greedy:
+            return output_token_ids
 
-    # Ignore INVALID_TOKEN_ID.
-    valid_mask = (token_ids != INVALID_TOKEN_ID)
-    valid_indices = token_ids.clone()
-    valid_indices[~valid_mask] = 0
+    # Generate uniform probabilities for rejection sampling.
+    uniform_probs = torch.rand(
+        (batch_size, max_spec_len),
+        dtype=torch.float32,
+        device=device,
+    )
+    for i, generator in sampling_metadata.generators.items():
+        num_tokens = num_draft_tokens[i]
+        if num_tokens > 0:
+            # NOTE(woosuk): We shouldn't use max_spec_len here because
+            # max_spec_len is affected by other requests in the batch.
+            uniform_probs[i][:num_tokens].uniform_(generator=generator)
 
-    token_probs.scatter_(dim=2,
-                         index=valid_indices.unsqueeze(-1),
-                         src=valid_mask.unsqueeze(-1).float())
+    # Sample recovered tokens for each position.
+    # Compute the adjusted probabilities.
+    is_ngram = draft_probs is None
+    if is_ngram:
+        # [batch_size, max_spec_len, vocab_size]
+        probs = target_probs[:, :-1].clone()
+        # [batch_size, max_spec_len]
+        safe_draft_token_ids = torch.where(
+            draft_token_ids == PLACEHOLDER_TOKEN_ID, 0, draft_token_ids)
+        # Set probabilities to 0 for draft token positions
+        probs.scatter_(2, safe_draft_token_ids.unsqueeze(-1), 0)
+    else:
+        probs = torch.clamp(target_probs[:, :-1] - draft_probs, min=1e-8)
+    probs /= probs.sum(dim=-1, keepdim=True)
 
-    return token_probs
+    # NOTE(woosuk): Create only one distribution for each request.
+    q = torch.empty(
+        (batch_size, vocab_size),
+        dtype=torch.float32,
+        device=device,
+    )
+    q.exponential_()
+    for i, generator in sampling_metadata.generators.items():
+        if num_draft_tokens[i] > 0:
+            q[i].exponential_(generator=generator)
+    q = q.unsqueeze(dim=1)
+    recovered_token_ids = probs.div_(q).argmax(dim=-1)
+    recovered_token_ids = recovered_token_ids.view(batch_size, max_spec_len)
+
+    # Rejection sampling for random sampling requests.
+    rejection_random_sample_kernel[(batch_size, )](
+        output_token_ids,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        bonus_token_ids,
+        recovered_token_ids,
+        uniform_probs,
+        is_greedy,
+        max_spec_len,
+        vocab_size,
+        is_ngram,
+    )
+    return output_token_ids
+
+
+@triton.jit
+def rejection_random_sample_kernel(
+    output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
+    draft_token_ids_ptr,  # [batch_size, max_spec_len]
+    draft_probs_ptr,  # [batch_size, max_spec_len, vocab_size] or None
+    target_probs_ptr,  # [batch_size, max_spec_len + 1, vocab_size]
+    bonus_token_ids_ptr,  # [batch_size]
+    recovered_token_ids_ptr,  # [batch_size, max_spec_len]
+    uniform_probs_ptr,  # [batch_size, UNIFORM_PROBS_LEN]
+    is_greedy_ptr,  # [batch_size]
+    max_spec_len,
+    vocab_size,
+    IS_NGRAM: tl.constexpr,
+):
+    seq_idx = tl.program_id(0)
+    is_greedy = tl.load(is_greedy_ptr + seq_idx)
+    if is_greedy:
+        # Early exit for greedy sampling requests.
+        return
+
+    rejected = False
+    finished = False
+    num_generated = 0
+    for pos in range(max_spec_len):
+        if not finished:
+            token_id = tl.load(draft_token_ids_ptr + seq_idx * max_spec_len +
+                               pos)
+            if token_id == PLACEHOLDER_TOKEN_ID:
+                finished = True
+            else:
+                if IS_NGRAM:
+                    draft_prob = 1
+                else:
+                    # NOTE(woosuk): Here, we assume that draft_prob is nonzero.
+                    draft_prob = tl.load(draft_probs_ptr +
+                                         seq_idx * max_spec_len * vocab_size +
+                                         pos * vocab_size + token_id)
+                target_prob = tl.load(target_probs_ptr + seq_idx *
+                                      (max_spec_len + 1) * vocab_size +
+                                      pos * vocab_size + token_id)
+                uniform_prob = tl.load(uniform_probs_ptr +
+                                       seq_idx * max_spec_len + pos)
+                if target_prob / draft_prob >= uniform_prob:
+                    # Accept.
+                    tl.store(
+                        output_token_ids_ptr + seq_idx * (max_spec_len + 1) +
+                        pos, token_id)
+                    num_generated += 1
+                else:
+                    # Reject. Use recovered token.
+                    rejected = True
+                    recovered_token_id = tl.load(recovered_token_ids_ptr +
+                                                 seq_idx * max_spec_len + pos)
+                    tl.store(
+                        output_token_ids_ptr + seq_idx * (max_spec_len + 1) +
+                        pos, recovered_token_id)
+                    num_generated += 1
+                    finished = True
+
+    if not rejected:
+        # If all tokens are accepted, append the bonus token.
+        bonus_token_id = tl.load(bonus_token_ids_ptr + seq_idx)
+        tl.store(
+            output_token_ids_ptr + seq_idx * (max_spec_len + 1) +
+            num_generated, bonus_token_id)
+
+
+@triton.jit
+def rejection_greedy_sample_kernel(
+    output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
+    draft_token_ids_ptr,  # [batch_size, max_spec_len]
+    target_argmax_ptr,  # [batch_size, max_spec_len + 1]
+    bonus_token_ids_ptr,  # [batch_size]
+    is_greedy_ptr,  # [batch_size]
+    max_spec_len,
+):
+    seq_idx = tl.program_id(0)
+    is_greedy = tl.load(is_greedy_ptr + seq_idx)
+    if not is_greedy:
+        # Early exit for non-greedy sampling requests.
+        return
+
+    rejected = False
+    finished = False
+    num_generated = 0
+    for pos in range(max_spec_len):
+        if not finished:
+            token_id = tl.load(draft_token_ids_ptr + seq_idx * max_spec_len +
+                               pos)
+            if token_id == PLACEHOLDER_TOKEN_ID:
+                finished = True
+            else:
+                draft_token_id = tl.load(draft_token_ids_ptr +
+                                         seq_idx * max_spec_len + pos)
+                target_argmax = tl.load(target_argmax_ptr + seq_idx *
+                                        (max_spec_len + 1) + pos)
+                if draft_token_id == target_argmax:
+                    # Accept.
+                    tl.store(
+                        output_token_ids_ptr + seq_idx * (max_spec_len + 1) +
+                        pos, draft_token_id)
+                    num_generated += 1
+                else:
+                    # Reject.
+                    rejected = True
+                    tl.store(
+                        output_token_ids_ptr + seq_idx * (max_spec_len + 1) +
+                        pos, target_argmax)
+                    num_generated += 1
+                    finished = True
+
+    if not rejected:
+        # If all tokens are accepted, append the bonus token.
+        bonus_token_id = tl.load(bonus_token_ids_ptr + seq_idx)
+        tl.store(
+            output_token_ids_ptr + seq_idx * (max_spec_len + 1) +
+            num_generated, bonus_token_id)

@@ -9,7 +9,7 @@ import torch
 @dataclass
 class SamplingMetadata:
 
-    temperature: Optional[torch.Tensor]
+    temperature: torch.Tensor
     all_greedy: bool
     all_random: bool
 
