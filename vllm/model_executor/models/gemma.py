@@ -424,9 +424,5 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
-        unloaded_params = params_dict.keys() - loaded_params
-        if unloaded_params:
-            logger.warning(
-                "Some weights are not initialized from checkpoints: %s",
-                unloaded_params)
+
         return loaded_params
