@@ -411,7 +411,7 @@ def _create_uniform_samples(seeded_seqs: Optional[dict[int, torch.Generator]],
                 random values in the range [0, 1).
         """
 
-    uniform_rand = torch.rand(batch_size, k, device=device)
+    uniform_rand = torch.rand(batch_size, k, dtype=torch.float32, device=device)
     # Apply seeded generators only where needed
     if seeded_seqs:
         for idx, generator in seeded_seqs.items():
