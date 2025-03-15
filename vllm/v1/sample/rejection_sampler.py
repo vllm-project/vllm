@@ -69,6 +69,7 @@ class RejectionSampler(nn.Module):
     @staticmethod
     def parse_output(output_token_ids: torch.Tensor) -> list[list[int]]:
         output_token_ids = output_token_ids.tolist()
+        # Preallocate outputs.
         outputs: list[list[int]] = [[] for _ in output_token_ids]
         for i, token_ids in enumerate(output_token_ids):
             for token_id in token_ids:
@@ -106,16 +107,15 @@ def rejection_sample(
     num_draft_tokens: list[int],
     # [batch_size]
     cu_num_draft_tokens: torch.Tensor,
-    # [batch_size, max_spec_len, vocab_size]
+    # [num_tokens, vocab_size]
     draft_probs: Optional[torch.Tensor],
-    # [batch_size, max_spec_len, vocab_size]
+    # [num_tokens, vocab_size]
     target_probs: torch.Tensor,
     # [batch_size]
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    batch_size = draft_token_ids.shape[0]
-    max_spec_len = draft_token_ids.shape[1]
+    batch_size, max_spec_len = draft_token_ids.shape
     vocab_size = target_probs.shape[-1]
     device = target_probs.device
     assert draft_token_ids.is_contiguous()
@@ -123,13 +123,14 @@ def rejection_sample(
     assert target_probs.is_contiguous()
     assert bonus_token_ids.is_contiguous()
 
-    # Rejection sampling.
+    # Create output buffer.
     output_token_ids = torch.empty(
         (batch_size, max_spec_len + 1),
         dtype=torch.int64,
         device=device,
     )
     output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
+
     is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
