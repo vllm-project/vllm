@@ -58,7 +58,8 @@ def get_forward_context() -> ForwardContext:
 def set_forward_context(attn_metadata: Any,
                         vllm_config: VllmConfig,
                         virtual_engine: int = 0,
-                        num_tokens: int = 0):
+                        num_tokens: int = 0,
+                        enable_sequence_parallel: bool = False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -91,16 +92,11 @@ def set_forward_context(attn_metadata: Any,
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)
         dp_metadata = DPMetadata(cu_tokens_across_dp_cpu)
 
+    # TODO: support pipeline parallel
     if vllm_config.parallel_config.enable_sequence_parallel:
         assert vllm_config.parallel_config.pipeline_parallel_size == 1, (
-            "sequence parallel doesn't work when combined with pipeline")
-
-    # only do sequence parallelism when tokens num is divisible by parallel size
-    # sequence parallelism uses torch.distributed.reduce_scatter which only
-    # supports the case when size is divisible by parallel size
-    enable_sequence_parallel = (
-        vllm_config.parallel_config.enable_sequence_parallel
-        and num_tokens % vllm_config.parallel_config.tensor_parallel_size == 0)
+            "sequence parallel doesn't work correctly when "
+            "combined with pipeline parallel")
 
     global _forward_context
     prev_context = _forward_context

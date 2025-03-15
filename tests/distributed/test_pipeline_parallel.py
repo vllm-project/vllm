@@ -523,6 +523,7 @@ SP_TEXT_GENERATION_MODELS = {
 }
 
 SP_TEST_MODELS = [
+    # TODO support other models
     # [LANGUAGE GENERATION]
     "unsloth/Llama-3.2-1B-Instruct",
 ]
