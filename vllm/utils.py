@@ -1275,7 +1275,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         config_args = self._load_config_file(file_path)
 
         # 0th index is for {serve,chat,complete}
-        # followed by model_tag (only for serve)
+        # optionally followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
