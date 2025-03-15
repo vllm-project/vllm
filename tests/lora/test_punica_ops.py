@@ -2,7 +2,6 @@
 from threading import Lock
 
 import pytest
-
 import torch
 
 import vllm.lora.ops.torch_ops as torch_ops
