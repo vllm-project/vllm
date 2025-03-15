@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
+    VLLM_V0_USE_OUTLINES_CACHE: bool = False
 
 
 def get_default_cache_root():
@@ -623,6 +624,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
     "VLLM_MARLIN_USE_ATOMIC_ADD":
     lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
+
+    # Whether to turn on the outlines cache for V0
+    # This cache is unbounded and on disk, so it's not safe to use in
+    # an environment with potentially malicious users.
+    "VLLM_V0_USE_OUTLINES_CACHE":
+    lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
 }
 
 # end-env-vars-definition
