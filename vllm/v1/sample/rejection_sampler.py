@@ -415,8 +415,5 @@ def _create_uniform_samples(seeded_seqs: Optional[dict[int, torch.Generator]],
     # Apply seeded generators only where needed
     if seeded_seqs:
         for idx, generator in seeded_seqs.items():
-            uniform_rand[idx, :] = torch.rand(1,
-                                              k,
-                                              device=device,
-                                              generator=generator)
+            uniform_rand[idx].uniform_(0, 1, generator=generator)
     return uniform_rand
