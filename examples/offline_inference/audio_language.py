@@ -77,6 +77,7 @@ def run_phi4mm(questions: str, audio_count: int):
         enable_lora=True,
         max_lora_rank=320,
         lora_extra_vocab_size=0,
+        limit_mm_per_prompt={"audio": audio_count},
     )
     lora_request = LoRARequest("speech", 1, speech_lora_path)
     # To maintain code compatibility in this script, we add LoRA here.

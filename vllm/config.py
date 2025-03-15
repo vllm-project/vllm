@@ -53,6 +53,8 @@ if TYPE_CHECKING:
 else:
     QuantizationConfig = None
 
+from packaging.version import Version
+
 logger = init_logger(__name__)
 
 # This value is chosen to have a balance between ITL and TTFT. Note it is
@@ -256,7 +258,7 @@ class ModelConfig:
         override_neuron_config: Optional[dict[str, Any]] = None,
         override_pooler_config: Optional["PoolerConfig"] = None,
         logits_processor_pattern: Optional[str] = None,
-        generation_config: Optional[str] = None,
+        generation_config: str = "auto",
         enable_sleep_mode: bool = False,
         override_generation_config: Optional[dict[str, Any]] = None,
         model_impl: Union[str, ModelImpl] = ModelImpl.AUTO,
@@ -287,14 +289,18 @@ class ModelConfig:
         if rope_scaling is not None:
             hf_override: dict[str, Any] = {"rope_scaling": rope_scaling}
             hf_overrides_kw.update(hf_override)
-            msg = ("`--rope-scaling` will be removed in a future release. "
-                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            hf_overrides_str = json.dumps(hf_overrides)
+            msg = (
+                "`--rope-scaling` will be removed in a future release. "
+                f"'Please instead use `--hf-overrides '{hf_overrides_str}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
         if rope_theta is not None:
             hf_override = {"rope_theta": rope_theta}
             hf_overrides_kw.update(hf_override)
-            msg = ("`--rope-theta` will be removed in a future release. "
-                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            hf_overrides_str = json.dumps(hf_overrides)
+            msg = (
+                "`--rope-theta` will be removed in a future release. "
+                f"'Please instead use `--hf-overrides '{hf_overrides_str}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_s3(model, tokenizer)
@@ -351,10 +357,11 @@ class ModelConfig:
         if self.enforce_eager is None:
             self.enforce_eager = False
 
+        interleaved_attn_models = ["gemma2", "gemma3_text", "cohere2"]
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         has_interleaved_attention = (sliding_window is not None) and (
             isinstance(sliding_window, list) or
-            (self.hf_text_config.model_type in ["gemma2", "cohere2"]))
+            (self.hf_text_config.model_type in interleaved_attn_models))
 
         if (not self.disable_sliding_window and has_interleaved_attention):
             if (backend :=
@@ -614,7 +621,7 @@ class ModelConfig:
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed_tensors",
-            "compressed-tensors", "experts_int8", "quark"
+            "compressed-tensors", "experts_int8", "quark", "nvfp4"
         ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
@@ -952,7 +959,7 @@ class ModelConfig:
         return self.multimodal_config
 
     def try_get_generation_config(self) -> dict[str, Any]:
-        if self.generation_config is None or self.generation_config == "auto":
+        if self.generation_config in ("auto", "vllm"):
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
@@ -972,17 +979,14 @@ class ModelConfig:
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """
         This method returns a dictionary containing the parameters
-        that differ from the default sampling parameters, but only
-        if `generation_config` is set. If `generation_config` is not
-        set, an empty dictionary is returned.
+        that differ from the default sampling parameters. If
+        `generation_config` is `"vllm"`, an empty dictionary is returned.
 
         Returns:
             dict[str, Any]: A dictionary with the differing sampling
-            parameters if `generation_config` is set, otherwise an
-            empty dictionary.
+            parameters, if `generation_config` is `"vllm"` an empty dictionary.
         """
-        if self.generation_config is None:
-            # When generation_config is not set
+        if self.generation_config == "vllm":
             config = {}
         else:
             config = self.try_get_generation_config()
@@ -1149,7 +1153,7 @@ class CacheConfig:
         if not self.enable_prefix_caching:
             return
 
-        if self.sliding_window is not None:
+        if self.sliding_window is not None and not envs.VLLM_USE_V1:
             raise NotImplementedError(
                 "Prefix caching is not supported with sliding window. "
                 "Run with --disable-sliding-window to use prefix caching.")
@@ -1281,6 +1285,8 @@ class LoadConfig:
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's
             checkpoints.
+        use_tqdm_on_load: Whether to enable tqdm for showing progress bar during
+            loading. Default to True
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
@@ -1288,6 +1294,7 @@ class LoadConfig:
     model_loader_extra_config: Optional[Union[str, dict]] = field(
         default_factory=dict)
     ignore_patterns: Optional[Union[list[str], str]] = None
+    use_tqdm_on_load: bool = True
 
     def compute_hash(self) -> str:
         """
@@ -2288,9 +2295,14 @@ class LoRAConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # LoRA is not compatible with `torch.compile` .
         factors: list[Any] = []
+        factors.append(self.max_lora_rank)
+        factors.append(self.max_loras)
+        factors.append(self.fully_sharded_loras)
+        factors.append(self.lora_dtype)
+        factors.append(self.lora_extra_vocab_size)
+        factors.append(self.long_lora_scaling_factors)
+        factors.append(self.bias_enabled)
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -2507,11 +2519,11 @@ def _get_and_verify_dtype(
         dtype = dtype.lower()
         if dtype == "auto":
             if config_dtype == torch.float32:
-                if config.model_type == "gemma2":
+                if config.model_type in ("gemma2", "gemma3", "gemma3_text"):
                     logger.info(
-                        "For Gemma 2, we downcast float32 to bfloat16 instead "
-                        "of float16 by default. Please specify `dtype` if you "
-                        "want to use float16.")
+                        "For Gemma 2 and 3, we downcast float32 to bfloat16 "
+                        "instead of float16 by default. Please specify `dtype` "
+                        "if you want to use float16.")
                     torch_dtype = torch.bfloat16
                 else:
                     # Following the common practice, we use float16 for float32
@@ -2643,7 +2655,9 @@ def _get_and_verify_max_len(
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    if rope_scaling is not None:
+    # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
+    # scaling, so we skip applying the scaling factor again.
+    if rope_scaling is not None and "gemma3" not in hf_config.model_type:
         # No need to consider "type" key because of patch_rope_scaling when
         # loading HF config
         rope_type = rope_scaling["rope_type"]
@@ -2840,6 +2854,9 @@ class KVTransferConfig(BaseModel):
     # The KV connector port, used to build distributed connection
     kv_port: int = 14579
 
+    # any extra config that the connector may need
+    kv_connector_extra_config: dict[str, Any] = {}
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2898,6 +2915,9 @@ class KVTransferConfig(BaseModel):
     def is_kv_consumer(self) -> bool:
         return self.kv_connector is not None and \
             self.kv_role in ["kv_consumer", "kv_both"]
+
+    def get_from_extra_config(self, key, default) -> Any:
+        return self.kv_connector_extra_config.get(key, default)
 
 
 class CompilationLevel:
@@ -3114,6 +3134,19 @@ class CompilationConfig(BaseModel):
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
 
+        # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
+        # 1. A bug in PyTorch, fixed in 2.7:
+        #    https://github.com/pytorch/pytorch/issues/147924
+        # 2. Custom passes (fusion) rely on auto-functionalization V1 and don't
+        #    work with V2. Addressing this will take extra engineering effort
+        #    and it is not yet a priority. RFC here:
+        #    https://github.com/vllm-project/vllm/issues/14703
+
+        if Version(torch.__version__) >= Version("2.6"):
+            KEY = 'enable_auto_functionalized_v2'
+            if KEY not in self.inductor_compile_config:
+                self.inductor_compile_config[KEY] = False
+
         if self.splitting_ops is None:
             if envs.VLLM_USE_V1:
                 # v1 must split the graph on attention ops
@@ -3296,6 +3329,11 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
+            # LoRA creates static buffers based on max_num_batched_tokens.
+            # The tensor sizes and strides get captured in the torch.compile
+            # graph explicitly.
+            vllm_factors.append(
+                str(self.scheduler_config.max_num_batched_tokens))
         else:
             vllm_factors.append("None")
         if self.speculative_config:
@@ -3446,16 +3484,19 @@ class VllmConfig:
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        if self.lora_config is not None and self.compilation_config.level !=\
-             CompilationLevel.NO_COMPILATION:
-            logger.warning("LoRA is not supported with `torch.compile` yet. "
-                           "Disabling `torch.compile`.")
+        if ((not envs.VLLM_USE_V1) and self.lora_config is not None
+                and self.compilation_config.level
+                != CompilationLevel.NO_COMPILATION):
+            logger.warning(
+                "LoRA for V0 is not supported with `torch.compile` yet. "
+                "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
+
         if self.model_config and self.model_config.use_mla and \
-            not current_platform.is_cuda():
+            not (current_platform.is_cuda() or current_platform.is_rocm()):
             logger.info(
-                "MLA is enabled on a non-cuda platform; forcing chunked "
+                "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
             self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.chunked_prefill_enabled = False
@@ -3531,6 +3572,11 @@ class VllmConfig:
                 not self.model_config.enforce_eager:
                 batch_size_capture_list = [1, 2, 4
                                            ] + [i for i in range(8, 513, 8)]
+                max_num_tokens = self.scheduler_config.max_num_batched_tokens
+                batch_size_capture_list = [
+                    size for size in batch_size_capture_list
+                    if size <= max_num_tokens
+                ]
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
@@ -3578,11 +3624,11 @@ _current_vllm_config: Optional[VllmConfig] = None
 @contextmanager
 def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     """
-    Temporarily set the current VLLM config.
+    Temporarily set the current vLLM config.
     Used during model initialization.
-    We save the current VLLM config in a global variable,
+    We save the current vLLM config in a global variable,
     so that all modules can access it, e.g. custom ops
-    can access the VLLM config to determine how to dispatch.
+    can access the vLLM config to determine how to dispatch.
     """
     global _current_vllm_config
     old_vllm_config = _current_vllm_config
@@ -3617,7 +3663,7 @@ def get_current_vllm_config() -> VllmConfig:
         # in ci, usually when we test custom ops/modules directly,
         # we don't set the vllm config. In that case, we set a default
         # config.
-        logger.warning("Current VLLM config is not set.")
+        logger.warning("Current vLLM config is not set.")
         from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config

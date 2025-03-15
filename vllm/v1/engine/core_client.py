@@ -4,6 +4,7 @@ import asyncio
 import os
 import queue
 import signal
+import threading
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -302,13 +303,20 @@ class MPClient(EngineCoreClient):
         # TODO(rob): rather than killing the main process, we should
         # figure out how to raise an AsyncEngineDeadError and
         # handle at the API server level so we can return a better
-        # error code to the clients calling VLLM.
+        # error code to the clients calling vLLM.
         def sigusr1_handler(signum, frame):
             logger.fatal("Got fatal signal from worker processes, shutting "
                          "down. See stack trace above for root cause issue.")
             kill_process_tree(os.getpid())
 
-        signal.signal(signal.SIGUSR1, sigusr1_handler)
+        if threading.current_thread() == threading.main_thread():
+            signal.signal(signal.SIGUSR1, sigusr1_handler)
+        else:
+            logger.warning("SIGUSR1 handler not installed because we are not "
+                           "running in the main thread. In this case the "
+                           "forked engine process may not be killed when "
+                           "an exception is raised, and you need to handle "
+                           "the engine process shutdown manually.")
 
         # Serialization setup.
         self.encoder = MsgpackEncoder()

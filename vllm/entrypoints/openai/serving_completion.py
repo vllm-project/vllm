@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import Optional, Union, cast
 
+import jinja2
 from fastapi import Request
 
 from vllm.config import ModelConfig
@@ -55,9 +56,10 @@ class OpenAIServingCompletion(OpenAIServing):
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
         if self.default_sampling_params:
-            logger.info(
-                "Overwriting default completion sampling param with: %s",
-                self.default_sampling_params)
+            source = self.model_config.generation_config
+            source = "model" if source == "auto" else source
+            logger.info("Using default completion sampling params from %s: %s",
+                        source, self.default_sampling_params)
 
     async def create_completion(
         self,
@@ -111,6 +113,15 @@ class OpenAIServingCompletion(OpenAIServing):
                 add_special_tokens=request.add_special_tokens,
             )
         except ValueError as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e))
+        except TypeError as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e))
+        except RuntimeError as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e))
+        except jinja2.TemplateError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
