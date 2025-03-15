@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding.reasoner import get_reasoner
@@ -14,7 +14,7 @@ from vllm.platforms import CpuArchEnum
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, SpeculativeConfig
     from vllm.logits_process import LogitsProcessor
     from vllm.sampling_params import GuidedDecodingParams
 
@@ -107,6 +107,7 @@ async def get_guided_decoding_logits_processor(
         guided_params: GuidedDecodingParams,
         tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
+        speculative_config: Optional[SpeculativeConfig] = None,
         reasoning_backend: str | None = None) -> LogitsProcessor | None:
 
     reasoner = get_reasoner(tokenizer, reasoning_backend)
@@ -129,7 +130,7 @@ async def get_guided_decoding_logits_processor(
         from vllm.model_executor.guided_decoding.xgrammar_decoding import (  # noqa
             get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
-            guided_params, tokenizer, model_config, reasoner)
+            guided_params, tokenizer, model_config, reasoner, speculative_config)
 
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
@@ -140,7 +141,8 @@ def get_local_guided_decoding_logits_processor(
         guided_params: GuidedDecodingParams,
         tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
-        reasoning_backend: str | None = None) -> LogitsProcessor | None:
+        reasoning_backend: str | None = None,
+        speculative_config: Optional[SpeculativeConfig] = None) -> LogitsProcessor | None:
     guided_params = maybe_backend_fallback(guided_params)
 
     # Get the reasoner if needed, it will be None if reasoning_
@@ -162,7 +164,7 @@ def get_local_guided_decoding_logits_processor(
         from vllm.model_executor.guided_decoding.xgrammar_decoding import (  # noqa
             get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
-            guided_params, tokenizer, model_config, reasoner)
+            guided_params, tokenizer, model_config, reasoner, speculative_config)
 
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "

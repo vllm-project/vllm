@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any, List, Optional
 
 import torch
 from transformers import PreTrainedTokenizerFast
@@ -28,7 +28,7 @@ from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, SpeculativeConfig
     from vllm.model_executor.guided_decoding.reasoner import Reasoner
     from vllm.sampling_params import GuidedDecodingParams
 
@@ -41,10 +41,12 @@ def get_local_xgrammar_guided_decoding_logits_processor(
         tokenizer: PreTrainedTokenizer,
         model_config: ModelConfig,
         reasoner: Reasoner | None,
+        speculative_config: Optional[SpeculativeConfig] = None,
         max_threads: int = 8):
     config = GrammarConfig.from_guided_params(guided_params=guided_params,
                                               model_config=model_config,
                                               tokenizer=tokenizer,
+                                              speculative_config=speculative_config,
                                               max_threads=max_threads)
     return XGrammarLogitsProcessor(config, reasoner)
 
@@ -170,16 +172,21 @@ class GrammarConfig:
     any_whitespace: bool = True
     max_threads: int = 8
     tokenizer_data: TokenizerData | None = None
+    num_lookahead_slots: int | None = None
 
     @classmethod
-    def from_guided_params(cls,
-                           guided_params: GuidedDecodingParams,
-                           model_config: ModelConfig,
-                           tokenizer: PreTrainedTokenizer,
-                           max_threads: int = 8) -> GrammarConfig:
+    def from_guided_params(
+            cls,
+            guided_params: GuidedDecodingParams,
+            model_config: ModelConfig,
+            tokenizer: PreTrainedTokenizer,
+            speculative_config: Optional[SpeculativeConfig] = None,
+            max_threads: int = 8) -> GrammarConfig:
 
         tokenizer_hash = hash(tokenizer)
         tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
+        num_lookahead_slots = (speculative_config.num_lookahead_slots
+                               if speculative_config else None)
 
         if guided_params.json:
             if not isinstance(guided_params.json, str):
@@ -222,7 +229,8 @@ class GrammarConfig:
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads,
                        tokenizer_data=tokenizer_data,
-                       any_whitespace=any_whitespace)
+                       any_whitespace=any_whitespace,
+                       num_lookahead_slots=num_lookahead_slots)
         elif guided_params.grammar:
             # XGrammar only supports GBNF grammars, so we must convert Lark
             if grammar_is_likely_lark(guided_params.grammar):
@@ -249,7 +257,8 @@ class GrammarConfig:
                        vocab_size=model_config.hf_text_config.vocab_size,
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads,
-                       tokenizer_data=tokenizer_data)
+                       tokenizer_data=tokenizer_data,
+                       num_lookahead_slots=num_lookahead_slots)
         elif guided_params.json_object:
             return cls(
                 json_object=True,
@@ -257,6 +266,7 @@ class GrammarConfig:
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
+                num_lookahead_slots=num_lookahead_slots,
             )
         elif guided_params.choice:
             choice_str = GrammarConfig.choice_as_grammar(guided_params.choice)
@@ -271,6 +281,7 @@ class GrammarConfig:
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
+                num_lookahead_slots=num_lookahead_slots,
             )
         else:
             raise ValueError(
@@ -302,7 +313,7 @@ class XGrammarLogitsProcessor:
     token_bitmask: torch.Tensor = None  # type: ignore[assignment]
     matchers: list[xgr.GrammarMatcher] = field(default_factory=list)
     batch_size: int = field(default=1)
-    prefilled: bool = field(default=False)
+    num_processed_tokens: list[int] = field(default_factory=list)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config, 'reasoner': self.reasoner}
@@ -315,7 +326,7 @@ class XGrammarLogitsProcessor:
         self.matchers = []
         self.batch_size = 1
         self.token_bitmask = None  # type: ignore[assignment]
-        self.prefilled = False
+        self.num_processed_tokens = []
 
     def _ensure_ctx(self):
         """Lazily initialize the processor in the worker process"""
@@ -348,18 +359,28 @@ class XGrammarLogitsProcessor:
             self._ensure_ctx()
 
         if len(self.matchers) == 0:
+            max_rollback_tokens = (self.config.num_lookahead_slots
+                                   if self.config.num_lookahead_slots else 0)
             self.matchers = [
-                xgr.GrammarMatcher(self.ctx) for _ in range(self.batch_size)
+                xgr.GrammarMatcher(self.ctx,
+                                   max_rollback_tokens=max_rollback_tokens)
+                for _ in range(self.batch_size)
             ]
+            self.num_processed_tokens = [0 for _ in range(self.batch_size)]
             self.token_bitmask = xgr.allocate_token_bitmask(
                 self.batch_size, self.config.vocab_size)
 
-        if not self.prefilled:
-            # Have not sampled a token yet
-            self.prefilled = True
-        else:
+        for i in range(len(self.matchers)):
+            if self.num_processed_tokens[i] > 0 and self.num_processed_tokens[
+                    i] >= len(input_ids):
+                diff = self.num_processed_tokens[i] - len(input_ids) + 1
+                self.num_processed_tokens[i] -= diff
+                self.matchers[i].rollback(diff)
+
+        if len(input_ids) > 0:
             for i, matcher in enumerate(self.matchers):
                 if not matcher.is_terminated():
+                    self.num_processed_tokens[i] += 1
                     sampled_token = input_ids[-1]
                     assert self.matchers[i].accept_token(sampled_token)
 
@@ -382,8 +403,15 @@ class XGrammarLogitsProcessor:
         # Note: In this method, if the tensors have different dimensions
         # on CPU device fails, but on GPU it runs without error. Hence the
         # unsqueeze above for scores, to match the token bitmask shape
+
+        # A non-blocking copy causes incorrect behaviour in speculative
+        # decoding. Therefore, we use a blocking copy in the speculative
+        # decoding case.
+        speculative_decoding_disabled = self.config.num_lookahead_slots is None
         xgr.apply_token_bitmask_inplace(
-            scores, self.token_bitmask.to(scores.device, non_blocking=True))
+            scores,
+            self.token_bitmask.to(scores.device,
+                                  non_blocking=speculative_decoding_disabled))
         if device_type != "cuda":
             scores = scores.to(dtype).to(device_type).squeeze()
 
@@ -397,10 +425,18 @@ class XGrammarLogitsProcessor:
         # Share the compiled grammar context (immutable after compilation)
         new_processor.ctx = self.ctx
 
-        # Create fresh matchers for the new sequence
+        # Create fresh matchers for the new sequence and reset
+        # num_processed_tokens for new sequence
         if self.ctx is not None:
+            max_rollback_tokens = (self.config.num_lookahead_slots
+                                   if self.config.num_lookahead_slots else 0)
             new_processor.matchers = [
-                xgr.GrammarMatcher(self.ctx) for _ in range(self.batch_size)
+                xgr.GrammarMatcher(self.ctx,
+                                   max_rollback_tokens=max_rollback_tokens)
+                for _ in range(self.batch_size)
+            ]
+            new_processor.num_processed_tokens = [
+                0 for _ in range(self.batch_size)
             ]
 
         # Create a new token bitmask with the same size
@@ -409,7 +445,5 @@ class XGrammarLogitsProcessor:
 
         # Copy simple attributes
         new_processor.batch_size = self.batch_size
-        # Reset prefilled state for new sequence
-        new_processor.prefilled = False
 
         return new_processor

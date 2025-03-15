@@ -13,7 +13,8 @@ from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VllmConfig)
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
+                         VllmConfig)
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
@@ -510,7 +511,8 @@ class _AsyncLLMEngine(LLMEngine):
                 default_guided_backend=self.decoding_config.
                 guided_decoding_backend,
                 reasoning_backend=self.decoding_config.reasoning_backend,
-                model_config=self.model_config)
+                model_config=self.model_config,
+                speculative_config=self.speculative_config)
 
         self._add_processed_request(
             request_id=request_id,
@@ -532,7 +534,8 @@ class _AsyncLLMEngine(LLMEngine):
 async def build_guided_decoding_logits_processor_async(
         sampling_params: SamplingParams, tokenizer: AnyTokenizer,
         default_guided_backend: str, reasoning_backend: Optional[str],
-        model_config: ModelConfig) -> SamplingParams:
+        model_config: ModelConfig,
+        speculative_config: Optional[SpeculativeConfig] = None) -> SamplingParams:
     """Constructs logits processors based on the guided_decoding,
     logits_bias, and allowed_token_ids fields in sampling_params. Deletes
     those fields and adds the constructed logits processors to the
@@ -558,7 +561,8 @@ async def build_guided_decoding_logits_processor_async(
         guided_params=guided_decoding,
         tokenizer=tokenizer,
         reasoning_backend=reasoning_backend,
-        model_config=model_config)
+        model_config=model_config,
+        speculative_config=speculative_config)
 
     if processor:
         if sampling_params.logits_processors is None:

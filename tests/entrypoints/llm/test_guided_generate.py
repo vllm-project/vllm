@@ -17,11 +17,22 @@ MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 
 
-@pytest.fixture(scope="module")
-def llm():
+@pytest.fixture(scope="module", params=["autoregressive", "speculative"])
+def llm(request):
+
+    def get_llm_kwargs(mode: str):
+        if mode == "autoregressive":
+            return {}
+        return {
+            # the model with fixed vocabulary size
+            "speculative_model": "Qwen/Qwen2.5-0.5B-Instruct",
+            "num_speculative_tokens": 3,
+        }
+
+    test_llm_kwargs = get_llm_kwargs(request.param)
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model=MODEL_NAME, max_model_len=1024, seed=0)
+    llm = LLM(model=MODEL_NAME, max_model_len=1024, seed=0, **test_llm_kwargs)
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
