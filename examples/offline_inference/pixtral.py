@@ -43,12 +43,18 @@ from vllm.sampling_params import SamplingParams
 #     python demo.py advanced
 
 
-def run_simple_demo():
+def run_simple_demo(args: argparse.Namespace):
     model_name = "mistralai/Pixtral-12B-2409"
     sampling_params = SamplingParams(max_tokens=8192)
 
-    # Lower max_num_seqs or max_model_len on low-VRAM GPUs.
-    llm = LLM(model=model_name, tokenizer_mode="mistral")
+    # Lower max_model_len and/or max_num_seqs on low-VRAM GPUs.
+    llm = LLM(
+        model=model_name,
+        tokenizer_mode="mistral",
+        max_model_len=4096,
+        max_num_seqs=2,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+    )
 
     prompt = "Describe this image in one sentence."
     image_url = "https://picsum.photos/id/237/200/300"
@@ -76,7 +82,7 @@ def run_simple_demo():
     print(outputs[0].outputs[0].text)
 
 
-def run_advanced_demo():
+def run_advanced_demo(args: argparse.Namespace):
     model_name = "mistralai/Pixtral-12B-2409"
     max_img_per_msg = 5
     max_tokens_per_img = 4096
@@ -87,6 +93,7 @@ def run_advanced_demo():
         tokenizer_mode="mistral",
         limit_mm_per_prompt={"image": max_img_per_msg},
         max_model_len=max_img_per_msg * max_tokens_per_img,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
     prompt = "Describe the following image."
@@ -153,14 +160,19 @@ def main():
         help="Specify the demo mode: 'simple' or 'advanced'",
     )
 
+    parser.add_argument(
+        '--disable-mm-preprocessor-cache',
+        action='store_true',
+        help='If True, disables caching of multi-modal preprocessor/mapper.')
+
     args = parser.parse_args()
 
     if args.mode == "simple":
         print("Running simple demo...")
-        run_simple_demo()
+        run_simple_demo(args)
     elif args.mode == "advanced":
         print("Running advanced demo...")
-        run_advanced_demo()
+        run_advanced_demo(args)
 
 
 if __name__ == "__main__":
