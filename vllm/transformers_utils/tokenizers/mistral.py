@@ -164,7 +164,8 @@ def make_mistral_chat_completion_request(
                 tool["function"] for tool in tools
                 if tool["type"] == "function"
         ]:
-            function.setdefault("parameters", {})
+            if function.get("parameters") is None:
+                function["parameters"] = {}
 
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     return ChatCompletionRequest(messages=messages,
@@ -248,7 +249,7 @@ class MistralTokenizer(TokenizerBase):
                                          revision=revision)
         return tokenizer_file
 
-    # the following attributes are set to fit VLLM's design and are used
+    # the following attributes are set to fit vLLM's design and are used
     # by the guided structured output backends.
     @property
     def all_special_tokens_extended(self) -> List[str]:

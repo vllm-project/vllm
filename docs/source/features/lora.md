@@ -110,7 +110,7 @@ In addition to serving LoRA adapters at server startup, the vLLM server now supp
 LoRA adapters at runtime through dedicated API endpoints. This feature can be particularly useful when the flexibility
 to change models on-the-fly is needed.
 
-Note: Enabling this feature in production environments is risky as user may participate model adapter management.
+Note: Enabling this feature in production environments is risky as users may participate in model adapter management.
 
 To enable dynamic LoRA loading and unloading, ensure that the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING`
 is set to `True`. When this option is enabled, the API server will log a warning to indicate that dynamic loading is active.
@@ -170,7 +170,7 @@ Now, you can specify a base_model_name alongside the name and path using JSON fo
 
 To provide the backward compatibility support, you can still use the old key-value format (name=path), but the `base_model_name` will remain unspecified in that case.
 
-## Lora model lineage in model card
+## LoRA model lineage in model card
 
 The new format of `--lora-modules` is mainly to support the display of parent model information in the model card. Here's an explanation of how your current response supports this:
 

@@ -20,7 +20,7 @@ from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLora,
+                              LinearScalingRotaryEmbeddingWithLoRA,
                               LoRAMapping)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
@@ -201,7 +201,7 @@ class LoRAModel(AdapterModel):
             expected_lora_modules: Name of modules that are expected to be
                 replaced by lora.
             peft_helper: Loaded lora configuration information.
-            lora_model_id: Lora model id. If not given, automatically set by
+            lora_model_id: LoRA model id. If not given, automatically set by
                 a global counter.
             device: Device where the lora model is loaded.
             dtype: dtype of the lora model weights.
@@ -326,9 +326,11 @@ class LoRAModelManager(AdapterModelManager):
         self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
         self.long_lora_context: Optional[LongContextLoRAContext] = None
-        self.punica_wrapper = get_punica_wrapper(max_num_batched_tokens,
-                                                 max_batches=self.max_num_seqs,
-                                                 device=self.device)
+        self.punica_wrapper = get_punica_wrapper(
+            max_num_batched_tokens,
+            max_batches=self.max_num_seqs,
+            device=self.device,
+            max_loras=self.lora_config.max_loras)
         # Scaling factor -> offset to the sin_cos_cache to it.
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
@@ -437,7 +439,7 @@ class LoRAModelManager(AdapterModelManager):
     def pin_adapter(self, lora_id: int) -> bool:
         """Pin a LoRAModel in the manager cache."""
         raise NotImplementedError(
-            "Pinning is not supported in LoRAModelManager."
+            "Pinning is not supported in LoRAModelManager. "
             "Use LRUCacheLoRAModelManager for pinning")  # type: ignore
 
     def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
@@ -480,9 +482,9 @@ class LoRAModelManager(AdapterModelManager):
                 from_layer(module, self.lora_slots, self.lora_config,
                            packed_moduled_lst, self.model.config))
 
-            # LinearScalingRotaryEmbeddingWithLora is used to handle
+            # LinearScalingRotaryEmbeddingWithLoRA is used to handle
             # long context lora. Register relevant metadata.
-            if isinstance(new_module, LinearScalingRotaryEmbeddingWithLora):
+            if isinstance(new_module, LinearScalingRotaryEmbeddingWithLoRA):
                 self.long_lora_context = LongContextLoRAContext(
                     new_module.scaling_factors, new_module.rotary_dim)
                 self.scaling_factor_to_offset = \
@@ -527,7 +529,7 @@ class LoRAModelManager(AdapterModelManager):
             bias_enabled = self.lora_config.bias_enabled
             if (not self._match_target_modules(module_name)
                     or not isinstance(module, BaseLayerWithLoRA)
-                    or isinstance(module, LinearScalingRotaryEmbeddingWithLora)
+                    or isinstance(module, LinearScalingRotaryEmbeddingWithLoRA)
                     or self._filter_unsupported_mm_module(module_name)):
                 continue
             parts = module_name.split(".")

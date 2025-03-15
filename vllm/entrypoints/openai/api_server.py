@@ -13,10 +13,11 @@ import socket
 import tempfile
 import uuid
 from argparse import Namespace
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, AsyncIterator, Dict, Optional, Set, Tuple, Union
+from typing import Annotated, Optional, Union
 
 import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
@@ -53,7 +54,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse,
-                                              LoadLoraAdapterRequest,
+                                              LoadLoRAAdapterRequest,
                                               PoolingChatRequest,
                                               PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
@@ -63,7 +64,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
-                                              UnloadLoraAdapterRequest)
+                                              UnloadLoRAAdapterRequest)
 from vllm.entrypoints.openai.reasoning_parsers import ReasoningParserManager
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -79,7 +80,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.utils import with_cancellation
+from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
@@ -93,7 +94,7 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger('vllm.entrypoints.openai.api_server')
 
-_running_tasks: Set[asyncio.Task] = set()
+_running_tasks: set[asyncio.Task] = set()
 
 
 @asynccontextmanager
@@ -346,6 +347,24 @@ async def health(raw_request: Request) -> Response:
     return Response(status_code=200)
 
 
+@router.get("/load")
+async def get_server_load_metrics(request: Request):
+    # This endpoint returns the current server load metrics.
+    # It tracks requests utilizing the GPU from the following routes:
+    # - /v1/chat/completions
+    # - /v1/completions
+    # - /v1/audio/transcriptions
+    # - /v1/embeddings
+    # - /pooling
+    # - /score
+    # - /v1/score
+    # - /rerank
+    # - /v1/rerank
+    # - /v2/rerank
+    return JSONResponse(
+        content={'server_load': request.app.state.server_load_metrics})
+
+
 @router.api_route("/ping", methods=["GET", "POST"])
 async def ping(raw_request: Request) -> Response:
     """Ping check. Endpoint required for SageMaker"""
@@ -399,6 +418,7 @@ async def show_version():
 @router.post("/v1/chat/completions",
              dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     handler = chat(raw_request)
@@ -420,6 +440,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
 @router.post("/v1/completions", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
@@ -438,6 +459,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 @router.post("/v1/embeddings", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
@@ -484,6 +506,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 
 @router.post("/pooling", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_pooling(request: PoolingRequest, raw_request: Request):
     handler = pooling(raw_request)
     if handler is None:
@@ -502,6 +525,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
 
 @router.post("/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
     if handler is None:
@@ -520,6 +544,7 @@ async def create_score(request: ScoreRequest, raw_request: Request):
 
 @router.post("/v1/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
     logger.warning(
         "To indicate that Score API is not part of standard OpenAI API, we "
@@ -530,10 +555,10 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
 
 @router.post("/v1/audio/transcriptions")
 @with_cancellation
+@load_aware_call
 async def create_transcriptions(request: Annotated[TranscriptionRequest,
                                                    Form()],
                                 raw_request: Request):
-
     handler = transcription(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
@@ -555,6 +580,7 @@ async def create_transcriptions(request: Annotated[TranscriptionRequest,
 
 @router.post("/rerank", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def do_rerank(request: RerankRequest, raw_request: Request):
     handler = rerank(raw_request)
     if handler is None:
@@ -575,7 +601,7 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
 async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     logger.warning_once(
         "To indicate that the rerank API is not part of the standard OpenAI"
-        " API, we have located it at `/rerank`. Please update your client"
+        " API, we have located it at `/rerank`. Please update your client "
         "accordingly. (Note: Conforms to JinaAI rerank API)")
 
     return await do_rerank(request, raw_request)
@@ -587,7 +613,7 @@ async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
 
 
-TASK_HANDLERS: Dict[str, Dict[str, tuple]] = {
+TASK_HANDLERS: dict[str, dict[str, tuple]] = {
     "generate": {
         "messages": (ChatCompletionRequest, create_chat_completion),
         "default": (CompletionRequest, create_completion),
@@ -690,12 +716,12 @@ if envs.VLLM_TORCH_PROFILER_DIR:
 
 if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
     logger.warning(
-        "Lora dynamic loading & unloading is enabled in the API server. "
+        "LoRA dynamic loading & unloading is enabled in the API server. "
         "This should ONLY be used for local development!")
 
     @router.post("/v1/load_lora_adapter",
                  dependencies=[Depends(validate_json_request)])
-    async def load_lora_adapter(request: LoadLoraAdapterRequest,
+    async def load_lora_adapter(request: LoadLoRAAdapterRequest,
                                 raw_request: Request):
         handler = models(raw_request)
         response = await handler.load_lora_adapter(request)
@@ -707,7 +733,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
 
     @router.post("/v1/unload_lora_adapter",
                  dependencies=[Depends(validate_json_request)])
-    async def unload_lora_adapter(request: UnloadLoraAdapterRequest,
+    async def unload_lora_adapter(request: UnloadLoRAAdapterRequest,
                                   raw_request: Request):
         handler = models(raw_request)
         response = await handler.unload_lora_adapter(request)
@@ -893,8 +919,11 @@ async def init_app_state(
     ) if model_config.runner_type == "transcription" else None
     state.task = model_config.task
 
+    state.enable_server_load_tracking = args.enable_server_load_tracking
+    state.server_load_metrics = 0
 
-def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
+
+def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     family = socket.AF_INET
     if is_valid_ipv6_address(addr[0]):
         family = socket.AF_INET6
@@ -954,8 +983,10 @@ async def run_server(args, **uvicorn_kwargs) -> None:
                 return '[' + a + ']'
             return a or "0.0.0.0"
 
-        logger.info("Starting vLLM API server on http://%s:%d",
-                    _listen_addr(sock_addr[0]), sock_addr[1])
+        is_ssl = args.ssl_keyfile and args.ssl_certfile
+        logger.info("Starting vLLM API server on http%s://%s:%d",
+                    "s" if is_ssl else "", _listen_addr(sock_addr[0]),
+                    sock_addr[1])
 
         shutdown_task = await serve_http(
             app,

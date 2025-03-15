@@ -2,11 +2,10 @@
 
 import asyncio
 from contextlib import ExitStack
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import pytest
 
-from tests.v1.engine.utils import PLP_APC_UNSUPPORTED_MSG
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -47,7 +46,8 @@ async def generate(engine: AsyncLLM,
                    prompt: PromptType,
                    output_kind: RequestOutputKind,
                    max_tokens: int,
-                   prompt_logprobs: Optional[int] = None) -> Tuple[int, str]:
+                   n: int = 1,
+                   prompt_logprobs: Optional[int] = None) -> tuple[int, str]:
     # Ensure generate doesn't complete too fast for cancellation test.
     await asyncio.sleep(0.2)
 
@@ -55,13 +55,15 @@ async def generate(engine: AsyncLLM,
     sampling_params = SamplingParams(max_tokens=max_tokens,
                                      ignore_eos=True,
                                      output_kind=output_kind,
-                                     temperature=0,
+                                     temperature=0.5,
+                                     seed=33,
+                                     n=n,
                                      prompt_logprobs=prompt_logprobs)
     async for out in engine.generate(request_id=request_id,
                                      prompt=prompt,
                                      sampling_params=sampling_params):
 
-        num_tokens = len(out.outputs[0].token_ids)
+        num_tokens = sum(len(output.token_ids) for output in out.outputs)
         if output_kind == RequestOutputKind.DELTA:
             count += num_tokens
         else:
@@ -74,47 +76,12 @@ async def generate(engine: AsyncLLM,
 
 @pytest.mark.parametrize(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
-@pytest.mark.asyncio
-async def test_async_llm_refuses_prompt_logprobs_with_apc(
-        monkeypatch, output_kind: RequestOutputKind):
-    """Test passes if AsyncLLM raises an exception when it is configured
-    for automatic prefix caching and it receives a request with
-    prompt_logprobs enabled, which is incompatible."""
-    # TODO(rickyx): Remove monkeypatch VLLM_USE_V1 setting once we have a
-    # better way to test V1 so that in the future when we switch, we don't
-    # have to change all the tests.
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-    # Create AsyncLLM engine with APC
-    apc_engine_args = AsyncEngineArgs(model="facebook/opt-125m",
-                                      enable_prefix_caching=True,
-                                      gpu_memory_utilization=0.8,
-                                      disable_log_requests=True)
-    engine = AsyncLLM.from_engine_args(apc_engine_args)
-    try:
-        with pytest.raises(ValueError) as excinfo:
-            # Issue a request with prompt logprobs enabled, which should fail
-            await asyncio.create_task(
-                generate(engine,
-                         "request-0",
-                         TEXT_PROMPT,
-                         output_kind,
-                         10,
-                         prompt_logprobs=5))
-        # Validate exception string is correct
-        assert str(excinfo.value) == PLP_APC_UNSUPPORTED_MSG
-    finally:
-        # Shut down engine
-        engine.shutdown()
-
-
-@pytest.mark.parametrize(
-    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
 @pytest.mark.parametrize("engine_args_and_prompt",
                          [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
                           (VISION_ENGINE_ARGS, VISION_PROMPT)])
 @pytest.mark.asyncio
 async def test_load(monkeypatch, output_kind: RequestOutputKind,
-                    engine_args_and_prompt: Tuple[AsyncEngineArgs,
+                    engine_args_and_prompt: tuple[AsyncEngineArgs,
                                                   PromptType]):
     # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
     # so that in the future when we switch, we don't have to change all the
@@ -160,7 +127,7 @@ async def test_load(monkeypatch, output_kind: RequestOutputKind,
                           (VISION_ENGINE_ARGS, VISION_PROMPT)])
 @pytest.mark.asyncio
 async def test_abort(monkeypatch, output_kind: RequestOutputKind,
-                     engine_args_and_prompt: Tuple[AsyncEngineArgs,
+                     engine_args_and_prompt: tuple[AsyncEngineArgs,
                                                    PromptType]):
 
     with monkeypatch.context() as m, ExitStack() as after:
@@ -172,17 +139,22 @@ async def test_abort(monkeypatch, output_kind: RequestOutputKind,
 
         NUM_REQUESTS = 100
         NUM_EXPECTED_TOKENS = 100
+        NUM_EXPECTED_TOKENS_LONG = 50000
         REQUEST_IDS_TO_ABORT = range(1, 100, 10)
+        PARALLEL_SAMPLE_REQ_IDS = range(1, 100, 15)
 
         request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
 
         # Create concurrent requests.
-        tasks: List[asyncio.Task] = []
-        for request_id in request_ids:
+        tasks: list[asyncio.Task] = []
+        for idx, request_id in enumerate(request_ids):
+            max_tokens = NUM_EXPECTED_TOKENS_LONG if (
+                idx in REQUEST_IDS_TO_ABORT) else NUM_EXPECTED_TOKENS
+            n = 3 if idx in PARALLEL_SAMPLE_REQ_IDS else 1
             tasks.append(
                 asyncio.create_task(
                     generate(engine, request_id, prompt, output_kind,
-                             NUM_EXPECTED_TOKENS)))
+                             max_tokens, n)))
 
         # API server cancels requests when they disconnect.
         for idx in REQUEST_IDS_TO_ABORT:
@@ -198,10 +170,13 @@ async def test_abort(monkeypatch, output_kind: RequestOutputKind,
             else:
                 # Otherwise, make sure the request was not impacted.
                 num_generated_tokens, request_id = await task
-                assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
+                n = 3 if idx in PARALLEL_SAMPLE_REQ_IDS else 1
+                expected_tokens = NUM_EXPECTED_TOKENS * n
+                assert num_generated_tokens == expected_tokens, (
                     f"{request_id} generated {num_generated_tokens} but "
-                    f"expected {NUM_EXPECTED_TOKENS}")
+                    f"expected {expected_tokens}")
 
+        # Make sure all aborted requests were really aborted.
         assert not engine.output_processor.has_unfinished_requests()
 
         # Confirm we can do another generation.
@@ -212,3 +187,36 @@ async def test_abort(monkeypatch, output_kind: RequestOutputKind,
         num_generated_tokens, request_id = await task
         assert num_generated_tokens == NUM_EXPECTED_TOKENS
         assert not engine.output_processor.has_unfinished_requests()
+
+
+@pytest.mark.parametrize("n", [1, 3])
+@pytest.mark.parametrize("engine_args_and_prompt",
+                         [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
+                          (VISION_ENGINE_ARGS, VISION_PROMPT)])
+@pytest.mark.asyncio
+async def test_finished_flag(monkeypatch, n: int,
+                             engine_args_and_prompt: tuple[AsyncEngineArgs,
+                                                           PromptType]):
+
+    with monkeypatch.context() as m, ExitStack() as after:
+        m.setenv("VLLM_USE_V1", "1")
+        engine_args, prompt = engine_args_and_prompt
+
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        sampling_params = SamplingParams(max_tokens=100,
+                                         output_kind=RequestOutputKind.DELTA,
+                                         temperature=1.0,
+                                         seed=33,
+                                         n=n)
+        outputs = [
+            out
+            async for out in engine.generate(request_id="request-33",
+                                             prompt=prompt,
+                                             sampling_params=sampling_params)
+        ]
+
+        # Assert only the last output has the finished flag set
+        assert all(not out.finished for out in outputs[:-1])
+        assert outputs[-1].finished

@@ -153,7 +153,7 @@ class GPTQMarlinConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, FusedMoE):
-            if layer.num_experts > 32:
+            if layer.local_num_experts > 32:
                 # For MoEs with many experts the moe_wna16 kernel is faster
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
@@ -569,7 +569,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w13_scales", marlin_w13_scales)
         marlin_w2_scales = marlin_moe_permute_scales(
             s=layer.w2_scales,
-            size_k=layer.w2_scales.shape[1] * self.quant_config.pack_factor,
+            size_k=layer.w2_scales.shape[1] *
+            (self.quant_config.group_size if self.quant_config.group_size != -1
+             else self.quant_config.pack_factor),
             size_n=layer.w2_scales.shape[2],
             group_size=self.quant_config.group_size,
         )
@@ -590,7 +592,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
     ) -> torch.Tensor:
+        assert activation == "silu", "Only SiLU activation is supported."
+
         # The input must currently be float16
         orig_dtype = x.dtype
         x = x.half()
