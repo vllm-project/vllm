@@ -595,6 +595,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
 
     list(APPEND VLLM_MOE_EXT_SRC "${MARLIN_MOE_SRC}")
+
+    file(GLOB MOE_WNAA16_MARLIN_SRC "csrc/moe/marlin_moe_wna16/*.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${MOE_WNAA16_MARLIN_SRC}"
+      CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
+
+    list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC})
+
     message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
