@@ -168,6 +168,11 @@ class CudaPlatformBase(Platform):
             compilation_config.use_cudagraph = False
 
     @classmethod
+    def empty_cache(cls) -> None:
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+    @classmethod
     def get_current_memory_usage(cls,
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:
