@@ -116,5 +116,7 @@ ENV TOKENIZERS_PARALLELISM=false
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
 
+# Dummy change to test the CI system
+
 CMD ["/bin/bash"]
 
