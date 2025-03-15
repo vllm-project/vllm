@@ -32,7 +32,10 @@ async def serve_http(app: FastAPI,
             continue
 
         logger.info("Route: %s, Methods: %s", path, ', '.join(methods))
-
+    disable_access_log = envs.VLLM_LOGGING_LEVEL.upper() in [
+        "ERROR", "CRITICAL"
+    ]
+    uvicorn_kwargs["access_log"] = not disable_access_log
     config = uvicorn.Config(app, **uvicorn_kwargs)
     config.load()
     server = uvicorn.Server(config)
