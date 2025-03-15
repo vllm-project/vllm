@@ -4,16 +4,15 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from functools import cached_property
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union, cast
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mistral_common.protocol.instruct.messages import ImageChunk
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
 from PIL import Image
-from transformers import BatchFeature, PixtralVisionConfig, TensorType
+from transformers import PixtralVisionConfig, TensorType
 from transformers.image_utils import ImageInput
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens)
@@ -33,7 +32,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -43,9 +42,10 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import (MistralTokenizer,
                                                cached_tokenizer_from_config)
+from vllm.utils import JSONTree, flatten_2d_lists, json_map_leaves
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
+from .utils import (init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
@@ -59,21 +59,23 @@ except ImportError:
 class PixtralImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
 
-    images: list[torch.Tensor]
+    images: Union[torch.Tensor, list[torch.Tensor]]
     """
     Shape: `(batch_size, num_channels, image_width, image_height)`
 
     The result of stacking :attr:`ImageEncoding.tokens` from each prompt.
     """
 
-    num_image_tokens: list[int]
+    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
     """
-    The number of image tokens matching :attr:`VisionEncoderArgs.image_token_id`
-    in :attr:`ImageEncoding.tokens` for each image in the batch.
+    A boolean mask indicating which image embeddings correspond
+    to patch tokens.
+    
+    Shape: `(batch_size, num_embeds)`
+    """
 
-    This is used to split the embeddings which has the first two dimensions
-    flattened.
-    """
+    num_crops: Union[torch.Tensor, list[torch.Tensor]]
+    """Shape: `(batch_size, num_images)`"""
 
 
 class PixtralProcessorAdapter:
@@ -119,7 +121,7 @@ class PixtralProcessorAdapter:
         images: Optional[Union[ImageInput, list[ImageInput]]] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         **kwargs,
-    ) -> BatchFeature:
+    ) -> Mapping[str, NestedTensors]:
         if text is None:
             text = []
         if not isinstance(text, list):
@@ -132,10 +134,7 @@ class PixtralProcessorAdapter:
         if not images:
             input_ids = self.tokenizer(text).input_ids
 
-            return BatchFeature(
-                {"input_ids": input_ids},
-                tensor_type=return_tensors,
-            )
+            return {"input_ids": torch.tensor(input_ids)}
 
         # Allow dummy text, which is used for profiling as well as token inputs
         if any(len(t) > 0 for t in text):
@@ -146,42 +145,30 @@ class PixtralProcessorAdapter:
                 "For more info, see: "
                 "https://github.com/vllm-project/vllm/issues/8411.")
 
-        images_flat = []
-        num_crops_hw = []
-        image_tokens_flat = []
-        num_images_tokens = []
-
-        patch_size = self.patch_size
         image_token_id = self.image_token_id
+
+        images_processed = list[torch.Tensor]()
+        images_tokens = list[torch.Tensor]()
+        images_embed_is_patch = list[torch.Tensor]()
+        images_num_tokens = list[int]()
 
         for image in images:
             image_inputs = self.image_processor(ImageChunk(image=image))
 
-            C, H, W = image_inputs.image.shape
-            grid_h, grid_w = H // patch_size, W // patch_size
-            image_flat = (image_inputs.image.reshape(
-                C, grid_h, patch_size, grid_w,
-                patch_size).transpose(1, 3, 0, 2,
-                                      4).reshape(grid_h * grid_w, C,
-                                                 patch_size, patch_size))
+            image_processed = torch.tensor(image_inputs.image)
+            image_tokens = torch.tensor(image_inputs.tokens)
 
-            num_image_tokens = image_inputs.tokens.count(image_token_id)
-            assert num_image_tokens == grid_h * grid_w
+            images_processed.append(image_processed)
+            images_tokens.append(image_tokens)
+            images_embed_is_patch.append(image_tokens == image_token_id)
+            images_num_tokens.append(len(image_tokens))
 
-            images_flat.append(image_flat)
-            num_crops_hw.append([grid_h, grid_w])
-            image_tokens_flat.extend(image_inputs.tokens)
-            num_images_tokens.append(num_image_tokens)
-
-        return BatchFeature(
-            {
-                "input_ids": [image_tokens_flat] * len(text),
-                "images_flat": np.concatenate(images_flat),
-                "num_crops_hw": np.array(num_crops_hw),
-                "num_image_tokens": num_images_tokens,
-            },
-            tensor_type=return_tensors,
-        )
+        return {
+            "input_ids": torch.cat(images_tokens)[None].expand(len(text), -1),
+            "images": images_processed,
+            "embed_is_patch": images_embed_is_patch,
+            "num_image_tokens": torch.tensor(images_num_tokens),
+        }
 
 
 class PixtralProcessingInfo(BaseProcessingInfo):
@@ -278,15 +265,12 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
 
     def _get_mm_fields_config(
         self,
-        hf_inputs: BatchFeature,
+        hf_inputs: Mapping[str, NestedTensors],
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        num_crops_hw = hf_inputs.get("num_crops_hw", torch.empty((0, 2)))
-
         return dict(
-            images_flat=MultiModalFieldConfig.flat_from_sizes(
-                "image", num_crops_hw.prod(-1)),
-            num_crops_hw=MultiModalFieldConfig.batched("image"),
+            images=MultiModalFieldConfig.batched("image"),
+            embed_is_patch=MultiModalFieldConfig.batched("image"),
             num_image_tokens=MultiModalFieldConfig.batched("image"),
         )
 
@@ -381,13 +365,90 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return get_sampler()
 
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[PixtralImagePixelInputs]:
+        images = kwargs.pop("images", None)
+        if images is None:
+            return None
+
+        if not isinstance(images, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of images. "
+                             f"Got type: {type(images)}")
+
+        embed_is_patch = kwargs.pop("embed_is_patch")
+        if not isinstance(embed_is_patch, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of embed_is_patch. "
+                             f"Got type: {type(embed_is_patch)}")
+
+        num_image_tokens = kwargs.pop("num_image_tokens")
+        if not isinstance(num_image_tokens, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of num_image_tokens. "
+                             f"Got type: {type(num_image_tokens)}")
+
+        return PixtralImagePixelInputs(
+            type="pixel_values",
+            images=images,
+            embed_is_patch=embed_is_patch,
+            num_crops=num_image_tokens,
+        )
+
+    def _process_image_input(
+        self,
+        image_input: PixtralImagePixelInputs,
+    ) -> tuple[torch.Tensor, ...]:
+        images = image_input["images"]
+
+        image_features = self.vision_encoder(images)
+        feature_sizes = [
+            image_feature.shape[0] for image_feature in image_features
+        ]
+
+        image_embeds = self.vision_language_adapter(torch.cat(image_features))
+        image_embeds = torch.split(image_embeds, feature_sizes)
+        return image_embeds
+
+    def _get_mm_embeds(
+            self,
+            features: torch.Tensor,  # Shape: (num_crop, num_patch, d)
+            num_crops: torch.Tensor,  # Shape: (num_images,)
+            embed_is_patch: torch.Tensor,  # Shape: (num_embeds,)
+    ) -> tuple[torch.Tensor, ...]:
+        """Scatter the patch features into a contiguous tensor that corresponds
+        to the embedding tokens defined by the multimodal processor.
+
+        Mostly copied from `Molmo._get_mm_embeds`. See following fixme comment.
+        """
+        # Insert columns of nan values according to `feat_is_patch`. This work
+        # ideally should be done in `_process_image_input`, but
+        # `_process_image_input` is used in both V0 and V1 path. It's safer to
+        # put the logic here.
+        # FIXME: Move this logic to `_process_image_input` when v0 is
+        # deprecated. Merge this function with `Molmo._get_mm_embeds`.
+        embeds_flat = features.new_full(
+            (int(num_crops.sum()), *features.shape[1:]),
+            fill_value=torch.nan,
+        )
+        embeds_flat[embed_is_patch.view(-1)] = features
+
+        num_crops_per_image = num_crops.tolist()
+        return embeds_flat.split(num_crops_per_image)
+
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
 
-        return self._process_image_input(image_input)
+        image_features = self._process_image_input(image_input)
+
+        nested_embeds = [
+            self._get_mm_embeds(*args) for args in zip(
+                image_features,
+                image_input["num_crops"],
+                image_input["embed_is_patch"],
+            )
+        ]
+        return flatten_2d_lists(nested_embeds)
 
     def get_input_embeddings(
         self,
@@ -396,10 +457,15 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
+            # Extract the patch tokens
+            patch_embeddings = json_map_leaves(
+                lambda x: x[~x.isnan()].view(-1, *x.shape[1:]),
+                cast(JSONTree[torch.Tensor], multimodal_embeddings),
+            )
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
-                multimodal_embeddings,
+                cast(NestedTensors, patch_embeddings),
                 self.vision_args.image_token_id,
             )
         return inputs_embeds
@@ -430,62 +496,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                   inputs_embeds=inputs_embeds)
 
         return hidden_states
-
-    def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[PixtralImagePixelInputs]:
-        images_flat = kwargs.pop("images_flat", None)
-        if images_flat is None:
-            return None
-
-        num_crops_hw = kwargs.pop("num_crops_hw")
-        num_image_tokens = kwargs.pop("num_image_tokens")
-
-        if not isinstance(images_flat, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of images. "
-                             f"Got type: {type(images_flat)}")
-        if not isinstance(num_crops_hw, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of num_crops_hw. "
-                             f"Got type: {type(num_crops_hw)}")
-        if not isinstance(num_image_tokens, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of num_image_tokens. "
-                             f"Got type: {type(num_image_tokens)}")
-
-        images_flat = flatten_bn(images_flat, concat=True)
-        num_crops_hw = flatten_bn(num_crops_hw, concat=True)
-        num_image_tokens = flatten_bn(num_image_tokens, concat=True)
-
-        assert images_flat.dim() == 4, images_flat.shape
-        assert num_crops_hw.dim() == 2, num_crops_hw.shape
-        assert num_image_tokens.dim() == 1, num_image_tokens.shape
-
-        images = list[torch.Tensor]()
-        for image, (crop_h, crop_w) in zip(
-                torch.split(images_flat,
-                            num_crops_hw.prod(-1).tolist()),
-                num_crops_hw.tolist(),
-        ):
-            _, C, h, w = image.shape
-
-            images.append(
-                image.reshape(crop_h, crop_w, C, h,
-                              w).permute(2, 0, 3, 1,
-                                         4).reshape(C, crop_h * h, crop_w * w))
-
-        return PixtralImagePixelInputs(
-            type="pixel_values",
-            images=images,
-            num_image_tokens=num_image_tokens.tolist(),
-        )
-
-    def _process_image_input(
-            self, image_input: PixtralImagePixelInputs) -> torch.Tensor:
-        images = image_input["images"]
-        num_image_tokens = image_input["num_image_tokens"]
-
-        image_embeds_flat = self.vision_language_adapter(
-            self.vision_encoder(images))
-
-        return image_embeds_flat.split(num_image_tokens, dim=0)
 
     def compute_logits(
         self,
@@ -786,9 +796,13 @@ class VisionTransformer(nn.Module):
             self.patch_conv(img.unsqueeze(0).to(self.dtype)) for img in images
         ]
 
+        patch_embeds = [
+            p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list
+        ]
+        embed_sizes = [p.shape[1] for p in patch_embeds]
+
         # flatten to a single sequence
-        patch_embeds = torch.cat(
-            [p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list], dim=1)
+        patch_embeds = torch.cat(patch_embeds, dim=1)
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
@@ -804,8 +818,8 @@ class VisionTransformer(nn.Module):
                               "with the Mistral format")
         out = self.transformer(patch_embeds, mask=mask, freqs_cis=freqs_cis)
 
-        # remove batch dimension of the single sequence
-        return out.squeeze(0)
+        # squeeze dim 0 and split into separate tensors for each image
+        return torch.split(out.squeeze(0), embed_sizes)
 
 
 class VisionLanguageAdapter(nn.Module):
@@ -1127,9 +1141,9 @@ class PixtralHFVisionModel(nn.Module):
 
     def forward(
         self,
-        pixel_values: List[torch.Tensor],
+        pixel_values: list[torch.Tensor],
         feature_sample_layers: Optional[list[int]] = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, ...]:
         """
         Args:
             pixel_values: Each image to be processed will be a separate tensor
@@ -1188,8 +1202,7 @@ class PixtralHFVisionModel(nn.Module):
                                              self.config.num_hidden_layers)
 
         # squeeze dim 0 and split into separate tensors for each image
-        out = torch.split(torch.squeeze(out), embed_sizes)
-        return out
+        return torch.split(out.squeeze(0), embed_sizes)
 
     # (TODO) Add prefix argument for filtering out weights to be loaded
     #        ref: https://github.com/vllm-project/vllm/pull/7186#discussion_r1734163986

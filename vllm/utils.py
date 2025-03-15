@@ -867,7 +867,7 @@ def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
         return func(value)
 
 
-def flatten_2d_lists(lists: list[list[T]]) -> list[T]:
+def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
     """Flatten a list of lists to a single list."""
     return [item for sublist in lists for item in sublist]
 
