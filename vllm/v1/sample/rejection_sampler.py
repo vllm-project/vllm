@@ -18,16 +18,30 @@ TINY: tl.constexpr = 1.1754943508222875e-38  # torch.finfo(torch.float32).tiny
 
 class RejectionSampler(nn.Module):
 
-    def __init__(self, max_num_tokens: int = 32 * 1024):
+    def __init__(
+        self,
+        max_batch_size: int = 8 * 1024,
+        max_num_draft_tokens: int = 32 * 1024,
+    ):
         super().__init__()
-        self.max_num_tokens = max_num_tokens
-        self.buffer = torch.empty(
-            max_num_tokens,
+        self.max_batch_size = max_batch_size
+        self.max_num_draft_tokens = max_num_draft_tokens
+
+        self.cu_num_tokens_buffer = torch.empty(
+            max_batch_size,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=is_pin_memory_available(),
+        )
+        self.cu_num_tokens_buffer_np = self.cu_num_tokens_buffer.numpy()
+
+        self.token_ids_buffer = torch.empty(
+            max_num_draft_tokens,
             dtype=torch.int64,
             device="cpu",
             pin_memory=is_pin_memory_available(),
         )
-        self.buffer_np = self.buffer.numpy()
+        self.token_ids_buffer_np = self.token_ids_buffer.numpy()
 
     def forward(
         self,
@@ -51,11 +65,12 @@ class RejectionSampler(nn.Module):
             cu_num_draft_tokens,
             max_spec_len,
         )
-        # [batch_size, max_spec_len]
-        draft_token_ids_tensor = self._async_copy_to_device(
+        draft_token_ids_tensor, cu_num_draft_tokens_tensor = \
+            self._async_copy_to_device(
             draft_token_ids,
             target_logits.device,
         )
+
         output_token_ids = rejection_sample(
             draft_token_ids_tensor,
             num_draft_tokens,
@@ -83,22 +98,26 @@ class RejectionSampler(nn.Module):
         self,
         draft_token_ids: list[list[int]],
         device: torch.device,
-    ) -> torch.Tensor:
-        batch_size = len(draft_token_ids)
-        num_draft_tokens = [len(ids) for ids in draft_token_ids]
-        max_spec_len = max(num_draft_tokens)
-        assert batch_size * max_spec_len <= self.max_num_tokens
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        flattened_token_ids: list[int] = []
+        cu_num_tokens: list[int] = []
+        for token_ids in draft_token_ids:
+            flattened_token_ids.extend(token_ids)
+            cu_num_tokens.append(len(token_ids))
 
-        draft_token_ids_np = self.buffer_np[:batch_size * max_spec_len]
-        draft_token_ids_np.fill(PLACEHOLDER_TOKEN_ID)
-        for i, token_ids in enumerate(draft_token_ids):
-            start = i * max_spec_len
-            end = start + len(token_ids)
-            draft_token_ids_np[start:end] = token_ids
-        draft_token_ids_cpu = self.buffer[:batch_size * max_spec_len]
-        draft_token_ids_cpu = draft_token_ids_cpu.view(batch_size,
-                                                       max_spec_len)
-        return draft_token_ids_cpu.to(device=device, non_blocking=True)
+        num_draft_tokens = len(flattened_token_ids)
+        assert num_draft_tokens <= self.max_num_draft_tokens
+        self.token_ids_buffer_np[:num_draft_tokens] = flattened_token_ids
+        draft_token_ids_cpu = self.token_ids_buffer[:num_draft_tokens]
+        draft_token_ids_gpu = draft_token_ids_cpu.to(device=device,
+                                                     non_blocking=True)
+
+        batch_size = len(cu_num_tokens)
+        self.cu_num_tokens_buffer_np[:batch_size] = cu_num_tokens
+        cu_num_draft_tokens_cpu = self.cu_num_tokens_buffer[:batch_size]
+        cu_num_draft_tokens_gpu = cu_num_draft_tokens_cpu.to(device=device,
+                                                             non_blocking=True)
+        return draft_token_ids_gpu, cu_num_draft_tokens_gpu
 
 
 def rejection_sample(
