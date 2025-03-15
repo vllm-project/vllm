@@ -62,6 +62,22 @@ class Grammar:
             self.num_processed_tokens += 1
         return True
 
+    def validate_tokens(self, tokens: list[int]) -> list[int]:
+        """Checks if the list of tokens are accepted by the FSM in sequence.
+
+        Returns the prefix list of tokens that are accepted by the FSM.
+        Does not advance the FSM.
+        """
+        accepted_tokens = []
+        for token in tokens:
+            if self.matcher.accept_token(token):
+                accepted_tokens.append(token)
+            else:
+                break
+        if len(accepted_tokens) > 0:
+            self.matcher.rollback(len(accepted_tokens))
+        return accepted_tokens
+
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> bool:
         return self.matcher.fill_next_token_bitmask(bitmask, idx)
 
@@ -71,7 +87,9 @@ class Grammar:
 
     def __copy__(self):
         return Grammar(
-            matcher=xgr.GrammarMatcher(self.ctx),
+            matcher=xgr.GrammarMatcher(
+                self.ctx,
+                max_rollback_tokens=self.matcher.max_rollback_tokens),
             vocab_size=self.vocab_size,
             ctx=self.ctx,
         )

@@ -131,9 +131,6 @@ class Processor:
                 and params.guided_decoding.backend != 'xgrammar'):
             raise ValueError(
                 "Only xgrammar structured output is supported in V1.")
-        if self.vllm_config.speculative_config:
-            raise ValueError("Structured output is not supported with "
-                             "speculative decoding.")
         if vllm.platforms.current_platform.is_tpu():
             raise ValueError("Structured output is not supported on TPU.")
 

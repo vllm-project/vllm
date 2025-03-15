@@ -39,6 +39,11 @@ class StructuredOutputManager:
             lora_config=self.vllm_config.lora_config)  # type: ignore[arg-type]
         tokenizer_group.ping()
 
+        self.num_speculative_tokens = 0
+        if self.vllm_config.speculative_config is not None:
+            self.num_speculative_tokens = \
+                self.vllm_config.speculative_config.num_speculative_tokens
+
         tokenizer = tokenizer_group.get_lora_tokenizer(None)
         self.vocab_size = len(tokenizer.get_vocab())
         if isinstance(tokenizer, MistralTokenizer):
@@ -84,7 +89,8 @@ class StructuredOutputManager:
         max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self._grammar_bitmask = xgr.allocate_token_bitmask(
-            self.vllm_config.scheduler_config.max_num_seqs,
+            self.vllm_config.scheduler_config.max_num_seqs *
+            (1 + self.num_speculative_tokens),
             self.vocab_size,
         )
 
@@ -132,7 +138,8 @@ class StructuredOutputManager:
                 f"grammar is not of valid supported types. ({request_type!s})")
 
         return Grammar(
-            matcher=xgr.GrammarMatcher(ctx),
+            matcher=xgr.GrammarMatcher(
+                ctx, max_rollback_tokens=self.num_speculative_tokens),
             vocab_size=self.vocab_size,
             ctx=ctx,
         )
@@ -141,23 +148,45 @@ class StructuredOutputManager:
         self,
         requests: dict[str, Request],
         structured_output_request_ids: dict[str, int],
-        batch_len: int,
+        scheduled_spec_decode_tokens: dict[str, list[int]],
     ) -> Optional[npt.NDArray[np.int32]]:
         # Prepare the structured output bitmask for this batch.
         if not structured_output_request_ids:
             return None
 
-        # Fill the bitmask using the index of each request equal to its
-        # position in the batch. Resize the bitmask down to the size of
-        # the batch.
-        bitmask_tensor = self._grammar_bitmask
-        for req_id, batch_index in structured_output_request_ids.items():
+        if self._grammar_bitmask is None:
+            self._grammar_bitmask = xgr.allocate_token_bitmask(
+                self.vllm_config.scheduler_config.max_num_seqs *
+                (1 + self.num_speculative_tokens), self.vocab_size)
+
+        # Generate a batched bitmask for all structured output requests.
+        # When speculative decoding is enabled, we need to include multiple
+        # masks for each request, one for each possible bonus token position.
+        # These are stored inline in the tensor and unpacked by the gpu runner.
+        cumulative_index = 0
+        ordered_seq = sorted(structured_output_request_ids.items(),
+                             key=lambda x: x[1])
+        # NOTE: This outer loop can likely be parallelized to improve
+        # performance of bitmask generation for large batches.
+        for req_id, _ in ordered_seq:
             request = requests[req_id].structured_output_request
             assert request is not None and request.grammar is not None
-            if not request.grammar.matcher.is_terminated():
-                request.grammar.fill_bitmask(bitmask_tensor, batch_index)
-        if batch_len < self._grammar_bitmask.shape[0]:
-            bitmask_tensor = self._grammar_bitmask[:batch_len]
+            state_advancements = 0
+            req_tokens = scheduled_spec_decode_tokens.get(req_id, []) + [None]
+            for i, token in enumerate(req_tokens):
+                if not request.grammar.matcher.is_terminated():
+                    request.grammar.fill_bitmask(self._grammar_bitmask,
+                                                 cumulative_index)
+                    if token is not None:
+                        assert request.grammar.matcher.accept_token(token)
+                        state_advancements += 1
+                cumulative_index += 1
+            if state_advancements > 0:
+                request.grammar.matcher.rollback(state_advancements)
+
+        bitmask_tensor = self._grammar_bitmask
+        if cumulative_index < self._grammar_bitmask.shape[0]:
+            bitmask_tensor = self._grammar_bitmask[:cumulative_index]
 
         # After finishing with the xgrammar operations, we convert to
         # np.ndarray, because that is much more efficient for serialization
