@@ -684,6 +684,12 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
     dummy_inputs=InternVLDummyInputsBuilder)
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "w1": ("gate_up_proj", 0),
+        "w3": ("gate_up_proj", 1),
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
