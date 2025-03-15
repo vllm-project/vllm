@@ -485,6 +485,23 @@ def run_nvlm_d(questions: list[str], modality: str):
     return llm, prompts, stop_token_ids
 
 
+#Ovis
+def run_ovis(question: str, modality: str):
+    assert modality == "image"
+
+    model_name = "AIDC-AI/Ovis1.6-Llama3.2-3B"
+
+    llm = LLM(
+        model=model_name,
+        dtype="float16",
+        max_model_len=8192,
+        trust_remote_code=True,
+    )
+    stop_token_ids = [1, 107]
+    prompt = f"<image>\n{question}"
+    return llm, prompt, stop_token_ids
+
+
 # PaliGemma
 def run_paligemma(question: str, modality: str):
     assert modality == "image"
@@ -700,6 +717,7 @@ model_example_map = {
     "mllama": run_mllama,
     "molmo": run_molmo,
     "NVLM_D": run_nvlm_d,
+    "ovis": run_ovis,
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
