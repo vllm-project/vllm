@@ -128,12 +128,18 @@ class EngineCoreOutputs(
     #NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout
 
+    engine_index: int = 0
+
     # [num_reqs]
     outputs: list[EngineCoreOutput] = []
     scheduler_stats: Optional[SchedulerStats] = None
     timestamp: float = 0.0
 
     utility_output: Optional[UtilityOutput] = None
+    finished_requests: Optional[set[str]] = None
+
+    # In DP case, used to signal that the engine is paused.
+    engine_paused: bool = False
 
     def __post_init__(self):
         if self.timestamp == 0.0:
@@ -147,4 +153,5 @@ class EngineCoreRequestType(enum.Enum):
     """
     ADD = b'\x00'
     ABORT = b'\x01'
-    UTILITY = b'\x02'
+    START_DP = b'\x02'
+    UTILITY = b'\x03'

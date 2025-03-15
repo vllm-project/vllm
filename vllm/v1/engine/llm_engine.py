@@ -51,11 +51,13 @@ class LLMEngine:
         self.cache_config = vllm_config.cache_config
 
         # important: init dp group before init the engine_core
-        self.parallel_config = vllm_config.parallel_config
-        self.dp_enabled = self.parallel_config.data_parallel_size > 1  # noqa
+        # In the decoupled engine case this is handled in EngineCoreProc.
+        parallel_config = vllm_config.parallel_config
+        if not multiprocess_mode and parallel_config.data_parallel_size > 1:
+            self.dp_group = parallel_config.stateless_init_dp_group()
+        else:
+            self.dp_group = None
         self.should_execute_dummy_batch = False
-        if self.dp_enabled:
-            self.dp_group = self.parallel_config.stateless_init_dp_group()
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -119,7 +121,7 @@ class LLMEngine:
 
     def has_unfinished_requests(self) -> bool:
         has_unfinished = self.output_processor.has_unfinished_requests()
-        if not self.dp_enabled:
+        if self.dp_group is None:
             return has_unfinished
         return self.has_unfinished_requests_dp(has_unfinished)
 
