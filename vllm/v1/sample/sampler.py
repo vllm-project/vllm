@@ -152,7 +152,7 @@ class Sampler(nn.Module):
 
         # Get with the logprob of the prompt or sampled token.
         token_ids = token_ids.unsqueeze(-1)
-        token_logprobs = logprobs.gather(-1, token_ids)
+        token_logprobs = logprobs.gather(-1, token_ids.long())
 
         # Compute the ranks of the actual token.
         token_ranks = (logprobs >= token_logprobs).sum(-1)
