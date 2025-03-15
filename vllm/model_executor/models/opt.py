@@ -38,7 +38,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -372,42 +371,112 @@ class OPTForCausalLM(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
+        """
+        Load weights into the model, handling stacked parameters.
+        
+        Args:
+            weights: Iterable of (name, tensor) tuples
+            
+        Returns:
+            Set of parameter names that were loaded
+        """
+
+        # Define helpers to make the process clearer
+        def normalize_param_name(name: str) -> str:
+            """Normalize parameter name to match model's naming convention."""
+            if name.startswith("decoder."):
+                return "model." + name
+            return name
+
+        def should_skip_param(name: str) -> bool:
+            """Check if parameter should be skipped."""
+            # Skip tied embeddings
+            if "lm_head.weight" in name and self.config.tie_word_embeddings:
+                return True
+
+            # # Skip extra bias for GPTQ models
+            # if name.endswith(".bias") and name not in params_dict:
+            #     return True
+
+            # Skip parameters missing due to pp
+            return is_pp_missing_parameter(name, self)
+
+        def identify_stacked_param(name: str) -> Tuple[str, str, str]:
+            """
+            Identify if parameter belongs to a stacked parameter configuration.
+            
+            Returns:
+                Tuple of (base_name, shard_id, None) if parameter 
+                is part of stacked param
+                or (original_name, None, None) if not
+            """
+            for stacked_param, components in stacked_params_mapping.items():
+                for component in components:
+                    if component in name:
+                        # Replace component name with stacked param name
+                        base_name = name.replace(component, stacked_param)
+                        # Extract shard identifier (q, k, v)
+                        shard_id = component.split("_")[0]
+                        return base_name, shard_id, component
+
+            # Not a stacked parameter
+            return name, None, None
+
+        # Mapping for stacked parameters
+        stacked_params_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+        # Get model parameters
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            if "lm_head.weight" in name and self.config.tie_word_embeddings:
-                continue
-            if name.startswith("decoder."):
-                name = "model." + name
 
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
+        # Organize weights by stacked parameters
+        stacked_weights = {}  # {base_name: {shard_id: tensor}}
+        regular_weights = []  # [(name, tensor)]
+
+        # First pass: organize the weights
+        for name, loaded_weight in weights:
+            # Normalize the parameter name
+            norm_name = normalize_param_name(name)
+
+            if should_skip_param(norm_name):
+                continue
+
+            # Check if this is part of a stacked parameter
+            base_name, shard_id, _ = identify_stacked_param(norm_name)
+
+            if shard_id:  # This is part of a stacked parameter
+                if should_skip_param(base_name):
                     continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
+
+                # Store for later batch processing
+                if base_name not in stacked_weights:
+                    stacked_weights[base_name] = {}
+                stacked_weights[base_name][shard_id] = loaded_weight
             else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+                # Regular parameter
+                regular_weights.append((base_name, loaded_weight))
+
+        # Second pass: load the stacked parameters
+        # breakpoint()
+        for param_name, shard_weights in stacked_weights.items():
+            if param_name in params_dict:
+                param = params_dict[param_name]
+                # Use specialized weight loader for stacked params
+                # Lets create our weight_stack
+                q, k, v = shard_weights['q'], shard_weights[
+                    'k'], shard_weights['v']
+                weight_stack = torch.cat([q, k, v], dim=0).to(param.device)
+                torch.utils.swap_tensors(param, weight_stack)
+                # weight_loader = param.weight_loader
+                # weight_loader(param, shard_weights)
+                loaded_params.add(param_name)
+
+        # Third pass: load regular parameters
+        for name, loaded_weight in regular_weights:
+            if name not in params_dict:
+                continue
+            param = params_dict[name]
+            torch.utils.swap_tensors(param, loaded_weight.to(param.device))
             loaded_params.add(name)
+
         return loaded_params
