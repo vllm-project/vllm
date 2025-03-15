@@ -191,6 +191,36 @@ class UnquantizedLinearMethod(LinearMethodBase):
         return F.linear(x, layer.weight, bias)
 
 
+class TiedWeightLinearMethod(UnquantizedLinearMethod):
+    """Linear method base with noop create_weights
+
+    Can be used to prevent the initialization of weights
+    during the initialization of modules with weight tying.
+    """
+
+    def create_weights(self, layer: torch.nn.Module,
+                       input_size_per_partition: int,
+                       output_partition_sizes: list[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
+        ...
+
+
+class QuantizationConfigOverride(QuantizationConfig):
+    """Config class to inject a specific LinearMethod.
+    """
+
+    def __init__(self, cls: type[LinearMethodBase]):
+        self.cls = cls
+
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional[LinearMethodBase]:
+        return self.cls()
+
+
+QuantizationConfigOverride.__abstractmethods__ = frozenset()
+
+
 class LinearBase(torch.nn.Module):
     """Base linear layer.
 
