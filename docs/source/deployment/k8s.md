@@ -16,7 +16,7 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 ## Deployment with CPUs
 
-First, create a PVC and Secret for downloading and storing Hugging Face model:
+First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
 
 ```bash
 cat <<EOF |kubectl apply -f -
@@ -41,7 +41,7 @@ data:
   token: $(HF_TOKEN)
 ```
 
-Next, start the vLLM server as a Kubernetes Pod and Service:
+Next, start the vLLM server as a Kubernetes Deployment and Service:
 
 ```bash
 cat <<EOF |kubectl apply -f -
