@@ -305,8 +305,6 @@ def stateless_init_torch_distributed_process_group(
         group_size,
     )
 
-    pg._set_default_backend(backend)
-
     if backend == "gloo":
         from torch.distributed.distributed_c10d import ProcessGroupGloo
         backend_class = ProcessGroupGloo(prefix_store,
@@ -327,8 +325,9 @@ def stateless_init_torch_distributed_process_group(
         backend_type = ProcessGroup.BackendType.NCCL
         device = torch.device("cuda")
     else:
-        raise RuntimeError(f"Unsupported backend type: {backend}")
+        raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
 
+    pg._set_default_backend(backend_type)
     backend_class._set_sequence_number_for_group()
 
     pg._register_backend(device, backend_type, backend_class)
