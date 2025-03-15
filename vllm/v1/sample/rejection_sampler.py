@@ -46,8 +46,6 @@ class RejectionSampler(nn.Module):
     def forward(
         self,
         draft_token_ids: list[list[int]],
-        # [batch_size]
-        cu_num_draft_tokens: torch.Tensor,
         # [num_tokens, vocab_size]
         draft_probs: Optional[torch.Tensor],
         # [num_tokens, vocab_size]
@@ -56,6 +54,11 @@ class RejectionSampler(nn.Module):
         bonus_token_ids: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
+        token_ids, cu_num_draft_tokens = self._async_copy_to_device(
+            draft_token_ids,
+            target_logits.device,
+        )
+
         num_draft_tokens = [len(ids) for ids in draft_token_ids]
         max_spec_len = max(num_draft_tokens)
         # [num_tokens, vocab_size]
@@ -65,14 +68,9 @@ class RejectionSampler(nn.Module):
             cu_num_draft_tokens,
             max_spec_len,
         )
-        draft_token_ids_tensor, cu_num_draft_tokens_tensor = \
-            self._async_copy_to_device(
-            draft_token_ids,
-            target_logits.device,
-        )
 
         output_token_ids = rejection_sample(
-            draft_token_ids_tensor,
+            token_ids,
             num_draft_tokens,
             cu_num_draft_tokens,
             draft_probs,
