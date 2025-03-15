@@ -4,7 +4,9 @@ import os
 
 import pytest
 
-from ..utils import compare_two_settings, fork_new_process_for_each_test
+from vllm.platforms import current_platform
+
+from ..utils import compare_two_settings, create_new_process_for_each_test
 
 
 @pytest.mark.parametrize("PP_SIZE, MODEL_NAME", [
@@ -14,7 +16,8 @@ from ..utils import compare_two_settings, fork_new_process_for_each_test
     "FLASH_ATTN",
     "FLASHINFER",
 ])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_pp_cudagraph(PP_SIZE, MODEL_NAME, ATTN_BACKEND):
     cudagraph_args = [
         # use half precision for speed and memory savings in CI environment

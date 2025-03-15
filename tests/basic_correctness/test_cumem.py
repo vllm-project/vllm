@@ -5,12 +5,14 @@ import torch
 
 from vllm import LLM, SamplingParams
 from vllm.device_allocator.cumem import CuMemAllocator
+from vllm.platforms import current_platform
 from vllm.utils import GiB_bytes
 
-from ..utils import fork_new_process_for_each_test
+from ..utils import create_new_process_for_each_test
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_python_error():
     """
     Test if Python error occurs when there's low-level
@@ -36,7 +38,8 @@ def test_python_error():
         allocator.wake_up()
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_basic_cumem():
     # some tensors from default memory pool
     shape = (1024, 1024)
@@ -69,7 +72,8 @@ def test_basic_cumem():
     assert torch.allclose(output, torch.ones_like(output) * 3)
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 def test_cumem_with_cudagraph():
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool():
@@ -114,7 +118,8 @@ def test_cumem_with_cudagraph():
     assert torch.allclose(y, x + 1)
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test(
+    "spawn" if current_platform.is_rocm() else "fork")
 @pytest.mark.parametrize(
     "model, use_v1",
     [

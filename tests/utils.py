@@ -7,12 +7,14 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import warnings
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+import cloudpickle
 import openai
 import pytest
 import requests
@@ -696,6 +698,74 @@ def fork_new_process_for_each_test(
     return wrapper
 
 
+def spawn_new_process_for_each_test(
+        f: Callable[_P, None]) -> Callable[_P, None]:
+    """Decorator to spawn a new process for each test function.
+    """
+
+    @functools.wraps(f)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        # Check if we're already in a subprocess
+        if os.environ.get('RUNNING_IN_SUBPROCESS') == '1':
+            # If we are, just run the function directly
+            return f(*args, **kwargs)
+
+        import torch.multiprocessing as mp
+        with suppress(RuntimeError):
+            mp.set_start_method('spawn')
+
+        # Get the module
+        module_name = f.__module__
+
+        # Create a process with environment variable set
+        env = os.environ.copy()
+        env['RUNNING_IN_SUBPROCESS'] = '1'
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            output_filepath = os.path.join(tempdir, "new_process.tmp")
+
+            # `cloudpickle` allows pickling complex functions directly
+            input_bytes = cloudpickle.dumps((f, output_filepath))
+
+            cmd = [sys.executable, "-m", f"{module_name}"]
+
+            returned = subprocess.run(cmd,
+                                      input=input_bytes,
+                                      capture_output=True,
+                                      env=env)
+
+            # check if the subprocess is successful
+            try:
+                returned.check_returncode()
+            except Exception as e:
+                # wrap raised exception to provide more information
+                raise RuntimeError(f"Error raised in subprocess:\n"
+                                   f"{returned.stderr.decode()}") from e
+
+    return wrapper
+
+
+def create_new_process_for_each_test(
+    method: str = "fork"
+) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
+    """creates a new process for each test function.
+
+    Args:
+        method: The process creation method, either "spawn" or "fork".
+
+    Returns:
+        A decorator function that will run the test in a new process.
+    """
+
+    assert method in ["spawn",
+                      "fork"], "Method must be either 'spawn' or 'fork'"
+
+    if method == "fork":
+        return fork_new_process_for_each_test
+
+    return spawn_new_process_for_each_test
+
+
 def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
     """
     Get a pytest mark, which skips the test if the GPU doesn't meet
@@ -755,7 +825,8 @@ def multi_gpu_test(*, num_gpus: int):
     marks = multi_gpu_marks(num_gpus=num_gpus)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        func = fork_new_process_for_each_test(f)
+        func = create_new_process_for_each_test(
+            "spawn" if current_platform.is_rocm() else "fork")(f)
         for mark in reversed(marks):
             func = mark(func)
 
