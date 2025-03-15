@@ -1,9 +1,10 @@
 
+import sys
+
 import torch
 import torch.optim as optim
 from dataloader import SequenceDataset
-from model import MemoryPredict
-import sys
+from model import MlpMemoryPredict, LstmMemoryPredict
 
 windows_size = 50
 file_path = "/root/vllm/vllm/cpen511/data/pure_sequence.csv"
@@ -20,15 +21,22 @@ train_size = int(len(data) * 0.75)
 train, test = torch.utils.data.random_split(data, [train_size, len(data) - train_size])
 
 # Prepare data loaders
-train_loader = torch.utils.data.DataLoader(train, batch_size=1, shuffle=True)
-test_loader = torch.utils.data.DataLoader(test, batch_size=1, shuffle=False)
+train_loader = torch.utils.data.DataLoader(train, batch_size=2, shuffle=True)
+test_loader = torch.utils.data.DataLoader(test, batch_size=2, shuffle=False)
 
-    
+
 # Initialize model
-model = MemoryPredict(windows_size=windows_size).cuda()
+model = MlpMemoryPredict(windows_size=windows_size).cuda()
 criterion = torch.nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
+# Lost function
+def loss_fn(input, outputs, labels):
+    average = input.mean()
+    diff_out = labels - outputs
+    diff_label = labels - average
+    return criterion(diff_out, diff_label)
+    
 # Train the model
 for epoch in range(10):
     model.train()
@@ -57,13 +65,14 @@ for epoch in range(10):
 model.eval()
 test_loss, correct, total = 0, 0, 0
 with torch.no_grad():
-    for inputs in test_loader:
-        inputs = inputs.cuda()
+    for inputs, label in test_loader:
+        inputs, label = inputs.cuda(), label.cuda()
         outputs = model(inputs)
-        loss = criterion(outputs, inputs)
+        loss = criterion(outputs, label)
         test_loss += loss.item()
-        for i in range(len(outputs)):
-            total += 1
-            if torch.argmax(outputs[i]) == inputs[i]:
-                correct += 1
+        total += label.size(0)
+        correct += ((outputs.int() == label.int()).sum()).item()
+        print(f"Output: {outputs.tolist()}, Label: {label.tolist()}, correct: {correct}, total: {total}")
+print(f"Test Loss: {test_loss / len(test_loader)}, Accuracy: {correct / total}")
+result_output
 
