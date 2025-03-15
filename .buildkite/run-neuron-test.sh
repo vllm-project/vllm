@@ -44,7 +44,7 @@ remove_docker_container() {
 trap remove_docker_container EXIT
 
 # Run the image
-docker run --rm -it --device=/dev/neuron0 --device=/dev/neuron1 --network host \
+docker run --rm -it --device=/dev/neuron0 --network bridge \
        -v "${HF_CACHE}:${HF_MOUNT}" \
        -e "HF_HOME=${HF_MOUNT}" \
        -v "${NEURON_COMPILE_CACHE_URL}:${NEURON_COMPILE_CACHE_MOUNT}" \
