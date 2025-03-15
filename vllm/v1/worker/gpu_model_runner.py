@@ -1021,7 +1021,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sample_lens = [len(tokens) + 1 for tokens in draft_token_ids]
             bonus_logits_idx = np.cumsum(sample_lens) - 1
             sampler_output = self.model.sample(
-                logits=logits[bonus_logits_idx],
+                logits=logits[bonus_logits_idx],  # FIXME: synchronization
                 sampling_metadata=sampling_metadata,
             )
             bonus_token_ids = sampler_output.sampled_token_ids
@@ -1070,7 +1070,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # Includes spec decode tokens.
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
-                sampled_token_ids)
+                sampled_token_ids, self.input_batch.vocab_size)
+        print("valid_sampled_token_ids", valid_sampled_token_ids)
 
         if not self.use_spec_decode:
             spec_token_ids = None

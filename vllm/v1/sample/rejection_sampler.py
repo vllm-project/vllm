@@ -56,6 +56,7 @@ class RejectionSampler(nn.Module):
         bonus_token_ids: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
+        print("draft_token_ids", draft_token_ids)
         token_ids, cu_num_draft_tokens = self._async_copy_to_device(
             draft_token_ids,
             target_logits.device,
@@ -83,13 +84,19 @@ class RejectionSampler(nn.Module):
         return output_token_ids
 
     @staticmethod
-    def parse_output(output_token_ids: torch.Tensor) -> list[list[int]]:
+    def parse_output(
+        output_token_ids: torch.Tensor,
+        vocab_size: int,
+    ) -> list[list[int]]:
         output_token_ids = output_token_ids.tolist()
         # Preallocate outputs.
         outputs: list[list[int]] = [[] for _ in output_token_ids]
         for i, token_ids in enumerate(output_token_ids):
             for token_id in token_ids:
                 if token_id == PLACEHOLDER_TOKEN_ID:
+                    break
+                # Make sure the token id is in the vocabulary.
+                if token_id >= vocab_size:
                     break
                 outputs[i].append(token_id)
         return outputs
@@ -99,11 +106,11 @@ class RejectionSampler(nn.Module):
         draft_token_ids: list[list[int]],
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        flattened_token_ids: list[int] = []
-        cu_num_tokens: list[int] = []
-        for token_ids in draft_token_ids:
-            flattened_token_ids.extend(token_ids)
-            cu_num_tokens.append(len(token_ids))
+        flattened_token_ids = sum(draft_token_ids, [])
+        cu_num_tokens = [0] * len(draft_token_ids)
+        for i, token_ids in enumerate(draft_token_ids):
+            prev = cu_num_tokens[i - 1] if i > 0 else 0
+            cu_num_tokens[i] = prev + len(token_ids)
 
         num_draft_tokens = len(flattened_token_ids)
         assert num_draft_tokens <= self.max_num_draft_tokens
@@ -191,6 +198,8 @@ def rejection_sample(
         device,
     )
 
+    print("recovered_token_ids", recovered_token_ids)
+    print("bonus_token_ids", bonus_token_ids)
     # Rejection sampling for random sampling requests.
     rejection_random_sample_kernel[(batch_size, )](
         output_token_ids,
@@ -420,7 +429,8 @@ def compute_probs_kernel(
     vocab_offset = tl.arange(0, PADDED_VOCAB_SIZE)
     logits = tl.load(logits_ptr + (start_idx + pos) * vocab_size +
                      vocab_offset,
-                     mask=vocab_offset < vocab_size)
+                     mask=vocab_offset < vocab_size,
+                     other=float("-inf"))
     logits = logits.to(dtype=tl.float32)
     temperature = tl.load(temperature_ptr + req_idx)
     if temperature == GREEDY_TEMPERATURE:
@@ -471,20 +481,24 @@ def sample_recovered_tokens_kernel(
             0)
         prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size +
                        vocab_offset,
-                       mask=vocab_offset < vocab_size)
+                       mask=vocab_offset < vocab_size,
+                       other=0)
     else:
         draft_prob = tl.load(draft_probs_ptr + (start_idx + pos) * vocab_size +
                              vocab_offset,
-                             mask=vocab_offset < vocab_size)
+                             mask=vocab_offset < vocab_size,
+                             other=0)
         target_prob = tl.load(target_probs_ptr +
                               (start_idx + pos) * vocab_size + vocab_offset,
-                              mask=vocab_offset < vocab_size)
-        prob = target_prob - draft_prob
-        prob = tl.maximum(prob, TINY)
-    prob = prob / tl.sum(prob, axis=-1, keep_dims=True)
+                              mask=vocab_offset < vocab_size,
+                              other=0)
+        prob = tl.maximum(target_prob - draft_prob, 0)
+        # NOTE(woosuk): We don't need `prob = prob / tl.sum(prob)` here because
+        # `tl.argmax` will select the maximum value.
 
     q = tl.load(q_ptr + req_idx * vocab_size + vocab_offset,
-                mask=vocab_offset < vocab_size)
+                mask=vocab_offset < vocab_size,
+                other=float("-inf"))
     recovered_id = tl.argmax(prob / q, axis=-1)
     tl.store(output_token_ids_ptr + start_idx + pos, recovered_id)
     if IS_NGRAM:
