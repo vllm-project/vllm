@@ -53,32 +53,37 @@ def cache_models():
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.usefixtures("cache_models")
-def test_offline_mode(monkeypatch):
+def test_offline_mode(monkeypatch: pytest.MonkeyPatch):
     # Set HF to offline mode and ensure we can still construct an LLM
-    try:
-        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-        monkeypatch.setenv("VLLM_NO_USAGE_STATS", "1")
+    with monkeypatch.context() as m:
+        try:
+            m.setenv("HF_HUB_OFFLINE", "1")
+            m.setenv("VLLM_NO_USAGE_STATS", "1")
 
-        def disable_connect(*args, **kwargs):
-            raise RuntimeError("No http calls allowed")
+            def disable_connect(*args, **kwargs):
+                raise RuntimeError("No http calls allowed")
 
-        monkeypatch.setattr(urllib3.connection.HTTPConnection, "connect",
-                            disable_connect)
-        monkeypatch.setattr(urllib3.connection.HTTPSConnection, "connect",
-                            disable_connect)
+            m.setattr(
+                urllib3.connection.HTTPConnection,
+                "connect",
+                disable_connect,
+            )
+            m.setattr(
+                urllib3.connection.HTTPSConnection,
+                "connect",
+                disable_connect,
+            )
 
-        # Need to re-import huggingface_hub and friends to setup offline mode
-        _re_import_modules()
-        # Cached model files should be used in offline mode
-        for model_config in MODEL_CONFIGS:
-            LLM(**model_config)
-    finally:
-        # Reset the environment after the test
-        # NB: Assuming tests are run in online mode
-        monkeypatch.delenv("HF_HUB_OFFLINE")
-        monkeypatch.delenv("VLLM_NO_USAGE_STATS")
-        _re_import_modules()
-        pass
+            # Need to re-import huggingface_hub
+            # and friends to setup offline mode
+            _re_import_modules()
+            # Cached model files should be used in offline mode
+            for model_config in MODEL_CONFIGS:
+                LLM(**model_config)
+        finally:
+            # Reset the environment after the test
+            # NB: Assuming tests are run in online mode
+            _re_import_modules()
 
 
 def _re_import_modules():

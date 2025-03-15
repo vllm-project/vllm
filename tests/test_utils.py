@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa
 
 import asyncio
-import os
 import socket
 from collections.abc import AsyncIterator
 from unittest.mock import patch
@@ -112,16 +112,16 @@ def test_deprecate_kwargs_additional_message():
         dummy(old_arg=1)
 
 
-def test_get_open_port():
-    os.environ["VLLM_PORT"] = "5678"
-    # make sure we can get multiple ports, even if the env var is set
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:
-        s1.bind(("localhost", get_open_port()))
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
-            s2.bind(("localhost", get_open_port()))
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
-                s3.bind(("localhost", get_open_port()))
-    os.environ.pop("VLLM_PORT")
+def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_PORT", "5678")
+        # make sure we can get multiple ports, even if the env var is set
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:
+            s1.bind(("localhost", get_open_port()))
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                s2.bind(("localhost", get_open_port()))
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
+                    s3.bind(("localhost", get_open_port()))
 
 
 # Tests for FlexibleArgumentParser
@@ -366,31 +366,32 @@ def test_bind_kv_cache_non_attention():
     assert ctx['model.layers.28.attn'].kv_cache[0] is kv_cache[1]
 
 
-def test_bind_kv_cache_encoder_decoder(monkeypatch):
+def test_bind_kv_cache_encoder_decoder(monkeypatch: pytest.MonkeyPatch):
     # V1 TESTS: ENCODER_DECODER is not supported on V1 yet.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "0")
 
-    from vllm.attention import Attention, AttentionType
+        from vllm.attention import Attention, AttentionType
 
-    # example from bart
-    ctx = {
-        'encoder.layers.0.self_attn.attn':
-            Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER),
-        'decoder.layers.0.encoder_attn.attn':
-            Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER),
-        'decoder.layers.0.self_attn.attn':
-            Attention(32, 128, 0.1, attn_type=AttentionType.DECODER),
-    }
+        # example from bart
+        ctx = {
+            'encoder.layers.0.self_attn.attn':
+                Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER),
+            'decoder.layers.0.encoder_attn.attn':
+                Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER),
+            'decoder.layers.0.self_attn.attn':
+                Attention(32, 128, 0.1, attn_type=AttentionType.DECODER),
+        }
 
-    kv_cache = [
-        torch.zeros((1, )),
-    ]
-    encoder_kv_cache = ctx['encoder.layers.0.self_attn.attn'].kv_cache
+        kv_cache = [
+            torch.zeros((1, )),
+        ]
+        encoder_kv_cache = ctx['encoder.layers.0.self_attn.attn'].kv_cache
 
-    bind_kv_cache(ctx, [kv_cache])
-    assert ctx['encoder.layers.0.self_attn.attn'].kv_cache is encoder_kv_cache
-    assert ctx['decoder.layers.0.encoder_attn.attn'].kv_cache[0] is kv_cache[0]
-    assert ctx['decoder.layers.0.self_attn.attn'].kv_cache[0] is kv_cache[0]
+        bind_kv_cache(ctx, [kv_cache])
+        assert ctx['encoder.layers.0.self_attn.attn'].kv_cache is encoder_kv_cache
+        assert ctx['decoder.layers.0.encoder_attn.attn'].kv_cache[0] is kv_cache[0]
+        assert ctx['decoder.layers.0.self_attn.attn'].kv_cache[0] is kv_cache[0]
 
 
 def test_bind_kv_cache_pp():
