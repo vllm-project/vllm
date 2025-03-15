@@ -14,7 +14,7 @@ from sklearn.model_selection import KFold
 # Define argument parser
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a simple prediction model")
-    parser.add_argument("--filepath", help="Path to the trace file", default="/root/vllm/vllm/cpen511/data/trace.csv")
+    parser.add_argument("--filepath", help="Path to the trace file", default="/root/vllm/vllm/cpen511/data/output.csv")
     parser.add_argument("--targetpath", help="Path to the target output file", default="/root/vllm/vllm/cpen511/data/")
     return parser.parse_args()  # Ensure we return the parsed arguments
 

@@ -27,7 +27,7 @@ test_loader = torch.utils.data.DataLoader(test, batch_size=2, shuffle=False)
 
 
 # Initialize model
-model = MlpMemoryPredict(windows_size=windows_size).cuda()
+model = LstmMemoryPredict(windows_size=windows_size).cuda()
 criterion = torch.nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 schedular = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
@@ -40,7 +40,7 @@ def loss_fn(input, outputs, labels):
     return criterion(diff_out, diff_label)
     
 # Train the model
-for epoch in range(10):
+for epoch in range(50):
     model.train()
     early_stopping = EarlyStopping(patience=3)
     for inputs, label in train_loader:

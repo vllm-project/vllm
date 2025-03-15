@@ -58,3 +58,18 @@ class LstmMemoryPredict(nn.Module):
         out, _ = self.lstm(x)
         out = self.fc(out)
         return out.squeeze(1)
+    
+
+class TransformerMemoryPredict(nn.Module):
+    def __init__(self, windows_size):
+        super(TransformerMemoryPredict, self).__init__()
+        self.transformer = nn.Transformer(d_model=windows_size, nhead=8, num_encoder_layers=6, num_decoder_layers=6, dim_feedforward=512)
+        self.fc = nn.Linear(windows_size, 1, bias=True)
+        
+    # takes a sequence of memory access and predicts the next memory access
+    # x: [batch_size, windows_size]
+    # output: [batch_size]
+    def forward(self, x):
+        out = self.transformer(x, x)
+        out = self.fc(out)
+        return out.squeeze(1)
