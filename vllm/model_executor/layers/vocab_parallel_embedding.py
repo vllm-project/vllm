@@ -7,12 +7,11 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
-from vllm.forward_context import get_forward_context
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce,
-                              tensor_model_parallel_reduce_scatter,
-                              get_pp_group)
+                              tensor_model_parallel_reduce_scatter)
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
 from vllm.model_executor.parameter import BasevLLMParameter

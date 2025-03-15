@@ -137,8 +137,7 @@ class PPTestSettings:
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
         )
-        
-        
+
     @staticmethod
     def sp(
         *,
@@ -160,7 +159,7 @@ class PPTestSettings:
                               sp_enabled=True,
                               eager_mode=False,
                               chunked_prefill=True),
-                
+
                 # current sp doesn't support combination with pp
                 # ParallelSetup(tp_size=2 * tp_base,
                 #               pp_size=2 * pp_base,
@@ -403,7 +402,7 @@ def _compare_tp(
         "--distributed-executor-backend",
         distributed_backend,
     ]
-    
+
     if sp_enabled:
         pp_args.append("--enable-sequence-parallel")
 
@@ -516,25 +515,26 @@ def test_tp_multimodal_generation(
                 num_gpus_available,
                 method="generate",
                 is_multimodal=True)
-    
+
 
 SP_TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     "unsloth/Llama-3.2-1B-Instruct": PPTestSettings.sp(),
 }
 
-
 SP_TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "unsloth/Llama-3.2-1B-Instruct",
 ]
+
 
 @pytest.mark.parametrize(
     ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
      "task", "test_options"),
     [
         params for model_id, settings in SP_TEXT_GENERATION_MODELS.items()
-        for params in settings.iter_params(model_id) if model_id in SP_TEST_MODELS
+        for params in settings.iter_params(model_id)
+        if model_id in SP_TEST_MODELS
     ],
 )
 @fork_new_process_for_each_test

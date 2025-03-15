@@ -74,7 +74,8 @@ class LLM:
             environments.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
-        enable_sequence_parallel: If enable sequence parallelism on top of tensor_parallel_size.
+        enable_sequence_parallel: Enable sequence parallelism on top of tensor
+            parallelism.
         dtype: The data type for the model weights and activations. Currently,
             we support `float32`, `float16`, and `bfloat16`. If `auto`, we use
             the `torch_dtype` attribute specified in the model config file.
