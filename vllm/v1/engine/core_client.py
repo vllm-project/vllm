@@ -507,7 +507,10 @@ class AsyncMPClient(MPClient):
         self.outputs_handler: Optional[Callable[
             [AsyncMPClient, EngineCoreOutputs], Awaitable[None]]] = None
 
-    async def _start_output_queue_task(self):
+    def _ensure_output_queue_task(self):
+        if self.outputs_queue is not None:
+            return
+
         # Perform IO in separate task to parallelize as much as possible.
         # Avoid task having direct reference back to the client.
         self.outputs_queue = asyncio.Queue()
@@ -545,9 +548,8 @@ class AsyncMPClient(MPClient):
                                               name="EngineCoreOutputQueueTask")
 
     async def get_output_async(self) -> EngineCoreOutputs:
-        if self.outputs_queue is None:
-            await self._start_output_queue_task()
-            assert self.outputs_queue is not None
+        self._ensure_output_queue_task()
+        assert self.outputs_queue is not None
         return await self.outputs_queue.get()
 
     async def _send_input(self, request_type: EngineCoreRequestType,
@@ -555,8 +557,7 @@ class AsyncMPClient(MPClient):
         await self.core_engine.send_multipart(
             (request_type.value, self.encoder.encode(request)))
 
-        if self.outputs_queue is None:
-            await self._start_output_queue_task()
+        self._ensure_output_queue_task()
 
     async def call_utility_async(self, method: str, *args) -> Any:
         return await self._call_utility_async(method,
@@ -575,6 +576,7 @@ class AsyncMPClient(MPClient):
         message = (EngineCoreRequestType.UTILITY.value,
                    self.encoder.encode((call_id, method, args)))
         await engine.send_multipart(message)
+        self._ensure_output_queue_task()
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
@@ -660,9 +662,6 @@ class DPAsyncMPClient(AsyncMPClient):
         # tokenized.
         request.prompt = None
 
-        if self.outputs_queue is None:
-            await self._start_output_queue_task()
-
         msg = (EngineCoreRequestType.ADD.value, self.encoder.encode(request))
 
         chosen_engine = self.get_core_engine_for_request()
@@ -679,6 +678,8 @@ class DPAsyncMPClient(AsyncMPClient):
                                       chosen_engine else self.start_dp_msg)
                 for engine in self.core_engines
             ])
+
+        self._ensure_output_queue_task()
 
     def get_core_engine_for_request(self) -> CoreEngine:
         return min(self.core_engines, key=lambda e: e.num_reqs_in_flight)
