@@ -424,13 +424,14 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         # put the logic here.
         # FIXME: Move this logic to `_process_image_input` when v0 is
         # deprecated. Merge this function with `Molmo._get_mm_embeds`.
+        num_patches_per_image: list[int] = num_patches.tolist()
+
         embeds_flat = features.new_full(
-            (int(num_patches.sum()), *features.shape[1:]),
+            (sum(num_patches_per_image), *features.shape[1:]),
             fill_value=torch.nan,
         )
-        embeds_flat[embed_is_patch.view(-1)] = features
+        embeds_flat[embed_is_patch] = features
 
-        num_patches_per_image = num_patches.tolist()
         return embeds_flat.split(num_patches_per_image)
 
     def get_multimodal_embeddings(
