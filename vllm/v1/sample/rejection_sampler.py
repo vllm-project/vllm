@@ -87,6 +87,17 @@ class RejectionSampler(nn.Module):
                                                        max_spec_len)
         return draft_token_ids_cpu.to(device=device, non_blocking=True)
 
+    @staticmethod
+    def parse_output(output_token_ids: torch.Tensor) -> list[list[int]]:
+        output_token_ids = output_token_ids.tolist()
+        outputs: list[list[int]] = [[] for _ in output_token_ids]
+        for i, token_ids in enumerate(output_token_ids):
+            for token_id in token_ids:
+                if token_id == PLACEHOLDER_TOKEN_ID:
+                    break
+                outputs[i].append(token_id)
+        return outputs
+
 
 def rejection_sample(
     # [batch_size, max_spec_len]
