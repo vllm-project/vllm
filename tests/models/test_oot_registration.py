@@ -10,11 +10,14 @@ from ..utils import fork_new_process_for_each_test
 
 @fork_new_process_for_each_test
 def test_plugin(monkeypatch: pytest.MonkeyPatch, dummy_opt_path):
+    # V1 shuts down rather than raising an error here.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     monkeypatch.setenv("VLLM_PLUGINS", "")
+
     with pytest.raises(Exception) as excinfo:
         LLM(model=dummy_opt_path, load_format="dummy")
     error_msg = "has no vLLM implementation and " \
-                "the Transformers implementation is not compatible with vLLM."
+                "the Transformers implementation is not compatible with vLLM"
     assert (error_msg in str(excinfo.value))
 
 

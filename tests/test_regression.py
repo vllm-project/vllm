@@ -13,6 +13,7 @@ import torch
 from vllm import LLM, SamplingParams
 
 
+@pytest.mark.skip(reason="In V1, we reject tokens > max_seq_len")
 def test_duplicated_ignored_sequence_group():
     """https://github.com/vllm-project/vllm/issues/1655"""
 
