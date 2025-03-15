@@ -11,6 +11,7 @@ from vllm.utils import is_pin_memory_available
 from vllm.v1.sample.metadata import SamplingMetadata
 
 logger = init_logger(__name__)
+
 PLACEHOLDER_TOKEN_ID: tl.constexpr = -1
 GREEDY_TEMPERATURE: tl.constexpr = -1
 TINY: tl.constexpr = 1.1754943508222875e-38  # torch.finfo(torch.float32).tiny
