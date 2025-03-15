@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa
+# type: ignore
 from __future__ import annotations
 
 import threading
