@@ -47,3 +47,19 @@ def _validate_score_input_lens(
         raise ValueError("At least one text element must be given")
     if len(texts_2) == 0:
         raise ValueError("At least one text_pair element must be given")
+
+
+def _validate_truncation_size(max_model_len: int,
+                              truncate_prompt_tokens: int) -> int:
+    if truncate_prompt_tokens is not None and truncate_prompt_tokens == -1:
+        truncate_prompt_tokens = max_model_len
+        return truncate_prompt_tokens
+
+    if truncate_prompt_tokens is not None \
+                            and truncate_prompt_tokens > max_model_len:
+        raise ValueError(
+            f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
+            f"is greater than max_model_len ({max_model_len})."
+            f" Please, select a smaller truncation size.")
+
+    return truncate_prompt_tokens

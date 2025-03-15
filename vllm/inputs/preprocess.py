@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Mapping
-from typing import Optional, Union, cast
+from typing import Any, Optional, Union, cast
 
 from typing_extensions import assert_never
 
@@ -184,6 +184,7 @@ class InputPreprocessor:
         prompt: str,
         request_id: str,
         lora_request: Optional[LoRARequest],
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[int]:
         """
         Apply the model's tokenizer to a text prompt, returning the
@@ -201,6 +202,13 @@ class InputPreprocessor:
                 and self.model_config.encoder_config.get(
                     "do_lower_case", False)):
             prompt = prompt.lower()
+
+        if tokenization_kwargs is not None:
+            return tokenizer.encode(request_id=request_id,
+                                    prompt=prompt,
+                                    lora_request=lora_request,
+                                    add_special_tokens=add_special_tokens,
+                                    **tokenization_kwargs)
 
         return tokenizer.encode(request_id=request_id,
                                 prompt=prompt,
@@ -310,6 +318,7 @@ class InputPreprocessor:
         self,
         prompt: SingletonPrompt,
         request_id: str,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> SingletonInputs:
@@ -335,6 +344,7 @@ class InputPreprocessor:
                 prompt_text,
                 request_id=request_id,
                 lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
             )
 
             return token_inputs(
@@ -701,6 +711,7 @@ class InputPreprocessor:
         self,
         prompt: SingletonPrompt,
         request_id: str,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
@@ -725,6 +736,7 @@ class InputPreprocessor:
         prompt_comps = self._prompt_to_llm_inputs(
             prompt,
             request_id=request_id,
+            tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
         )
 
@@ -757,6 +769,7 @@ class InputPreprocessor:
         self,
         prompt: PromptType,
         request_id: str,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         return_mm_hashes: bool = False,
@@ -781,6 +794,7 @@ class InputPreprocessor:
         return self._process_decoder_only_prompt(
             prompt,
             request_id=request_id,
+            tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=return_mm_hashes,

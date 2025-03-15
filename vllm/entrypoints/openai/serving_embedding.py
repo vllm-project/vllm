@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.score_utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput)
@@ -88,16 +89,11 @@ class OpenAIServingEmbedding(OpenAIServing):
         request_id = f"embd-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        truncate_prompt_tokens = None
+        truncate_prompt_tokens = request.truncate_prompt_tokens
 
-        if request.truncate_prompt_tokens is not None:
-            if request.truncate_prompt_tokens <= self.max_model_len:
-                truncate_prompt_tokens = request.truncate_prompt_tokens
-            else:
-                return self.create_error_response(
-                    "truncate_prompt_tokens value is "
-                    "greater than max_model_len."
-                    " Please, select a smaller truncation size.")
+        if truncate_prompt_tokens is not None:
+            truncate_prompt_tokens = _validate_truncation_size(
+                self.max_model_len, truncate_prompt_tokens)
 
         try:
             (
