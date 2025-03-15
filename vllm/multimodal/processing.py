@@ -11,7 +11,6 @@ from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
-import numpy as np
 import torch
 from cachetools import LRUCache
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
@@ -828,8 +827,8 @@ class ProcessingCache:
     ) -> LRUCache[str, _V]:
 
         def get_size(leaf: object) -> int:
-            if isinstance(leaf, (torch.Tensor, np.ndarray)):
-                return leaf.nbytes
+            if isinstance(leaf, torch.Tensor):
+                return leaf.nbytes  # sys.getsizeof doesn't work for tensors
 
             return sys.getsizeof(leaf)
 
@@ -846,8 +845,8 @@ class ProcessingCache:
 
         # DEBUG: Set to None to disable
         self.debug_cache_hit_ratio_steps: Optional[int] = None
-        self.cache_hits = 0
-        self.cache_total = 0
+        self.debug_cache_hits = 0
+        self.debug_cache_total = 0
 
         self._cache = self.get_lru_cache(capacity_gb, MultiModalKwargsItem)
 
@@ -856,10 +855,10 @@ class ProcessingCache:
         if not steps:
             return
 
-        total = self.cache_total
+        total = self.debug_cache_total
         if total > 0 and total % steps == 0:
             logger.debug("ProcessingCache: hit_ratio = %.2f",
-                         self.cache_hits / total)
+                         self.debug_cache_hits / total)
 
     def get(
         self,
@@ -885,9 +884,9 @@ class ProcessingCache:
 
         if self.debug_cache_hit_ratio_steps:
             if cache_key in self._cache:
-                self.cache_hits += 1
+                self.debug_cache_hits += 1
 
-            self.cache_total += 1
+            self.debug_cache_total += 1
 
         return self._cache.get(cache_key)
 

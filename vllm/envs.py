@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
-    VLLM_MM_INPUT_CACHE_SPACE: int = 8
+    VLLM_MM_INPUT_CACHE_GIB: int = 8
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -432,10 +432,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
-    # Cache size (in GB) for multimodal input cache
-    # Default is 8GB
-    "VLLM_MM_INPUT_CACHE_SPACE":
-    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_SPACE", "8")),
+    # Cache size (in GiB) for multimodal input cache
+    # Default is 8GiB
+    "VLLM_MM_INPUT_CACHE_GIB":
+    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "8")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
