@@ -7,6 +7,7 @@ https://arxiv.org/abs/2310.18547
 """
 
 from typing import List
+from itertools import product
 
 import torch
 import triton
@@ -16,7 +17,63 @@ from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr
 from vllm.utils import direct_register_custom_op
 
+def block_m_ranges():
+    return [16, 32, 64, 128, 256, 512]
 
+
+def block_k_ranges():
+    return [16]
+
+
+def block_n_ranges():
+    return [32, 64, 128, 256, 512, 1024]
+
+
+def warp_ranges():
+    return [4, 8]
+
+
+def cta_ranges():
+    return [1]
+
+
+def num_stages():
+    return [2, 4]
+
+
+def autotune_configs():
+    return [
+        triton.Config(kwargs={
+            'BLOCK_M': bm,
+            'BLOCK_N': bn,
+            'BLOCK_K': bk
+        },
+                      num_warps=nw,
+                      num_ctas=nc,
+                      num_stages=ns)
+        for bm, bn, bk, nw, nc, ns in product(block_m_ranges(), block_n_ranges(
+        ), block_k_ranges(), warp_ranges(), cta_ranges(), num_stages())
+    ]
+
+
+def prune_fn(*args, **kwargs):
+    configs_list, kernel_kwargs = args
+
+    # prune such that EVEN_K is true
+
+    def is_m_good(config, kkwargs):
+        return config.kwargs['BLOCK_M'] == 16 or config.kwargs[
+            'BLOCK_M'] <= kkwargs['M']
+
+    pruned = filter(lambda x: is_m_good(x, kernel_kwargs), configs_list)
+    pruned = list(pruned)
+    print(f"Trying #configs {len(pruned)}")
+    return pruned
+
+
+@triton.autotune(configs=autotune_configs(),
+                 key=['M', 'N', 'K', 'SLICE_NUM', 'ADD_INPUTS', 'MAX_LORAS'],
+                 prune_configs_by={'early_config_prune': prune_fn})
 @triton.jit
 def _v1_expand_kernel(
         input_ptr,
@@ -39,14 +96,15 @@ def _v1_expand_kernel(
         output_d0_stride,
         output_d1_stride,  # 1
         output_hs_ptr,
-        BLOCK_M: tl.constexpr,
-        BLOCK_N: tl.constexpr,
-        BLOCK_K: tl.constexpr,
         EVEN_K: tl.constexpr,
         ADD_INPUTS: tl.constexpr,
         CAST_TYPE: tl.constexpr,
         SLICE_NUM: tl.constexpr,
-        SAME_STRIDE: tl.constexpr):
+        SAME_STRIDE: tl.constexpr,
+        MAX_LORAS: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,):
 
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
@@ -123,7 +181,6 @@ def _v1_expand_kernel(
         CAST_TYPE,
         ADD_INPUTS)
 
-
 @torch.inference_mode()
 def _v1_expand(
     inputs: torch.Tensor,  # shape [num_slices, num_tokens, lora_rank]
@@ -187,34 +244,14 @@ def _v1_expand(
     CAST_TYPE = False
     NUM_SLICES = len(lora_b_weights)
 
-    # Triton kernel configs.
-    BLOCK_M = 64
-    BLOCK_N = 128
-    BLOCK_K = 16
-    NUM_WARPS = 4
-    NUM_CTAS = 1
-    NUM_STAGES = 2
-    MAX_NREG = None
-
-    EVEN_K = K % BLOCK_K == 0  # type: ignore
-
     if inputs.dtype == torch.float32 and lora_b_weights[0].dtype in [
             torch.float16,
             torch.bfloat16,
     ]:
         CAST_TYPE = True
 
-    # TODO (varun): This grid formulation maximizes parallelization at the
-    # cost of wasteful thread block launch when only a few input tokens require
-    # LoRA. This might not be the best in all cases.
-    grid = (
-        triton.cdiv(M, BLOCK_M) * triton.cdiv(MAX_N, BLOCK_N),
-        NUM_SLICES,
-        # Each LoRA receives its own set of thread blocks for output
-        # computation. If some LoRA doesn't have any tokens to process, its
-        # thread blocks simply exit.
-        MAX_LORAS,
-    )
+    grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']) * triton.cdiv(
+        MAX_N, meta['BLOCK_N']), NUM_SLICES, MAX_LORAS)
 
     _v1_expand_kernel[grid](
         inputs,
@@ -237,18 +274,12 @@ def _v1_expand(
         output_tensor.stride(0),
         output_tensor.stride(1),
         hidden_sizes_tensor,
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_K,
-        EVEN_K,
+        True, # EVEN_K, i.e. multiples of 16
         ADD_INPUTS,
         CAST_TYPE,
         NUM_SLICES,
         same_stride,
-        num_warps=NUM_WARPS,
-        num_ctas=NUM_CTAS,
-        num_stages=NUM_STAGES,
-        maxnreg=MAX_NREG,
+        MAX_LORAS,
     )
 
     return

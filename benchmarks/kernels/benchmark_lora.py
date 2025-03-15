@@ -979,6 +979,38 @@ def print_timers(timers: list[TMeasurement],
           "slower than torch.mm in cases where num_loras is big. But for "
           "small num_loras the goal should be to match the torch.mm numbers.")
 
+def tune_optype(ctx: BenchmarkContext,
+                op_type: OpType,
+                add_input_arg: bool):
+    tensors = BenchmarkTensors.make(ctx, op_type)
+    tensors.sanity_check()
+
+    bench_kwargs = tensors.bench_fn_kwargs(op_type, add_inputs=add_input_arg)
+
+    _LORA_A_PTR_DICT.clear()
+    _LORA_B_PTR_DICT.clear()
+
+    describe_args = (f"add_inputs={add_input_arg}"
+                     if add_input_arg is not None else "")
+    description = (f"{op_type.name}({describe_args}) ({tensors.io_types()})")
+
+    print(f"Running :: {ctx.bench_sublabel(op_type)} -- {description} ...")
+    op_type.bench_fn()(**bench_kwargs)
+
+
+def run_tuner(args: argparse.Namespace, bench_ctxs: list[BenchmarkContext]):
+    for bench_ctx in bench_ctxs:
+        for seq_len in args.seq_lengths:
+            for bench_op in args.op_types:
+                for num_slices in bench_op.num_slices():
+                    _ctx = bench_ctx.with_seq_length(seq_len).with_num_slices(
+                        num_slices)
+                    # Benchmark bench_op
+                    expand_fn_add_inputs = [
+                        None
+                    ] if bench_op.is_shrink_fn() else args.expand_fn_add_inputs
+                    for add_input_arg in expand_fn_add_inputs:
+                        tune_optype(_ctx, bench_op, add_input_arg)
 
 def run(args: argparse.Namespace, bench_ctxs: list[BenchmarkContext]):
 
@@ -1073,7 +1105,10 @@ def run_list_bench(args: argparse.Namespace):
     bench_contexts: list[BenchmarkContext] = as_benchmark_contexts(
         hidden_sizes=args.hidden_sizes, lora_ranks=args.lora_ranks, args=args)
 
-    run(args, bench_contexts)
+    if args.run_tuner:
+        run_tuner(args, bench_contexts)
+    else:
+        run(args, bench_contexts)
 
 
 def run_range_bench(args: argparse.Namespace):
@@ -1094,7 +1129,10 @@ def run_range_bench(args: argparse.Namespace):
     bench_contexts: list[BenchmarkContext] = as_benchmark_contexts(
         hidden_sizes=hidden_sizes, lora_ranks=lora_ranks, args=args)
 
-    run(args, bench_contexts)
+    if args.run_tuner:
+        run_tuner(args, bench_contexts)
+    else:
+        run(args, bench_contexts)
 
 
 def run_model_bench(args: argparse.Namespace):
@@ -1121,7 +1159,10 @@ def run_model_bench(args: argparse.Namespace):
     bench_contexts: list[BenchmarkContext] = as_benchmark_contexts(
         hidden_sizes=hidden_sizes, lora_ranks=args.lora_ranks, args=args)
 
-    run(args, bench_contexts)
+    if args.run_tuner:
+        run_tuner(args, bench_contexts)
+    else:
+        run(args, bench_contexts)
 
 
 if __name__ == '__main__':
@@ -1187,6 +1228,9 @@ if __name__ == '__main__':
                        nargs="+",
                        type=get_bool,
                        default=DEFAULT_EXPAND_FN_ADD_INPUTS)
+        p.add_argument("--run-tuner",
+                       action='store_true',
+                       help="When True just runs the kernels once to invoke the triton autotuner.")
         p.add_argument(
             '-o',
             '--output-directory',
