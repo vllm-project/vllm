@@ -1283,7 +1283,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         if args[0] == "serve":
             model_in_cli = len(args) > 1 and not args[1].startswith('-')
             model_in_config = any(arg == '--model' for arg in config_args)
-            
+
             if not model_in_cli and not model_in_config:
                 raise ValueError(
                     "No model specified! Please specify model either in "
@@ -1297,7 +1297,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             else:
                 # No model in CLI, use config if available
                 args = [args[0]
-                    ] + config_args + args[1:index] + args[index + 2:]
+                        ] + config_args + args[1:index] + args[index + 2:]
         else:
             args = [args[0]] + config_args + args[1:index] + args[index + 2:]
 
@@ -1343,7 +1343,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         # Skip model from config if it's provided as positional argument
         skip_model = False
         if hasattr(self, '_parsed_args') and self._parsed_args:
-            if (len(self._parsed_args) > 1 and self._parsed_args[0] == 'serve' 
+            if (len(self._parsed_args) > 1 and self._parsed_args[0] == 'serve'
                     and not self._parsed_args[1].startswith('-')):
                 skip_model = True
 
