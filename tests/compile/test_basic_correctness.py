@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from __future__ import annotations
 
 import dataclasses
 
@@ -21,74 +22,72 @@ class TestSetting:
     fullgraph: bool
 
 
-# representative settings for testing
-test_settings = [
-    # basic llama model
-    TestSetting(
-        model="meta-llama/Llama-3.2-1B-Instruct",
-        model_args=[],
-        pp_size=2,
-        tp_size=2,
-        attn_backend="FLASHINFER",
-        method="generate",
-        fullgraph=True,
-    ),
-    # llama model with quantization
-    TestSetting(
-        model="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-        model_args=["--quantization", "gptq"],
-        pp_size=1,
-        tp_size=1,
-        attn_backend="FLASH_ATTN",
-        method="generate",
-        fullgraph=True,
-    ),
-    # MoE model
-    TestSetting(
-        model="ibm/PowerMoE-3b",
-        model_args=[],
-        pp_size=1,
-        tp_size=2,
-        attn_backend="FLASH_ATTN",
-        method="generate",
-        fullgraph=True,
-    ),
-    # embedding model
-    TestSetting(
-        model="BAAI/bge-multilingual-gemma2",
-        model_args=["--task", "embed"],
-        pp_size=1,
-        tp_size=1,
-        attn_backend="FLASH_ATTN",
-        method="encode",
-        fullgraph=True,
-    ),
-    # encoder-based embedding model (BERT)
-    TestSetting(
-        model="BAAI/bge-base-en-v1.5",
-        model_args=["--task", "embed"],
-        pp_size=1,
-        tp_size=1,
-        attn_backend="XFORMERS",
-        method="encode",
-        fullgraph=True,
-    ),
-    # vision language model
-    TestSetting(
-        model="microsoft/Phi-3.5-vision-instruct",
-        model_args=["--trust-remote-code", "--max-model-len", "2048"],
-        pp_size=2,
-        tp_size=1,
-        attn_backend="FLASH_ATTN",
-        method="generate_with_image",
-        fullgraph=False,
-    ),
-]
-
-
 # we cannot afford testing the full Catesian product
 # of all models and all levels
-@pytest.mark.parametrize("test_setting", test_settings)
+@pytest.mark.parametrize(
+    "test_setting",
+    [
+        # basic llama model
+        TestSetting(
+            model="meta-llama/Llama-3.2-1B-Instruct",
+            model_args=[],
+            pp_size=2,
+            tp_size=2,
+            attn_backend="FLASHINFER",
+            method="generate",
+            fullgraph=True,
+        ),
+        # llama model with quantization
+        TestSetting(
+            model="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
+            model_args=["--quantization", "gptq"],
+            pp_size=1,
+            tp_size=1,
+            attn_backend="FLASH_ATTN",
+            method="generate",
+            fullgraph=True,
+        ),
+        # MoE model
+        TestSetting(
+            model="ibm/PowerMoE-3b",
+            model_args=[],
+            pp_size=1,
+            tp_size=2,
+            attn_backend="FLASH_ATTN",
+            method="generate",
+            fullgraph=True,
+        ),
+        # embedding model
+        TestSetting(
+            model="BAAI/bge-multilingual-gemma2",
+            model_args=["--task", "embed"],
+            pp_size=1,
+            tp_size=1,
+            attn_backend="FLASH_ATTN",
+            method="encode",
+            fullgraph=True,
+        ),
+        # encoder-based embedding model (BERT)
+        TestSetting(
+            model="BAAI/bge-base-en-v1.5",
+            model_args=["--task", "embed"],
+            pp_size=1,
+            tp_size=1,
+            attn_backend="XFORMERS",
+            method="encode",
+            fullgraph=True,
+        ),
+        # vision language model
+        TestSetting(
+            model="microsoft/Phi-3.5-vision-instruct",
+            model_args=["--trust-remote-code", "--max-model-len", "2048"],
+            pp_size=2,
+            tp_size=1,
+            attn_backend="FLASH_ATTN",
+            method="generate_with_image",
+            fullgraph=False,
+        ),
+    ])
 def test_compile_correctness(
     monkeypatch: pytest.MonkeyPatch,
     test_setting: TestSetting,
@@ -115,7 +114,7 @@ def test_compile_correctness(
         ]
 
         all_args: list[list[str]] = []
-        all_envs: list[dict[str, str]] = []
+        all_envs: list[dict[str, str] | None] = []
 
         for level in [
                 CompilationLevel.NO_COMPILATION,
@@ -143,6 +142,7 @@ def test_compile_correctness(
             all_envs.append({})
             if level != CompilationLevel.DYNAMO_ONCE and not fullgraph:
                 # "DYNAMO_ONCE" will always use fullgraph
+                assert all(i is not None for i in all_envs)
                 all_envs[-1]["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "0"
 
         compare_all_settings(model, all_args * 3, all_envs, method=method)
