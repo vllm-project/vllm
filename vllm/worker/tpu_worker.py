@@ -51,6 +51,9 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.model_runner: TPUModelRunner = TPUModelRunner(
             vllm_config=vllm_config, is_driver_worker=is_driver_worker)
 
+        if self.model_config.seed is None:
+            self.model_config.seed = 0
+
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
         torch.set_grad_enabled(False)
