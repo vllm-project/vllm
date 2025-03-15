@@ -48,7 +48,7 @@ def _test_processing_correctness(
         tokenizer=cached_tokenizer_from_config(model_config),
     )
     # Ensure that it can fit all of the data
-    cache = ProcessingCache(capacity=1 << 30)
+    cache = ProcessingCache(capacity_gb=2048)
 
     processing_info = factories.info(ctx)
     supported_mm_limits = processing_info.get_supported_mm_limits()
