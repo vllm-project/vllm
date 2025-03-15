@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 import msgspec
 
 import vllm.platforms
+from vllm import envs
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
@@ -283,12 +284,14 @@ def initialize_ray_cluster(
     """
     assert_ray_available()
     from vllm.platforms import current_platform
-
-    # Connect to a ray cluster.
-    if current_platform.is_rocm() or current_platform.is_xpu():
+    if ray.is_initialized():
+        logger.info("Ray is already initialized. Skipping Ray initialization.")
+    elif current_platform.is_rocm() or current_platform.is_xpu():
         # Try to connect existing ray instance and create a new one if not found
         try:
-            ray.init("auto", ignore_reinit_error=True)
+            ray.init("auto",
+                     ignore_reinit_error=True,
+                     namespace=envs.VLLM_RAY_NAMESPACE)
         except ConnectionError:
             logger.warning(
                 "No existing RAY instance detected. "
@@ -297,7 +300,9 @@ def initialize_ray_cluster(
                      ignore_reinit_error=True,
                      num_gpus=parallel_config.world_size)
     else:
-        ray.init(address=ray_address, ignore_reinit_error=True)
+        ray.init(address=ray_address,
+                 ignore_reinit_error=True,
+                 namespace=envs.VLLM_RAY_NAMESPACE)
 
     if parallel_config.placement_group:
         # Placement group is already set.
@@ -310,8 +315,17 @@ def initialize_ray_cluster(
             "support ray.")
 
     # Create placement group for worker processes
-    current_placement_group = ray.util.get_current_placement_group()
+    if envs.VLLM_RAY_PG_NAME:
+        # the placement group is specified by the user
+        logger.info(
+            "Looking for the placement group specified by"
+            " VLLM_RAY_PG_NAME: %s", envs.VLLM_RAY_PG_NAME)
+        current_placement_group = ray.util.get_placement_group(
+            envs.VLLM_RAY_PG_NAME)
+    else:
+        current_placement_group = ray.util.get_current_placement_group()
     if current_placement_group:
+        logger.info("Using current placement group")
         # We are in a placement group
         bundles = current_placement_group.bundle_specs
         # Verify that we can use the placement group.
@@ -331,6 +345,8 @@ def initialize_ray_cluster(
                 f"Required number of devices: {parallel_config.world_size}. "
                 f"Total number of devices: {device_bundles}.")
     else:
+        logger.info("No current placement group found. "
+                    "Creating a new placement group.")
         num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
         # Log a warning message and delay resource allocation failure response.
         # Avoid immediate rejection to allow user-initiated placement group
