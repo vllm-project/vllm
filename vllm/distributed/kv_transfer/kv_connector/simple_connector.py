@@ -169,11 +169,12 @@ class SimpleConnector(KVConnectorBase):
         num_attention_heads = model_config.num_attention_heads
 
         if hasattr(model_config, "kv_lora_rank"):
-            head_size = model_config.kv_lora_rank + model_config.qk_rope_head_dim
+            head_size = model_config.kv_lora_rank + \
+                model_config.qk_rope_head_dim
             num_heads = 1
         else:
             head_size = getattr(model_config, "head_dim",
-                        int(hidden_size // num_attention_heads))
+                                int(hidden_size // num_attention_heads))
 
         # query_lens contains new KV caches that are added to vLLM.
         # so we will send them to decode instance
@@ -196,7 +197,6 @@ class SimpleConnector(KVConnectorBase):
 
             for layer_id in range(start_layer, end_layer):
                 kv_cache = kv_caches[layer_id - start_layer]
-
 
                 if hasattr(model_config, "kv_lora_rank"):
                     key_cache = kv_cache.reshape(-1, num_heads, head_size)
@@ -305,8 +305,12 @@ class SimpleConnector(KVConnectorBase):
 
                 if hasattr(model_config, "kv_lora_rank"):
                     layer.self_attn.attn = layer.self_attn.mla_attn
-                    k_c_normed = keys[i - model_executable.model.start_layer].to(kv_cache.device)
-                    k_pe_sqz = values[i - model_executable.model.start_layer].to(kv_cache.device)
+                    k_c_normed = keys[i -
+                                      model_executable.model.start_layer].to(
+                                          kv_cache.device)
+                    k_pe_sqz = values[i -
+                                      model_executable.model.start_layer].to(
+                                          kv_cache.device)
                     k_c_normed = k_c_normed.squeeze(1)
                     k_pe_sqz = k_pe_sqz.squeeze(1)
                     ops.concat_and_cache_mla(
