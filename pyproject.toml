@@ -86,6 +86,7 @@ exclude = [
 "vllm/triton_utils/**/*.py" = ["UP006", "UP035"]
 "vllm/vllm_flash_attn/**/*.py" = ["UP006", "UP035"]
 "vllm/worker/**/*.py" = ["UP006", "UP035"]
+"vllm/utils.py" = ["UP006", "UP035"]
 
 [tool.ruff.lint]
 select = [
