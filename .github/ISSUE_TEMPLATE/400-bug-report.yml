@@ -75,7 +75,7 @@ body:
       ```
 
       ```
-      The error message you got, with the full traceback.
+      The error message you got, with the full traceback and the error logs with [dump_input.py:##] if present.
       ```
   validations:
     required: true
