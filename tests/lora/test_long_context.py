@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import vllm
+import vllm.envs as envs
 from vllm import SamplingParams
 from vllm.lora.layers import LinearScalingRotaryEmbeddingWithLoRA
 from vllm.lora.request import LoRARequest
@@ -25,6 +26,32 @@ sampling_params = SamplingParams(
     temperature=0,
     max_tokens=100,
 )
+
+
+@pytest.fixture(params=[True, False])
+def run_with_both_engines_long_context_lora(request, monkeypatch):
+    # Automatically runs tests twice, once with V1 and once without
+    use_v1 = request.param
+    # Tests decorated with `@skip_v1` are only run without v1
+    skip_v1 = request.node.get_closest_marker("skip_v1")
+
+    if use_v1:
+        if skip_v1:
+            pytest.skip("Skipping test on vllm V1")
+        monkeypatch.setenv('VLLM_USE_V1', '1')
+        monkeypatch.setenv('VLLM_ALLOW_LONG_MAX_MODEL_LEN', '1')
+    else:
+        monkeypatch.setenv('VLLM_USE_V1', '0')
+
+    yield
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_long_context_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
 
 
 def _create_lora_request(lora_id, long_context_infos):
@@ -109,12 +136,16 @@ def batched_generate(
     return [outputs[i].outputs[0].text.strip() for i in range(len(outputs))]
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def lora_llm(long_context_infos):
     scaling_factors = [
         context_len_to_scaling_factor[info["context_length"]]
         for info in long_context_infos.values()
     ]
+
+    max_model_len = None
+    if envs.VLLM_USE_V1:
+        max_model_len = 4096 * 8
 
     llm = vllm.LLM(
         "meta-llama/Llama-2-13b-chat-hf",
@@ -127,7 +158,11 @@ def lora_llm(long_context_infos):
         # FIXME enable async output processor
         disable_async_output_proc=True,
         distributed_executor_backend="mp",
-        enable_chunked_prefill=True)
+        enable_chunked_prefill=True,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.95,
+        max_model_len=max_model_len,
+    )
     yield llm
     del llm
 
@@ -135,15 +170,25 @@ def lora_llm(long_context_infos):
 def test_rotary_emb_replaced(dist_init):
     """Verify rotary emb in all the layers are replaced"""
     from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.worker.model_runner import ModelRunner
+
     engine_args = EngineArgs("meta-llama/Llama-2-7b-hf",
                              long_lora_scaling_factors=(4.0, ),
                              enable_lora=True)
     engine_config = engine_args.create_engine_config()
-    model_runner = ModelRunner(
-        vllm_config=engine_config,
-        is_driver_worker=True,
-    )
+
+    if envs.VLLM_USE_V1:
+        model_runner = GPUModelRunner(
+            vllm_config=engine_config,
+            device="cuda",
+        )
+    else:
+        model_runner = ModelRunner(
+            vllm_config=engine_config,
+            is_driver_worker=True,
+        )
+
     model_runner.load_model()
     rotary_emb_count = 0
     for module_name, module in model_runner.model.named_modules(
