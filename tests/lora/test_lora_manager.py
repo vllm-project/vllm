@@ -7,6 +7,7 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
+from vllm import envs
 from vllm.config import LoRAConfig
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
@@ -410,6 +411,7 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
     assert manager.device == device
 
 
+@pytest.mark.skipif(envs.VLLM_USE_V1, reason="Test leverages V0 internals.")
 @pytest.mark.parametrize("device", DEVICES)
 def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
                                           sql_lora_files, device):
@@ -489,6 +491,7 @@ def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
             device)
 
 
+@pytest.mark.skipif(envs.VLLM_USE_V1, reason="Test leverages V0 internals.")
 @pytest.mark.parametrize("device", DEVICES)
 def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
                                 sql_lora_files, device):

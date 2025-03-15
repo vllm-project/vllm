@@ -151,6 +151,10 @@ def uid() -> str:
 
 @pytest_asyncio.fixture(scope="module")
 async def async_engine():
+    # We cannot use monkeypatch since this is a module
+    # scoped fixture and monkeypatch is function scoped.
+    previous_value = os.getenv("VLLM_USE_V1", None)
+    os.environ["VLLM_USE_V1"] = "0"
     engine = await asyncio.get_event_loop().run_in_executor(executor=None,
                                                             func=start_engine)
     try:
@@ -160,6 +164,11 @@ async def async_engine():
         del engine
         await asyncio.sleep(0.1)
         cleanup_dist_env_and_memory()
+
+        if previous_value:
+            os.environ["VLLM_USE_V1"] = previous_value
+        else:
+            del os.environ["VLLM_USE_V1"]
 
 
 @pytest.fixture()

@@ -24,6 +24,18 @@ logger = init_logger("test_pipeline_parallel")
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
 
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    For PP, we fall back to V0 by default. This means
+    that the TP baseline runs with V1 while the PP engine
+    runs with V0. This gives divergent results with dummy
+    weights. Once we enable V1 by default for PP, we can
+    remove this.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int

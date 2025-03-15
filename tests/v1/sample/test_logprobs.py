@@ -6,7 +6,6 @@ from collections.abc import Generator
 import pytest
 import torch
 
-from tests.kernels.utils import override_backend_env_variable
 from tests.v1.sample.utils import (
     BatchLogprobsComposition, BatchLogprobsSpecType,
     assert_incr_detok_str_matches_non_incr_detok_str,
@@ -334,7 +333,7 @@ def test_get_logprobs_and_prompt_logprobs(
             do_apc=do_apc)
 
 
-def test_max_logprobs(monkeypatch):
+def test_max_logprobs():
     """vLLM v1 engine should fail a request with `logprobs > max_logprobs`
     
     Should also fail for `prompt_logprobs > max_logprobs`
@@ -344,7 +343,6 @@ def test_max_logprobs(monkeypatch):
     Args:
       monkeypatch
     """
-    override_backend_env_variable(monkeypatch, "FLASH_ATTN")
 
     runner = VllmRunner("facebook/opt-125m",
                         max_logprobs=1,

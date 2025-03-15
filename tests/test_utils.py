@@ -366,7 +366,10 @@ def test_bind_kv_cache_non_attention():
     assert ctx['model.layers.28.attn'].kv_cache[0] is kv_cache[1]
 
 
-def test_bind_kv_cache_encoder_decoder():
+def test_bind_kv_cache_encoder_decoder(monkeypatch):
+    # V1 TESTS: ENCODER_DECODER is not supported on V1 yet.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
+
     from vllm.attention import Attention, AttentionType
 
     # example from bart
