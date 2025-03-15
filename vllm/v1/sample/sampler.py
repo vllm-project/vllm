@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """A layer that samples the next tokens from the model's outputs."""
+from typing import Optional
 
 import torch
 import torch.nn as nn
 
+from vllm.utils import next_power_of_2
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
@@ -12,6 +14,7 @@ from vllm.v1.sample.ops.penalties import (apply_all_penalties,
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
 _SAMPLING_EPS = 1e-5
+_MIN_LOGITS_BUFFER_SIZE = 1024  # Default value of max_num_seqs
 
 
 class Sampler(nn.Module):
@@ -19,6 +22,8 @@ class Sampler(nn.Module):
     def __init__(self):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
+        # Created dynamically in forward()
+        self.logits_buffer: Optional[torch.Tensor] = None
 
     def forward(
         self,
@@ -35,8 +40,20 @@ class Sampler(nn.Module):
         if num_logprobs is not None:
             raw_logprobs = self.compute_logprobs(logits)
 
-        # Use float32 for the logits.
-        logits = logits.to(torch.float32)
+        num_logits = logits.shape[0]
+        if (self.logits_buffer is None
+                or num_logits > self.logits_buffer.shape[0]):
+            # Increase the buffer size to the next power of 2.
+            buffer_size = max(next_power_of_2(num_logits),
+                              _MIN_LOGITS_BUFFER_SIZE)
+            # Use float32 for the logits.
+            self.logits_buffer = torch.empty(buffer_size,
+                                             logits.shape[1],
+                                             dtype=torch.float32,
+                                             device=logits.device)
+        self.logits_buffer[:num_logits] = logits
+        logits = self.logits_buffer[:num_logits]
+
         # Apply allowed token ids.
         logits = self.apply_allowed_token_ids(logits, sampling_metadata)
         # Apply bad words exclusion.
