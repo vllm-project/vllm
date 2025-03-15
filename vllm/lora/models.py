@@ -643,12 +643,12 @@ class LoRAModelManager(AdapterModelManager):
                 if replacement_loras[i]:
                     continue
                 replacement_loras[i] = None
-
+            # HACK Temporary solution for the pool model.
             if self.is_pooling_model and not lora_model.check_lora_name(
                     module_name):
-                new_module_name = module_name.replace("model.", "")
+                replaced_module_name = module_name.replace("model.", "")
                 if lora_model.check_lora_name(module_name):
-                    module_name = new_module_name
+                    module_name = replaced_module_name
             lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
                 replacement_loras)
             # Remove the modules that have been replaced.
@@ -661,9 +661,14 @@ class LoRAModelManager(AdapterModelManager):
         org_module_name = module_name
         if self.is_pooling_model and not lora_model.check_lora_name(
                 module_name):
+            # If it's a pool model, and the layer name is not found,
+            # remove the prefix 'model.' and search again.
             module_name = module_name.replace("model.", "")
             if lora_model.check_lora_name(module_name):
                 org_module_name = module_name
+                logger.info_once(
+                    "For the pool model, successfully loaded the LoRA weights "
+                    "after removing the prefix 'model.'.")
         return lora_model.get_lora(org_module_name)
 
     def deactivate_adapter(self, adapter_id: int) -> bool:
