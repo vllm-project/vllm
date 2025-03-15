@@ -833,7 +833,7 @@ void mla_decode_kvcache_cpu_impl(
     const int last_block_size = seq_len - (block_num - 1) * BLOCK_SIZE;
 
     std::vector<float> acc_lse(num_heads, -FLT_MAX);
-    std::vector<vec_type> acc_out(num_heads * V_HEAD_DIM / ELEM_NUM);
+    std::vector<vec_op::FP32Vec16> acc_out(num_heads * V_HEAD_DIM / ELEM_NUM);
 
     for (int block_idx = 0; block_idx < block_num; ++block_idx) {
       const int physical_block_idx =
@@ -858,7 +858,7 @@ void mla_decode_kvcache_cpu_impl(
 
         for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
           // dot product
-          vec_type acc_vec;
+          vec_op::FP32Vec16 acc_vec;
           for (int i = 0; i < HEAD_DIM; i += ELEM_NUM) {
             load_vec_type q_load_vec(q + seq_idx * q_stride +
                                      head_idx * HEAD_DIM + i);
@@ -880,15 +880,19 @@ void mla_decode_kvcache_cpu_impl(
           sum_exp += val;
         }
 
-        vec_type this_out[V_HEAD_DIM / ELEM_NUM];
+        vec_op::FP32Vec16 this_out[V_HEAD_DIM / ELEM_NUM];
         float inv_sum = 1.0f / sum_exp;
 
         for (int block_offset = 0; block_offset < BLOCK_SIZE; ++block_offset) {
-          vec_type scale_(logits[block_offset] * inv_sum);
+          vec_op::FP32Vec16 scale_(logits[block_offset] * inv_sum);
+
           for (int i = 0; i < V_HEAD_DIM; i += ELEM_NUM) {
-            vec_op::fma(this_out[i / ELEM_NUM],
-                        k_vecs[(block_offset * HEAD_DIM + i) / ELEM_NUM],
-                        scale_);
+            // always do FP32 x FP32 -> FP32 here
+            // TODO: on AVX512, this is equivalent to BF16Vec32 -> FP32Vec16,
+            // which does not exist. need to fix this
+            vec_op::FP32Vec16 v_vec_f32(
+                k_vecs[(block_offset * HEAD_DIM + i) / ELEM_NUM]);
+            vec_op::fma(this_out[i / ELEM_NUM], v_vec_f32, scale_);
           }
         }
 
@@ -902,8 +906,8 @@ void mla_decode_kvcache_cpu_impl(
         const float curr_sum_exp = std::exp(curr_lse - max_val);
 
         const float new_sum_exp = prev_sum_exp + curr_sum_exp;
-        vec_type prev_scale(prev_sum_exp / new_sum_exp);
-        vec_type curr_scale(curr_sum_exp / new_sum_exp);
+        vec_op::FP32Vec16 prev_scale(prev_sum_exp / new_sum_exp);
+        vec_op::FP32Vec16 curr_scale(curr_sum_exp / new_sum_exp);
 
         acc_lse[head_idx] = std::log(new_sum_exp) +
                             max_val;  // add back max_val to get true lse
@@ -947,7 +951,7 @@ void mla_decode_kvcache_cpu_impl(
           const scalar_t* __restrict__ k_ptr = kv_cache +
                                                physical_block_idx * kv_stride +
                                                block_offset * HEAD_DIM;
-          vec_type acc_vec;
+          vec_op::FP32Vec16 acc_vec;
 
           for (int i = 0; i < HEAD_DIM; i += ELEM_NUM) {
             load_vec_type q_load_vec(q_ptr + i);
@@ -974,7 +978,7 @@ void mla_decode_kvcache_cpu_impl(
       const float inv_sum = 1.0f / sum;
 
       // multiply with v
-      std::vector<vec_type> out_token(V_HEAD_DIM / ELEM_NUM);
+      std::vector<vec_op::FP32Vec16> out_token(V_HEAD_DIM / ELEM_NUM);
 
       for (int block_idx = 0; block_idx < block_num; ++block_idx) {
         const int64_t physical_block_idx = seq_block_table[block_idx];
@@ -985,13 +989,13 @@ void mla_decode_kvcache_cpu_impl(
           const scalar_t* __restrict__ v_ptr = kv_cache +
                                                physical_block_idx * kv_stride +
                                                block_offset * HEAD_DIM;
-          vec_type scale_(logits[block_idx * BLOCK_SIZE + block_offset] *
-                          inv_sum);
+          vec_op::FP32Vec16 scale_(
+              logits[block_idx * BLOCK_SIZE + block_offset] * inv_sum);
 
           for (int i = 0; i < V_HEAD_DIM; i += ELEM_NUM) {
             load_vec_type v_load_vec(v_ptr + i);
-            vec_type v_vec(v_load_vec);
-            vec_op::fma(out_token[i / ELEM_NUM], v_vec, scale_);
+            vec_op::FP32Vec16 v_vec_f32(v_load_vec);
+            vec_op::fma(out_token[i / ELEM_NUM], v_vec_f32, scale_);
           }
         }
       }
