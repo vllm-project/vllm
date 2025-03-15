@@ -23,7 +23,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import check_gguf_file, is_remote_url
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, StoreBoolean
 
@@ -339,7 +339,8 @@ class EngineArgs:
             '* "runai_streamer" will load the Safetensors weights using Run:ai'
             'Model Streamer \n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
-            'quantization.\n')
+            'quantization.\n'
+            '* "remote" will load the weights from remote database.\n')
         parser.add_argument(
             '--config-format',
             default=EngineArgs.config_format,
@@ -1172,6 +1173,9 @@ class EngineArgs:
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
+
+        if is_remote_url(self.model):
+            self.load_format = "remote"
 
         return LoadConfig(
             load_format=self.load_format,

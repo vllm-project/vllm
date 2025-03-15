@@ -436,6 +436,26 @@ def safetensors_weights_iterator(
                 yield name, param
 
 
+def set_runai_streamer_env(load_config: LoadConfig):
+    if load_config.model_loader_extra_config:
+        extra_config = load_config.model_loader_extra_config
+
+        if ("concurrency" in extra_config
+                and isinstance(extra_config.get("concurrency"), int)):
+            os.environ["RUNAI_STREAMER_CONCURRENCY"] = str(
+                extra_config.get("concurrency"))
+
+        if ("memory_limit" in extra_config
+                and isinstance(extra_config.get("memory_limit"), int)):
+            os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] = str(
+                extra_config.get("memory_limit"))
+
+    runai_streamer_s3_endpoint = os.getenv('RUNAI_STREAMER_S3_ENDPOINT')
+    aws_endpoint_url = os.getenv('AWS_ENDPOINT_URL')
+    if (runai_streamer_s3_endpoint is None and aws_endpoint_url is not None):
+        os.environ["RUNAI_STREAMER_S3_ENDPOINT"] = aws_endpoint_url
+
+
 def runai_safetensors_weights_iterator(
     hf_weights_files: List[str],
     use_tqdm_on_load: bool,

@@ -29,6 +29,9 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.attention import Attention
 from vllm.config import (LoadConfig, LoadFormat, ModelConfig, ParallelConfig,
                          VllmConfig, set_current_vllm_config)
+from vllm.connector import (ConnectorType, create_remote_connector,
+                            get_connector_type)
+from vllm.connector.utils import parse_model_name
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
@@ -52,11 +55,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
     get_gguf_extra_tensor_names, get_lock, gguf_quant_weights_iterator,
     initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
-    runai_safetensors_weights_iterator, safetensors_weights_iterator)
+    runai_safetensors_weights_iterator, safetensors_weights_iterator,
+    set_runai_streamer_env)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.transformers_utils.s3_utils import glob as s3_glob
-from vllm.transformers_utils.utils import is_s3
 from vllm.utils import is_pin_memory_available
 
 
@@ -415,6 +417,8 @@ class DefaultModelLoader(BaseModelLoader):
                               allow_patterns_overrides=None)
 
     def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        logger.info("Loading weights by default loader ... ")
+        start = time.perf_counter()
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
         target_device = torch.device(device_config.device)
@@ -441,6 +445,9 @@ class DefaultModelLoader(BaseModelLoader):
 
             _process_weights_after_loading(model, model_config, target_device)
 
+        end = time.perf_counter()
+        logger.info("Loaded weights from default loader in %.2f seconds.",
+                    end - start)
         return model.eval()
 
 
@@ -1344,58 +1351,35 @@ class GGUFModelLoader(BaseModelLoader):
 class RunaiModelStreamerLoader(BaseModelLoader):
     """
         Model loader that can load safetensors
-        files from local FS or S3 bucket.
+        files from local FS.
     """
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
-        if load_config.model_loader_extra_config:
-            extra_config = load_config.model_loader_extra_config
-
-            if ("concurrency" in extra_config
-                    and isinstance(extra_config.get("concurrency"), int)):
-                os.environ["RUNAI_STREAMER_CONCURRENCY"] = str(
-                    extra_config.get("concurrency"))
-
-            if ("memory_limit" in extra_config
-                    and isinstance(extra_config.get("memory_limit"), int)):
-                os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] = str(
-                    extra_config.get("memory_limit"))
-
-            runai_streamer_s3_endpoint = os.getenv(
-                'RUNAI_STREAMER_S3_ENDPOINT')
-            aws_endpoint_url = os.getenv('AWS_ENDPOINT_URL')
-            if (runai_streamer_s3_endpoint is None
-                    and aws_endpoint_url is not None):
-                os.environ["RUNAI_STREAMER_S3_ENDPOINT"] = aws_endpoint_url
+        set_runai_streamer_env(load_config)
 
     def _prepare_weights(self, model_name_or_path: str,
                          revision: Optional[str]) -> List[str]:
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
-
-        is_s3_path = is_s3(model_name_or_path)
         is_local = os.path.isdir(model_name_or_path)
         safetensors_pattern = "*.safetensors"
         index_file = SAFE_WEIGHTS_INDEX_NAME
 
-        hf_folder = (model_name_or_path if
-                     (is_local or is_s3_path) else download_weights_from_hf(
+        hf_folder = (model_name_or_path
+                     if is_local else download_weights_from_hf(
                          model_name_or_path,
                          self.load_config.download_dir,
                          [safetensors_pattern],
                          revision,
                          ignore_patterns=self.load_config.ignore_patterns,
                      ))
-        if is_s3_path:
-            hf_weights_files = s3_glob(path=hf_folder,
-                                       allow_pattern=[safetensors_pattern])
-        else:
-            hf_weights_files = glob.glob(
-                os.path.join(hf_folder, safetensors_pattern))
 
-        if not is_local and not is_s3_path:
+        hf_weights_files = glob.glob(
+            os.path.join(hf_folder, safetensors_pattern))
+
+        if not is_local:
             download_safetensors_index_file_from_hf(
                 model_name_or_path, index_file, self.load_config.download_dir,
                 revision)
@@ -1442,6 +1426,136 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         return model.eval()
 
 
+class RemoteModelLoader(BaseModelLoader):
+    """Model loader that can load Tensors from remote database."""
+
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+        set_runai_streamer_env(load_config)
+
+    def _get_weights_iterator_kv(
+        self,
+        client,
+    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+        """Get an iterator for the model weights from remote storage."""
+        assert get_connector_type(client) == ConnectorType.KV
+        rank = get_tensor_model_parallel_rank()
+        return client.weight_iterator(rank)
+
+    def _get_weights_iterator_fs(
+        self,
+        client,
+    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+        """Get an iterator for the model weights from remote storage."""
+        assert get_connector_type(client) == ConnectorType.FS
+        return client.weight_iterator()
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        pass
+
+    @staticmethod
+    def save_model(
+        model: torch.nn.Module,
+        model_path: str,
+        url: str,
+    ) -> None:
+        with create_remote_connector(url) as client:
+            assert get_connector_type(client) == ConnectorType.KV
+            model_name = parse_model_name(url)
+            rank = get_tensor_model_parallel_rank()
+            state_dict = ShardedStateLoader._filter_subtensors(
+                model.state_dict())
+            for key, tensor in state_dict.items():
+                r_key = f"{model_name}/keys/rank_{rank}/{key}"
+                client.set(r_key, tensor)
+
+            for root, _, files in os.walk(model_path):
+                for file_name in files:
+                    # ignore hidden files
+                    if file_name.startswith("."):
+                        continue
+                    if os.path.splitext(file_name)[1] not in (".bin", ".pt",
+                                                              ".safetensors"):
+                        file_path = os.path.join(root, file_name)
+                        with open(file_path, encoding='utf-8') as file:
+                            file_content = file.read()
+                            f_key = f"{model_name}/files/{file_name}"
+                            client.setstr(f_key, file_content)
+
+    def _load_model_from_remote_kv(self, model: nn.Module, client,
+                                   vllm_config: VllmConfig):
+        model_config = vllm_config.model_config
+        device_config = vllm_config.device_config
+        _process_weights_after_loading(model, model_config,
+                                       device_config.device)
+        weights_iterator = self._get_weights_iterator_kv(client)
+        state_dict = ShardedStateLoader._filter_subtensors(model.state_dict())
+        for key, tensor in weights_iterator:
+            # If loading with LoRA enabled, additional padding may
+            # be added to certain parameters. We only load into a
+            # narrowed view of the parameter data.
+            param_data = state_dict[key].data
+            param_shape = state_dict[key].shape
+            for dim, size in enumerate(tensor.shape):
+                if size < param_shape[dim]:
+                    param_data = param_data.narrow(dim, 0, size)
+            if tensor.shape != param_shape:
+                logger.warning(
+                    "loading tensor of shape %s into "
+                    "parameter '%s' of shape %s",
+                    tensor.shape,
+                    key,
+                    param_shape,
+                )
+            param_data.copy_(tensor)
+            state_dict.pop(key)
+        if state_dict:
+            raise ValueError(
+                f"Missing keys {tuple(state_dict)} in loaded state!")
+
+    def _load_model_from_remote_fs(self, model, client,
+                                   vllm_config: VllmConfig) -> nn.Module:
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
+
+        target_device = torch.device(device_config.device)
+        with set_default_torch_dtype(model_config.dtype):
+            model.load_weights(self._get_weights_iterator_fs(client))
+            _process_weights_after_loading(model, model_config, target_device)
+
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        logger.info("Loading weights from remote storage ...")
+        start = time.perf_counter()
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
+        load_config = vllm_config.load_config
+
+        assert load_config.load_format == LoadFormat.REMOTE, (
+            f"Model loader {self.load_config.load_format} is not supported for "
+            f"load format {load_config.load_format}")
+
+        model_weights = model_config.model
+        if hasattr(model_config, "model_weights"):
+            model_weights = model_config.model_weights
+
+        with set_default_torch_dtype(model_config.dtype):
+            with torch.device(device_config.device):
+                model = _initialize_model(vllm_config=vllm_config)
+
+            with create_remote_connector(model_weights,
+                                         device_config.device) as client:
+                connector_type = get_connector_type(client)
+                if connector_type == ConnectorType.KV:
+                    self._load_model_from_remote_kv(model, client, vllm_config)
+                elif connector_type == ConnectorType.FS:
+                    self._load_model_from_remote_fs(model, client, vllm_config)
+
+        end = time.perf_counter()
+        logger.info("Loaded weights from remote storage in %.2f seconds.",
+                    end - start)
+        return model.eval()
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
     if isinstance(load_config.load_format, type):
@@ -1464,5 +1578,8 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.RUNAI_STREAMER:
         return RunaiModelStreamerLoader(load_config)
+
+    if load_config.load_format == LoadFormat.REMOTE:
+        return RemoteModelLoader(load_config)
 
     return DefaultModelLoader(load_config)

@@ -23,6 +23,7 @@ from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
+from vllm.connector import create_remote_connector
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
@@ -35,8 +36,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
     try_get_generation_config, uses_mrope)
-from vllm.transformers_utils.s3_utils import S3Model
-from vllm.transformers_utils.utils import is_s3
+from vllm.transformers_utils.utils import is_remote_url
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
                         get_cpu_memory, random_uuid, resolve_obj_by_qualname)
 
@@ -302,7 +302,7 @@ class ModelConfig:
                 f"'Please instead use `--hf-overrides '{hf_overrides_str}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
-        self.maybe_pull_model_tokenizer_for_s3(model, tokenizer)
+        self.maybe_pull_model_tokenizer_from_remote(model, tokenizer)
 
         if (backend := envs.VLLM_ATTENTION_BACKEND
             ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
@@ -434,30 +434,32 @@ class ModelConfig:
     def architectures(self) -> list[str]:
         return getattr(self.hf_config, "architectures", [])
 
-    def maybe_pull_model_tokenizer_for_s3(self, model: str,
-                                          tokenizer: str) -> None:
+    def maybe_pull_model_tokenizer_from_remote(self, model: str,
+                                               tokenizer: str) -> None:
         """
         Pull the model config or tokenizer to a temporary
-        directory in case of S3.
+        directory in case of remote.
 
         Args:
             model: The model name or path.
             tokenizer: The tokenizer name or path.
 
         """
-        if is_s3(model) or is_s3(tokenizer):
-            if is_s3(model):
-                s3_model = S3Model()
-                s3_model.pull_files(
-                    model, allow_pattern=["*.model", "*.py", "*.json"])
+        if is_remote_url(model) or is_remote_url(tokenizer):
+            logger.info("Pulling model and tokenizer from remote...")
+            # BaseConnector implements __del__() to clean up the local dir.
+            # Since config files need to exist all the time, so we DO NOT use
+            # with statement to avoid closing the client.
+            client = create_remote_connector(model)
+            if is_remote_url(model):
+                client.pull_files(allow_pattern=["*config.json"])
                 self.model_weights = self.model
-                self.model = s3_model.dir
+                self.model = client.get_local_dir()
 
-            if is_s3(tokenizer):
-                s3_tokenizer = S3Model()
-                s3_tokenizer.pull_files(
-                    model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
-                self.tokenizer = s3_tokenizer.dir
+            if is_remote_url(tokenizer):
+                client.pull_files(
+                    ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                self.tokenizer = client.get_local_dir()
 
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
@@ -1254,6 +1256,7 @@ class TokenizerPoolConfig:
 
 class LoadFormat(str, enum.Enum):
     AUTO = "auto"
+    REMOTE = "remote"
     PT = "pt"
     SAFETENSORS = "safetensors"
     NPCACHE = "npcache"

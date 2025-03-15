@@ -230,6 +230,9 @@ class ExecutorBase(ABC):
                                         pattern=pattern,
                                         max_size=max_size))
 
+    def save_remote_state(self, url: str) -> None:
+        self.collective_rpc("save_remote_state", kwargs=dict(url=url))
+
     @abstractmethod
     def check_health(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an

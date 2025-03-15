@@ -14,7 +14,9 @@ from tqdm.asyncio import tqdm
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
+from vllm.connector import create_remote_connector
 from vllm.model_executor.model_loader.weight_utils import get_lock
+from vllm.transformers_utils.utils import is_remote_url
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -435,8 +437,15 @@ def get_model(pretrained_model_name_or_path: str) -> str:
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
                 ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
 
-            return model_path
-    return pretrained_model_name_or_path
+        return model_path
+
+    if is_remote_url(pretrained_model_name_or_path):
+        # BaseConnector implements __del__() to clean up the local dir.
+        # Since config files need to exist all the time, so we DO NOT use
+        # with statement to avoid closing the client.
+        client = create_remote_connector(pretrained_model_name_or_path)
+        client.pull_files(ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+        return client.get_local_dir()
 
 
 def get_tokenizer(

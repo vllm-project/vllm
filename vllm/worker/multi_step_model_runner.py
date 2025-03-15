@@ -665,6 +665,9 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                               tensorizer_config: TensorizerConfig) -> None:
         return self._base_model_runner.save_tensorized_model(tensorizer_config)
 
+    def save_remote_model(self, url):
+        return self._base_model_runner.save_remote_model(url)
+
     def profile_run(self) -> None:
         return self._base_model_runner.profile_run()
 

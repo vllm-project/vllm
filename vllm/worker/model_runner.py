@@ -1191,6 +1191,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             tensorizer_config=tensorizer_config,
         )
 
+    def save_remote_model(self, url: str) -> None:
+        from vllm.model_executor.model_loader.loader import RemoteModelLoader
+        RemoteModelLoader.save_model(
+            self.model,
+            self.model_config.model,
+            url,
+        )
+
     def get_max_block_per_batch(self) -> int:
         block_size = self.block_size
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
