@@ -64,7 +64,6 @@ def test_multi_chat():
 def test_chat_multi_image(image_urls: list[str]):
     llm = LLM(
         model="microsoft/Phi-3.5-vision-instruct",
-        dtype="bfloat16",
         max_model_len=4096,
         max_num_seqs=5,
         enforce_eager=True,

@@ -25,8 +25,6 @@ def server():
     args = [
         "--task",
         "generate",
-        "--dtype",
-        "bfloat16",
         "--max-model-len",
         "2048",
         "--max-num-seqs",

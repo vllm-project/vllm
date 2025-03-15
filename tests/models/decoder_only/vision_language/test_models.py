@@ -100,7 +100,8 @@ VLM_TEST_SETTINGS = {
         ),
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         convert_assets_to_embeddings=model_utils.get_llava_embeddings,
-        max_model_len=4096,
+        max_model_len=2048,
+        max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
@@ -258,7 +259,6 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         # TODO: Use AutoModelForVision2Seq once transformers supports this
         auto_cls=AutoModelForPreTraining,
-        dtype="bfloat16",
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
     ),
@@ -272,7 +272,6 @@ VLM_TEST_SETTINGS = {
         }),
         max_model_len=2048,
         max_num_seqs=2,
-        dtype="bfloat16",
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
         patch_hf_runner=model_utils.glm4v_patch_hf_runner,
         # The image embeddings match with HF but the outputs of the language
@@ -295,7 +294,7 @@ VLM_TEST_SETTINGS = {
         }),
         multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
         max_model_len=8192,
-        dtype="bfloat16",
+        max_num_seqs=2,
         use_tokenizer_eos=True,
         num_logprobs=10,
         patch_hf_runner=model_utils.h2ovl_patch_hf_runner,
@@ -324,10 +323,7 @@ VLM_TEST_SETTINGS = {
         }),
         multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
         max_model_len=4096,
-        # NOTE: Mono-InternVL-2B doesn't work with fp16,
-        # it will result NaN during inference.
-        # See: https://huggingface.co/OpenGVLab/Mono-InternVL-2B/discussions/9
-        dtype="bfloat16",
+        max_num_seqs=2,
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
     ),
@@ -335,7 +331,8 @@ VLM_TEST_SETTINGS = {
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
         test_type=(VLMTestType.IMAGE, VLMTestType.CUSTOM_INPUTS),
         prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
-        max_model_len=10240,
+        max_model_len=4096,
+        max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
@@ -351,6 +348,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
         num_video_frames=16,
         max_model_len=16384,
+        max_num_seqs=2,
         postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values_videos"
         ),
@@ -370,6 +368,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda vid_prompt: f"USER: {vid_prompt} ASSISTANT:",
         num_video_frames=16,
         max_model_len=4096,
+        max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
     ),
@@ -378,6 +377,7 @@ VLM_TEST_SETTINGS = {
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
         max_model_len=4096,
+        max_num_seqs=2,
         postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
@@ -503,7 +503,7 @@ VLM_TEST_SETTINGS = {
     "llava_next-broadcast": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
         prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
-        max_model_len=10240,
+        max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         marks=multi_gpu_marks(num_gpus=2),

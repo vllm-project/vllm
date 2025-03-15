@@ -291,7 +291,7 @@ class HfRunner:
     def __init__(
         self,
         model_name: str,
-        dtype: str = "half",
+        dtype: str = "auto",
         *,
         model_kwargs: Optional[dict[str, Any]] = None,
         is_sentence_transformer: bool = False,
@@ -300,36 +300,52 @@ class HfRunner:
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
         postprocess_inputs: Callable[..., BatchEncoding] = identity,
     ) -> None:
-        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
+        if dtype == "auto":
+            torch_dtype = None
+        else:
+            torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
         self.model_name = model_name
 
         if is_sentence_transformer:
             # Lazy init required for AMD CI
             from sentence_transformers import SentenceTransformer
-            self.model = self.wrap_device(
-                SentenceTransformer(
-                    model_name,
-                    device="cpu",
-                    trust_remote_code=True,
-                ).to(dtype=torch_dtype))
+
+            _model = SentenceTransformer(
+                model_name,
+                device="cpu",
+                trust_remote_code=True,
+            )
+            if torch_dtype is not None:
+                _model = _model.to(torch_dtype)
+
+            self.model = self.wrap_device(_model)
+            self.dtype = next(_model.parameters()).dtype
         elif is_cross_encoder:
             # Lazy init required for AMD CI
             from sentence_transformers import CrossEncoder
+
             self.model = CrossEncoder(model_name,
                                       device="cpu",
                                       trust_remote_code=True)
-            self.model.model = self.wrap_device(self.model.model)\
-                .to(dtype=torch_dtype)
+
+            _model = self.model.model
+            if torch_dtype is not None:
+                _model = _model.to(dtype=torch_dtype)
+
+            self.model.model = self.wrap_device(_model)
+            self.dtype = next(_model.parameters()).dtype
         else:
             model_kwargs = model_kwargs if model_kwargs is not None else {}
-            self.model = self.wrap_device(
-                auto_cls.from_pretrained(
-                    model_name,
-                    torch_dtype=torch_dtype,
-                    trust_remote_code=True,
-                    **model_kwargs,
-                ))
+            _model = auto_cls.from_pretrained(
+                model_name,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True,
+                **model_kwargs,
+            )
+
+            self.model = self.wrap_device(_model)
+            self.dtype = next(_model.parameters()).dtype
 
         if not skip_tokenizer_init:
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -349,7 +365,6 @@ class HfRunner:
         if skip_tokenizer_init:
             self.tokenizer = self.processor.tokenizer
 
-        self.dtype = dtype
         self.postprocess_inputs = postprocess_inputs
 
     def get_inputs(
@@ -681,6 +696,18 @@ def hf_runner():
 
 
 class VllmRunner:
+    """
+    The default value of some arguments have been modified from
+    :class:`~vllm.LLM` as follows:
+
+    - `trust_remote_code`: Set to `True` instead of `False` for convenience.
+    - `seed`: Set to `0` instead of `None` for test reproducibility.
+    - `max_model_len`: Set to `1024` instead of `None` to reduce memory usage.
+    - `block_size`: Set to `1024` instead of `None` to reduce memory usage.
+    - `enable_chunked_prefill`: Set to `False` instead of `None` for
+      test reproducibility.
+    - `enforce_eager`: Set to `False` instead of `None` to reduce memory usage.
+    """
 
     def __init__(
         self,
@@ -688,14 +715,14 @@ class VllmRunner:
         task: TaskOption = "auto",
         tokenizer_name: Optional[str] = None,
         tokenizer_mode: str = "auto",
-        # Use smaller max model length, otherwise bigger model cannot run due
-        # to kv cache size limit.
+        trust_remote_code: bool = True,
+        seed: Optional[int] = 0,
         max_model_len: int = 1024,
-        dtype: str = "half",
+        dtype: str = "auto",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
         block_size: int = 16,
-        enable_chunked_prefill: bool = False,
+        enable_chunked_prefill: Optional[bool] = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
         **kwargs,
@@ -705,8 +732,9 @@ class VllmRunner:
             task=task,
             tokenizer=tokenizer_name,
             tokenizer_mode=tokenizer_mode,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             dtype=dtype,
+            seed=seed,
             swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,

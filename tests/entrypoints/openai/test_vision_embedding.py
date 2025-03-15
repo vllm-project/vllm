@@ -28,8 +28,6 @@ def server():
     args = [
         "--task",
         "embed",
-        "--dtype",
-        "bfloat16",
         "--max-model-len",
         "2048",
         "--max-num-seqs",

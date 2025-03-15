@@ -18,8 +18,6 @@ TEST_AUDIO_URLS = [
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--dtype",
-        "bfloat16",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
