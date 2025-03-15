@@ -231,7 +231,6 @@ def test_models_with_fp8_kv_cache(
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("enable", [True, False])
 def test_with_prefix_caching(
     vllm_runner: VllmRunner,
     max_tokens: int,
@@ -239,7 +238,6 @@ def test_with_prefix_caching(
     chunk_size: int,
     tensor_parallel_size: int,
     dtype: str,
-    enable: bool,
 ) -> None:
     """
     Checks exact match decode with and without prefix caching
@@ -257,22 +255,23 @@ def test_with_prefix_caching(
 
     max_num_batched_tokens = max_num_seqs = chunk_size
     outputs = {}  # type: ignore
-    with vllm_runner(
-            model,
-            dtype=dtype,
-            max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=True,
-            enable_prefix_caching=enable,
-            tensor_parallel_size=tensor_parallel_size,
-            enforce_eager=enforce_eager,
-            max_num_seqs=max_num_seqs,
-    ) as vllm_model:
-        outputs[enable] = []
-        for prompt in full_prompts:
-            outputs[enable] += vllm_model.generate_greedy(
-                [prompt],
-                max_tokens,
-            )
+    for enable in (True, False):
+        with vllm_runner(
+                model,
+                dtype=dtype,
+                max_num_batched_tokens=max_num_batched_tokens,
+                enable_chunked_prefill=True,
+                enable_prefix_caching=enable,
+                tensor_parallel_size=tensor_parallel_size,
+                enforce_eager=enforce_eager,
+                max_num_seqs=max_num_seqs,
+        ) as vllm_model:
+            outputs[enable] = []
+            for prompt in full_prompts:
+                outputs[enable] += vllm_model.generate_greedy(
+                    [prompt],
+                    max_tokens,
+                )
 
     check_outputs_equal(
         outputs_0_lst=outputs[False],

@@ -70,16 +70,14 @@ def models_list_fixture(request):
             "quantization": "AWQ"
         }))
 
-    if request.param is None:
-        return TEST_MODELS
-    return TEST_MODELS[request.param]
+    return TEST_MODELS
 
 
 @pytest.mark.parametrize(
     "optimization_level",
     [CompilationLevel.DYNAMO_ONCE, CompilationLevel.PIECEWISE],
 )
-@pytest.mark.parametrize("model_info", None, indirect=True)
+@pytest.mark.parametrize("model_info", "", indirect=True)
 @fork_new_process_for_each_test
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
