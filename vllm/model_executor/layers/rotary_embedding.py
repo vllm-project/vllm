@@ -23,15 +23,17 @@
 # limitations under the License.
 """Rotary Positional Embeddings."""
 import math
-from typing import Any, Dict, List, Optional, Tuple, Union
+from functools import lru_cache
+from typing import Any, Dict, List, Optional, Tuple, Union, Literal, ClassVar
 
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
-
+from vllm.utils import maybe_numba_jit, IS_NUMBA_AVAILABLE
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., :x.shape[-1] // 2]
@@ -925,60 +927,113 @@ class MRotaryEmbedding(RotaryEmbedding):
         return query, key
 
     @staticmethod
-    def get_input_positions(
-        input_tokens: List[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: Optional[Union[List[List[int]], torch.Tensor]],
-        video_grid_thw: Optional[Union[List[List[int]], torch.Tensor]],
-        second_per_grid_ts: Optional[List[float]],
+    def get_input_positions_and_delta(
+        input_tokens: Union[list[int], np.ndarray],
+        hf_config: any,
+        image_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
+        video_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
+        second_per_grid_ts: Optional[list[float]],
         context_len: int = 0,
         seq_len: Optional[int] = None,
-    ) -> Tuple[List[List[int]], int]:
-        """Get mrope input positions and delta value."""
+        backend: Literal["numba", "torch", "auto"] = "auto",
+    ) -> Tuple[torch.Tensor, int]:
+        if backend == "auto":
+            if image_grid_thw is not None or video_grid_thw is not None:
+                backend = "numba" if IS_NUMBA_AVAILABLE else "torch"
+            else:
+                backend = "plain"
 
-        image_grid_thw = [] if image_grid_thw is None else image_grid_thw
-        video_grid_thw = [] if video_grid_thw is None else video_grid_thw
-        second_per_grid_ts = [] if second_per_grid_ts is None else \
-            second_per_grid_ts
+        if second_per_grid_ts is None:
+            second_per_grid_ts = []
 
-        llm_positions, mrope_position_delta = \
-            MRotaryEmbedding.get_input_positions_tensor(
-                input_tokens=input_tokens,
-                hf_config=hf_config,
+        if backend == "numba":
+            if image_grid_thw is None or len(image_grid_thw) == 0:
+                image_grid_thw = np.empty((0, 3), dtype=np.int64)
+            elif isinstance(image_grid_thw, torch.Tensor):
+                image_grid_thw = image_grid_thw.numpy()
+            else:
+                image_grid_thw = np.array(image_grid_thw, dtype=np.int64)
+
+            if video_grid_thw is None or len(video_grid_thw) == 0:
+                video_grid_thw = np.empty((0, 3), dtype=np.int64)
+            elif isinstance(video_grid_thw, torch.Tensor):
+                video_grid_thw = video_grid_thw.numpy()
+            else:
+                video_grid_thw = np.array(video_grid_thw, dtype=np.int64)
+
+            second_per_grid_ts = np.array(second_per_grid_ts, dtype=np.float64)
+            if len(second_per_grid_ts) < len(video_grid_thw):
+                second_per_grid_ts = np.concatenate([
+                    second_per_grid_ts,
+                    np.ones(len(video_grid_thw) - len(second_per_grid_ts), dtype=np.float64),
+                ])
+            
+            input_positions = MRotaryEmbedding.get_input_positions_numba(
+                input_tokens=np.asarray(input_tokens, dtype=np.int64),
+                image_token_id=hf_config.image_token_id,
+                video_token_id=hf_config.video_token_id,
+                spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+                tokens_per_second=getattr(hf_config.vision_config, "tokens_per_second", 1.0),
                 image_grid_thw=image_grid_thw,
                 video_grid_thw=video_grid_thw,
                 second_per_grid_ts=second_per_grid_ts,
-                context_len=context_len,
-                seq_len=seq_len,
             )
+        elif backend == "torch":
+            if image_grid_thw is None:
+                image_grid_thw = []
+            elif isinstance(image_grid_thw, torch.Tensor):
+                image_grid_thw = image_grid_thw.tolist()
 
-        return llm_positions.tolist(), mrope_position_delta
+            if video_grid_thw is None:
+                video_grid_thw = []
+            elif isinstance(video_grid_thw, torch.Tensor):
+                video_grid_thw = video_grid_thw.tolist()
+
+            if isinstance(input_tokens, np.ndarray):
+                input_tokens = torch.from_numpy(input_tokens)
+
+            input_positions = MRotaryEmbedding.get_input_positions_torch(
+                input_tokens=input_tokens,
+                vision_start_token_id=hf_config.vision_start_token_id,
+                image_token_id=hf_config.image_token_id,
+                video_token_id=hf_config.video_token_id,
+                spatial_merge_size=hf_config.vision_config.spatial_merge_size,
+                tokens_per_second=getattr(hf_config.vision_config, "tokens_per_second", 1.0),
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+            )
+        else: # text-only prompt
+            input_positions = torch.arange(len(input_tokens)).expand(3, -1)
+
+        mrope_position_delta = input_positions[:, -1].max().item() + 1 - len(input_tokens)
+        if context_len != 0 or seq_len is not None:
+            input_positions = input_positions[:, context_len:seq_len]
+
+        if backend == "numba":
+            input_positions = torch.from_numpy(input_positions)
+
+        return input_positions, mrope_position_delta
 
     @staticmethod
-    def get_input_positions_tensor(
-        input_tokens: List[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: Union[List[List[int]], torch.Tensor],
-        video_grid_thw: Union[List[List[int]], torch.Tensor],
-        second_per_grid_ts: List[float],
-        context_len: int = 0,
-        seq_len: Optional[int] = None,
-    ) -> Tuple[torch.Tensor, int]:
+    def get_input_positions_torch(
+        input_tokens: Union[list[int], torch.Tensor],
+        vision_start_token_id: int,
+        image_token_id: int,
+        video_token_id: int,
+        spatial_merge_size: int,
+        tokens_per_second: float,
+        image_grid_thw: list[list[int]],
+        video_grid_thw: list[list[int]],
+        second_per_grid_ts: list[float],
+    ) -> torch.Tensor:
         """Get mrope input positions and delta value."""
+        if isinstance(input_tokens, torch.Tensor):
+            input_tokens_tensor = input_tokens
+            input_tokens = input_tokens.tolist()
+        else:
+            input_tokens_tensor = torch.tensor(input_tokens, dtype=torch.int64)
 
-        image_token_id = hf_config.image_token_id
-        video_token_id = hf_config.video_token_id
-        vision_start_token_id = hf_config.vision_start_token_id
-        spatial_merge_size = hf_config.vision_config.spatial_merge_size
-        tokens_per_second = getattr(hf_config.vision_config,
-                                    "tokens_per_second", 1.0)
-
-        if isinstance(image_grid_thw, torch.Tensor):
-            image_grid_thw = image_grid_thw.tolist()
-        if isinstance(video_grid_thw, torch.Tensor):
-            video_grid_thw = video_grid_thw.tolist()
-
-        input_tokens_tensor = torch.tensor(input_tokens)
         vision_start_indices = torch.argwhere(
             input_tokens_tensor == vision_start_token_id).squeeze(1)
         vision_tokens = input_tokens_tensor[vision_start_indices + 1]
@@ -1051,12 +1106,100 @@ class MRotaryEmbedding(RotaryEmbedding):
                 torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-        mrope_position_delta = (llm_positions.max() + 1 -
-                                len(input_tokens)).item()
-        llm_positions = llm_positions[:, context_len:seq_len]
+        return llm_positions
+    
+    @staticmethod
+    @maybe_numba_jit(nopython=True)
+    def get_input_positions_numba(
+        input_tokens: np.ndarray,
+        image_token_id: int,
+        video_token_id: int,
+        spatial_merge_size: int,
+        tokens_per_second: float,
+        image_grid_thw: np.ndarray,
+        video_grid_thw: np.ndarray,
+        second_per_grid_ts: np.ndarray,
+    ) -> np.ndarray:
+        mrope_pos = np.empty((3, input_tokens.shape[0]), dtype=np.int64)
 
-        return llm_positions, mrope_position_delta
+        # current mrope `t`
+        cur_t = -1
 
+        # processed or processing image / video index
+        cur_image_idx = -1
+        cur_video_idx = -1
+
+        # previous token id
+        prev_token_id = -1
+
+        # stateful args inside an multi-modal item
+        mm_start_t = 0
+        mm_t_progress = 0
+        mm_h_progress = 0
+        mm_w_progress = 0
+        mm_grid_h = 0
+        mm_grid_w = 0
+
+        for i, token_id in enumerate(input_tokens):
+            if token_id == image_token_id:
+                if prev_token_id != image_token_id:
+                    cur_image_idx += 1
+                    mm_grid_h = image_grid_thw[cur_image_idx][1] // spatial_merge_size
+                    mm_grid_w = image_grid_thw[cur_image_idx][2] // spatial_merge_size
+                    cur_t += 1
+                    mm_start_t = cur_t
+                    mm_t_progress = 0
+                    mm_h_progress = 0
+                    mm_w_progress = 0
+                else:
+                    mm_w_progress += 1
+                    if mm_w_progress >= mm_grid_w:
+                        mm_w_progress = 0
+                        mm_h_progress += 1
+                    if mm_h_progress >= mm_grid_h:
+                        mm_h_progress = 0
+                        mm_t_progress += 1
+                        cur_t += 1
+
+                mrope_pos[0, i] = cur_t
+                mrope_pos[1, i] = mm_start_t + mm_h_progress
+                mrope_pos[2, i] = mm_start_t + mm_w_progress
+            elif token_id == video_token_id:
+                if prev_token_id != video_token_id:
+                    cur_video_idx += 1
+                    mm_grid_h = video_grid_thw[cur_video_idx][1] // spatial_merge_size
+                    mm_grid_w = video_grid_thw[cur_video_idx][2] // spatial_merge_size
+                    cur_t += 1
+                    mm_start_t = cur_t
+                    mm_t_progress = 0
+                    mm_h_progress = 0
+                    mm_w_progress = 0
+                else:
+                    mm_w_progress += 1
+                    if mm_w_progress >= mm_grid_w:
+                        mm_w_progress = 0
+                        mm_h_progress += 1
+                    if mm_h_progress >= mm_grid_h:
+                        mm_h_progress = 0
+                        mm_t_progress += 1
+                        cur_t = mm_start_t + int(mm_t_progress * tokens_per_second * second_per_grid_ts[cur_video_idx])
+
+                mrope_pos[0, i] = cur_t
+                mrope_pos[1, i] = mm_start_t + mm_h_progress
+                mrope_pos[2, i] = mm_start_t + mm_w_progress
+            else:
+                if prev_token_id == image_token_id or prev_token_id == video_token_id:
+                    cur_t = max(mrope_pos[0, i - 1], mrope_pos[1, i - 1], mrope_pos[2, i - 1]) + 1
+                else:
+                    cur_t += 1
+                
+                mrope_pos[0, i] = cur_t
+                mrope_pos[1, i] = cur_t
+                mrope_pos[2, i] = cur_t
+            prev_token_id = token_id
+
+        return mrope_pos
+    
     @staticmethod
     def get_next_input_positions(
         mrope_position_delta: int,

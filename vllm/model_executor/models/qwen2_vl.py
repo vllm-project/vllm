@@ -25,9 +25,10 @@
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property, partial
-from typing import (Any, Callable, Literal, Optional, Set, Tuple, TypedDict,
+from typing import (Any, Callable, cast, Literal, Optional, Set, Tuple, TypedDict,
                     Union)
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -70,6 +71,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import (
     cached_image_processor_from_config)
+from vllm.utils import maybe_numba_jit, IS_NUMBA_AVAILABLE
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -591,8 +593,8 @@ class Qwen2VisionTransformer(nn.Module):
     @property
     def device(self) -> torch.device:
         return self.patch_embed.proj.weight.device
-
-    def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
+    
+    def rot_pos_torch(self, grid_thw: torch.Tensor) -> torch.Tensor:
         pos_ids = []
         for t, h, w in grid_thw:
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
@@ -611,46 +613,150 @@ class Qwen2VisionTransformer(nn.Module):
             ).permute(0, 2, 1, 3).flatten()
             pos_ids.append(
                 torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
-        pos_ids = torch.cat(pos_ids, dim=0)
-        max_grid_size = grid_thw[:, 1:].max()
-        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
-        return rotary_pos_emb
+        
+        # avoid copy when there is only one tensor
+        if len(pos_ids) == 1:
+            return pos_ids[0]
+        
+        return torch.cat(pos_ids, dim=0)
+    
+    @staticmethod
+    @maybe_numba_jit(nopython=True)
+    def _rot_pos_hw_numba(arr, w, spatial_merge_size):
+        if spatial_merge_size == 2:
+            w *= 2
+            for i in range(arr.shape[0]):
+                # calc hpos_id: (i // (w * 2)) * 2 + (i // 2) % 2
+                # use bitwise operation for better performance
+                arr[i, 0] = ((i // w) << 1) | ((i >> 1) & 1)
 
+                # calc wpos_id: (i % (w * 2)) // 4 * 2 + i % 2
+                # use bitwise operation for better performance
+                arr[i, 1] = ((i % w) >> 2) << 1 | (i & 1)
+        else:
+            merged_row_size = w * spatial_merge_size
+            merged_grid_size = spatial_merge_size ** 2
+            for i in range(arr.shape[0]):
+                # calc hpos_id
+                arr[i, 0] = (i // merged_row_size) * spatial_merge_size + (i // spatial_merge_size) % spatial_merge_size
+
+                # calc wpos_id
+                arr[i, 1] = (i % merged_row_size) // merged_grid_size * spatial_merge_size + i % spatial_merge_size
+    
+    def rot_pos_numba(self, grid_thw: torch.Tensor) -> torch.Tensor:
+        pos_ids = []
+        for t, h, w in grid_thw.tolist():
+            out_arr = np.empty((h * w, 2), dtype=np.int64)
+            self._rot_pos_hw_numba(out_arr, w, self.spatial_merge_size)
+            pos_ids.append(out_arr.reshape((1, -1)).repeat(t, 0).reshape((-1, 2)))
+        
+        # avoid copy when there is only one ndarray
+        if len(pos_ids) == 1:
+            return torch.from_numpy(pos_ids[0])
+        
+        return torch.from_numpy(np.concatenate(pos_ids, axis=0))
+    
+    def rot_pos_torch_parallel(self, grid_thw: torch.Tensor) -> torch.Tensor:
+        out = torch.empty(
+            (grid_thw.prod(dim=1).sum().item(), 2),
+            device=self.device,
+            dtype=torch.int64,
+        )
+
+        max_hw = grid_thw[:, 1:].prod(dim=1).max().item()
+        grid_size = self.spatial_merge_size ** 2
+        
+        block_pos = torch.arange(0,
+                                 grid_thw[:, 1:].max().item(),
+                                 self.spatial_merge_size,
+                                 device=self.device,
+                                 dtype=torch.int64)
+        spatial_seq = torch.arange(self.spatial_merge_size,
+                                   device=self.device,
+                                   dtype=torch.int64)
+
+        block_hdelta = spatial_seq.unsqueeze(1) \
+            .repeat(1, self.spatial_merge_size) \
+            .view(-1, grid_size) \
+            .expand(max_hw // grid_size, -1)
+        block_wdelta = spatial_seq.unsqueeze(0) \
+            .repeat(1, self.spatial_merge_size) \
+            .view(-1, grid_size) \
+            .expand(max_hw // grid_size, -1)
+
+        start_pos = 0
+        for t, h, w in grid_thw.tolist():
+            seqlen = t * h * w
+
+            merged_h = h // self.spatial_merge_size
+            merged_w = w // self.spatial_merge_size
+            merged_hw = merged_h * merged_w
+
+            narrowed_out = out.narrow(0, start_pos, seqlen).view(
+                t, merged_h, merged_w, grid_size, 2)
+            
+            block_hpos = block_pos[:merged_h].view(-1, 1, 1) \
+                .expand(-1, merged_w, grid_size)
+            block_wpos = block_pos[:merged_w].view(1, -1, 1) \
+                .expand(merged_h, -1, grid_size)
+
+            narrowed_out[..., 0] = block_hpos + block_hdelta[:merged_hw] \
+                .view(merged_h, merged_w, grid_size)
+            narrowed_out[..., 1] = block_wpos + block_wdelta[:merged_hw] \
+                .view(merged_h, merged_w, grid_size)
+
+            start_pos += seqlen
+
+        return out
+    
     def forward(
         self,
         x: torch.Tensor,
-        grid_thw: torch.Tensor,
+        grid_thw: torch.Tensor, # on CPU
     ) -> torch.Tensor:
+        # DEBUG
+        assert grid_thw.is_cpu()
+        grid_thw = grid_thw.cpu()
+        
         # patchify
         x = x.to(device=self.device, dtype=self.dtype)
         x = self.patch_embed(x)
 
         # compute position embedding
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        max_grid_size = grid_thw[:, 1:].max().item()
+        rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+
+        if x.is_cpu():
+            if IS_NUMBA_AVAILABLE:
+                pos_ids = self.rot_pos_numba(grid_thw)
+            else:
+                pos_ids = self.rot_pos_torch(grid_thw)
+        else:
+            pos_ids = self.rot_pos_torch_parallel(grid_thw)
+        
+        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
 
         # compute cu_seqlens
-        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
-                                             grid_thw[:, 0]).cumsum(
-                                                 dim=0, dtype=torch.int32)
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
+        seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
+                                          grid_thw[:, 0])
+        cu_seqlens = F.pad(seqlens.cumsum(dim=0, dtype=torch.int32), (1, 0), "constant", 0)
 
         # transformers
         x = x.unsqueeze(1)
 
-        max_seqlen = None
-        seqlens = None
+        max_seqlen: Optional[int] = None
+        seqlens_list: Optional[list[int]] = None
         if self.attn_backend == _Backend.FLASH_ATTN:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+            max_seqlen = seqlens.max().item()
         elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+            seqlens_list = seqlens.tolist()
         for blk in self.blocks:
             x = blk(
                 x,
                 cu_seqlens=cu_seqlens,
                 rotary_pos_emb=rotary_pos_emb,
                 max_seqlen=max_seqlen,
-                seqlens=seqlens,
+                seqlens=seqlens_list,
             )
 
         # adapter
