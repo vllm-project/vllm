@@ -472,3 +472,32 @@ def test_swap_dict_values(obj, key1, key2):
         assert obj[key1] == original_obj[key2]
     else:
         assert key1 not in obj
+
+
+def test_model_specification(parser_with_config):
+    # Test model in CLI takes precedence over config
+    args = parser_with_config.parse_args([
+        'serve', 'cli-model', '--config', './data/test_config_with_model.yaml'
+    ])
+    assert args.model_tag == 'cli-model'
+    assert args.served_model_name == 'mymodel'
+
+    # Test model from config file works
+    args = parser_with_config.parse_args([
+        'serve', '--config', './data/test_config_with_model.yaml'
+    ])
+    assert args.model == 'config-model'
+    assert args.served_model_name == 'mymodel'
+
+    # Test no model specified anywhere raises error
+    with pytest.raises(ValueError, match="No model specified!"):
+        parser_with_config.parse_args(['serve', '--config', './data/test_config.yaml'])
+
+    # Test other config values are preserved
+    args = parser_with_config.parse_args([
+        'serve', 'cli-model', '--config', './data/test_config_with_model.yaml'
+    ])
+    assert args.tensor_parallel_size == 2
+    assert args.trust_remote_code is True
+    assert args.multi_step_stream_outputs is False
+    assert args.port == 12312
