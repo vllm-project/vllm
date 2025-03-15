@@ -73,3 +73,31 @@ class TransformerMemoryPredict(nn.Module):
         out = self.transformer(x, x)
         out = self.fc(out)
         return out.squeeze(1)
+    
+import torch
+import torch.nn as nn
+
+
+class MlpMemoryPredictClassification(nn.Module):
+    def __init__(self, window_size, num_classes):
+        super(MlpMemoryPredictClassification, self).__init__()
+        self.fc1 = nn.Linear(window_size * num_classes, 32, bias=True)  # Fixed input size
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(32, 32, bias=True)
+        self.fc3 = nn.Linear(32, num_classes, bias=True)  # Fixed layer name
+
+    # Takes a sequence of memory accesses and predicts the next memory access class
+    # x: [batch_size, window_size, num_classes]
+    # output: [batch_size, num_classes] (logits for classification)
+    def forward(self, x):
+        batch_size = x.shape[0]
+        x = x.view(batch_size, -1)  # Flatten [batch_size, window_size, num_classes] -> [batch_size, window_size * num_classes]
+        
+        out = self.fc1(x)
+        out = self.relu(out)
+        out = self.fc2(out)
+        out = self.relu(out)
+        out = self.fc3(out)  # Fixed incorrect reference
+        out = torch.nn.functional.log_softmax(out, dim=1)
+
+        return out  # No need for squeeze(1) since this is a classification model
