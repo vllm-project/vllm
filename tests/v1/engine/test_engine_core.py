@@ -214,8 +214,10 @@ def test_engine_core_concurrent_batches(monkeypatch):
     Test that the engine can handle multiple concurrent batches.
     """
 
-    def make_request_with_max_tokens(max_tokens: int) -> EngineCoreRequest:
+    def make_request_with_max_tokens(req_id: int,
+                                     max_tokens: int) -> EngineCoreRequest:
         request = make_request()
+        request.request_id = req_id
         request.sampling_params.max_tokens = max_tokens
         return request
 
@@ -262,6 +264,8 @@ def test_engine_core_concurrent_batches(monkeypatch):
             # Avoid all requests being scheduled once.
             enable_prefix_caching=False,
             max_num_batched_tokens=10,
+            # Reduce startup time.
+            enforce_eager=True,
         )
         vllm_config = engine_args.create_engine_config()
         engine_core = EngineCore(vllm_config=vllm_config,
@@ -269,23 +273,86 @@ def test_engine_core_concurrent_batches(monkeypatch):
                                  executor_class=DummyExecutor)
         assert engine_core.batch_queue is not None
 
-        # Add two requests in a row.
-        req = make_request_with_max_tokens(5)
-        engine_core.add_request(req)
-        req = make_request_with_max_tokens(5)
-        engine_core.add_request(req)
+        # Add two requests in a row. Each request have 12 prompt tokens.
+        req0 = make_request_with_max_tokens(0, 5)
+        engine_core.add_request(req0)
+        req1 = make_request_with_max_tokens(1, 5)
+        engine_core.add_request(req1)
 
-        # First saturate the batch queue.
+        # Schedule Batch 1: (10, req0)
         assert engine_core.step_with_batch_queue() is None
         assert engine_core.batch_queue.qsize() == 1
+        scheduler_output = engine_core.batch_queue.queue[-1][1]
+        assert scheduler_output.num_scheduled_tokens[0] == 10
+        # num_computed_tokens should have been updated immediately.
+        assert engine_core.scheduler.requests[
+            req0.request_id].num_computed_tokens == 10
+
+        # Schedule Batch 2: (2, req0), (8, req1)
         assert engine_core.step_with_batch_queue() is None
         assert engine_core.batch_queue.qsize() == 2
+        scheduler_output = engine_core.batch_queue.queue[-1][1]
+        assert scheduler_output.num_scheduled_tokens[0] == 2
+        assert scheduler_output.num_scheduled_tokens[1] == 8
+        # num_computed_tokens should have been updated immediately.
+        assert engine_core.scheduler.requests[0].num_computed_tokens == 12
+        assert engine_core.scheduler.requests[1].num_computed_tokens == 8
+
         assert engine_core.scheduler.get_num_unfinished_requests() == 2
 
-        # Loop through both requests.
-        while engine_core.scheduler.get_num_unfinished_requests() == 2:
-            engine_core.step_with_batch_queue()
+        # Batch queue is full. Finish Batch 1.
+        engine_core.step_with_batch_queue()
 
-        # Reaching here when got the result of the first request.
-        while engine_core.scheduler.get_num_unfinished_requests() == 1:
-            engine_core.step_with_batch_queue()
+        # Schedule Batch 3: (4, req1). Note that req0 cannot be scheduled
+        # because it is in the decoding stage now.
+        engine_core.step_with_batch_queue()
+        assert engine_core.batch_queue.qsize() == 2
+        scheduler_output = engine_core.batch_queue.queue[-1][1]
+        assert scheduler_output.num_scheduled_tokens[1] == 4
+
+        # Batch queue is full. Finish Batch 2. Get first token of req0.
+        output = engine_core.step_with_batch_queue()
+        assert output is not None
+        assert len(output.outputs) == 1
+        assert engine_core.scheduler.requests[req0.request_id].num_tokens == 13
+
+        # Schedule Batch 4: (1, req0).
+        engine_core.step_with_batch_queue()
+        assert engine_core.batch_queue.qsize() == 2
+        scheduler_output = engine_core.batch_queue.queue[-1][1]
+        assert scheduler_output.num_scheduled_tokens[0] == 1
+
+        # Batch queue is full. Finish Batch 3. Get first token of req1.
+        engine_core.step_with_batch_queue()
+        assert output is not None
+        assert len(output.outputs) == 1
+        assert engine_core.scheduler.requests[req1.request_id].num_tokens == 13
+
+        # Schedule Batch 5: (1, req1).
+        engine_core.step_with_batch_queue()
+        assert engine_core.batch_queue.qsize() == 2
+        scheduler_output = engine_core.batch_queue.queue[-1][1]
+        assert scheduler_output.num_scheduled_tokens[1] == 1
+
+        # Loop until req0 is finished.
+        step = 0
+        req_id = 0
+        expected_num_tokens = [
+            engine_core.scheduler.requests[0].num_tokens + 1,
+            engine_core.scheduler.requests[1].num_tokens + 1,
+        ]
+        while engine_core.scheduler.get_num_unfinished_requests() == 2:
+            output = engine_core.step_with_batch_queue()
+            if step % 2 == 0:
+                # Even steps consumes an output.
+                assert output is not None
+                assert len(output.outputs) == 1
+                if req_id in engine_core.scheduler.requests:
+                    assert engine_core.scheduler.requests[
+                        req_id].num_tokens == expected_num_tokens[req_id]
+                expected_num_tokens[req_id] += 1
+                req_id = (req_id + 1) % 2
+            else:
+                # Odd steps schedules a new batch.
+                assert output is None
+            step += 1
