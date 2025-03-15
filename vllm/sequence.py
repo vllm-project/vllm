@@ -111,6 +111,13 @@ class RequestMetrics:
         model_execute_time: The time spent in the model execute function. This
                             will include model forward, block/sync across
                             workers, cpu-gpu sync time and sampling time.
+        spec_token_acceptance_counts: number of accepted speculative tokens at
+                                      each position; the first token is from 
+                                      the target model and is always accepted;
+                                      e.g., when it's [10, 8, 4, 2] for a req, 
+                                      it means there were 10 forward passes in
+                                      total, and there were 8, 4, 2 accepted 
+                                      tokens at 1st, 2nd, 3rd speculation step. 
     """
     arrival_time: float
     last_token_time: float
@@ -121,6 +128,7 @@ class RequestMetrics:
     scheduler_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
+    spec_token_acceptance_counts: Optional[list[int]] = None
 
 
 class SequenceDataDelta(
@@ -639,22 +647,25 @@ class SequenceGroup:
         trace_headers: OpenTelemetry trace headers.
         prompt_adapter_request: Prompt Adapter request.
         priority: User-defined priority of the request.
+        draft_size: The number of speculative tokens plus one from the target 
+                    model; equal to max number of tokens a step can generate
+                    for single-draft speculative decoding but larger than 
+                    that for multi-draft SD (currently not supported).
     """
 
-    def __init__(
-        self,
-        request_id: str,
-        seqs: list[Sequence],
-        arrival_time: float,
-        sampling_params: Optional[SamplingParams] = None,
-        lora_request: Optional[LoRARequest] = None,
-        pooling_params: Optional[PoolingParams] = None,
-        pooled_data: Optional[torch.Tensor] = None,
-        encoder_seq: Optional[Sequence] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        priority: int = 0,
-    ) -> None:
+    def __init__(self,
+                 request_id: str,
+                 seqs: list[Sequence],
+                 arrival_time: float,
+                 sampling_params: Optional[SamplingParams] = None,
+                 lora_request: Optional[LoRARequest] = None,
+                 pooling_params: Optional[PoolingParams] = None,
+                 pooled_data: Optional[torch.Tensor] = None,
+                 encoder_seq: Optional[Sequence] = None,
+                 trace_headers: Optional[Mapping[str, str]] = None,
+                 prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+                 priority: int = 0,
+                 draft_size: int = 1) -> None:
         self.request_id = request_id
         self.seqs = seqs
         self.first_seq = seqs[0]
@@ -667,7 +678,9 @@ class SequenceGroup:
                                       last_token_time=arrival_time,
                                       first_scheduled_time=None,
                                       first_token_time=None,
-                                      time_in_queue=None)
+                                      time_in_queue=None,
+                                      spec_token_acceptance_counts=[0] *
+                                      draft_size)
         self.last_token_latency = 0.0
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
@@ -1079,6 +1092,7 @@ class CompletionSequenceGroupOutput(
     samples: list[SequenceOutput]
     # Prompt logprob for each prompt query token.
     prompt_logprobs: Optional[PromptLogprobs]
+    step_index: Optional[int] = 0
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "
