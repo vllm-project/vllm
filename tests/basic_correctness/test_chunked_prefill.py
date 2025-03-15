@@ -266,7 +266,7 @@ def test_with_prefix_caching(
 
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
-@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("dtype", ["bfloat16", "half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
 @pytest.mark.parametrize("enforce_eager", [False])
@@ -303,7 +303,7 @@ def test_models_cpu(
 @pytest.mark.parametrize("max_tokens", [16])
 @pytest.mark.parametrize("enforce_eager", [False])
 @pytest.mark.parametrize("chunk_size", [30, 32])
-@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("dtype", ["bfloat16", "half"])
 @pytest.mark.cpu_model
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
 def test_with_prefix_caching_cpu(

@@ -189,7 +189,7 @@ vLLM CPU backend supports the following vLLM features:
 - Model Quantization (`INT8 W8A8, AWQ, GPTQ`)
 - Chunked-prefill
 - Prefix-caching
-- FP8-E5M2 KV-Caching (TODO)
+- FP8-E5M2 KV cache
 
 ## Related runtime environment variables
 
