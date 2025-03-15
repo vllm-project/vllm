@@ -204,3 +204,4 @@ actionlint
 shellcheck*/
 
 output/
+data/
