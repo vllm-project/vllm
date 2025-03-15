@@ -78,8 +78,6 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
 
   __m256i reg;
 
-  explicit FP16Vec16() : reg(_mm256_setzero_si256()) {}
-
   explicit FP16Vec16(const void* ptr)
       : reg((__m256i)_mm256_loadu_si256((__m256i*)ptr)) {}
 
@@ -112,8 +110,6 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
 
   __m256i reg;
 
-  explicit BF16Vec16() : reg(_mm256_setzero_si256()) {};
-
   explicit BF16Vec16(const void* ptr)
       : reg((__m256i)_mm256_loadu_si256((__m256i*)ptr)) {}
 
@@ -133,8 +129,6 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
   constexpr static int VEC_ELEM_NUM = 32;
 
   __m512i reg;
-
-  explicit BF16Vec32() : reg((__m512i)_mm512_set1_ps(0.0)) {}
 
   explicit BF16Vec32(const void* ptr) : reg((__m512i)_mm512_loadu_si512(ptr)) {}
 

@@ -52,67 +52,18 @@ struct KernelVecType<c10::BFloat16> {
 };
 #endif
 
-template <typename T1, typename T2>
-void convert(T1& dst, const T2& src) {
-  T1 tmp(src);
-  dst = tmp;
-}
-
-#ifdef __x86_64__
-  #ifdef __AVX512F__
-  // pass
-  #else  // AVX2
-// custom BF16<->FP32 dtype conversion optimized for x86 AVX2
-// this uses different layout compared to the ones defined in vec_op.
-// this results in 10-20% speedup for the mla_decode_kv_cache() kernel.
-// NOTE: might remove if AVX2 optimization is not important.
-
-// 256-bit BF16 src: [a00, a01, ..., a15]
-//               | 256-bit FP32 high dst | 256-bit FP32 low dst
-// vec_op layout |  [a00, a01, ..., a07] |  [a08, a09, ..., a15]
-// this layout   |  [a00, a02, ..., a14] |  [a01, a03, ..., a15]
-template <>
-void convert(vec_op::FP32Vec16& dst, const vec_op::BF16Vec16& src) {
-  __m256i v_low = _mm256_setzero_si256();
-  v_low = _mm256_blend_epi16(src.reg, v_low, 0xAA);  // select even elements
-  v_low = _mm256_bslli_epi128(v_low, 2);
-  dst.reg_low = _mm256_castsi256_ps(v_low);
-
-  __m256i v_high = _mm256_setzero_si256();
-  v_high = _mm256_blend_epi16(src.reg, v_high, 0x55);  // select odd elements
-  dst.reg_high = _mm256_castsi256_ps(v_high);
-}
-
-// 2x 256-bit FP32 src: [a00, a01, ..., a07], [b00, b01, ..., b07]
-//                |            256-bit BF16 dst
-// vec_op layout  | [a00, a01, ..., a07, b00, b01, ..., b07]
-// this layout    | [a00, b00, a01, b01, ..., ..., a07, b07]
-//
-// NOTE: similar to vec_op, there is no rounding handling here for FP32->BF16
-template <>
-void convert(vec_op::BF16Vec16& dst, const vec_op::FP32Vec16& src) {
-  __m256i low = _mm256_setzero_si256();
-  low = _mm256_blend_epi16(_mm256_castps_si256(src.reg_low), low,
-                           0x55);  // take the higher 16-bit
-  low = _mm256_bsrli_epi128(low, 2);
-
-  __m256i high = _mm256_setzero_si256();
-  high = _mm256_blend_epi16(_mm256_castps_si256(src.reg_high), high, 0x55);
-  dst.reg = _mm256_or_si256(low, high);
-}
-  #endif
-#endif
-
-template <typename scalar_t, int HEAD_DIM, int V_HEAD_DIM, int BLOCK_SIZE>
+template <typename scalar_t, int HEAD_DIM, int V_HEAD_DIM, int BLOCK_SIZE,
+          typename qk_vec_type>
 void mla_decode_block(
-    const scalar_t* __restrict__ q,         // [num_heads, head_dim]
-    const scalar_t* __restrict__ kv_cache,  // [block_size, head_dim]
-    float* __restrict__ acc_out,  // [num_heads, v_head_dim]. TODO: add
-                                  // alignment hint?
-    float* __restrict__ acc_lse,  // [num_heads]
+    const qk_vec_type* __restrict__ q_vecs,  // [num_heads, head_dim]
+    const scalar_t* __restrict__ kv_cache,   // [block_size, head_dim]
+    float* __restrict__ acc_out,             // [num_heads, v_head_dim]
+    float* __restrict__ acc_lse,             // [num_heads]
     const int num_heads, const float scale, const int num_tokens) {
   using qk_load_vec_type = typename KernelVecType<scalar_t>::qk_load_vec_type;
-  using qk_vec_type = typename KernelVecType<scalar_t>::qk_vec_type;
+  static_assert(
+      std::is_same<qk_vec_type,
+                   typename KernelVecType<scalar_t>::qk_vec_type>::value);
   using v_load_vec_type = typename KernelVecType<scalar_t>::v_load_vec_type;
   using f32_vec_type = vec_op::FP32Vec16;
   static_assert(qk_load_vec_type::VEC_ELEM_NUM == qk_vec_type::VEC_ELEM_NUM);
@@ -124,12 +75,9 @@ void mla_decode_block(
   const f32_vec_type* v_vecs_f32;
   float* kv_cache_f32 = nullptr;
 
-  // TODO: we should also pre-convert q to FP32
-
   if constexpr (!std::is_same<scalar_t, float>::value) {
     // convert KV cache block to FP32 to reuse it across query heads and
-    // attn @ V computation, since FP16/BF16->FP32 is expensive. The FP32
-    // KV cache should live in CPU cache.
+    // attn @ V computation, since FP16/BF16->FP32 is expensive.
     // TODO: move malloc outside of this fn to reuse across iterations.
     const int nbytes = BLOCK_SIZE * HEAD_DIM * sizeof(float);
     kv_cache_f32 = static_cast<float*>(std::aligned_alloc(64, nbytes));
@@ -137,8 +85,7 @@ void mla_decode_block(
     for (int block_offset = 0; block_offset < num_tokens; ++block_offset)
       for (int i = 0; i < HEAD_DIM; i += V_NUM_ELEM) {
         v_load_vec_type kv_load_vec(kv_cache + block_offset * HEAD_DIM + i);
-        f32_vec_type kv_vec_f32;
-        convert(kv_vec_f32, kv_load_vec);
+        f32_vec_type kv_vec_f32(kv_load_vec);
         kv_vec_f32.save(kv_cache_f32 + block_offset * HEAD_DIM + i);
       }
 
@@ -164,19 +111,17 @@ void mla_decode_block(
     float logits[BLOCK_SIZE] = {};  // initialize to zeros
     float max_val = -FLT_MAX;
 
-    for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
-      // dot product
-      f32_vec_type acc_vec;
-      for (int i = 0; i < HEAD_DIM; i += QK_NUM_ELEM) {
-        qk_load_vec_type q_load_vec(q + head_idx * HEAD_DIM + i);
-        qk_vec_type q_vec;
-        convert(q_vec, q_load_vec);
+    f32_vec_type acc_vec[BLOCK_SIZE];
+    for (int i = 0; i < HEAD_DIM; i += QK_NUM_ELEM) {
+      qk_vec_type q_vec(q_vecs[i / QK_NUM_ELEM]);
+      for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
         qk_vec_type k_vec(k_vecs[(block_offset * HEAD_DIM + i) / QK_NUM_ELEM]);
-        vec_op::fma(acc_vec, q_vec, k_vec);
+        vec_op::fma(acc_vec[block_offset], q_vec, k_vec);
       }
-      float acc = acc_vec.reduce_sum();
+    }
 
-      acc *= scale;  // softmax scale
+    for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
+      const float acc = acc_vec[block_offset].reduce_sum() * scale;
       logits[block_offset] = acc;
       max_val = std::max(max_val, acc);
     }
@@ -217,10 +162,13 @@ void mla_decode_block(
 
     acc_lse[head_idx] = std::log(new_sum_exp) + max_val;
     for (int i = 0; i < V_HEAD_DIM; i += V_NUM_ELEM) {
-      f32_vec_type o_vec(acc_out + head_idx * V_HEAD_DIM + i);
+      f32_vec_type o_vec(acc_out + i);
       o_vec = o_vec * prev_scale + this_out[i / V_NUM_ELEM] * curr_scale;
-      o_vec.save(acc_out + head_idx * V_HEAD_DIM + i);
+      o_vec.save(acc_out + i);
     }
+
+    q_vecs += HEAD_DIM / QK_NUM_ELEM;
+    acc_out += V_HEAD_DIM;
   }
 
   if (kv_cache_f32 != nullptr) {
@@ -240,53 +188,111 @@ void mla_decode_kvcache_cpu_impl(
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int max_num_blocks_per_seq, const int o_stride, const int q_stride,
     const int kv_stride, const int num_seqs) {
-  // there is n query heads and 1 key-value head, where value overlaps witih key
-  // to make good use of data reuse, we want to
-  // -> for each kv token, compute required problem for all query heads
-  // -> this means that we have to do softmax(QK.T)@V in 1 pass
-  //   - if KV cache is separate, it's ok to do attention in 2 passes, since
-  //     logits is not that big, and we need to read fresh V anyway.
-  // -> let seq_len dim is the outer most loop. we chunk the seq_len, compute
-  // sub-problem
-  //   - chunk according to BLOCK_SIZE for convenience
+  using qk_load_vec_type = typename KernelVecType<scalar_t>::qk_load_vec_type;
+  using qk_vec_type = typename KernelVecType<scalar_t>::qk_vec_type;
+  constexpr int QK_NUM_ELEM = qk_vec_type::VEC_ELEM_NUM;
 
-#pragma omp parallel for schedule(static, 1)
-  for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
-    const int seq_len = seq_lens[seq_idx];
-    const int block_num = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    const int last_block_size = seq_len - (block_num - 1) * BLOCK_SIZE;
+  // shared across threads
+  const int max_threads = omp_get_max_threads();
+  const int acc_out_nbytes =
+      max_threads * num_heads * V_HEAD_DIM * sizeof(float);
+  float* acc_out = static_cast<float*>(std::aligned_alloc(64, acc_out_nbytes));
+  std::vector<float> acc_lse(max_threads * num_heads);
 
-    const int acc_out_nbytes = num_heads * V_HEAD_DIM * sizeof(float);
-    float* acc_out =
-        static_cast<float*>(std::aligned_alloc(64, acc_out_nbytes));
-    std::fill(acc_out, acc_out + num_heads * V_HEAD_DIM, 0.0f);
-    std::vector<float> acc_lse(num_heads, -FLT_MAX);
-
-    for (int block_idx = 0; block_idx < block_num; ++block_idx) {
-      const int physical_block_idx =
-          block_tables[seq_idx * max_num_blocks_per_seq + block_idx];
-      const int num_tokens =
-          block_idx < block_num - 1 ? BLOCK_SIZE : last_block_size;
-
-      mla_decode_block<scalar_t, HEAD_DIM, V_HEAD_DIM, BLOCK_SIZE>(
-          q + seq_idx * q_stride, kv_cache + physical_block_idx * kv_stride,
-          acc_out, acc_lse.data(), num_heads, scale, num_tokens);
-    }
-
-    // we can't use vec_op::storeFP32() here since acc_out may use custom layout
-    // as described in convert() function above.
-    using o_store_vec_type = typename KernelVecType<scalar_t>::v_load_vec_type;
-    for (int i = 0; i < num_heads * V_HEAD_DIM;
-         i += o_store_vec_type::VEC_ELEM_NUM) {
-      vec_op::FP32Vec16 o_vec_f32(acc_out + i);
-      o_store_vec_type o_vec;
-      convert(o_vec, o_vec_f32);
-      o_vec.save(out + seq_idx * o_stride + i);
-    }
-
-    std::free(acc_out);
+  // allocate memory to pre-convert query to FP32 later
+  float* q_f32;
+  constexpr bool PRE_CONVERT_QUERY =
+      !std::is_same<scalar_t, float>::value &&
+      std::is_same<qk_vec_type, vec_op::FP32Vec16>::value;
+  if constexpr (PRE_CONVERT_QUERY) {
+    const int q_f32_nbytes = num_heads * HEAD_DIM * sizeof(float);
+    q_f32 = static_cast<float*>(std::aligned_alloc(64, q_f32_nbytes));
   }
-  return;
+
+#pragma omp parallel
+  {
+    const int num_threads = omp_get_num_threads();
+    const int thread_id = omp_get_thread_num();
+    float* __restrict__ acc_out_thread =
+        acc_out + thread_id * num_heads * V_HEAD_DIM;
+    float* __restrict__ acc_lse_thread = acc_lse.data() + thread_id * num_heads;
+
+    for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
+      // reset accumulator
+      std::fill(acc_out_thread, acc_out_thread + num_heads * V_HEAD_DIM, 0.0f);
+      std::fill(acc_lse_thread, acc_lse_thread + num_heads, -FLT_MAX);
+
+      const int seq_len = seq_lens[seq_idx];
+      const int block_num = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+      const int last_block_size = seq_len - (block_num - 1) * BLOCK_SIZE;
+
+      const qk_vec_type* q_vecs;
+      if constexpr (PRE_CONVERT_QUERY) {
+// pre-convert query to FP32 since FP16/BF16->FP32 is slow.
+#pragma omp for
+        for (int i = 0; i < num_heads * HEAD_DIM; i += QK_NUM_ELEM) {
+          qk_load_vec_type q_load_vec(q + seq_idx * q_stride + i);
+          qk_vec_type q_vec(q_load_vec);
+          q_vec.save(q_f32 + i);
+        }
+        q_vecs = reinterpret_cast<const qk_vec_type*>(q_f32);
+      } else {
+        q_vecs = reinterpret_cast<const qk_vec_type*>(q + seq_idx * q_stride);
+      }
+
+#pragma omp for
+      for (int block_idx = 0; block_idx < block_num; ++block_idx) {
+        const int physical_block_idx =
+            block_tables[seq_idx * max_num_blocks_per_seq + block_idx];
+        const int num_tokens =
+            block_idx < block_num - 1 ? BLOCK_SIZE : last_block_size;
+
+        mla_decode_block<scalar_t, HEAD_DIM, V_HEAD_DIM, BLOCK_SIZE>(
+            q_vecs, kv_cache + physical_block_idx * kv_stride, acc_out_thread,
+            acc_lse_thread, num_heads, scale, num_tokens);
+      }
+
+// merge attention states across threads
+// section 2.2 in https://arxiv.org/pdf/2501.01005
+// each thread is responsible for 1 head
+#pragma omp for
+      for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
+        float* acc_lse_head = acc_lse.data() + head_idx;
+        float* acc_out_head = acc_out + head_idx * V_HEAD_DIM;
+
+        float max_val = -FLT_MAX;
+        for (int thread_id_ = 0; thread_id_ < num_threads; ++thread_id_) {
+          max_val = std::max(max_val, acc_lse_head[thread_id_ * num_heads]);
+        }
+
+        float sum_exp = 0.0f;
+        for (int thread_id_ = 0; thread_id_ < num_threads; ++thread_id_) {
+          float val = std::exp(acc_lse_head[thread_id_ * num_heads] - max_val);
+          acc_lse_head[thread_id_ * num_heads] = val;
+          sum_exp += val;
+        }
+
+        float inv_sum = 1.0f / sum_exp;
+        float out_head[V_HEAD_DIM] = {};
+        for (int thread_id_ = 0; thread_id_ < num_threads; ++thread_id_) {
+          float scale_ = acc_lse_head[thread_id_ * num_heads] * inv_sum;
+          for (int i = 0; i < V_HEAD_DIM; ++i) {
+            out_head[i] +=
+                acc_out_head[thread_id_ * num_heads * V_HEAD_DIM + i] * scale_;
+          }
+        }
+
+        for (int i = 0; i < V_HEAD_DIM; ++i) {
+          vec_op::storeFP32(out_head[i], out + seq_idx * o_stride +
+                                             head_idx * V_HEAD_DIM + i);
+        }
+      }
+    }
+  }
+  if (PRE_CONVERT_QUERY) {
+    std::free(q_f32);
+  }
+  std::free(acc_out);
 }
 
 void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
