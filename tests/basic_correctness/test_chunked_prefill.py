@@ -90,11 +90,12 @@ def test_models_distributed(
 ) -> None:
     override_backend_env_variable(monkeypatch, attention_backend)
 
-    if (model == "meta-llama/Llama-3.2-1B-Instruct"
-            and distributed_executor_backend == "ray"):
-        # test Ray Compiled Graph
-        monkeypatch.setenv("VLLM_USE_RAY_SPMD_WORKER", "1")
-        monkeypatch.setenv("VLLM_USE_RAY_COMPILED_DAG", "1")
+    with monkeypatch.context() as monkeypatch_context:
+        if (model == "meta-llama/Llama-3.2-1B-Instruct"
+                and distributed_executor_backend == "ray"):
+            # test Ray Compiled Graph
+            monkeypatch_context.setenv("VLLM_USE_RAY_SPMD_WORKER", "1")
+            monkeypatch_context.setenv("VLLM_USE_RAY_COMPILED_DAG", "1")
 
     dtype = "half"
     max_tokens = 5

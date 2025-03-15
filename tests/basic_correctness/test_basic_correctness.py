@@ -118,13 +118,15 @@ def test_models_distributed(
     if test_suite != TARGET_TEST_SUITE:
         pytest.skip(f"Skip test for {test_suite}")
 
-    if model == "meta-llama/Llama-3.2-1B-Instruct" and distributed_executor_backend == "ray" and attention_backend == "" and test_suite == "L4":  # noqa
-        # test Ray Compiled Graph
-        monkeypatch.setenv("VLLM_USE_RAY_SPMD_WORKER", "1")
-        monkeypatch.setenv("VLLM_USE_RAY_COMPILED_DAG", "1")
+    with monkeypatch.context() as monkeypatch_context:
+        if model == "meta-llama/Llama-3.2-1B-Instruct" and distributed_executor_backend == "ray" and attention_backend == "" and test_suite == "L4":  # noqa
+            # test Ray Compiled Graph
+            monkeypatch_context.setenv("VLLM_USE_RAY_SPMD_WORKER", "1")
+            monkeypatch_context.setenv("VLLM_USE_RAY_COMPILED_DAG", "1")
 
-    if attention_backend:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attention_backend)
+        if attention_backend:
+            monkeypatch_context.setenv("VLLM_ATTENTION_BACKEND",
+                                       attention_backend)
 
     dtype = "half"
     max_tokens = 5
