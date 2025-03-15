@@ -8,6 +8,7 @@ pytest-shard
 
 # testing utils
 awscli
+backoff # required for phi4mm test
 decord # required for video tests
 einops # required for MPT, qwen-vl and Mamba
 httpx

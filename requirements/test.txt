@@ -33,6 +33,8 @@ audioread==3.0.1
     # via librosa
 awscli==1.35.23
     # via -r requirements/test.in
+backoff==2.2.1
+    # via -r requirements/test.in
 bitsandbytes==0.45.3
     # via -r requirements/test.in
 black==24.10.0
