@@ -78,6 +78,8 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
 
   __m256i reg;
 
+  explicit FP16Vec16() : reg(_mm256_setzero_si256()) {}
+
   explicit FP16Vec16(const void* ptr)
       : reg((__m256i)_mm256_loadu_si256((__m256i*)ptr)) {}
 
@@ -466,15 +468,6 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
     reg_low = _mm256_castsi256_ps(v_low_shifted);
     reg_high = _mm256_castsi256_ps(v_high_shifted);
-
-    // __m256i v_low = _mm256_setzero_si256();
-    // v_low = _mm256_blend_epi16(v.reg, v_low, 0xAA);  // select even elements
-    // v_low = _mm256_bslli_epi128(v_low, 2);
-    // reg_low = _mm256_castsi256_ps(v_low);
-
-    // __m256i v_high = _mm256_setzero_si256();
-    // v_high = _mm256_blend_epi16(v.reg, v_high, 0x55);  // select odd elements
-    // reg_high = _mm256_castsi256_ps(v_high);
   }
 
   explicit FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {}
@@ -662,14 +655,6 @@ inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
   BF16Vec8 low = BF16Vec8(FP32Vec8(v.reg_low));
   BF16Vec8 high = BF16Vec8(FP32Vec8(v.reg_high));
   reg = _mm256_insertf128_si256(_mm256_castsi128_si256(low.reg), high.reg, 1);
-
-  // __m256i zeros = _mm256_setzero_si256();
-  // __m256i low = _mm256_blend_epi16(_mm256_castps_si256(v.reg_low), zeros,
-  //                                  0x55);  // take the higher 16-bit
-  // low = _mm256_bsrli_epi128(low, 2);
-  // __m256i high =
-  //     _mm256_blend_epi16(_mm256_castps_si256(v.reg_high), zeros, 0x55);
-  // reg = _mm256_or_si256(low, high);
 }
   #endif  // __AVX512F__
 #endif    // __AVX512BF16__

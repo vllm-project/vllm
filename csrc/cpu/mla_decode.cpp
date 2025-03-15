@@ -1,5 +1,8 @@
 #include "cpu_types.hpp"
 #include <float.h>
+#ifdef __x86_64__
+  #include <immintrin.h>
+#endif
 
 namespace {
 template <typename scalar_t>
@@ -48,9 +51,58 @@ struct KernelVecType<c10::BFloat16> {
   using v_load_vec_type = vec_op::BF16Vec16;
 };
 #endif
-}  // namespace
 
-namespace {
+template <typename T1, typename T2>
+void convert(T1& dst, const T2& src) {
+  T1 tmp(src);
+  dst = tmp;
+}
+
+#ifdef __x86_64__
+  #ifdef __AVX512F__
+  // pass
+  #else  // AVX2
+// custom BF16<->FP32 dtype conversion optimized for x86 AVX2
+// this uses different layout compared to the ones defined in vec_op.
+// this results in 10-20% speedup for the mla_decode_kv_cache() kernel.
+// NOTE: might remove if AVX2 optimization is not important.
+
+// 256-bit BF16 src: [a00, a01, ..., a15]
+//               | 256-bit FP32 high dst | 256-bit FP32 low dst
+// vec_op layout |  [a00, a01, ..., a07] |  [a08, a09, ..., a15]
+// this layout   |  [a00, a02, ..., a14] |  [a01, a03, ..., a15]
+template <>
+void convert(vec_op::FP32Vec16& dst, const vec_op::BF16Vec16& src) {
+  __m256i v_low = _mm256_setzero_si256();
+  v_low = _mm256_blend_epi16(src.reg, v_low, 0xAA);  // select even elements
+  v_low = _mm256_bslli_epi128(v_low, 2);
+  dst.reg_low = _mm256_castsi256_ps(v_low);
+
+  __m256i v_high = _mm256_setzero_si256();
+  v_high = _mm256_blend_epi16(src.reg, v_high, 0x55);  // select odd elements
+  dst.reg_high = _mm256_castsi256_ps(v_high);
+}
+
+// 2x 256-bit FP32 src: [a00, a01, ..., a07], [b00, b01, ..., b07]
+//                |            256-bit BF16 dst
+// vec_op layout  | [a00, a01, ..., a07, b00, b01, ..., b07]
+// this layout    | [a00, b00, a01, b01, ..., ..., a07, b07]
+//
+// NOTE: similar to vec_op, there is no rounding handling here for FP32->BF16
+template <>
+void convert(vec_op::BF16Vec16& dst, const vec_op::FP32Vec16& src) {
+  __m256i low = _mm256_setzero_si256();
+  low = _mm256_blend_epi16(_mm256_castps_si256(src.reg_low), low,
+                           0x55);  // take the higher 16-bit
+  low = _mm256_bsrli_epi128(low, 2);
+
+  __m256i high = _mm256_setzero_si256();
+  high = _mm256_blend_epi16(_mm256_castps_si256(src.reg_high), high, 0x55);
+  dst.reg = _mm256_or_si256(low, high);
+}
+  #endif
+#endif
+
 template <typename scalar_t, int HEAD_DIM, int V_HEAD_DIM, int BLOCK_SIZE>
 void mla_decode_block(
     const scalar_t* __restrict__ q,         // [num_heads, head_dim]
@@ -72,6 +124,8 @@ void mla_decode_block(
   const f32_vec_type* v_vecs_f32;
   float* kv_cache_f32 = nullptr;
 
+  // TODO: we should also pre-convert q to FP32
+
   if constexpr (!std::is_same<scalar_t, float>::value) {
     // convert KV cache block to FP32 to reuse it across query heads and
     // attn @ V computation, since FP16/BF16->FP32 is expensive. The FP32
@@ -83,7 +137,8 @@ void mla_decode_block(
     for (int block_offset = 0; block_offset < num_tokens; ++block_offset)
       for (int i = 0; i < HEAD_DIM; i += V_NUM_ELEM) {
         v_load_vec_type kv_load_vec(kv_cache + block_offset * HEAD_DIM + i);
-        f32_vec_type kv_vec_f32(kv_load_vec);
+        f32_vec_type kv_vec_f32;
+        convert(kv_vec_f32, kv_load_vec);
         kv_vec_f32.save(kv_cache_f32 + block_offset * HEAD_DIM + i);
       }
 
@@ -114,7 +169,8 @@ void mla_decode_block(
       f32_vec_type acc_vec;
       for (int i = 0; i < HEAD_DIM; i += QK_NUM_ELEM) {
         qk_load_vec_type q_load_vec(q + head_idx * HEAD_DIM + i);
-        qk_vec_type q_vec(q_load_vec);
+        qk_vec_type q_vec;
+        convert(q_vec, q_load_vec);
         qk_vec_type k_vec(k_vecs[(block_offset * HEAD_DIM + i) / QK_NUM_ELEM]);
         vec_op::fma(acc_vec, q_vec, k_vec);
       }
@@ -217,9 +273,17 @@ void mla_decode_kvcache_cpu_impl(
           acc_out, acc_lse.data(), num_heads, scale, num_tokens);
     }
 
-    for (int i = 0; i < num_heads * V_HEAD_DIM; ++i) {
-      vec_op::storeFP32(acc_out[i], out + seq_idx * o_stride + i);
+    // we can't use vec_op::storeFP32() here since acc_out may use custom layout
+    // as described in convert() function above.
+    using o_store_vec_type = typename KernelVecType<scalar_t>::v_load_vec_type;
+    for (int i = 0; i < num_heads * V_HEAD_DIM;
+         i += o_store_vec_type::VEC_ELEM_NUM) {
+      vec_op::FP32Vec16 o_vec_f32(acc_out + i);
+      o_store_vec_type o_vec;
+      convert(o_vec, o_vec_f32);
+      o_vec.save(out + seq_idx * o_stride + i);
     }
+
     std::free(acc_out);
   }
   return;
