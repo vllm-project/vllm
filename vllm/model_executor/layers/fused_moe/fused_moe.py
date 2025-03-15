@@ -1308,9 +1308,9 @@ def fused_experts_impl(hidden_states: torch.Tensor,
     intermediate_cache3 = cache13[:M * top_k_num * K].view(M, top_k_num, K)
 
     # This needs separate memory since it's used concurrently with cache1
-    intermediate_cache2 = torch.empty((M * top_k_num, N // 2),
-                                      device=hidden_states.device,
-                                      dtype=hidden_states.dtype)
+    #intermediate_cache2 = torch.empty((M * top_k_num, N // 2),
+    #                                  device=hidden_states.device,
+    #                                  dtype=hidden_states.dtype)
 
     # XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
@@ -1355,25 +1355,31 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
         new_M = ((sorted_token_ids.numel() + block_m - 1) // block_m) * block_m
 
-        intermediate_cache1 = torch.empty((new_M, N),
-                                          device=hidden_states.device,
-                                          dtype=hidden_states.dtype)
+        # We can reuse the memory between these because by the time we need
+        # cache3, we're done with cache1
+        cache13 = torch.empty(new_M * max(N, w2.shape[1]),
+                              device=hidden_states.device,
+                              dtype=hidden_states.dtype)
+
+        intermediate_cache1 = cache13[:(new_M * N)].view(new_M, N)
         intermediate_cache2 = torch.empty((new_M, N // 2),
                                           device=hidden_states.device,
                                           dtype=hidden_states.dtype)
-        intermediate_cache3 = torch.empty((new_M, w2.shape[1]),
-                                          device=hidden_states.device,
-                                          dtype=hidden_states.dtype)
+        intermediate_cache3 = cache13[:(new_M * w2.shape[1])].view(new_M, w2.shape[1])
     else:
-        intermediate_cache1 = torch.empty((M, top_k_num, N),
-                                          device=hidden_states.device,
-                                          dtype=hidden_states.dtype)
+        # We can reuse the memory between these because by the time we need
+        # cache3, we're done with cache1
+        cache13 = torch.empty(M * top_k_num * max(N, w2.shape[1]),
+                              device=hidden_states.device,
+                              dtype=hidden_states.dtype)
+
+        intermediate_cache1 = cache13[:M * top_k_num * N].view(
+            (M, topk_ids.shape[1], N))
         intermediate_cache2 = torch.empty((M * top_k_num, N // 2),
                                           device=hidden_states.device,
                                           dtype=hidden_states.dtype)
-        intermediate_cache3 = torch.empty((M, top_k_num, w2.shape[1]),
-                                          device=hidden_states.device,
-                                          dtype=hidden_states.dtype)
+        intermediate_cache3 = cache13[:M * top_k_num * w2.shape[1]].view(
+            (M, topk_ids.shape[1], w2.shape[1]))
 
         num_chunks = (num_tokens // CHUNK_SIZE) + 1
 
