@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
-    VLLM_USE_V1: bool = False
+    VLLM_USE_V1: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -522,7 +522,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, use the V1 code path.
     "VLLM_USE_V1":
-    lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
+    lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
@@ -644,3 +644,19 @@ def __getattr__(name: str):
 
 def __dir__():
     return list(environment_variables.keys())
+
+
+def is_set(name: str):
+    """Check if an environment variable is explicitly set."""
+    if name in environment_variables:
+        return name in os.environ
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def set_vllm_use_v1(use_v1: bool):
+    if is_set("VLLM_USE_V1"):
+        raise ValueError(
+            "Should not call set_vllm_use_v1() if VLLM_USE_V1 is set "
+            "explicitly by the user. Please raise this as a Github "
+            "Issue and explicitly set VLLM_USE_V1=0 or 1.")
+    os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
