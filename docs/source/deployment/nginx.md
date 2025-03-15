@@ -69,14 +69,14 @@ server {
 
 ```console
 cd $vllm_root
-docker build -f Dockerfile . --tag vllm
+docker build -f docker/Dockerfile . --tag vllm
 ```
 
 If you are behind proxy, you can pass the proxy settings to the docker build command as shown below:
 
 ```console
 cd $vllm_root
-docker build -f Dockerfile . --tag vllm --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy
+docker build -f docker/Dockerfile . --tag vllm --build-arg http_proxy=$http_proxy --build-arg https_proxy=$https_proxy
 ```
 
 (nginxloadbalancer-nginx-docker-network)=

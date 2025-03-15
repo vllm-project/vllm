@@ -169,13 +169,13 @@ Their values can be passed in when running `docker build` with `--build-arg` opt
 To build vllm on ROCm 6.3 for MI200 and MI300 series, you can use the default:
 
 ```console
-DOCKER_BUILDKIT=1 docker build -f Dockerfile.rocm -t vllm-rocm .
+DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm-rocm .
 ```
 
 To build vllm on ROCm 6.3 for Radeon RX7900 series (gfx1100), you should pick the alternative base image:
 
 ```console
-DOCKER_BUILDKIT=1 docker build --build-arg BASE_IMAGE="rocm/vllm-dev:navi_base" -f Dockerfile.rocm -t vllm-rocm .
+DOCKER_BUILDKIT=1 docker build --build-arg BASE_IMAGE="rocm/vllm-dev:navi_base" -f docker/Dockerfile.rocm -t vllm-rocm .
 ```
 
 To run the above docker image `vllm-rocm`, use the below command:
