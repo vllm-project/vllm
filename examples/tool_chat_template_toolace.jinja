@@ -44,7 +44,7 @@
             {{- tool_call.name + '(' -}}
             {%- for param in tool_call.arguments %}
                 {{- param + '=' -}}
-                {{- "%sr" | format(tool_call.arguments[param]) -}}
+                {{- "%s" | format(tool_call.arguments[param]) -}}
                 {% if not loop.last %}, {% endif %}
             {%- endfor %}
             {{- ')' -}}
