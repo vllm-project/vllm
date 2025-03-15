@@ -335,7 +335,8 @@ class LoRAModelManager(AdapterModelManager):
         # Used for long context lora.
         self.scaling_factor_to_offset: Dict[float, int] = {}
         super().__init__(model)
-        self.supported_lora_modules = get_supported_lora_modules(self.model)
+        self.supported_lora_modules = get_supported_lora_modules(
+            self.model, lora_config.ignored_layers)
         assert self.supported_lora_modules, "No supported LoRA modules found in"
         f"{self.model.__class__.__name__}."
         if lora_config.long_lora_scaling_factors:
