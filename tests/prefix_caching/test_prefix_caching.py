@@ -16,6 +16,15 @@ from vllm.platforms import current_platform
 
 from ..models.utils import check_outputs_equal
 
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This module relies on V0 internals, so set VLLM_USE_V1=0.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 MODELS = [
     "distilbert/distilgpt2",
 ]

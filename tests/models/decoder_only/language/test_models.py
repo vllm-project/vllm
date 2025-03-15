@@ -7,6 +7,12 @@ import pytest
 
 from ...utils import check_logprobs_close
 
+# These have unsupported head_dim for FA. We do not
+# not have a clean way to fall back, so we fail with
+# a clear msg when it happens.
+# https://github.com/vllm-project/vllm/issues/14524
+REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
+
 
 @pytest.mark.parametrize(
     "model",
@@ -71,7 +77,10 @@ def test_models(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
+    monkeypatch,
 ) -> None:
+    if model in REQUIRES_V0:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
 
     with hf_runner(model, dtype=dtype) as hf_model:
         if model.startswith("THUDM/chatglm3"):
@@ -84,13 +93,6 @@ def test_models(
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
-
-        # This test is for verifying whether the model's extra_repr
-        # can be printed correctly.
-        def print_model(model):
-            print(model)
-
-        vllm_model.apply_model(print_model)
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,

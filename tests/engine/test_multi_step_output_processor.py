@@ -15,7 +15,7 @@ from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
 
-from ...core.utils import create_seq_group
+from ..core.utils import create_seq_group
 
 
 @pytest.mark.parametrize("seq_output_len", [128])

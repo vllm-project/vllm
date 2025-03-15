@@ -279,7 +279,12 @@ def test_decode_prompt_logprobs_chunked_prefill(
     model,
     chunked_prefill_token_size: int,
     example_prompts,
+    monkeypatch,
 ):
+    # VLLM V1 does not use incremental detokenization for
+    # prompt logprobs, so this test strategy is irrelevant.
+    monkeypatch.setenv("VLLM_USE_V1", "0")
+
     max_num_seqs = 256
     enable_chunked_prefill = False
     max_num_batched_tokens = None
