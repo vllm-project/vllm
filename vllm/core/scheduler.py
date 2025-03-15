@@ -467,6 +467,7 @@ class Scheduler:
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
         self.waiting: Deque[SequenceGroup] = deque()
+        self._waiting_tokens: int = 0
         # Sequence groups in the RUNNING state.
         # Contain decode requests.
         self.running: Deque[SequenceGroup] = deque()
@@ -548,13 +549,31 @@ class Scheduler:
         """The number of new tokens."""
         return 1
 
+    def _get_seq_group_tokens(self, seq_group: SequenceGroup) -> int:
+        total_tokens = 0
+        for seq in seq_group.get_seqs():
+            prompt_tokens = len(seq.get_prompt_token_ids())
+            max_new_tokens = 0
+            if seq_group.sampling_params and\
+                seq_group.sampling_params.max_tokens is not None:
+                max_new_tokens = seq_group.sampling_params.max_tokens
+            total_tokens += prompt_tokens + max_new_tokens
+        return total_tokens
+
+    def get_num_tokens_in_queue(self) -> int:
+        return self._waiting_tokens
+
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
+        # Track total tokens in waiting queue
+        self._waiting_tokens += self._get_seq_group_tokens(seq_group)
 
     def _add_seq_group_to_running(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the running queue.
         # Only for testing purposes.
+        if seq_group in self.waiting:
+            self._waiting_tokens -= self._get_seq_group_tokens(seq_group)
         self.running.append(seq_group)
 
     def _add_seq_group_to_swapped(self, seq_group: SequenceGroup) -> None:
@@ -596,6 +615,10 @@ class Scheduler:
                 else:
                     real_request_id = seq_group.request_id
                 if real_request_id in request_ids:
+                    # Update token count if removing from waiting queue
+                    if state_queue is self.waiting:
+                        self._waiting_tokens -= self._get_seq_group_tokens(
+                            seq_group)
                     # Appending aborted group into pending list.
                     aborted_groups.append(seq_group)
                     # We can't remove real_request_id in request_ids here,
@@ -1378,6 +1401,8 @@ class Scheduler:
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
+        for seq_group in running_scheduled.preempted:
+            self._waiting_tokens += self._get_seq_group_tokens(seq_group)
         self.waiting.extendleft(running_scheduled.preempted)
 
         # Update new running requests.
@@ -1663,6 +1688,10 @@ class Scheduler:
                 self.free_seq(seq)
 
     def _free_finished_seq_group(self, seq_group: SequenceGroup) -> None:
+        if seq_group in self.waiting:
+            # Update token count before removing from waiting queue
+            self._waiting_tokens -= self._get_seq_group_tokens(seq_group)
+            self.waiting.remove(seq_group)
         if seq_group.is_finished():
             # Free cross-attention block table, if it exists
             self._free_seq_group_cross_attn_blocks(seq_group)
@@ -1793,16 +1822,26 @@ class Scheduler:
         seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         assert len(seqs) == 1
         for seq in seqs:
+            # Track token evictions before freeing
+            num_tokens = seq.get_num_computed_tokens()
+            if num_tokens > 0:
+                seq.increment_evicted_tokens(num_tokens)
             seq.status = SequenceStatus.WAITING
             self.free_seq(seq)
             seq.reset_state_for_recompute()
         self._free_seq_group_cross_attn_blocks(seq_group)
+        self._waiting_tokens += self._get_seq_group_tokens(seq_group)
 
     def _preempt_by_swap(
         self,
         seq_group: SequenceGroup,
         blocks_to_swap_out: List[Tuple[int, int]],
     ) -> None:
+        # Track token evictions before swapping out
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            num_tokens = seq.get_num_computed_tokens()
+            if num_tokens > 0:
+                seq.increment_evicted_tokens(num_tokens)
         self._swap_out(seq_group, blocks_to_swap_out)
 
     def _swap_in(
