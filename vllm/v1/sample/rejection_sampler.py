@@ -324,7 +324,7 @@ class RejectionSampler(nn.Module):
             return logits
         assert sampling_metadata.temperature is not None
         # We should optimize the following code as
-        # ut will cause CPU -> GPU synchronization.
+        # it will cause CPU -> GPU synchronization.
         temperature = torch.repeat_interleave(
             sampling_metadata.temperature,
             torch.tensor(sample_lens,
