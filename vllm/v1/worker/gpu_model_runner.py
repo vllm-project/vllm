@@ -1105,8 +1105,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 continue
 
             # Skip requests that require top-p, top-k, etc.
-            if not is_spec_decode_supported(i, sampling_metadata,
-                                            self.input_batch.vocab_size):
+            req_id = self.input_batch.req_ids[i]
+            if not is_spec_decode_supported(req_id, self.input_batch):
                 draft_token_ids.append([])
                 continue
 

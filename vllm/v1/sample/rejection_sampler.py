@@ -172,7 +172,12 @@ class RejectionSampler(nn.Module):
 
             # 3. Accept or reject the samples.
             # [batch_size, max_spec_len]
-            accepted = uniform_samples <= target_token_probs / draft_token_probs
+            # If the draft token probabilities are 0, set them to the smallest
+            # positive normal value representable by float32.
+            safe_draft_probs = torch.where(draft_token_probs > 0,
+                                           draft_token_probs,
+                                           torch.finfo(torch.float32).tiny)
+            accepted = uniform_samples <= target_token_probs / safe_draft_probs
             accept_mask = accepted.cumprod(dim=1)
             # Set the token ids to the draft token ids if accepted, otherwise
             # set them to INVALID_TOKEN_ID.
