@@ -127,6 +127,7 @@ def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
         model=model_name,
         trust_remote_code=True,
         max_model_len=8192,
+        max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
         mm_processor_kwargs={"max_dynamic_patch": 4},
     )
@@ -192,6 +193,7 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
         model=model_name,
         trust_remote_code=True,
         max_model_len=4096,
+        max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
         mm_processor_kwargs={"max_dynamic_patch": 4},
     )

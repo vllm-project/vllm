@@ -171,6 +171,7 @@ def run_h2ovl(questions: list[str], modality: str):
         model=model_name,
         trust_remote_code=True,
         max_model_len=8192,
+        max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
@@ -226,6 +227,7 @@ def run_internvl(questions: list[str], modality: str):
         model=model_name,
         trust_remote_code=True,
         max_model_len=4096,
+        max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
@@ -258,6 +260,7 @@ def run_llava(questions: list[str], modality: str):
 
     llm = LLM(model="llava-hf/llava-1.5-7b-hf",
               max_model_len=4096,
+              max_num_seqs=2,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompts, stop_token_ids
@@ -284,7 +287,8 @@ def run_llava_next_video(questions: list[str], modality: str):
         f"USER: <video>\n{question} ASSISTANT:" for question in questions
     ]
     llm = LLM(model="llava-hf/LLaVA-NeXT-Video-7B-hf",
-              max_model_len=8192,
+              max_model_len=4096,
+              max_num_seqs=2,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompts, stop_token_ids
@@ -307,6 +311,7 @@ def run_llava_onevision(questions: list[str], modality: str):
 
     llm = LLM(model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
               max_model_len=16384,
+              max_num_seqs=2,
               disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache)
     stop_token_ids = None
     return llm, prompts, stop_token_ids
@@ -325,6 +330,7 @@ def run_mantis(questions: list[str], modality: str):
     llm = LLM(
         model="TIGER-Lab/Mantis-8B-siglip-llama3",
         max_model_len=4096,
+        max_num_seqs=2,
         hf_overrides={"architectures": ["MantisForConditionalGeneration"]},
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
