@@ -71,7 +71,7 @@ class PixtralImagePixelInputs(TypedDict):
     A boolean mask indicating which image embeddings correspond
     to patch tokens.
     
-    Shape: `(batch_size, num_embeds)`
+    Shape: `(batch_size, num_images, num_embeds)`
     """
 
     num_patches: Union[torch.Tensor, list[torch.Tensor]]
@@ -411,7 +411,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             self,
             features: torch.Tensor,  # Shape: (num_patch, d)
             num_patches: torch.Tensor,  # Shape: (num_images,)
-            embed_is_patch: torch.Tensor,  # Shape: (num_embeds,)
+            embed_is_patch: torch.Tensor,  # Shape: (num_images, num_embeds)
     ) -> tuple[torch.Tensor, ...]:
         """Scatter the patch features into a contiguous tensor that corresponds
         to the embedding tokens defined by the multimodal processor.
@@ -430,7 +430,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             (sum(num_patches_per_image), *features.shape[1:]),
             fill_value=torch.nan,
         )
-        embeds_flat[embed_is_patch] = features
+        embeds_flat[embed_is_patch.view(-1)] = features
 
         return embeds_flat.split(num_patches_per_image)
 
