@@ -45,6 +45,7 @@ class RejectionSampler(nn.Module):
 
     def forward(
         self,
+        # batch_size x [0, max_spec_len)
         draft_token_ids: list[list[int]],
         # [num_tokens, vocab_size]
         draft_probs: Optional[torch.Tensor],
