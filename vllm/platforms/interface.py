@@ -43,6 +43,10 @@ class _Backend(enum.Enum):
     BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
 
+    @classmethod
+    def get_v1_backends(cls) -> Tuple["_Backend", ...]:
+        return (cls.FLASH_ATTN_VLLM_V1, cls.ROCM_FLASH, cls.PALLAS_VLLM_V1)
+
 
 class PlatformEnum(enum.Enum):
     CUDA = enum.auto()
