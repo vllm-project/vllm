@@ -175,6 +175,21 @@ void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b_scales,
                        std::optional<torch::Tensor> const& bias);
 
+void cutlass_grouped_mm(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides);
+
+void get_grouped_mm_data(const torch::Tensor& topk_ids,
+                         torch::Tensor& expert_offsets,
+                         torch::Tensor& problem_sizes1,
+                         torch::Tensor& problem_sizes2, torch::Tensor& arg_sort,
+                         torch::Tensor& arg_sort_prim,
+                         const int64_t num_experts, const int64_t n,
+                         const int64_t k);
+
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,
                            torch::Tensor const& a_scales,
