@@ -376,8 +376,22 @@ class HpuModelAdapter:
         mask = mask >= metadata.block_usage.unsqueeze(-1)
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
             mask, -math.inf))
-        block_mapping = torch.nn.functional.one_hot(metadata.block_groups,
-                                                    num_classes=batch_size)
+        if os.environ.get('VLLM_USE_FAKE_HPU',
+                          '0') == '0' and htorch.utils.internal.is_lazy():
+            block_mapping = torch.nn.functional.one_hot(metadata.block_groups,
+                                                        num_classes=batch_size)
+        else:
+            # Unfortunately one_hot on CPU/torch.compile mode/eager mode
+            # doesn't handle out of bounds classes so we need to convert
+            # all negative values to 0 (block_mapping) or bs (block_groups)
+            block_groups = metadata.block_groups.to(torch.long)
+            block_mapping = torch.nn.functional.relu(block_groups)
+            block_mapping = torch.nn.functional.one_hot(block_mapping,
+                                                        num_classes=batch_size)
+            oob_values = block_groups.lt(0)
+            block_mapping.masked_fill_(oob_values.unsqueeze(-1), 0)
+            block_groups.masked_fill_(oob_values, batch_size)
+            metadata = metadata._replace(block_groups=block_groups)
         block_mapping = block_mapping.to(dtype)
         metadata = metadata._replace(block_mapping=block_mapping,
                                      attn_bias=attn_bias)
