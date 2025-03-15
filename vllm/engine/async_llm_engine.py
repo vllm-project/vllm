@@ -1225,6 +1225,9 @@ class AsyncLLMEngine(EngineClient):
     async def wake_up(self) -> None:
         self.engine.wake_up()
 
+    async def is_sleeping(self) -> bool:
+        return self.engine.is_sleeping()
+
     async def add_lora(self, lora_request: LoRARequest) -> None:
         self.engine.add_lora(lora_request)
 

@@ -18,6 +18,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCAdapterLoadedResponse, RPCError,
+                                         RPCIsSleepingRequest,
+                                         RPCIsSleepingResponse,
                                          RPCLoadAdapterRequest,
                                          RPCProcessRequest,
                                          RPCResetPrefixCacheRequest,
@@ -271,6 +273,8 @@ class MQLLMEngine:
                     self.sleep(request.value)
                 elif isinstance(request, RPCWakeUpRequest):
                     self.wake_up()
+                elif isinstance(request, RPCIsSleepingRequest):
+                    self._handle_is_sleeping_request(request)
                 else:
                     raise ValueError("Unknown RPCRequest Type: "
                                      f"{type(request)}")
@@ -336,6 +340,12 @@ class MQLLMEngine:
         # Otherwise, send back the successful load message
         self._send_outputs(
             RPCAdapterLoadedResponse(request_id=request.request_id))
+
+    def _handle_is_sleeping_request(self, request: RPCIsSleepingRequest):
+        is_sleeping = self.is_sleeping()
+        self._send_outputs(
+            RPCIsSleepingResponse(request_id=request.request_id,
+                                  is_sleeping=is_sleeping))
 
     def _health_check(self):
         # Send unhealthy if engine has already errored
@@ -405,6 +415,9 @@ class MQLLMEngine:
 
     def wake_up(self) -> None:
         self.engine.wake_up()
+
+    def is_sleeping(self) -> bool:
+        return self.engine.is_sleeping()
 
 
 def signal_handler(*_) -> None:
