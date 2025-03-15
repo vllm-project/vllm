@@ -84,7 +84,6 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
-    VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -579,15 +578,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Format: comma-separated list of integers, e.g. "0,1,2,3"
     "VLLM_RAY_BUNDLE_INDICES":
     lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
-
-    # When on a Nvidia GPU aligns single entries (within a page) so they are 256
-    # byte aligned for better performance, this increases the memory usage of
-    # the cache. Currently this only affects MLA that results in non-256
-    # byte aligned entries. This matches the alignment the CUDA runtime uses
-    # for all allocations. Currently this primarily affects MLA, for most other
-    # models the alignment is already naturally aligned to 256 bytes.
-    "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
-    lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
 
     # In some system, find_loaded_library() may not work. So we allow users to
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
