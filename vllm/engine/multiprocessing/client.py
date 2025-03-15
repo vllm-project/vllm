@@ -18,7 +18,6 @@ from zmq.asyncio import Socket
 from vllm import PoolingParams
 from vllm.config import DecodingConfig, ModelConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
-from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.async_llm_engine import (
@@ -133,9 +132,9 @@ class MQLLMEngineClient(EngineClient):
         self._engine_process = psutil.Process(engine_pid)
 
     @staticmethod
-    def is_unsupported_config(engine_args: AsyncEngineArgs):
+    def is_unsupported_config(vllm_config: VllmConfig):
         # Pipeline parallel not yet supported
-        return engine_args.pipeline_parallel_size > 1
+        return vllm_config.parallel_config.pipeline_parallel_size > 1
 
     @contextmanager
     def get_data_socket(self) -> Iterator[Socket]:

@@ -196,7 +196,8 @@ class FlashAttentionImpl(AttentionImpl):
         if head_size not in support_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
-                f"Supported head sizes are: {support_head_sizes}.")
+                f"Supported head sizes are: {support_head_sizes}. "
+                "Set VLLM_USE_V1=0 to use another attention backend.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "

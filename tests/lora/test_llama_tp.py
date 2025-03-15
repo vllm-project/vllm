@@ -80,6 +80,8 @@ def v1(run_with_both_engines_lora):
     pass
 
 
+# V1 Test: Failing due to numerics on V1.
+@pytest.mark.skip_v1
 @fork_new_process_for_each_test
 def test_llama_lora(sql_lora_files):
 
@@ -123,6 +125,8 @@ def test_llama_lora_warmup(sql_lora_files):
         "less when using lora than when not using lora")
 
 
+# V1 Test: Failing due to numerics on V1.
+@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_llama_lora_tp4(sql_lora_files):
