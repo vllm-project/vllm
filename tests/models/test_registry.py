@@ -20,7 +20,14 @@ from vllm.platforms import current_platform
 from ..utils import fork_new_process_for_each_test
 from .registry import HF_EXAMPLE_MODELS
 
+from vllm.model_executor.models.colqwen2_vl import ColQwen2VL
+from vllm.multimodal import MULTIMODAL_REGISTRY
 
+def test_colqwen2vl_registration():
+    assert 'ColQwen2VL' in MULTIMODAL_REGISTRY, "ColQwen2VL should be registered."
+    model = MULTIMODAL_REGISTRY['ColQwen2VL']()
+    assert isinstance(model, ColQwen2VL), "Failed to instantiate ColQwen2VL."
+    
 @pytest.mark.parametrize("model_arch", ModelRegistry.get_supported_archs())
 def test_registry_imports(model_arch):
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
