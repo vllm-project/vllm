@@ -308,8 +308,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   constexpr int GQA_RATIO4 = DIVIDE_ROUND_UP(GQA_RATIO, 4);
 
-  __shared__ float shared_qk_max[NWARPS][16 + 1];
-  __shared__ float shared_exp_sum[NWARPS][16 + 1];
+  [[maybe_unused]] __shared__ float shared_qk_max[NWARPS][16 + 1];
+  [[maybe_unused]] __shared__ float shared_exp_sum[NWARPS][16 + 1];
   // shared_logits is used for multiple purposes
   __shared__ _B16x4 shared_logits[NWARPS][4][16][4];
 
@@ -426,7 +426,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const cache_t* k_ptr2 = k_ptr + kblock_number * kv_block_stride;
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
-    const int kglobal_token_idx = partition_start_token_idx + klocal_token_idx;
+    [[maybe_unused]] const int kglobal_token_idx =
+        partition_start_token_idx + klocal_token_idx;
     const int kphysical_block_offset = klocal_token_idx % BLOCK_SIZE;
     const cache_t* k_ptr3 = k_ptr2 + kphysical_block_offset * KX;
 
