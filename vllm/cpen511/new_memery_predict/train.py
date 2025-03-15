@@ -1,14 +1,15 @@
 
+import os
 import sys
 
 import torch
 import torch.optim as optim
 from dataloader import SequenceDataset
-from model import MlpMemoryPredict, LstmMemoryPredict
+from model import EarlyStopping, LstmMemoryPredict, MlpMemoryPredict
 
-windows_size = 50
-file_path = "/root/vllm/vllm/cpen511/data/pure_sequence.csv"
-output_log = "/root/vllm/vllm/cpen511/data/output.txt"
+windows_size = 8
+data_file_path = os.path.dirname(os.path.abspath(__file__)) + "/../data/output.csv"
+output_log = os.path.dirname(os.path.abspath(__file__)) + "/../data/output.txt"
 
 # Redirect output
 result_output = open(output_log, "w", buffering=1)
@@ -16,7 +17,7 @@ sys.stdout = result_output
 
 
 # Split into train and test
-data = SequenceDataset(file_path , windows_size)
+data = SequenceDataset(data_file_path , windows_size)
 train_size = int(len(data) * 0.75)
 train, test = torch.utils.data.random_split(data, [train_size, len(data) - train_size])
 
@@ -29,6 +30,7 @@ test_loader = torch.utils.data.DataLoader(test, batch_size=2, shuffle=False)
 model = MlpMemoryPredict(windows_size=windows_size).cuda()
 criterion = torch.nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
+schedular = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
 # Lost function
 def loss_fn(input, outputs, labels):
@@ -40,6 +42,7 @@ def loss_fn(input, outputs, labels):
 # Train the model
 for epoch in range(10):
     model.train()
+    early_stopping = EarlyStopping(patience=3)
     for inputs, label in train_loader:
         inputs, label = inputs.cuda(), label.cuda()
         optimizer.zero_grad()
@@ -48,6 +51,7 @@ for epoch in range(10):
         loss.backward()
         optimizer.step()
         print(f"Epoch {epoch+1}, Batch Loss: {loss.item()}")
+    
 
     # Validation
     model.eval()
@@ -61,6 +65,14 @@ for epoch in range(10):
     val_loss /= len(test_loader)
     print(f"Epoch {epoch+1}, Validation Loss: {val_loss}")
     
+    schedular.step()
+    early_stopping(val_loss, model)
+    
+    if early_stopping.early_stop:
+            print("Early stopping")
+            break
+
+    
 # Testing
 model.eval()
 test_loss, correct, total = 0, 0, 0
@@ -71,8 +83,8 @@ with torch.no_grad():
         loss = criterion(outputs, label)
         test_loss += loss.item()
         total += label.size(0)
-        correct += ((outputs.int() == label.int()).sum()).item()
+        correct += (torch.round(outputs) == label).sum().item()
         print(f"Output: {outputs.tolist()}, Label: {label.tolist()}, correct: {correct}, total: {total}")
-print(f"Test Loss: {test_loss / len(test_loader)}, Accuracy: {correct / total}")
+print(f"Test Loss: {test_loss / len(test_loader)}, Accuracy: {(correct / total) * 100}%")
 result_output
 
