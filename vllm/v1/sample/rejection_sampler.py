@@ -12,6 +12,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 logger = init_logger(__name__)
 PLACEHOLDER_TOKEN_ID: tl.constexpr = -1
+GREEDY_TEMPERATURE: tl.constexpr = -1
 
 
 class RejectionSampler(nn.Module):
@@ -30,53 +31,59 @@ class RejectionSampler(nn.Module):
     def forward(
         self,
         draft_token_ids: list[list[int]],
-        # [batch_size, max_spec_len, vocab_size]
+        # [batch_size]
+        cu_num_draft_tokens: torch.Tensor,
+        # [num_tokens, vocab_size]
+        draft_probs: Optional[torch.Tensor],
+        # [num_tokens, vocab_size]
         target_logits: torch.Tensor,
         # [batch_size]
         bonus_token_ids: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
-        num_draft_tokens = [len(ids) for ids in draft_token_ids]
-        batch_size = len(draft_token_ids)
-        max_spec_len = max(num_draft_tokens)
-        assert batch_size * max_spec_len <= self.max_num_tokens
-
-        if sampling_metadata.all_greedy:
-            # [batch_size, max_spec_len, vocab_size]
-            target_probs = target_logits.contiguous()
-        else:
-            # [batch_size, max_spec_len, vocab_size]
-            target_probs = torch.softmax(
-                target_logits / sampling_metadata.temperature.unsqueeze(-1),
-                dim=-1,
-                dtype=torch.float32,
-            )
-            target_probs = torch.where(
-                sampling_metadata.temperature == -1,
-                target_logits,
-                target_probs,
-            )
-
-        draft_token_ids_np = self.buffer_np[:batch_size * max_spec_len]
-        for i, token_ids in enumerate(draft_token_ids):
-            start = i * max_spec_len
-            end = start + len(token_ids)
-            draft_token_ids_np[start:end] = token_ids
-
-        draft_token_ids_cpu = self.buffer[:batch_size * max_spec_len]
-        draft_token_ids_cpu = draft_token_ids_cpu.view(batch_size,
-                                                       max_spec_len)
-        draft_token_ids = draft_token_ids_cpu.to(device=target_probs.device,
-                                                 non_blocking=True)
-        output_token_ids = rejection_sample(
+        # [batch_size, max_spec_len]
+        draft_token_ids_tensor = self._async_copy_to_device(
             draft_token_ids,
-            num_draft_tokens,
-            None,  # draft_probs
+            target_logits.device,
+        )
+        max_spec_len = draft_token_ids_tensor.shape[1]
+        # [num_tokens, vocab_size]
+        target_probs = compute_probs(
+            target_logits,
+            sampling_metadata.temperature,
+            cu_num_draft_tokens,
+            max_spec_len,
+        )
+        output_token_ids = rejection_sample(
+            draft_token_ids_tensor,
+            cu_num_draft_tokens,
+            draft_probs,
             target_probs,
             bonus_token_ids,
             sampling_metadata,
         )
         return output_token_ids
+
+    def _async_copy_to_device(
+        self,
+        draft_token_ids: list[list[int]],
+        device: torch.device,
+    ) -> torch.Tensor:
+        batch_size = len(draft_token_ids)
+        num_draft_tokens = [len(ids) for ids in draft_token_ids]
+        max_spec_len = max(num_draft_tokens)
+        assert batch_size * max_spec_len <= self.max_num_tokens
+
+        draft_token_ids_np = self.buffer_np[:batch_size * max_spec_len]
+        draft_token_ids_np.fill(PLACEHOLDER_TOKEN_ID)
+        for i, token_ids in enumerate(draft_token_ids):
+            start = i * max_spec_len
+            end = start + len(token_ids)
+            draft_token_ids_np[start:end] = token_ids
+        draft_token_ids_cpu = self.buffer[:batch_size * max_spec_len]
+        draft_token_ids_cpu = draft_token_ids_cpu.view(batch_size,
+                                                       max_spec_len)
+        return draft_token_ids_cpu.to(device=device, non_blocking=True)
 
 
 def rejection_sample(
@@ -108,7 +115,7 @@ def rejection_sample(
         device=device,
     )
     output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
-    is_greedy = sampling_metadata.temperature == -1
+    is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_probs.argmax(dim=-1)
@@ -300,3 +307,62 @@ def rejection_greedy_sample_kernel(
         tl.store(
             output_token_ids_ptr + seq_idx * (max_spec_len + 1) +
             num_generated, bonus_token_id)
+
+
+def compute_probs(
+    logits: torch.Tensor,  # [num_tokens, vocab_size]
+    temperature: torch.Tensor,  # [batch_size]
+    cu_num_draft_tokens: torch.Tensor,  # [batch_size]
+    max_spec_len: int,
+) -> torch.Tensor:
+    output_prob = torch.empty_like(logits, dtype=torch.float32)
+    batch_size = temperature.shape[0]
+    vocab_size = logits.shape[-1]
+    compute_probs_kernel[(batch_size, max_spec_len)](
+        output_prob,
+        logits,
+        temperature,
+        cu_num_draft_tokens,
+        vocab_size,
+        triton.next_power_of_two(vocab_size),
+    )
+    return output_prob
+
+
+@triton.jit
+def compute_probs_kernel(
+    output_prob_ptr,  # [num_tokens, vocab_size]
+    logits_ptr,  # [num_tokens, vocab_size]
+    temperature_ptr,  # [batch_size]
+    cu_num_draft_tokens_ptr,  # [batch_size]
+    vocab_size,
+    PADDED_VOCAB_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    if req_idx == 0:
+        start_idx = 0
+    else:
+        start_idx = tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
+
+    # Early exit for out-of-range positions.
+    pos = tl.program_id(1)
+    if pos >= end_idx - start_idx:
+        return
+
+    vocab_offset = tl.arange(0, PADDED_VOCAB_SIZE)
+    logits = tl.load(logits_ptr + (start_idx + pos) * vocab_size +
+                     vocab_offset,
+                     mask=vocab_offset < vocab_size)
+    temperature = tl.load(temperature_ptr + req_idx)
+    if temperature == GREEDY_TEMPERATURE:
+        # Greedy sampling. Just return the logits.
+        output_prob = logits
+    else:
+        # Random sampling.
+        output_prob = tl.softmax(logits / temperature)
+    output_prob = output_prob.to(dtype=tl.float32)
+
+    tl.store(output_prob_ptr + (start_idx + pos) * vocab_size + vocab_offset,
+             output_prob,
+             mask=vocab_offset < vocab_size)
