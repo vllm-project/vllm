@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa
+from __future__ import annotations
 
 import threading
 from collections.abc import Iterable
 from concurrent import futures
-from typing import Callable, Literal
+from typing import Callable, Generator, Literal
 
 import grpc
 import pytest
@@ -69,7 +70,7 @@ class FakeTraceService(TraceServiceServicer):
 
 
 @pytest.fixture
-def trace_service() -> FakeTraceService:
+def trace_service() -> Generator[FakeTraceService, None, None]:
     """Fixture to set up a fake gRPC trace service"""
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
     service = FakeTraceService()
