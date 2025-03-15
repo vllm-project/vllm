@@ -17,10 +17,6 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
     os.environ["VLLM_DP_SIZE"] = str(dp_size)
     os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
     os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
-    # set devices for each dp_rank
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
-        str(i) for i in range(dp_rank * GPUs_per_dp_rank, (dp_rank + 1) *
-                              GPUs_per_dp_rank))
 
     # Sample prompts.
     prompts = [
@@ -70,9 +66,15 @@ if __name__ == "__main__":
     dp_master_ip = "127.0.0.1"
     dp_master_port = get_open_port()
     procs = []
-    for i in range(DP_size):
+    for dp_rank in range(DP_size):
+        # we must set CUDA devices for each dp rank before Process creation to
+        # ensure proper inheritance by early imports and torch.cuda accesses
+        # that come before target in child process
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+            str(i) for i in range(dp_rank * GPUs_per_dp_rank, (dp_rank + 1) *
+                                  GPUs_per_dp_rank))
         proc = Process(target=main,
-                       args=(DP_size, i, dp_master_ip, dp_master_port,
+                       args=(DP_size, dp_rank, dp_master_ip, dp_master_port,
                              GPUs_per_dp_rank))
         proc.start()
         procs.append(proc)
