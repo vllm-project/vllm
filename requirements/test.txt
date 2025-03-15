@@ -8,7 +8,7 @@ accelerate==1.0.1
     #   peft
 aiohappyeyeballs==2.4.3
     # via aiohttp
-aiohttp==3.10.10
+aiohttp==3.10.11
     # via
     #   datasets
     #   fsspec
@@ -181,7 +181,7 @@ iniconfig==2.0.0
     # via pytest
 isort==5.13.2
     # via datamodel-code-generator
-jinja2==3.1.4
+jinja2==3.1.6
     # via
     #   datamodel-code-generator
     #   torch
