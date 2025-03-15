@@ -73,11 +73,13 @@ if __name__ == "__main__":
     for i in range(DP_size):
         proc = Process(target=main,
                        args=(DP_size, i, dp_master_ip, dp_master_port,
-                             GPUs_per_dp_rank),
-                       daemon=True)
+                             GPUs_per_dp_rank))
         proc.start()
         procs.append(proc)
+    exit_code = 0
     for proc in procs:
         proc.join()
         if proc.exitcode:
-            exit(proc.exitcode)
+            exit_code = proc.exitcode
+
+    exit(exit_code)
