@@ -8,13 +8,18 @@ prefill requests are chunked.
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
 
+from typing import TYPE_CHECKING
+
 import pytest
 
-from tests.kernels.utils import override_backend_env_variable
 from vllm.platforms import current_platform
+from vllm.utils import STR_BACKEND_ENV_VAR
 
 from ..models.utils import check_logprobs_close, check_outputs_equal
 from ..utils import multi_gpu_test
+
+if TYPE_CHECKING:
+    from tests.conftest import HfRunner, VllmRunner
 
 MODELS = [
     "facebook/opt-125m",
@@ -41,8 +46,8 @@ def use_v0_only(monkeypatch):
 @pytest.mark.parametrize("tensor_parallel_size", [1])
 @pytest.mark.parametrize("attention_backend", ["FLASHINFER", "FLASH_ATTN"])
 def test_models(
-    hf_runner,
-    vllm_runner,
+    hf_runner: HfRunner,
+    vllm_runner: VllmRunner,
     example_prompts,
     model: str,
     dtype: str,
@@ -57,31 +62,33 @@ def test_models(
     Checks exact match decode between huggingface model and vllm runner with
     chunked prefill.
     """
-    override_backend_env_variable(monkeypatch, attention_backend)
+    with monkeypatch.context() as m:
+        m.setenv(STR_BACKEND_ENV_VAR, attention_backend)
 
-    max_num_seqs = chunked_prefill_token_size
-    max_num_batched_tokens = chunked_prefill_token_size
+        max_num_seqs = chunked_prefill_token_size
+        max_num_batched_tokens = chunked_prefill_token_size
 
-    with hf_runner(model, dtype=dtype) as hf_model:
-        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+        with hf_runner(model, dtype=dtype) as hf_model:
+            hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    with vllm_runner(
-            model,
-            dtype=dtype,
-            max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=True,
-            tensor_parallel_size=tensor_parallel_size,
-            enforce_eager=enforce_eager,
-            max_num_seqs=max_num_seqs,
-    ) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+        with vllm_runner(
+                model,
+                dtype=dtype,
+                max_num_batched_tokens=max_num_batched_tokens,
+                enable_chunked_prefill=True,
+                tensor_parallel_size=tensor_parallel_size,
+                enforce_eager=enforce_eager,
+                max_num_seqs=max_num_seqs,
+        ) as vllm_model:
+            vllm_outputs = vllm_model.generate_greedy(example_prompts,
+                                                      max_tokens)
 
-    check_outputs_equal(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
+        check_outputs_equal(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_outputs,
+            name_0="hf",
+            name_1="vllm",
+        )
 
 
 @multi_gpu_test(num_gpus=2)
@@ -89,58 +96,61 @@ def test_models(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("attention_backend", ["FLASHINFER", "FLASH_ATTN"])
 def test_models_distributed(
-    hf_runner,
-    vllm_runner,
+    hf_runner: HfRunner,
+    vllm_runner: VllmRunner,
     example_prompts,
     model: str,
     distributed_executor_backend: str,
     attention_backend: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    override_backend_env_variable(monkeypatch, attention_backend)
-
-    with monkeypatch.context() as monkeypatch_context:
+    with monkeypatch.context() as m:
+        m.setenv(STR_BACKEND_ENV_VAR, attention_backend)
         if (model == "meta-llama/Llama-3.2-1B-Instruct"
                 and distributed_executor_backend == "ray"):
             # test Ray Compiled Graph
-            monkeypatch_context.setenv("VLLM_USE_RAY_SPMD_WORKER", "1")
-            monkeypatch_context.setenv("VLLM_USE_RAY_COMPILED_DAG", "1")
+            m.setenv("VLLM_USE_RAY_SPMD_WORKER", "1")
+            m.setenv("VLLM_USE_RAY_COMPILED_DAG", "1")
 
-    dtype = "half"
-    max_tokens = 5
-    chunked_prefill_token_size = 16
+        dtype = "half"
+        max_tokens = 5
+        chunked_prefill_token_size = 16
 
-    # Add a chunked prefill config.
-    max_num_seqs = min(chunked_prefill_token_size, 256)
-    assert chunked_prefill_token_size != -1
-    enable_chunked_prefill = True
-    max_num_batched_tokens = chunked_prefill_token_size
+        # Add a chunked prefill config.
+        max_num_seqs = min(chunked_prefill_token_size, 256)
+        assert chunked_prefill_token_size != -1
+        enable_chunked_prefill = True
+        max_num_batched_tokens = chunked_prefill_token_size
 
-    # NOTE: take care of the order. run vLLM first, and then run HF.
-    # vLLM needs a fresh new process without cuda initialization.
-    # if we run HF first, the cuda initialization will be done and it
-    # will hurt multiprocessing backend with fork method (the default method).
+        # NOTE: take care of the order. run vLLM first, and then run HF.
+        # vLLM needs a fresh new process without cuda initialization.
+        # if we run HF first, the cuda initialization will be done and it
+        # will hurt multiprocessing backend with
+        # fork method (the default method).
 
-    with vllm_runner(
-            model,
-            dtype=dtype,
-            tensor_parallel_size=2,
-            max_num_seqs=max_num_seqs,
-            enable_chunked_prefill=enable_chunked_prefill,
-            max_num_batched_tokens=max_num_batched_tokens,
-            distributed_executor_backend=distributed_executor_backend,
-    ) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+        with vllm_runner(
+                model,
+                dtype=dtype,
+                tensor_parallel_size=2,
+                max_num_seqs=max_num_seqs,
+                enable_chunked_prefill=enable_chunked_prefill,
+                max_num_batched_tokens=max_num_batched_tokens,
+                distributed_executor_backend=distributed_executor_backend,
+        ) as vllm_model:
+            vllm_outputs = vllm_model.generate_greedy(
+                example_prompts,
+                max_tokens,
+            )
 
-    with hf_runner(model, dtype=dtype) as hf_model:
-        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+        with hf_runner(model, dtype=dtype) as hf_model:
+            hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    check_outputs_equal(
-        outputs_0_lst=hf_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
+        check_outputs_equal(
+            outputs_0_lst=hf_outputs,
+            outputs_1_lst=vllm_outputs,
+            name_0="hf",
+            name_1="vllm",
+        )
 
 
 @pytest.mark.parametrize(
@@ -158,7 +168,7 @@ def test_models_distributed(
 # the async postprocessor
 @pytest.mark.parametrize("disable_async_output_proc", [True])
 def test_models_with_fp8_kv_cache(
-    vllm_runner,
+    vllm_runner: VllmRunner,
     example_prompts,
     kv_cache_dtype: str,
     model: str,
@@ -217,13 +227,15 @@ def test_models_with_fp8_kv_cache(
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("enable", [True, False])
 def test_with_prefix_caching(
-    vllm_runner,
+    vllm_runner: VllmRunner,
     max_tokens: int,
     enforce_eager: bool,
     chunk_size: int,
     tensor_parallel_size: int,
     dtype: str,
+    enable: bool,
 ) -> None:
     """
     Checks exact match decode with and without prefix caching
@@ -241,21 +253,22 @@ def test_with_prefix_caching(
 
     max_num_batched_tokens = max_num_seqs = chunk_size
     outputs = {}  # type: ignore
-    for enable in (True, False):
-        with vllm_runner(
-                model,
-                dtype=dtype,
-                max_num_batched_tokens=max_num_batched_tokens,
-                enable_chunked_prefill=True,
-                enable_prefix_caching=enable,
-                tensor_parallel_size=tensor_parallel_size,
-                enforce_eager=enforce_eager,
-                max_num_seqs=max_num_seqs,
-        ) as vllm_model:
-            outputs[enable] = []
-            for prompt in full_prompts:
-                outputs[enable] += vllm_model.generate_greedy([prompt],
-                                                              max_tokens)
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            max_num_batched_tokens=max_num_batched_tokens,
+            enable_chunked_prefill=True,
+            enable_prefix_caching=enable,
+            tensor_parallel_size=tensor_parallel_size,
+            enforce_eager=enforce_eager,
+            max_num_seqs=max_num_seqs,
+    ) as vllm_model:
+        outputs[enable] = []
+        for prompt in full_prompts:
+            outputs[enable] += vllm_model.generate_greedy(
+                [prompt],
+                max_tokens,
+            )
 
     check_outputs_equal(
         outputs_0_lst=outputs[False],
@@ -274,8 +287,8 @@ def test_with_prefix_caching(
 @pytest.mark.cpu_model
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
 def test_models_cpu(
-    hf_runner,
-    vllm_runner,
+    hf_runner: HfRunner,
+    vllm_runner: VllmRunner,
     example_prompts,
     model: str,
     dtype: str,
@@ -285,9 +298,19 @@ def test_models_cpu(
     attention_backend: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    test_models(hf_runner, vllm_runner, example_prompts, model, dtype,
-                max_tokens, chunked_prefill_token_size, enforce_eager, 1,
-                attention_backend, monkeypatch)
+    test_models(
+        hf_runner,
+        vllm_runner,
+        example_prompts,
+        model,
+        dtype,
+        max_tokens,
+        chunked_prefill_token_size,
+        enforce_eager,
+        1,
+        attention_backend,
+        monkeypatch,
+    )
 
 
 @pytest.mark.parametrize("max_tokens", [16])
@@ -297,7 +320,7 @@ def test_models_cpu(
 @pytest.mark.cpu_model
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
 def test_with_prefix_caching_cpu(
-    vllm_runner,
+    vllm_runner: VllmRunner,
     max_tokens: int,
     enforce_eager: bool,
     chunk_size: int,

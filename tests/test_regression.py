@@ -58,10 +58,9 @@ def test_gc():
 
 def test_model_from_modelscope(monkeypatch: pytest.MonkeyPatch):
     # model: https://modelscope.cn/models/qwen/Qwen1.5-0.5B-Chat/summary
-    MODELSCOPE_MODEL_NAME = "qwen/Qwen1.5-0.5B-Chat"
-    monkeypatch.setenv("VLLM_USE_MODELSCOPE", "True")
-    try:
-        llm = LLM(model=MODELSCOPE_MODEL_NAME)
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_MODELSCOPE", "True")
+        llm = LLM(model="qwen/Qwen1.5-0.5B-Chat")
 
         prompts = [
             "Hello, my name is",
@@ -73,10 +72,3 @@ def test_model_from_modelscope(monkeypatch: pytest.MonkeyPatch):
 
         outputs = llm.generate(prompts, sampling_params)
         assert len(outputs) == 4
-    finally:
-        monkeypatch.delenv("VLLM_USE_MODELSCOPE", raising=False)
-
-
-if __name__ == "__main__":
-    import pytest
-    pytest.main([__file__])

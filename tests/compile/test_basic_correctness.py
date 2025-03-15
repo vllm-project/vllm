@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
-from typing import Optional
 
 import pytest
 
@@ -90,8 +89,10 @@ test_settings = [
 # we cannot afford testing the full Catesian product
 # of all models and all levels
 @pytest.mark.parametrize("test_setting", test_settings)
-def test_compile_correctness(monkeypatch: pytest.MonkeyPatch,
-                             test_setting: TestSetting):
+def test_compile_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    test_setting: TestSetting,
+):
     # this test is run under multiple suits, with different GPUs.
     # make sure we only run the test with correct CUDA devices.
     # don't use "<", as it will duplicate the tests.
@@ -104,40 +105,44 @@ def test_compile_correctness(monkeypatch: pytest.MonkeyPatch,
     fullgraph = test_setting.fullgraph
     if cuda_device_count_stateless() != pp_size * tp_size:
         pytest.skip("Not correct CUDA devices for the test.")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
-    final_args = ["--enforce-eager"] + model_args + ["-pp", str(pp_size)] + \
-                ["-tp", str(tp_size)]
 
-    all_args: list[list[str]] = []
-    all_envs: list[Optional[dict[str, str]]] = []
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
+        final_args = [
+            "--enforce-eager", *model_args, "-pp",
+            str(pp_size), "-tp",
+            str(tp_size)
+        ]
 
-    for level in [
-            CompilationLevel.NO_COMPILATION,
-            CompilationLevel.PIECEWISE,
-    ]:
-        all_args.append(final_args + [f"-O{level}"])
-        all_envs.append({})
+        all_args: list[list[str]] = []
+        all_envs: list[dict[str, str]] = []
 
-    # inductor will change the output, so we only compare if the output
-    # is close, not exactly the same.
-    compare_all_settings(
-        model,
-        all_args,
-        all_envs,
-        method=method if method != "generate" else "generate_close")
-    all_envs.clear()
-    all_args.clear()
+        for level in [
+                CompilationLevel.NO_COMPILATION,
+                CompilationLevel.PIECEWISE,
+        ]:
+            all_args.append(final_args + [f"-O{level}"])
+            all_envs.append({})
 
-    for level in [
-            CompilationLevel.NO_COMPILATION,
-            CompilationLevel.DYNAMO_AS_IS,
-            CompilationLevel.DYNAMO_ONCE,
-    ]:
-        all_args.append(final_args + [f"-O{level}"])
-        all_envs.append({})
-        if level != CompilationLevel.DYNAMO_ONCE and not fullgraph:
-            # "DYNAMO_ONCE" will always use fullgraph
-            all_envs[-1][
-                "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "0"  # type: ignore
+        # inductor will change the output, so we only compare if the output
+        # is close, not exactly the same.
+        compare_all_settings(
+            model,
+            all_args,
+            all_envs,
+            method=method if method != "generate" else "generate_close")
+        all_envs.clear()
+        all_args.clear()
 
-    compare_all_settings(model, all_args * 3, all_envs, method=method)
+        for level in [
+                CompilationLevel.NO_COMPILATION,
+                CompilationLevel.DYNAMO_AS_IS,
+                CompilationLevel.DYNAMO_ONCE,
+        ]:
+            all_args.append(final_args + [f"-O{level}"])
+            all_envs.append({})
+            if level != CompilationLevel.DYNAMO_ONCE and not fullgraph:
+                # "DYNAMO_ONCE" will always use fullgraph
+                all_envs[-1]["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "0"
+
+        compare_all_settings(model, all_args * 3, all_envs, method=method)
