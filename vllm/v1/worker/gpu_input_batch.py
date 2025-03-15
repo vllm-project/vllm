@@ -11,6 +11,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import BlockTable
@@ -196,6 +197,9 @@ class InputBatch:
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
+
+        # To accumulate prompt logprobs tensor chunks across prefill steps.
+        self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
         self.logit_bias: list[Optional[dict[int,
                                             float]]] = [None] * max_num_reqs
