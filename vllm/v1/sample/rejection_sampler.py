@@ -147,6 +147,71 @@ def rejection_sample(
             return output_token_ids
 
     # Generate uniform probabilities for rejection sampling.
+    uniform_probs = generate_uniform_probs(
+        batch_size,
+        max_spec_len,
+        num_draft_tokens,
+        sampling_metadata,
+        device,
+    )
+
+    # Sample recovered tokens for each position.
+    recovered_token_ids = sample_recovered_tokens(
+        batch_size,
+        max_spec_len,
+        vocab_size,
+        num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        sampling_metadata,
+        device,
+    )
+
+    # Rejection sampling for random sampling requests.
+    rejection_random_sample_kernel[(batch_size, )](
+        output_token_ids,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        bonus_token_ids,
+        recovered_token_ids,
+        uniform_probs,
+        is_greedy,
+        max_spec_len,
+        vocab_size,
+        IS_NGRAM=draft_probs is None,
+    )
+    return output_token_ids
+
+
+def compute_probs(
+    logits: torch.Tensor,  # [num_tokens, vocab_size]
+    temperature: torch.Tensor,  # [batch_size]
+    cu_num_draft_tokens: torch.Tensor,  # [batch_size]
+    max_spec_len: int,
+) -> torch.Tensor:
+    output_prob = torch.empty_like(logits, dtype=torch.float32)
+    batch_size = temperature.shape[0]
+    vocab_size = logits.shape[-1]
+    compute_probs_kernel[(batch_size, max_spec_len)](
+        output_prob,
+        logits,
+        temperature,
+        cu_num_draft_tokens,
+        vocab_size,
+        triton.next_power_of_two(vocab_size),
+    )
+    return output_prob
+
+
+def generate_uniform_probs(
+    batch_size: int,
+    max_spec_len: int,
+    num_draft_tokens: list[int],
+    sampling_metadata: SamplingMetadata,
+    device: torch.device,
+) -> torch.Tensor:
     uniform_probs = torch.rand(
         (batch_size, max_spec_len),
         dtype=torch.float32,
@@ -158,8 +223,20 @@ def rejection_sample(
             # NOTE(woosuk): We shouldn't use max_spec_len here because
             # max_spec_len is affected by other requests in the batch.
             uniform_probs[i][:num_tokens].uniform_(generator=generator)
+    return uniform_probs
 
-    # Sample recovered tokens for each position.
+
+def sample_recovered_tokens(
+    batch_size: int,
+    max_spec_len: int,
+    vocab_size: int,
+    num_draft_tokens: list[int],
+    draft_token_ids: torch.Tensor,
+    draft_probs: Optional[torch.Tensor],
+    target_probs: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    device: torch.device,
+) -> torch.Tensor:
     # Compute the adjusted probabilities.
     is_ngram = draft_probs is None
     if is_ngram:
@@ -187,23 +264,7 @@ def rejection_sample(
             q[i].exponential_(generator=generator)
     q = q.unsqueeze(dim=1)
     recovered_token_ids = probs.div_(q).argmax(dim=-1)
-    recovered_token_ids = recovered_token_ids.view(batch_size, max_spec_len)
-
-    # Rejection sampling for random sampling requests.
-    rejection_random_sample_kernel[(batch_size, )](
-        output_token_ids,
-        draft_token_ids,
-        draft_probs,
-        target_probs,
-        bonus_token_ids,
-        recovered_token_ids,
-        uniform_probs,
-        is_greedy,
-        max_spec_len,
-        vocab_size,
-        is_ngram,
-    )
-    return output_token_ids
+    return recovered_token_ids.view(batch_size, max_spec_len)
 
 
 @triton.jit
@@ -323,26 +384,6 @@ def rejection_greedy_sample_kernel(
         tl.store(
             output_token_ids_ptr + seq_idx * (max_spec_len + 1) +
             num_generated, bonus_token_id)
-
-
-def compute_probs(
-    logits: torch.Tensor,  # [num_tokens, vocab_size]
-    temperature: torch.Tensor,  # [batch_size]
-    cu_num_draft_tokens: torch.Tensor,  # [batch_size]
-    max_spec_len: int,
-) -> torch.Tensor:
-    output_prob = torch.empty_like(logits, dtype=torch.float32)
-    batch_size = temperature.shape[0]
-    vocab_size = logits.shape[-1]
-    compute_probs_kernel[(batch_size, max_spec_len)](
-        output_prob,
-        logits,
-        temperature,
-        cu_num_draft_tokens,
-        vocab_size,
-        triton.next_power_of_two(vocab_size),
-    )
-    return output_prob
 
 
 @triton.jit
