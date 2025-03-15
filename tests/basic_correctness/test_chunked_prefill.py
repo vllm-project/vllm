@@ -8,6 +8,8 @@ prefill requests are chunked.
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 import pytest
@@ -19,7 +21,7 @@ from ..models.utils import check_logprobs_close, check_outputs_equal
 from ..utils import multi_gpu_test
 
 if TYPE_CHECKING:
-    from tests.conftest import HfRunner, VllmRunner
+    from .conftest import HfRunner, VllmRunner
 
 MODELS = [
     "facebook/opt-125m",
@@ -28,12 +30,14 @@ MODELS = [
 
 
 @pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
+def use_v0_only(monkeypatch: pytest.MonkeyPatch):
     """
     Since this module is V0 only, set VLLM_USE_V1=0 for
     all tests in the file.
     """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
+    with monkeypatch.context() as m:
+        m.setenv('VLLM_USE_V1', '0')
+        yield
 
 
 @pytest.mark.parametrize("model", MODELS)

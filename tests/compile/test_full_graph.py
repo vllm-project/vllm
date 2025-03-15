@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 import torch
@@ -14,13 +14,10 @@ from vllm.platforms import current_platform
 
 from ..utils import fork_new_process_for_each_test
 
-if TYPE_CHECKING:
-    TestCompileModels = list[tuple[str, dict[str, Any]]]
 
-
-@pytest.fixture
-def test_models():
-    TEST_MODELS: TestCompileModels = [
+@pytest.fixture(params=None, name="model_info")
+def models_list_fixture(request):
+    TEST_MODELS: list[tuple[str, dict[str, Any]]] = [
         ("facebook/opt-125m", {}),
         ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", {
             "dtype": torch.float16,
@@ -73,20 +70,23 @@ def test_models():
             "quantization": "AWQ"
         }))
 
-    return TEST_MODELS
+    if request.param is None:
+        return TEST_MODELS
+    return TEST_MODELS[request.param]
 
 
 @pytest.mark.parametrize(
     "optimization_level",
     [CompilationLevel.DYNAMO_ONCE, CompilationLevel.PIECEWISE],
 )
+@pytest.mark.parametrize("model_info", None, indirect=True)
 @fork_new_process_for_each_test
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
-    test_models: TestCompileModels,
+    model_info: tuple[str, dict[str, Any]],
     optimization_level: int,
 ):
-    model, model_kwargs = test_models
+    model, model_kwargs = model_info
 
     with monkeypatch.context() as m:
         # make sure these models can be captured in full graph mode
