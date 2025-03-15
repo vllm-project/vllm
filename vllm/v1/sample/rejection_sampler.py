@@ -224,7 +224,7 @@ def compute_probs(
         temperature,
         cu_num_draft_tokens,
         vocab_size,
-        triton.next_power_of_two(vocab_size),
+        triton.next_power_of_2(vocab_size),
     )
     return output_prob
 
@@ -287,7 +287,7 @@ def sample_recovered_tokens(
         target_probs,
         q,
         vocab_size,
-        triton.next_power_of_two(vocab_size),
+        triton.next_power_of_2(vocab_size),
         IS_NGRAM=draft_probs is None,
     )
     return recovered_token_ids
