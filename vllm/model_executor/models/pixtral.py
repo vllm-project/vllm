@@ -45,7 +45,7 @@ from vllm.transformers_utils.tokenizer import (MistralTokenizer,
 from vllm.utils import JSONTree, flatten_2d_lists, json_map_leaves
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (init_vllm_registered_model, maybe_prefix,
+from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
@@ -61,7 +61,7 @@ class PixtralImagePixelInputs(TypedDict):
 
     images: Union[torch.Tensor, list[torch.Tensor]]
     """
-    Shape: `(batch_size, num_channels, image_width, image_height)`
+    Shape: `(batch_size * num_images, num_channels, image_width, image_height)`
 
     The result of stacking :attr:`ImageEncoding.tokens` from each prompt.
     """
@@ -150,7 +150,7 @@ class PixtralProcessorAdapter:
         images_processed = list[torch.Tensor]()
         images_tokens = list[torch.Tensor]()
         images_embed_is_patch = list[torch.Tensor]()
-        images_num_tokens = list[int]()
+        images_num_crops = list[int]()
 
         for image in images:
             image_inputs = self.image_processor(ImageChunk(image=image))
@@ -161,13 +161,13 @@ class PixtralProcessorAdapter:
             images_processed.append(image_processed)
             images_tokens.append(image_tokens)
             images_embed_is_patch.append(image_tokens == image_token_id)
-            images_num_tokens.append(len(image_tokens))
+            images_num_crops.append(len(image_tokens))
 
         return {
             "input_ids": torch.cat(images_tokens)[None].expand(len(text), -1),
             "images": images_processed,
             "embed_is_patch": images_embed_is_patch,
-            "num_image_tokens": torch.tensor(images_num_tokens),
+            "num_crops": torch.tensor(images_num_crops),
         }
 
 
@@ -271,7 +271,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         return dict(
             images=MultiModalFieldConfig.batched("image"),
             embed_is_patch=MultiModalFieldConfig.batched("image"),
-            num_image_tokens=MultiModalFieldConfig.batched("image"),
+            num_crops=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_updates(
@@ -380,16 +380,16 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise ValueError("Incorrect type of embed_is_patch. "
                              f"Got type: {type(embed_is_patch)}")
 
-        num_image_tokens = kwargs.pop("num_image_tokens")
-        if not isinstance(num_image_tokens, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of num_image_tokens. "
-                             f"Got type: {type(num_image_tokens)}")
+        num_crops = kwargs.pop("num_crops")
+        if not isinstance(num_crops, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of num_crops. "
+                             f"Got type: {type(num_crops)}")
 
         return PixtralImagePixelInputs(
             type="pixel_values",
-            images=images,
+            images=flatten_bn(images),
             embed_is_patch=embed_is_patch,
-            num_crops=num_image_tokens,
+            num_crops=num_crops,
         )
 
     def _process_image_input(
