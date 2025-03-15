@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from abc import abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
 from typing import Callable, Optional, Union
@@ -31,6 +32,49 @@ class ReasoningParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
+    @abstractmethod
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        """
+        Check if the reasoning content ends in the input_ids.
+
+        It is used in structured engines like `xgrammar` to check if the 
+        reasoning content ends in the model output.
+
+        Parameters:
+        input_ids: list[int]
+            The input_ids of the model output.
+
+        Returns:
+        bool
+            True if the reasoning content ends in the input_ids.
+        """
+
+        raise NotImplementedError(
+            "AbstractReasoningParser.is_reasoning_end has"
+            "not been implemented!")
+
+    @abstractmethod
+    def extract_content(self, input_ids: list[int]) -> list[int]:
+        """
+        Extract content from the input_ids.
+
+        It is used in structured engines like `outlines` to extract the content
+        from the model output.
+
+        Parameters:
+        input_ids: list[int]
+            The input_ids of the model output.
+
+        Returns:
+        list[int]
+            The extracted content from the input_ids.
+        """
+
+        raise NotImplementedError(
+            "AbstractReasoningParser.extract_content has not been implemented!"
+        )
+
+    @abstractmethod
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
@@ -56,6 +100,7 @@ class ReasoningParser:
             "AbstractReasoningParser.extract_reasoning_calls "
             "has not been implemented!")
 
+    @abstractmethod
     def extract_reasoning_content_streaming(
         self,
         previous_text: str,
