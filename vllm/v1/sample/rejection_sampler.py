@@ -245,8 +245,9 @@ def generate_uniform_probs(
         if n == 0:
             continue
         end_idx = start_idx + n
-        generator = sampling_metadata.generators[req_idx]
-        uniform_probs[start_idx:end_idx].uniform_(generator=generator)
+        generator = sampling_metadata.generators.get(req_idx)
+        if generator is not None:
+            uniform_probs[start_idx:end_idx].uniform_(generator=generator)
         start_idx = end_idx
     return uniform_probs
 
@@ -420,6 +421,7 @@ def compute_probs_kernel(
     logits = tl.load(logits_ptr + (start_idx + pos) * vocab_size +
                      vocab_offset,
                      mask=vocab_offset < vocab_size)
+    logits = logits.to(dtype=tl.float32)
     temperature = tl.load(temperature_ptr + req_idx)
     if temperature == GREEDY_TEMPERATURE:
         # Greedy sampling. Just return the logits.
@@ -427,7 +429,6 @@ def compute_probs_kernel(
     else:
         # Random sampling.
         output_prob = tl.softmax(logits / temperature)
-    output_prob = output_prob.to(dtype=tl.float32)
 
     tl.store(output_prob_ptr + (start_idx + pos) * vocab_size + vocab_offset,
              output_prob,
@@ -480,7 +481,7 @@ def sample_recovered_tokens_kernel(
                               mask=vocab_offset < vocab_size)
         prob = target_prob - draft_prob
         prob = tl.maximum(prob, TINY)
-    prob = prob / prob.sum(axis=-1, keep_dims=True)
+    prob = prob / tl.sum(prob, axis=-1, keep_dims=True)
 
     q = tl.load(q_ptr + req_idx * vocab_size + vocab_offset,
                 mask=vocab_offset < vocab_size)
