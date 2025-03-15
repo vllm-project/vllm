@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
@@ -37,6 +38,8 @@ class SimpleConnector(KVConnectorBase):
 
         self.config = config.kv_transfer_config
         self.tp_size = config.parallel_config.tensor_parallel_size
+        self.is_deepseek_mla = config.model_config.is_deepseek_mla
+        self.use_mla_opt = not envs.VLLM_MLA_DISABLE
 
         if self.config.kv_connector == "PyNcclConnector":
             from vllm.distributed.kv_transfer.kv_pipe.pynccl_pipe import (
@@ -168,10 +171,22 @@ class SimpleConnector(KVConnectorBase):
         hidden_size = model_config.hidden_size
         num_attention_heads = model_config.num_attention_heads
 
-        if hasattr(model_config, "kv_lora_rank"):
+        # Deepseek's MLA (Multi-head Latent Attention) uses two different
+        # kv_cache shapes based on whether VLLM_MLA_DISABLE is set to 0.
+        # When VLLM_MLA_DISABLE=0 (default), forward absorb is applied,
+        # resulting in a kv_cache shape of [num_blks, blk_size, 1,
+        # kv_lora_rank + qk_rope_head_dim].
+        # When VLLM_MLA_DISABLE=1, standard FA is used instead, leading
+        # to a kv_cache shape of [2, num_blks, blk_size,
+        # num_key_value_heads / tp, qk_nope_head_dim + qk_rope_head_dim].
+        # For more details, see vllm/attention/backends/mla/common.py.
+        if self.is_deepseek_mla and self.use_mla_opt:
             head_size = model_config.kv_lora_rank + \
                 model_config.qk_rope_head_dim
             num_heads = 1
+        elif self.is_deepseek_mla and not self.use_mla_opt:
+            head_size = model_config.qk_nope_head_dim + \
+                model_config.qk_rope_head_dim
         else:
             head_size = getattr(model_config, "head_dim",
                                 int(hidden_size // num_attention_heads))
@@ -198,7 +213,7 @@ class SimpleConnector(KVConnectorBase):
             for layer_id in range(start_layer, end_layer):
                 kv_cache = kv_caches[layer_id - start_layer]
 
-                if hasattr(model_config, "kv_lora_rank"):
+                if self.is_deepseek_mla and self.use_mla_opt:
                     key_cache = kv_cache.reshape(-1, num_heads, head_size)
                     value_cache = kv_cache.reshape(-1, num_heads, head_size)
                 else:
@@ -303,7 +318,7 @@ class SimpleConnector(KVConnectorBase):
                 kv_cache = kv_caches[i - model_executable.model.start_layer]
                 layer = model_executable.model.layers[i]
 
-                if hasattr(model_config, "kv_lora_rank"):
+                if self.is_deepseek_mla and self.use_mla_opt:
                     layer.self_attn.attn = layer.self_attn.mla_attn
                     k_c_normed = keys[i -
                                       model_executable.model.start_layer].to(
