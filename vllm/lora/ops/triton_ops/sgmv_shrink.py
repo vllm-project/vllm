@@ -18,6 +18,86 @@ from .kernel_utils import do_shrink_kernel
 from .utils import _get_lora_a_ptr
 
 
+def get_autotune_config():
+    return [
+        triton.Config({
+            'BLOCK_M': 32,
+            'BLOCK_N': 16,
+            'BLOCK_K': 32,
+            'SPLIT_K': 8
+        }),
+        triton.Config({
+            'BLOCK_M': 32,
+            'BLOCK_N': 16,
+            'BLOCK_K': 32,
+            'SPLIT_K': 16
+        }),
+        triton.Config({
+            'BLOCK_M': 32,
+            'BLOCK_N': 16,
+            'BLOCK_K': 32,
+            'SPLIT_K': 32
+        }),
+        triton.Config({
+            'BLOCK_M': 32,
+            'BLOCK_N': 16,
+            'BLOCK_K': 32,
+            'SPLIT_K': 64
+        }),
+        triton.Config({
+            'BLOCK_M': 32,
+            'BLOCK_N': 32,
+            'BLOCK_K': 32,
+            'SPLIT_K': 8
+        }),
+        triton.Config({
+            'BLOCK_M': 32,
+            'BLOCK_N': 32,
+            'BLOCK_K': 32,
+            'SPLIT_K': 16
+        }),
+        triton.Config({
+            'BLOCK_M': 32,
+            'BLOCK_N': 32,
+            'BLOCK_K': 32,
+            'SPLIT_K': 32
+        }),
+        triton.Config({
+            'BLOCK_M': 32,
+            'BLOCK_N': 32,
+            'BLOCK_K': 32,
+            'SPLIT_K': 64
+        }),
+        triton.Config({
+            'BLOCK_M': 64,
+            'BLOCK_N': 32,
+            'BLOCK_K': 32,
+            'SPLIT_K': 8
+        }),
+        triton.Config({
+            'BLOCK_M': 64,
+            'BLOCK_N': 32,
+            'BLOCK_K': 32,
+            'SPLIT_K': 16
+        }),
+        triton.Config({
+            'BLOCK_M': 64,
+            'BLOCK_N': 32,
+            'BLOCK_K': 32,
+            'SPLIT_K': 32
+        }),
+        triton.Config({
+            'BLOCK_M': 64,
+            'BLOCK_N': 32,
+            'BLOCK_K': 32,
+            'SPLIT_K': 64
+        }),
+    ]
+
+
+@triton.autotune(configs=get_autotune_config(),
+                 key=['N', 'K'],
+                 restore_value=["out_ptr"])
 @triton.jit
 def _sgmv_shrink_kernel(
         input_ptr,
@@ -37,12 +117,11 @@ def _sgmv_shrink_kernel(
         output_d0_stride,
         output_d1_stride,
         output_d2_stride,  # 1 
+        SLICE_NUM: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
-        EVEN_K: tl.constexpr,
-        SPLIT_K: tl.constexpr,
-        SLICE_NUM: tl.constexpr):
+        SPLIT_K: tl.constexpr):
     """
     The sgmv's shrink triton kernel is based on GroupGEMM+SPLIT-K.
     The GEMM of Multi-LoRA can be considered as GroupGEMM. Additionally,
@@ -77,6 +156,7 @@ def _sgmv_shrink_kernel(
     ram = cta_m_offset + tl.max_contiguous(
         tl.multiple_of(offset_m % cta_m_len, BLOCK_M), BLOCK_M)
 
+    EVEN_K = K % (BLOCK_K * SPLIT_K) == 0
     do_shrink_kernel(
         pid_n,
         pid_sk,
@@ -158,14 +238,10 @@ def _sgmv_shrink(
      lora_strides_d2) = _get_lora_a_ptr(lora_a_weights, b_seq_start_loc.device)
     # TODO tuning this config
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
-    BLOCK_M = 32
-    BLOCK_N = 16
-    BLOCK_K = 32
-    SPLIT_K = 8
-    EVEN_K = K % (BLOCK_K * SPLIT_K) == 0
-    grid = (
-        triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(N, BLOCK_N),
-        SPLIT_K * len(lora_a_weights),
+    grid = lambda META: (
+        triton.cdiv(max_seq_length, META["BLOCK_M"]) * triton.cdiv(
+            N, META["BLOCK_N"]),
+        META["SPLIT_K"] * len(lora_a_weights),
         batches,
     )
     _sgmv_shrink_kernel[grid](
@@ -186,12 +262,7 @@ def _sgmv_shrink(
         output_tensor.stride(0),
         output_tensor.stride(1),
         output_tensor.stride(2),
-        BLOCK_M,
-        BLOCK_N,
-        BLOCK_K,
-        EVEN_K,
-        SPLIT_K,
-        len(lora_a_weights),
+        SLICE_NUM=len(lora_a_weights),
     )
     return
 
