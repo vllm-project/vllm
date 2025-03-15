@@ -72,6 +72,21 @@ SHORTEST_REASONING_WITH_THINK = {
     "reasoning_content": None,
     "content": "This is the rest",
 }
+THINK_NO_END = {
+    "output": "<think>This is a reasoning section",
+    "reasoning_content": "This is a reasoning section",
+    "content": None,
+}
+EMPTY = {
+    "output": "",
+    "reasoning_content": "",
+    "content": None,
+}
+EMPTY_STREAMING = {
+    "output": "",
+    "reasoning_content": None,
+    "content": None,
+}
 
 TEST_CASES = [
     pytest.param(
@@ -163,6 +178,26 @@ TEST_CASES = [
         True,
         SHORTEST_REASONING_WITH_THINK,
         id="shortest_with_think_streaming",
+    ),
+    pytest.param(
+        False,
+        THINK_NO_END,
+        id="think_no_end",
+    ),
+    pytest.param(
+        True,
+        THINK_NO_END,
+        id="think_no_end_streaming",
+    ),
+    pytest.param(
+        False,
+        EMPTY,
+        id="empty",
+    ),
+    pytest.param(
+        True,
+        EMPTY_STREAMING,
+        id="empty_streaming",
     ),
 ]
 

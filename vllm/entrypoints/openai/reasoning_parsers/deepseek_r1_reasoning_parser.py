@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 from collections.abc import Sequence
 from typing import Optional, Union
 
@@ -28,9 +27,6 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         super().__init__(tokenizer)
         self.think_start_token = "<think>"
         self.think_end_token = "</think>"
-
-        self.reasoning_regex = re.compile(
-            rf"{self.think_start_token}(.*?){self.think_end_token}", re.DOTALL)
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -124,6 +120,23 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Extract reasoning content from the model output.
+
+        For text <think>abc</think>xyz:
+        - 'abc' goes to reasoning_content
+        - 'xyz' goes to content
+
+        Returns:
+            tuple[Optional[str], Optional[str]]: reasoning content and content
+        """
+
+        # Check if the start token is present in the model output, remove it
+        # if it is present.
+        start_token_index = model_output.find(self.think_start_token)
+        if start_token_index != -1:
+            model_output = model_output[start_token_index +
+                                        len(self.think_start_token):]
 
         # DeepSeek R1 doesn't generate <think> now.
         # Thus we assume the reasoning content is always at the start.
@@ -131,18 +144,18 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         if self.think_end_token not in model_output:
             return model_output, None
         else:
-            # Add a start token if it's missing to keep compatibility.
-            if self.think_start_token not in model_output:
-                model_output = f"{self.think_start_token}{model_output}"
-            # Use a regex to find the reasoning content
-            reasoning_content = self.reasoning_regex.findall(model_output)[0]
-
-            end_index = len(
-                f"{self.think_start_token}{reasoning_content}{self.think_end_token}"
-            )
-            final_output = model_output[end_index:]
-
-            if len(final_output) == 0:
+            # Find the end token index in the model output.
+            end_token_index = model_output.find(self.think_end_token)
+            # If the end token is not found, return the model output as is.
+            # It should not happen since we already checked for the presence
+            # of the end token.
+            if end_token_index == -1:
+                return model_output, None
+            # Extract the reasoning content before the end token.
+            reasoning_content = model_output[:end_token_index]
+            # Extract the content after the end token.
+            content = model_output[end_token_index +
+                                   len(self.think_end_token):]
+            if len(content) == 0:
                 return reasoning_content, None
-
-            return reasoning_content, final_output
+            return reasoning_content, content
