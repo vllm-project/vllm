@@ -41,7 +41,7 @@ class MLP(nn.Module):
     def forward(self, x):
         out = self.fc1(x)
         out = self.relu(out)
-        out, self.lstm_hidden = self.lstm(out, self.lstm_hidden)
+        # out, self.lstm_hidden = self.lstm(out, self.lstm_hidden)
         # out = self.dropout(out)
         out = self.fc2(out)
         return out
