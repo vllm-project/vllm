@@ -24,7 +24,7 @@ from typing import Callable, DefaultDict, Dict, List, Optional, Union
 import numpy as np
 import torch
 from outlines import grammars
-from outlines.caching import cache
+from outlines.caching import cache, disable_cache
 from outlines.fsm.guide import (CFGGuide, CFGState, Generate, Guide,
                                 RegexGuide, Write)
 from outlines.fsm.parsing import PartialLark
@@ -32,11 +32,19 @@ from outlines_core.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding.reasoner import Reasoner
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+if envs.VLLM_V0_USE_OUTLINES_CACHE:
+    logger.warning("Enabling outlines cache. This is an unbounded on-disk "
+                   "cache. It may consume a lot of disk space and should "
+                   "not be used with untrusted clients.")
+else:
+    disable_cache()
 
 
 class BaseLogitsProcessor:
