@@ -1,8 +1,5 @@
 #include "cpu_types.hpp"
 #include <float.h>
-#ifdef __x86_64__
-  #include <immintrin.h>
-#endif
 
 namespace {
 template <typename scalar_t>
