@@ -484,7 +484,7 @@ def sample_recovered_tokens_kernel(
 
     q = tl.load(q_ptr + req_idx * vocab_size + vocab_offset,
                 mask=vocab_offset < vocab_size)
-    recovered_id = tl.argmax(prob / q, -1)
+    recovered_id = tl.argmax(prob / q, axis=-1)
     tl.store(output_token_ids_ptr + start_idx + pos, recovered_id)
     if IS_NGRAM:
         tl.store(
