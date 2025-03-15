@@ -1311,8 +1311,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _bind_and_group_updates(
         self,
-        prompt_updates: list[PromptUpdate],
-    ) -> dict[str, list[BoundPromptUpdate]]:
+        prompt_updates: Sequence[PromptUpdate],
+    ) -> dict[str, Sequence[BoundPromptUpdate]]:
         tokenizer = self.info.get_tokenizer()
 
         it = (update.bind(tokenizer) for update in prompt_updates)
