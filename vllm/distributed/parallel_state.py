@@ -312,6 +312,13 @@ class GroupCoordinator:
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
         return self.device_communicator.all_reduce(input_)
 
+    def reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor:
+        # Bypass the function if we are using only 1 GPU.
+        if self.world_size == 1:
+            return input_
+
+        return self.device_communicator.reduce_scatter(input_)
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
         # Bypass the function if we are using only 1 GPU.

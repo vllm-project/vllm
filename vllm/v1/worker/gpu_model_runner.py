@@ -984,9 +984,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
+        # only do sequence parallelism when num of tokens
+        # is divisible by parallel size.
+        # sequence parallelism uses torch.distributed.reduce_scatter which only
+        # supports the case when size is divisible by parallel size
+        enable_sequence_parallel = (
+            self.vllm_config.parallel_config.enable_sequence_parallel
+            and num_input_tokens %
+            self.vllm_config.parallel_config.tensor_parallel_size == 0)
+
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                enable_sequence_parallel=enable_sequence_parallel,
+        ):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -1243,9 +1256,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            with set_forward_context(None,
-                                     self.vllm_config,
-                                     num_tokens=num_tokens):
+            # only do sequence parallelism when num of tokens
+            # is divisible by parallel size.
+            # sequence parallelism uses torch.distributed.reduce_scatter which only
+            # supports the case when size is divisible by parallel size
+            enable_sequence_parallel = (
+                self.vllm_config.parallel_config.enable_sequence_parallel
+                and num_tokens %
+                self.vllm_config.parallel_config.tensor_parallel_size == 0)
+
+            with set_forward_context(
+                    None,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    enable_sequence_parallel=enable_sequence_parallel,
+            ):
                 hidden_states = model(
                     input_ids=input_ids,
                     positions=positions,
