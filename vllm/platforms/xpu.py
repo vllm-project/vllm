@@ -140,14 +140,24 @@ class XPUPlatform(Platform):
     @classmethod
     def device_support_bf16(cls) -> bool:
         device_name = cls.get_device_name().lower()
-        if device_name.count("arc") > 0:
+        if cls.is_client_gpu():
             return False
-        elif device_name.count("data center gpu") > 0:
+        elif cls.is_data_center_gpu():
             return True
         else:
             logger.warning("Unknown device name %s, always use float16",
                            device_name)
             return False
+
+    @classmethod
+    def is_data_center_gpu(cls) -> bool:
+        device_name = cls.get_device_name().lower()
+        return device_name.count("data center gpu") > 0
+
+    @classmethod
+    def is_client_gpu(cls) -> bool:
+        device_name = cls.get_device_name().lower()
+        return device_name.count("arc") > 0
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
