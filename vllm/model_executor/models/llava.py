@@ -755,12 +755,12 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             # The path is used for pixtral (V0 only) and llava (V0/V1)
             return vision_embeddings
 
-        nested_emb = [
-            self._get_mm_embeds(*args)
-            for args in zip(vision_embeddings, image_input["num_crops"],
-                            image_input["embed_is_patch"])
-        ]
-        return flatten_2d_lists(nested_emb)
+        return flatten_2d_lists(
+            self._get_mm_embeds(*args) for args in zip(
+                vision_embeddings,
+                image_input["num_crops"],
+                image_input["embed_is_patch"],
+            ))
 
     def get_input_embeddings(
         self,
