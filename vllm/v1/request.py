@@ -88,14 +88,13 @@ class Request:
                 sampling_params=request.sampling_params),
         )
 
-    def append_output_token_ids(
-        self,
-        token_ids: Union[int, list[int]],
-    ) -> None:
-        if isinstance(token_ids, int):
-            token_ids = [token_ids]
+    def append_output_token_ids(self, token_ids: list[int]) -> None:
         self._output_token_ids.extend(token_ids)
         self._all_token_ids.extend(token_ids)
+
+    def append_output_token_id(self, token_id: int) -> None:
+        self._output_token_ids.append(token_id)
+        self._all_token_ids.append(token_id)
 
     @property
     def num_tokens(self) -> int:

@@ -278,7 +278,7 @@ def test_decode():
     # Append slots without allocating a new block.
     req0.num_computed_tokens = 55
     for _ in range(4):
-        req0.append_output_token_ids(8)
+        req0.append_output_token_id(8)
     new_blocks = manager.allocate_slots(req0, 4)
     assert new_blocks is not None and len(new_blocks) == 0
     assert manager.req_to_blocks[req0.request_id][-2].block_hash is None
@@ -289,7 +289,7 @@ def test_decode():
     # 6 tokens to fill the previous block, and 10 tokens to fill
     # the preallocated block.
     for _ in range(5 + 10):
-        req0.append_output_token_ids(7)
+        req0.append_output_token_id(7)
     new_blocks = manager.allocate_slots(req0, 15)
     assert new_blocks is not None and len(new_blocks) == 0
     assert manager.req_to_blocks[req0.request_id][-2].block_hash is not None
@@ -299,7 +299,7 @@ def test_decode():
     # 6 tokens to fill the previous block, and 10 tokens to fill
     # the preallocated block.
     for _ in range(6 + 11):
-        req0.append_output_token_ids(12)
+        req0.append_output_token_id(12)
     new_blocks = manager.allocate_slots(req0, 17)
     # Plus one preallocated block.
     assert new_blocks is not None and len(new_blocks) == 2
@@ -622,7 +622,7 @@ def test_mm_prefix_caching():
 
     # Append slots without allocating a new block.
     for _ in range(5):
-        req0.append_output_token_ids(8)
+        req0.append_output_token_id(8)
     new_blocks = manager.allocate_slots(req0, 5)
     assert new_blocks is not None and len(new_blocks) == 0
 

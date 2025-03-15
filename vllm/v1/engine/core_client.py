@@ -356,9 +356,9 @@ class SyncMPClient(MPClient):
 
         def process_outputs_socket():
             shutdown_socket = ctx.socket(zmq.PAIR)
-            shutdown_socket.bind(shutdown_path)
             out_socket = make_zmq_socket(ctx, output_path, zmq.constants.PULL)
             try:
+                shutdown_socket.bind(shutdown_path)
                 poller = zmq.Poller()
                 poller.register(shutdown_socket)
                 poller.register(out_socket)
@@ -370,7 +370,7 @@ class SyncMPClient(MPClient):
                         # shutdown signal, exit thread.
                         break
 
-                    (frame, ) = out_socket.recv_multipart(copy=False)
+                    frame = out_socket.recv(copy=False)
                     outputs = decoder.decode(frame.buffer)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
@@ -478,7 +478,7 @@ class AsyncMPClient(MPClient):
 
         async def process_outputs_socket():
             while True:
-                (frame, ) = await output_socket.recv_multipart(copy=False)
+                frame = await output_socket.recv(copy=False)
                 outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
                 if outputs.utility_output:
                     _process_utility_output(outputs.utility_output,

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import gc
 import queue
 import signal
 import threading
@@ -179,16 +179,6 @@ class EngineCore:
                 scheduler_stats=self.scheduler.make_stats(),
             )
         scheduler_output = self.scheduler.schedule()
-
-        # This case may occur when the only unfinished requests are
-        # structured output requests where the grammar has not finished
-        # compiling yet, so there's nothing to run.
-        if scheduler_output.total_num_scheduled_tokens == 0:
-            return EngineCoreOutputs(
-                outputs=[],
-                scheduler_stats=self.scheduler.make_stats(),
-            )
-
         output = self.model_executor.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
@@ -330,6 +320,12 @@ class EngineCoreProc(EngineCore):
         engine_core = None
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
+
+            # Mark the startup heap as static so that it's ignored by GC.
+            # Reduces pause times of oldest generation collections.
+            gc.collect()
+            gc.freeze()
+
             engine_core.run_busy_loop()
 
         except SystemExit:
@@ -359,9 +355,7 @@ class EngineCoreProc(EngineCore):
                 self._handle_client_request(*req)
 
             # 2) Handle any new client requests.
-            while not self.input_queue.empty():
-                req = self.input_queue.get_nowait()
-                self._handle_client_request(*req)
+            self._process_input_queue_nonblock()
 
             # 3) Step the engine core.
             outputs = step_fn()
@@ -369,6 +363,31 @@ class EngineCoreProc(EngineCore):
             # 4) Put EngineCoreOutputs into the output queue.
             if outputs is not None:
                 self.output_queue.put_nowait(outputs)
+
+    def step(self) -> EngineCoreOutputs:
+        """Schedule, execute, and make output."""
+
+        # Check for any requests remaining in the scheduler - unfinished,
+        # or finished and not yet removed from the batch.
+        if not self.scheduler.has_requests():
+            return EngineCoreOutputs(
+                outputs=[],
+                scheduler_stats=self.scheduler.make_stats(),
+            )
+        scheduler_output = self.scheduler.schedule()
+        output = self.model_executor.execute_model(scheduler_output)
+
+        # Process new inputs here to avoid creating outputs for aborted
+        # requests and to reflect new requests in waiting queue stats.
+        self._process_input_queue_nonblock()
+
+        return self.scheduler.update_from_output(scheduler_output, output)
+
+    def _process_input_queue_nonblock(self):
+        # Handle any client requests.
+        while not self.input_queue.empty():
+            req = self.input_queue.get_nowait()
+            self._handle_client_request(*req)
 
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
@@ -440,4 +459,4 @@ class EngineCoreProc(EngineCore):
             while True:
                 outputs = self.output_queue.get()
                 encoder.encode_into(outputs, buffer)
-                socket.send_multipart((buffer, ), copy=False)
+                socket.send(buffer, copy=False)
