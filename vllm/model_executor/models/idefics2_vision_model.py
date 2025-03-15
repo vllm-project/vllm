@@ -297,7 +297,7 @@ class Idefics2VisionTransformer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         *,
         num_hidden_layers_override: Optional[int] = None,
-        require_post_norm: Optional[bool] = None,
+        require_post_norm: bool = True,
         prefix: str = "",
     ) -> None:
         super().__init__()
