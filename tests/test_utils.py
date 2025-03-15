@@ -140,7 +140,8 @@ def parser():
 def parser_with_config():
     parser = FlexibleArgumentParser()
     parser.add_argument('serve')
-    parser.add_argument('model_tag')
+    parser.add_argument('model_tag', nargs='?')
+    parser.add_argument('--model', type=str)
     parser.add_argument('--served-model-name', type=str)
     parser.add_argument('--config', type=str)
     parser.add_argument('--port', type=int)
