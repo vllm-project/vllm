@@ -7,12 +7,14 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import warnings
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+import cloudpickle
 import openai
 import pytest
 import requests
@@ -712,25 +714,33 @@ def spawn_new_process_for_each_test(
         with suppress(RuntimeError):
             mp.set_start_method('spawn')
 
-        # Get the module and function name
+        # Get the module
         module_name = f.__module__
-        func_name = f.__name__
 
         # Create a process with environment variable set
         env = os.environ.copy()
         env['RUNNING_IN_SUBPROCESS'] = '1'
 
-        cmd = [
-            sys.executable, "-c",
-            f"from {module_name} import *; {func_name}(*{args}, **{kwargs})"
-        ]
+        with tempfile.TemporaryDirectory() as tempdir:
+            output_filepath = os.path.join(tempdir, "new_process.tmp")
 
-        process = subprocess.Popen(cmd, env=env)
-        process.wait()
+            # `cloudpickle` allows pickling complex functions directly
+            input_bytes = cloudpickle.dumps((f, output_filepath))
 
-        assert process.returncode == 0, (
-            f"function {f} failed when called with"
-            f" args {args} and kwargs {kwargs}")
+            cmd = [sys.executable, "-m", f"{module_name}"]
+
+            returned = subprocess.run(cmd,
+                                      input=input_bytes,
+                                      capture_output=True,
+                                      env=env)
+
+            # check if the subprocess is successful
+            try:
+                returned.check_returncode()
+            except Exception as e:
+                # wrap raised exception to provide more information
+                raise RuntimeError(f"Error raised in subprocess:\n"
+                                   f"{returned.stderr.decode()}") from e
 
     return wrapper
 
