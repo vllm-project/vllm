@@ -1342,16 +1342,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_registry=self.mm_registry,
             )
             dummy_mm_data = dummy_request_data.multi_modal_data
+            if not isinstance(dummy_mm_data, MultiModalKwargs):
+                # TODO: Delete this check once input mapper is fully removed
+                raise RuntimeError(
+                    "Legacy input mapper is not supported in V1")
 
             # Dummy data definition in V0 may contain multiple multimodal items
             # (e.g, multiple images) for a single request, therefore here we
             # always replicate first item by max_num_mm_items times since in V1
             # they are scheduled to be processed separately.
-
-            # Case when models have a merged processor, their dummy data is
-            # already batched `MultiModalKwargs`, therefore we take the first
-            # `MultiModalKwargsItem` from the desired modality to profile on.
-            assert isinstance(dummy_mm_data, MultiModalKwargs)
             dummy_mm_item = dummy_mm_data.get_item(
                 modality=dummy_data_modality, item_index=0)
             dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
