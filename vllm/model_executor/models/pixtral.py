@@ -442,6 +442,9 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         image_features = self._process_image_input(image_input)
 
+        if kwargs.get("v0_path", False):
+            return image_features
+
         return flatten_2d_lists(
             self._get_mm_embeds(*args) for args in zip(
                 image_features,
@@ -484,6 +487,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
+            kwargs.update({"v0_path": True})
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
