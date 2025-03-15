@@ -1948,6 +1948,9 @@ class LLMEngine:
             "Sleep mode is not enabled in the model config")
         self.model_executor.wake_up()
 
+    def is_sleeping(self) -> bool:
+        return self.model_executor.is_sleeping
+
     def check_health(self) -> None:
         if self.tokenizer:
             self.tokenizer.check_health()

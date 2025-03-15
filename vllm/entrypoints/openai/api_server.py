@@ -694,6 +694,12 @@ if envs.VLLM_SERVER_DEV_MODE:
         # is sent but does not finish yet when we return a response.
         return Response(status_code=200)
 
+    @router.get("/is_sleeping")
+    async def is_sleeping(raw_request: Request):
+        logger.info("check whether the engine is sleeping")
+        is_sleeping = await engine_client(raw_request).is_sleeping()
+        return JSONResponse(content={"is_sleeping": is_sleeping})
+
 
 @router.post("/invocations", dependencies=[Depends(validate_json_request)])
 async def invocations(raw_request: Request):
