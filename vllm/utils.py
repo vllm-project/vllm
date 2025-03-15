@@ -1291,10 +1291,13 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
             if model_in_cli:
                 # Model specified as positional arg, keep CLI version
-                args = [args[0]] + [args[1]] + config_args + args[2:index] + args[index + 2:]
+                args = [args[0]] + [
+                    args[1]
+                ] + config_args + args[2:index] + args[index + 2:]
             else:
                 # No model in CLI, use config if available
-                args = [args[0]] + config_args + args[1:index] + args[index + 2:]
+                args = [args[0]
+                    ] + config_args + args[1:index] + args[index + 2:]
         else:
             args = [args[0]] + config_args + args[1:index] + args[index + 2:]
 
@@ -1341,7 +1344,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         skip_model = False
         if hasattr(self, '_parsed_args') and self._parsed_args:
             if (len(self._parsed_args) > 1 and self._parsed_args[0] == 'serve' 
-                and not self._parsed_args[1].startswith('-')):
+                    and not self._parsed_args[1].startswith('-')):
                 skip_model = True
 
         for key, value in config.items():

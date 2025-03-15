@@ -495,7 +495,8 @@ def test_model_specification(parser_with_config):
 
     # Test no model specified anywhere raises error
     with pytest.raises(ValueError, match="No model specified!"):
-        parser_with_config.parse_args(['serve', '--config', './data/test_config.yaml'])
+        parser_with_config.parse_args(['serve', '--config',
+                                       './data/test_config.yaml'])
 
     # Test other config values are preserved
     args = parser_with_config.parse_args([
