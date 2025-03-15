@@ -137,7 +137,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
-        """Profiles the peak memory usage of the model to determine how much 
+        """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
@@ -151,7 +151,10 @@ class Worker(WorkerBase):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
-        _, total_gpu_memory = torch.cuda.mem_get_info()
+        free_gpu_memory_before, total_gpu_memory = torch.cuda.mem_get_info()
+        non_torch_allocations_before = (total_gpu_memory -
+                                        free_gpu_memory_before -
+                                        torch.cuda.memory_allocated())
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         self.model_runner.profile_run()
@@ -174,11 +177,13 @@ class Worker(WorkerBase):
         torch.cuda.empty_cache()
         torch_allocated_bytes = torch.cuda.memory_stats(
         )["allocated_bytes.all.current"]
-        total_allocated_bytes = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
+        total_allocated_bytes = (torch.cuda.mem_get_info()[1] -
+                                 torch.cuda.mem_get_info()[0])
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
-        if non_torch_allocations > 0:
-            peak_memory += non_torch_allocations
+        non_torch_allocations_increase = non_torch_allocations - max(
+            0, non_torch_allocations_before)
+        if non_torch_allocations_increase > 0:
+            peak_memory += non_torch_allocations_increase
         available_kv_cache_memory = (
             total_gpu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
