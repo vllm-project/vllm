@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import os
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -649,3 +650,31 @@ def set_vllm_use_v1(use_v1: bool):
             "explicitly by the user. Please raise this as a Github "
             "Issue and explicitly set VLLM_USE_V1=0 or 1.")
     os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
+
+
+def compute_hash() -> str:
+    """
+    WARNING: Whenever a new key is added to this environment
+    variables, ensure that it is included in the factors list if
+    it affects the computation graph.
+    """
+    factors: list[Any] = []
+
+    # summarize environment variables
+    def factorize(name: str):
+        if __getattr__(name):
+            factors.append(__getattr__(name))
+        else:
+            factors.append("None")
+
+    # The values of VLLM_PP_LAYER_PARTITION will
+    # affects the computation graph.
+    factorize("VLLM_PP_LAYER_PARTITION")
+
+    # TODO(DefTruth): hash all environment variables?
+    # for key in environment_variables:
+    #     factorize(key)
+
+    hash_str = hashlib.md5(str(factors).encode()).hexdigest()
+
+    return hash_str
