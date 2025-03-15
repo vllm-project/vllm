@@ -11,12 +11,12 @@ from itertools import product
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import torch
 import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
 from utils import ArgPool, Bench, CudaGraphBenchParams
 from weight_shapes import WEIGHT_SHAPES
 
-import torch
 from vllm.lora.ops.triton_ops import LoRAKernelMeta, lora_expand, lora_shrink
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.utils import FlexibleArgumentParser
