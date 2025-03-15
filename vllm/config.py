@@ -52,6 +52,8 @@ if TYPE_CHECKING:
 else:
     QuantizationConfig = None
 
+from packaging.version import Version
+
 logger = init_logger(__name__)
 
 # This value is chosen to have a balance between ITL and TTFT. Note it is
@@ -2289,9 +2291,14 @@ class LoRAConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # LoRA is not compatible with `torch.compile` .
         factors: list[Any] = []
+        factors.append(self.max_lora_rank)
+        factors.append(self.max_loras)
+        factors.append(self.fully_sharded_loras)
+        factors.append(self.lora_dtype)
+        factors.append(self.lora_extra_vocab_size)
+        factors.append(self.long_lora_scaling_factors)
+        factors.append(self.bias_enabled)
         hash_str = hashlib.md5(str(factors).encode()).hexdigest()
         return hash_str
 
@@ -3127,6 +3134,19 @@ class CompilationConfig(BaseModel):
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
 
+        # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
+        # 1. A bug in PyTorch, fixed in 2.7:
+        #    https://github.com/pytorch/pytorch/issues/147924
+        # 2. Custom passes (fusion) rely on auto-functionalization V1 and don't
+        #    work with V2. Addressing this will take extra engineering effort
+        #    and it is not yet a priority. RFC here:
+        #    https://github.com/vllm-project/vllm/issues/14703
+
+        if Version(torch.__version__) >= Version("2.6"):
+            KEY = 'enable_auto_functionalized_v2'
+            if KEY not in self.inductor_compile_config:
+                self.inductor_compile_config[KEY] = False
+
         if self.splitting_ops is None:
             if envs.VLLM_USE_V1:
                 # v1 must split the graph on attention ops
@@ -3309,6 +3329,11 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
+            # LoRA creates static buffers based on max_num_batched_tokens.
+            # The tensor sizes and strides get captured in the torch.compile
+            # graph explicitly.
+            vllm_factors.append(
+                str(self.scheduler_config.max_num_batched_tokens))
         else:
             vllm_factors.append("None")
         if self.speculative_config:
@@ -3459,11 +3484,14 @@ class VllmConfig:
                 " Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        if self.lora_config is not None and self.compilation_config.level !=\
-             CompilationLevel.NO_COMPILATION:
-            logger.warning("LoRA is not supported with `torch.compile` yet. "
-                           "Disabling `torch.compile`.")
+        if ((not envs.VLLM_USE_V1) and self.lora_config is not None
+                and self.compilation_config.level
+                != CompilationLevel.NO_COMPILATION):
+            logger.warning(
+                "LoRA for V0 is not supported with `torch.compile` yet. "
+                "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
 
         if self.model_config and self.model_config.use_mla and \
             not (current_platform.is_cuda() or current_platform.is_rocm()):
