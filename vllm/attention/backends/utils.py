@@ -588,6 +588,9 @@ def get_num_prefill_decode_query_kv_tokens(
 
 
 def get_flash_attn_version():
+    if current_platform.get_device_capability() is None:
+        return None
+
     try:
         from vllm.vllm_flash_attn.flash_attn_interface import (
             fa_version_unsupported_reason, is_fa_version_supported)

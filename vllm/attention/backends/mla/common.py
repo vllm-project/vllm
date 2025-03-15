@@ -205,7 +205,6 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            get_flash_attn_version,
                                            is_block_tables_empty)
-from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
@@ -213,17 +212,26 @@ from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
+
+if HAS_TRITON:
+    from vllm.attention.ops.triton_flash_attention import triton_attention
+    from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
+else:
+    merge_attn_states = None
+    triton_attention = None
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     is_vllm_fa = True
 except ImportError:
-    # For rocm use upstream flash attention
-    from flash_attn import flash_attn_varlen_func
     is_vllm_fa = False
-
-from vllm.attention.ops.triton_flash_attention import triton_attention
+    try:
+        # For rocm use upstream flash attention
+        from flash_attn import flash_attn_varlen_func
+    except ImportError:
+        flash_attn_varlen_func = None
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -975,7 +983,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             head_dim=self.runner.model_config.get_head_size(),
-            is_profile_run=self.runner.in_profile_run,
+            is_profile_run=getattr(self.runner, "in_profile_run", False),
             # MLACommonMetadata Chunk prefill specific
             context_chunk_cu_seq_lens=context_chunk_cu_seq_lens,
             context_chunk_starts=context_chunk_starts,
@@ -1340,7 +1348,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             raise NotImplementedError(
                 "output is not yet supported for MLAImplBase")
 
-        if attn_metadata.is_profile_run and \
+        if getattr(attn_metadata, "is_profile_run", False) and \
             attn_metadata.context_chunk_workspace is not None:
             # During the profile run try to simulate to worse case output size
             # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`

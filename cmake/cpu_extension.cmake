@@ -190,6 +190,7 @@ set(VLLM_EXT_SRC
     "csrc/cpu/cache.cpp"
     "csrc/cpu/utils.cpp"
     "csrc/cpu/layernorm.cpp"
+    "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
