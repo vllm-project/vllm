@@ -159,4 +159,17 @@ def test_end_to_end(model: str, use_v1: bool):
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
+    # test sleep level 3 here.
+    llm.sleep(level=3)
+
+    # the memory usage is mostly cudagraph memory pool, similar to level 1
+    free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
+    used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
+
+    llm.wake_up()
+    output2 = llm.generate(prompt, sampling_params)
+
+    # cmp output
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
+
     del os.environ["VLLM_USE_V1"]
