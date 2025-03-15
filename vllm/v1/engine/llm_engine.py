@@ -235,6 +235,9 @@ class LLMEngine:
     def wake_up(self):
         self.engine_core.wake_up()
 
+    def is_sleeping(self) -> bool:
+        return self.engine_core.is_sleeping()
+
     def get_tokenizer_group(
         self,
         group_type: type[_G] = BaseTokenizerGroup,

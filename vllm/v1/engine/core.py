@@ -253,6 +253,9 @@ class EngineCore:
     def wake_up(self):
         self.model_executor.wake_up()
 
+    def is_sleeping(self) -> bool:
+        return self.model_executor.is_sleeping
+
     def execute_dummy_batch(self):
         self.model_executor.collective_rpc("execute_dummy_batch")
 
