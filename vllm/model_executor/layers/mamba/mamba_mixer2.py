@@ -469,7 +469,7 @@ class MambaMixer2(CustomOp):
                     has_initial_states):
                 zero_init_indices = mamba_cache_params.state_indices_tensor[
                     ~has_initial_states]
-                mamba_cache_params.ssm_state[zero_init_indices].zero_()
+                mamba_cache_params.ssm_state[zero_init_indices] = 0
                 initial_states = mamba_cache_params.ssm_state[
                     mamba_cache_params.state_indices_tensor]
 
