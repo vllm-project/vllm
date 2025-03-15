@@ -5,24 +5,11 @@ import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 
-from vllm import envs
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import random_sample
 
-try:
-    import flashinfer.sampling as fs
-    is_flashinfer_available = True
-except ImportError:
-    is_flashinfer_available = False
-
-# Turn off FlashInfer by default for now because
-# of its correctness issue in the reject sampling kernel.
-# Possible related issue:
-# https://github.com/flashinfer-ai/flashinfer/issues/879
-is_flashinfer_available = False
 logger = init_logger(__name__)
 INVALID_TOKEN_ID = -1
 
@@ -52,43 +39,6 @@ class RejectionSampler(nn.Module):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda():
-            if is_flashinfer_available:
-                if envs.VLLM_USE_FLASHINFER_SAMPLER is not False:
-                    # FIXME(woosuk): Currently, we have errors when using
-                    # FlashInfer for rejection sampling. As a workaround, we
-                    # disable FlashInfer for rejection sampling by default.
-                    logger.info("Currently, FlashInfer rejection sampler is "
-                                "disabled because of a bug. Falling back to "
-                                "the PyTorch-native implementation of "
-                                "rejection sampling.")
-                    self.forward_method = self.forward_native
-
-                    # NOTE(woosuk): The V0 sampler doesn't use FlashInfer for
-                    # sampling unless VLLM_USE_FLASHINFER_SAMPLER=1 (i.e., by
-                    # default it is unused). For backward compatibility, we set
-                    # `VLLM_USE_FLASHINFER_SAMPLER` as None by default and
-                    # interpret it differently in V0 and V1 samplers: In V0,
-                    # None means False, while in V1, None means True. This is
-                    # why we use the condition
-                    # `envs.VLLM_USE_FLASHINFER_SAMPLER is not False` here.
-                    # logger.info("Using FlashInfer for rejection sampling.")
-                    # self.forward_method = self.flashinfer_sample
-                else:
-                    logger.warning(
-                        "FlashInfer is available, but it is not enabled. "
-                        "Falling back to the PyTorch-native implementation of "
-                        "rejection sampling. For the best performance, "
-                        "please set VLLM_USE_FLASHINFER_SAMPLER=1.")
-                    self.forward_method = self.forward_native
-            else:
-                logger.warning(
-                    "FlashInfer is not available. Falling back to the PyTorch-"
-                    "native implementation of rejection sampling. For the "
-                    "best performance, please install FlashInfer.")
-                self.forward_method = self.forward_native
-        else:
-            self.forward_method = self.forward_native
 
     def forward(
         self,
@@ -147,57 +97,19 @@ class RejectionSampler(nn.Module):
         # NOTE: CPU <-> GPU synchronization happens here.
         draft_token_ids_tensor = draft_token_ids_tensor.to(target_probs.device)
 
-        if self.forward_method == self.flashinfer_sample:
-            # Create one-hot tensor for draft token ids.
-            # This is used for ngram where we don't have draft_probs.
-            if draft_probs is None:
-                vocab_size = target_probs.size(-1)
-                draft_probs = _create_greedy_token_probs(
-                    draft_token_ids_tensor, vocab_size, target_probs.device)
-            if sampling_metadata.all_greedy:
-                target_token_ids_tensor = target_probs.argmax(dim=-1)
-                target_probs = _create_greedy_token_probs(
-                    target_token_ids_tensor, vocab_size, target_probs.device)
-            else:
-                sample_lens = [len(x) + 1 for x in draft_token_ids]
-                target_probs = _convert_2d_probs(target_probs, sample_lens)
+        # Create one-hot tensor for draft token ids.
+        # This is used for ngram where we don't have draft_probs.
+        if draft_probs is None and not sampling_metadata.all_greedy:
+            vocab_size = target_probs.size(-1)
+            draft_probs = _create_greedy_token_probs(draft_token_ids_tensor,
+                                                     vocab_size,
+                                                     target_probs.device)
+        sample_lens = [len(x) + 1 for x in draft_token_ids]
+        target_probs = _convert_2d_probs(target_probs, sample_lens)
 
-        elif self.forward_method == self.forward_native:
-            # Create one-hot tensor for draft token ids.
-            # This is used for ngram where we don't have draft_probs.
-            if draft_probs is None and not sampling_metadata.all_greedy:
-                vocab_size = target_probs.size(-1)
-                draft_probs = _create_greedy_token_probs(
-                    draft_token_ids_tensor, vocab_size, target_probs.device)
-            sample_lens = [len(x) + 1 for x in draft_token_ids]
-            target_probs = _convert_2d_probs(target_probs, sample_lens)
-
-        return self.forward_method(draft_token_ids_tensor, draft_probs,
+        return self.forward_native(draft_token_ids_tensor, draft_probs,
                                    bonus_token_ids_tensor, target_probs,
                                    sampling_metadata)
-
-    def flashinfer_sample(
-        self,
-        draft_token_ids_tensor: torch.Tensor,
-        draft_probs: Optional[torch.Tensor],
-        bonus_token_ids_tensor: torch.Tensor,
-        target_probs: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
-        batch_size = draft_token_ids_tensor.size(0)
-        max_spec_len = draft_token_ids_tensor.size(1)
-        uniform_samples = _create_uniform_samples(sampling_metadata.generators,
-                                                  batch_size, max_spec_len + 1,
-                                                  target_probs.device)
-
-        sampled_token_ids, _, _ = fs.chain_speculative_sampling(
-            draft_probs,
-            draft_token_ids_tensor,
-            uniform_samples,
-            target_probs,
-        )
-        return SamplerOutput(sampled_token_ids=sampled_token_ids,
-                             logprobs_tensors=None)
 
     # TODO: The following method can be optimized for better performance.
     def forward_native(
@@ -268,8 +180,10 @@ class RejectionSampler(nn.Module):
                                   INVALID_TOKEN_ID * (1 - accept_mask))
 
             # 4. Adjust the distribution for the recovered tokens.
+            # Clamp the bonus probabilities to the smallest positive normal
+            # value representable by float32.
             bonus_prob = torch.clamp(target_probs[:, :-1, :] - draft_probs,
-                                     min=1e-5)
+                                     min=torch.finfo(torch.float32).tiny)
             normalized_bonus_prob = bonus_prob / bonus_prob.sum(dim=-1,
                                                                 keepdim=True)
 
@@ -389,7 +303,7 @@ def _convert_2d_probs(
     return padded_probs
 
 
-def _create_uniform_samples(seeded_seqs: Optional[dict[int, torch.Generator]],
+def _create_uniform_samples(seeded_seqs: dict[int, torch.Generator],
                             batch_size: int, k: int,
                             device: torch.device) -> torch.Tensor:
     """
@@ -420,7 +334,10 @@ def _create_uniform_samples(seeded_seqs: Optional[dict[int, torch.Generator]],
                 random values in the range [0, 1).
         """
 
-    uniform_rand = torch.rand(batch_size, k, dtype=torch.float32, device=device)
+    uniform_rand = torch.rand(batch_size,
+                              k,
+                              dtype=torch.float32,
+                              device=device)
     # Apply seeded generators only where needed
     if seeded_seqs:
         for idx, generator in seeded_seqs.items():

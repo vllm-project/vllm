@@ -2,10 +2,11 @@
 from vllm.v1.sample.metadata import SamplingMetadata
 
 
-def is_spec_decode_supported(req_idx: int,
-                             sampling_metadata: SamplingMetadata) -> bool:
-    if ((sampling_metadata.top_p and sampling_metadata.top_p[req_idx] < 1.0) or
-        (sampling_metadata.top_k and sampling_metadata.top_k[req_idx] > 0)):
+def is_spec_decode_supported(req_idx: int, sampling_metadata: SamplingMetadata,
+                             vocab_size: int) -> bool:
+    if ((sampling_metadata.top_p and sampling_metadata.top_p[req_idx] < 1.0)
+            or (sampling_metadata.top_k
+                and 0 < sampling_metadata.top_k[req_idx] < vocab_size)):
         # Spec decode doesn't support top_p/top_k sampling.
         return False
     elif sampling_metadata.min_p and sampling_metadata.min_p[req_idx] > 0.0:
