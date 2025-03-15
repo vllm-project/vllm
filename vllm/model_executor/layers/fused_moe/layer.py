@@ -869,6 +869,80 @@ class FusedMoE(torch.nn.Module):
             return torch.ops.vllm.moe_forward(hidden_states, router_logits,
                                               self.layer_name)
 
+    def forward_impl_while(self, hidden_states: torch.Tensor,
+                           router_logits: torch.Tensor):
+        max_tokens_across_dp = get_forward_context(
+        ).dp_metadata.max_tokens_across_dp
+
+        #TODO: we need to define a couple of ranges:
+        # 1. the range within this rank's M dimension that we are looping over
+        # 2. the range within the workspace buffer that our current chunk maps to.
+
+        moe_dp_chunk_size = 256
+        my_dp_chunk_size = moe_dp_chunk_size // self.dp_size
+        chunk_start = torch.tensor(0, device=hidden_states.device)
+
+        def padded_allgather(self, x: torch.Tensor):
+            assert (len(x.shape) == 2)
+            buffer = torch.zeros((moe_dp_chunk_size, x.shape[1]),
+                                 device=x.device,
+                                 dtype=x.dtype)
+
+            buffer[:x.shape[0], :].copy_(x)
+            get_dp_group().all_gather(buffer, 0)
+            return buffer
+
+        def cond_fn(chunk_range, max_tokens_across_dp, hidden_states,
+                    router_logits):
+            return chunk_range[0] < max_tokens_across_dp
+
+        def body_fn(chunk_range, max_tokens_across_dp, full_hidden_states,
+                    full_router_logits):
+            hidden_states = full_hidden_states[chunk_range]
+            router_logits = full_router_logits[chunk_range]
+
+            if self.dp_size > 1:
+                cu_tokens_across_dp_cpu = get_forward_context(
+                ).dp_metadata.cu_tokens_across_dp_cpu
+
+                hidden_states = self.padded_allgather(hidden_states)
+                router_logits = self.padded_allgather(router_logits)
+
+            # Matrix multiply.
+            final_hidden_states = self.quant_method.apply(
+                layer=self,
+                x=hidden_states,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                renormalize=self.renormalize,
+                use_grouped_topk=self.use_grouped_topk,
+                global_num_experts=self.global_num_experts,
+                expert_map=self.expert_map,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                custom_routing_function=self.custom_routing_function,
+                scoring_func=self.scoring_func,
+                e_score_correction_bias=self.e_score_correction_bias,
+                activation=self.activation,
+            )
+
+            if self.dp_size > 1:
+                all_hidden_states = get_dp_group().all_reduce(
+                    final_hidden_states)
+                final_hidden_states[chunk_range] = all_hidden_states[
+                    start:end, :]
+
+            if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+                # Default set to False. (May have to add shared expert outputs.)
+                final_hidden_states = tensor_model_parallel_all_reduce(
+                    final_hidden_states)
+
+            chunk_range[0] = min(hidden_states.shape[0],
+                                 chunk_range[0] + moe_dp_chunk_size)
+            chunk_range[1] = min(hidden_states.shape[0],
+                                 chunk_range[1] + moe_dp_chunk_size)
+            return chunk_start, hidden_states
+
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
