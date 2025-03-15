@@ -63,14 +63,15 @@ class Request:
     output_len: int
 
 
-def sample_tokens(tokenizer: PreTrainedTokenizerBase, length: int) -> str:
+def sample_tokens(tokenizer: PreTrainedTokenizerBase,
+                  length: int) -> list[int]:
+    special_ids_set = set(tokenizer.all_special_ids)
     vocab = tokenizer.get_vocab()
-    # Remove the special tokens.
-    vocab = {
-        k: v
-        for k, v in vocab.items() if k not in tokenizer.all_special_ids
-    }
-    return random.choices(list(vocab.values()), k=length)
+    filtered_vocab_ids = [
+        id_ for token, id_ in vocab.items() if id_ not in special_ids_set
+    ]
+
+    return random.choices(filtered_vocab_ids, k=length)
 
 
 def sample_requests_from_dataset(
@@ -149,7 +150,7 @@ def repeat_and_sort_requests(requests: list[Request],
                              sort: bool = False) -> list[str]:
     repeated_requests = requests * repeat_count
     if sort:
-        repeated_requests.sort(key=lambda x: x[1])
+        repeated_requests.sort(key=lambda x: x.prompt_len)
     else:
         random.shuffle(repeated_requests)
     return [req.prompt for req in repeated_requests]
