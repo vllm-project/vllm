@@ -36,6 +36,7 @@ class FBGEMMFp8Config(QuantizationConfig):
         # kernel for fast weight-only FP8 quantization
         self.use_marlin = not current_platform.has_device_capability(89)
         self.fp8_linear = Fp8LinearOp()
+        self.out_dtype = torch.get_default_dtype()
 
     @classmethod
     def get_name(cls) -> str:
@@ -73,6 +74,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: FBGEMMFp8Config):
         self.quant_config = quant_config
         self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=True)
+        self.out_dtype = torch.get_default_dtype()
 
     def create_weights(
         self,
@@ -161,6 +163,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         return self.fp8_linear.apply(input=x,
                                      weight=layer.weight,
                                      weight_scale=layer.weight_scale,
+                                     out_dtype=self.out_dtype,
                                      input_scale=None,
                                      input_scale_ub=layer.input_scale_ub,
                                      bias=bias)
