@@ -66,7 +66,8 @@ class _HfExamplesInfo:
             msg = (
                 f"You have `transformers=={current_version}` installed, but "
                 f"`transformers>={required_version}` is required to run this "
-                "model")
+                "model"
+            )
 
             if on_fail == "error":
                 raise RuntimeError(msg)

@@ -4,9 +4,11 @@ import pytest
 
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.activation import (GeluAndMul,
-                                                   ReLUSquaredActivation,
-                                                   SiluAndMul)
+from vllm.model_executor.layers.activation import (
+    GeluAndMul,
+    ReLUSquaredActivation,
+    SiluAndMul,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 
 
@@ -48,11 +50,16 @@ class Relu3(ReLUSquaredActivation):
         ("-silu_and_mul,+relu3", 3, [0, 0, 0, 1], False),
         # All but RMSNorm
         ("all,-rms_norm", 4, [0, 1, 1, 1], True),
-    ])
-def test_enabled_ops(env: str, torch_level: int, ops_enabled: list[int],
-                     default_on: bool):
-    vllm_config = VllmConfig(compilation_config=CompilationConfig(
-        level=torch_level, custom_ops=env.split(",")))
+    ],
+)
+def test_enabled_ops(
+    env: str, torch_level: int, ops_enabled: list[int], default_on: bool
+):
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            level=torch_level, custom_ops=env.split(",")
+        )
+    )
     with set_current_vllm_config(vllm_config):
         assert CustomOp.default_on() == default_on
 
@@ -80,10 +87,12 @@ def test_enabled_ops(env: str, torch_level: int, ops_enabled: list[int],
 
 
 @pytest.mark.parametrize(
-    "env", ["all,none", "all,+rms_norm,all", "+rms_norm,-rms_norm"])
+    "env", ["all,none", "all,+rms_norm,all", "+rms_norm,-rms_norm"]
+)
 def test_enabled_ops_invalid(env: str):
     with pytest.raises(Exception):  # noqa
-        vllm_config = VllmConfig(compilation_config=CompilationConfig(
-            custom_ops=env.split(",")))
+        vllm_config = VllmConfig(
+            compilation_config=CompilationConfig(custom_ops=env.split(","))
+        )
         with set_current_vllm_config(vllm_config):
             RMSNorm(1024).enabled()

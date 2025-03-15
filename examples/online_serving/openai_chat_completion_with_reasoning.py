@@ -41,10 +41,12 @@ print("content for Round 1:", content)
 
 # Round 2
 messages.append({"role": "assistant", "content": content})
-messages.append({
-    "role": "user",
-    "content": "How many Rs are there in the word 'strawberry'?",
-})
+messages.append(
+    {
+        "role": "user",
+        "content": "How many Rs are there in the word 'strawberry'?",
+    }
+)
 response = client.chat.completions.create(model=model, messages=messages)
 
 reasoning_content = response.choices[0].message.reasoning_content

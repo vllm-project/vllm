@@ -12,14 +12,8 @@ def test_chat():
 
     prompt1 = "Explain the concept of entropy."
     messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": prompt1
-        },
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": prompt1},
     ]
     outputs = llm.chat(messages)
     assert len(outputs) == 1
@@ -32,25 +26,13 @@ def test_multi_chat():
     prompt2 = "Explain what among us is."
 
     conversation1 = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": prompt1
-        },
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": prompt1},
     ]
 
     conversation2 = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": prompt2
-        },
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": prompt2},
     ]
 
     messages = [conversation1, conversation2]
@@ -59,8 +41,9 @@ def test_multi_chat():
     assert len(outputs) == 2
 
 
-@pytest.mark.parametrize("image_urls",
-                         [[TEST_IMAGE_URLS[0], TEST_IMAGE_URLS[1]]])
+@pytest.mark.parametrize(
+    "image_urls", [[TEST_IMAGE_URLS[0], TEST_IMAGE_URLS[1]]]
+)
 def test_chat_multi_image(image_urls: list[str]):
     llm = LLM(
         model="microsoft/Phi-3.5-vision-instruct",
@@ -72,21 +55,17 @@ def test_chat_multi_image(image_urls: list[str]):
         limit_mm_per_prompt={"image": 2},
     )
 
-    messages = [{
-        "role":
-        "user",
-        "content": [
-            *({
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url
-                }
-            } for image_url in image_urls),
-            {
-                "type": "text",
-                "text": "What's in this image?"
-            },
-        ],
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *(
+                    {"type": "image_url", "image_url": {"url": image_url}}
+                    for image_url in image_urls
+                ),
+                {"type": "text", "text": "What's in this image?"},
+            ],
+        }
+    ]
     outputs = llm.chat(messages)
     assert len(outputs) >= 0

@@ -24,24 +24,30 @@ async def test_tokenizer_group_lora(sql_lora_files, tokenizer_group_type):
     )
     lora_request = LoRARequest("1", 1, sql_lora_files)
     assert reference_tokenizer.encode("prompt") == tokenizer_group.encode(
-        request_id="request_id", prompt="prompt", lora_request=lora_request)
+        request_id="request_id", prompt="prompt", lora_request=lora_request
+    )
     assert reference_tokenizer.encode(
-        "prompt") == await tokenizer_group.encode_async(
-            request_id="request_id",
-            prompt="prompt",
-            lora_request=lora_request)
-    assert isinstance(tokenizer_group.get_lora_tokenizer(None),
-                      PreTrainedTokenizerBase)
+        "prompt"
+    ) == await tokenizer_group.encode_async(
+        request_id="request_id", prompt="prompt", lora_request=lora_request
+    )
+    assert isinstance(
+        tokenizer_group.get_lora_tokenizer(None), PreTrainedTokenizerBase
+    )
     assert tokenizer_group.get_lora_tokenizer(
-        None) == await tokenizer_group.get_lora_tokenizer_async(None)
+        None
+    ) == await tokenizer_group.get_lora_tokenizer_async(None)
 
-    assert isinstance(tokenizer_group.get_lora_tokenizer(lora_request),
-                      PreTrainedTokenizerBase)
+    assert isinstance(
+        tokenizer_group.get_lora_tokenizer(lora_request),
+        PreTrainedTokenizerBase,
+    )
     assert tokenizer_group.get_lora_tokenizer(
-        lora_request) != tokenizer_group.get_lora_tokenizer(None)
+        lora_request
+    ) != tokenizer_group.get_lora_tokenizer(None)
     assert tokenizer_group.get_lora_tokenizer(
-        lora_request) == await tokenizer_group.get_lora_tokenizer_async(
-            lora_request)
+        lora_request
+    ) == await tokenizer_group.get_lora_tokenizer_async(lora_request)
 
 
 def test_get_lora_tokenizer(sql_lora_files, tmp_path):
@@ -72,6 +78,7 @@ def test_lora_tokenizers(enable_lora, max_num_seqs, max_loras):
     )
     if enable_lora:
         assert tokenizer_group.lora_tokenizers.capacity == max(
-            max_num_seqs, max_loras)
+            max_num_seqs, max_loras
+        )
     else:
         assert tokenizer_group.lora_tokenizers.capacity == 0

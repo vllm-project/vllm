@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for H2OVL's multimodal preprocessing kwargs."""
+
 from collections.abc import Mapping
 from typing import Optional
 
@@ -23,8 +24,10 @@ def _get_expected_num_patches(
     min_num: int,
     max_num: int,
 ):
-    from vllm.model_executor.models.h2ovl import (calculate_h2ovl_targets,
-                                                  get_h2ovl_target_ratios)
+    from vllm.model_executor.models.h2ovl import (
+        calculate_h2ovl_targets,
+        get_h2ovl_target_ratios,
+    )
 
     width, height = image.size
 
@@ -101,7 +104,8 @@ def _run_check(
 
     total_expected_num_patches = sum(
         _get_expected_num_patches(config, image, len(images), min_num, max_num)
-        for image in images)
+        for image in images
+    )
 
     processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
 
@@ -114,10 +118,13 @@ def _run_check(
     assert pixel_shape[0] == total_expected_num_patches
 
 
-@pytest.mark.parametrize("model_id", [
-    "h2oai/h2ovl-mississippi-800m",
-    "h2oai/h2ovl-mississippi-2b",
-])
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "h2oai/h2ovl-mississippi-800m",
+        "h2oai/h2ovl-mississippi-2b",
+    ],
+)
 @pytest.mark.parametrize(
     "size_factors",
     [

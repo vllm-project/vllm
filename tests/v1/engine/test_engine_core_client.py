@@ -15,13 +15,17 @@ from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
-                                        SyncMPClient)
+from vllm.v1.engine.core_client import (
+    AsyncMPClient,
+    EngineCoreClient,
+    SyncMPClient,
+)
 from vllm.v1.executor.abstract import Executor
 
 if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.",
-                allow_module_level=True)
+    pytest.skip(
+        reason="V1 currently only supported on CUDA.", allow_module_level=True
+    )
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -45,7 +49,6 @@ def make_request(params: SamplingParams) -> EngineCoreRequest:
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):
-
     while True:
         engine_core_outputs = client.get_output().outputs
 
@@ -63,7 +66,6 @@ def loop_until_done(client: EngineCoreClient, outputs: dict):
 
 
 async def loop_until_done_async(client: EngineCoreClient, outputs: dict):
-
     while True:
         engine_core_outputs = (await client.get_output_async()).outputs
 
@@ -91,7 +93,6 @@ def echo(self, msg: str, err_msg: Optional[str] = None) -> str:
 @fork_new_process_for_each_test
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
 def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -100,7 +101,8 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
         engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(
-            UsageContext.UNKNOWN_CONTEXT)
+            UsageContext.UNKNOWN_CONTEXT
+        )
         executor_class = Executor.get_class(vllm_config)
         client = EngineCoreClient.make_client(
             multiprocess_mode=multiprocessing_mode,
@@ -126,7 +128,8 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
         for req_id in request_ids:
             assert len(outputs[req_id]) == MAX_TOKENS, (
-                f"{outputs[req_id]=}, {MAX_TOKENS=}")
+                f"{outputs[req_id]=}, {MAX_TOKENS=}"
+            )
         """Abort Request Cycle."""
 
         # Note: this code pathway will only work for multiprocessing
@@ -145,10 +148,12 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
         for idx, req_id in enumerate(request_ids):
             if idx % 2 == 0:
                 assert len(outputs[req_id]) < MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}"
+                )
             else:
                 assert len(outputs[req_id]) == MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}"
+                )
         """Abort after request is finished."""
 
         # Note: this code pathway will only work for multiprocessing
@@ -156,7 +161,7 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
         request = requests[0]
         client.add_request(request)
-        time.sleep(10.)
+        time.sleep(10.0)
 
         client.abort_requests([request.request_id])
 
@@ -176,7 +181,6 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_asyncio(monkeypatch):
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -185,7 +189,8 @@ async def test_engine_core_client_asyncio(monkeypatch):
 
         engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(
-            usage_context=UsageContext.UNKNOWN_CONTEXT)
+            usage_context=UsageContext.UNKNOWN_CONTEXT
+        )
         executor_class = Executor.get_class(vllm_config)
         client = EngineCoreClient.make_client(
             multiprocess_mode=True,
@@ -212,7 +217,8 @@ async def test_engine_core_client_asyncio(monkeypatch):
 
         for req_id in request_ids:
             assert len(outputs[req_id]) == MAX_TOKENS, (
-                f"{outputs[req_id]=}, {MAX_TOKENS=}")
+                f"{outputs[req_id]=}, {MAX_TOKENS=}"
+            )
         """Abort Request Cycle."""
 
         # Add requests to the engine.
@@ -228,10 +234,12 @@ async def test_engine_core_client_asyncio(monkeypatch):
         for idx, req_id in enumerate(request_ids):
             if idx % 2 == 0:
                 assert len(outputs[req_id]) < MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}"
+                )
             else:
                 assert len(outputs[req_id]) == MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}"
+                )
         """Utility method invocation"""
 
         core_client: AsyncMPClient = client

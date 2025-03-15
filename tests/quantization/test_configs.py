@@ -42,7 +42,6 @@ MODEL_ARG_EXPTYPES = [
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "marlin", "gptq_marlin"),
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "gptq", "gptq"),
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "awq", "ERROR"),
-
     # AUTOAWQ
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", None, "awq_marlin"),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "awq", "awq"),
@@ -56,15 +55,17 @@ def test_auto_gptq(model_arg_exptype: tuple[str, None, str]) -> None:
     model_path, quantization_arg, expected_type = model_arg_exptype
 
     try:
-        model_config = ModelConfig(model_path,
-                                   task="auto",
-                                   tokenizer=model_path,
-                                   tokenizer_mode="auto",
-                                   trust_remote_code=False,
-                                   seed=0,
-                                   dtype="float16",
-                                   revision=None,
-                                   quantization=quantization_arg)
+        model_config = ModelConfig(
+            model_path,
+            task="auto",
+            tokenizer=model_path,
+            tokenizer_mode="auto",
+            trust_remote_code=False,
+            seed=0,
+            dtype="float16",
+            revision=None,
+            quantization=quantization_arg,
+        )
         found_quantization_type = model_config.quantization
     except ValueError:
         found_quantization_type = "ERROR"
@@ -72,4 +73,5 @@ def test_auto_gptq(model_arg_exptype: tuple[str, None, str]) -> None:
     assert found_quantization_type == expected_type, (
         f"Expected quant_type == {expected_type} for {model_path}, "
         f"but found {found_quantization_type} "
-        f"for no --quantization {quantization_arg} case")
+        f"for no --quantization {quantization_arg} case"
+    )

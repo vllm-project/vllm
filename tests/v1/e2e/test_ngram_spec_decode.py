@@ -50,12 +50,13 @@ def model_name():
     return "meta-llama/Meta-Llama-3-8B-Instruct"
 
 
-def test_ngram_correctness(monkeypatch, test_prompts, sampling_config,
-                           model_name):
-    '''
+def test_ngram_correctness(
+    monkeypatch, test_prompts, sampling_config, model_name
+):
+    """
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
-    '''
+    """
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -63,12 +64,14 @@ def test_ngram_correctness(monkeypatch, test_prompts, sampling_config,
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
 
-        spec_llm = LLM(model=model_name,
-                       speculative_model='[ngram]',
-                       ngram_prompt_lookup_max=5,
-                       ngram_prompt_lookup_min=3,
-                       num_speculative_tokens=3,
-                       max_model_len=1024)
+        spec_llm = LLM(
+            model=model_name,
+            speculative_model="[ngram]",
+            ngram_prompt_lookup_max=5,
+            ngram_prompt_lookup_min=3,
+            num_speculative_tokens=3,
+            max_model_len=1024,
+        )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
         misses = 0

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Types for writing multimodal model tests."""
+
 from collections.abc import Iterable
 from enum import Enum
 from pathlib import PosixPath
@@ -86,8 +87,9 @@ class VLMTestInfo(NamedTuple):
 
     # Function for converting ImageAssets to image embeddings;
     # We need to define this explicitly for embedding tests
-    convert_assets_to_embeddings: Optional[Callable[[_ImageAssets],
-                                                    torch.Tensor]] = None
+    convert_assets_to_embeddings: Optional[
+        Callable[[_ImageAssets], torch.Tensor]
+    ] = None
 
     # Exposed options for vLLM runner; we change these in a several tests,
     # but the defaults are derived from VllmRunner & the engine defaults
@@ -113,8 +115,7 @@ class VLMTestInfo(NamedTuple):
     # Callable to pass to the HF runner to run on inputs; for now, we also pass
     # the data type to input post processing, because almost all of the uses of
     # postprocess_inputs are to fix the data types of BatchEncoding values.
-    postprocess_inputs: Callable[[BatchEncoding, str],
-                                 BatchEncoding] = identity
+    postprocess_inputs: Callable[[BatchEncoding, str], BatchEncoding] = identity
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]] = None
 
     # Post processors that if defined, will run oun the outputs of the
@@ -147,8 +148,8 @@ class VLMTestInfo(NamedTuple):
     # for Qwen-VL, which requires encoding the image path / url into the prompt
     # for HF runner
     prompt_path_encoder: Optional[
-        Callable[[PosixPath, str, Union[list[ImageAsset], _ImageAssets]],
-                 str]] = None  # noqa: E501
+        Callable[[PosixPath, str, Union[list[ImageAsset], _ImageAssets]], str]
+    ] = None  # noqa: E501
 
     # Allows configuring a test to run with custom inputs
     custom_test_opts: Optional[list[CustomTestOptions]] = None
@@ -182,6 +183,7 @@ class VLMTestInfo(NamedTuple):
 
 class ExpandableVLMTestArgs(NamedTuple):
     """The expanded kwargs which correspond to a single test case."""
+
     model: str
     max_tokens: int
     num_logprobs: int

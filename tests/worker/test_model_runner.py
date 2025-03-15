@@ -3,8 +3,10 @@
 import pytest
 import torch
 
-from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
-                                             init_distributed_environment)
+from vllm.distributed.parallel_state import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
@@ -61,11 +63,13 @@ def test_prepare_prompt(batch_size):
     expected_selected_token_indices = []
     selected_token_start_idx = 0
     for seq_len in seq_lens:
-        expected_selected_token_indices.append(selected_token_start_idx +
-                                               seq_len - 1)
+        expected_selected_token_indices.append(
+            selected_token_start_idx + seq_len - 1
+        )
         selected_token_start_idx += seq_len
     model_input = model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list)
+        seq_group_metadata_list
+    )
     input_tokens = model_input.input_tokens
     input_positions = model_input.input_positions
     attn_metadata = model_input.attn_metadata
@@ -80,7 +84,8 @@ def test_prepare_prompt(batch_size):
     assert attn_metadata.num_decode_tokens == 0
     torch.testing.assert_close(
         attn_metadata.seq_lens_tensor,
-        torch.tensor(seq_lens, device=device, dtype=torch.int))
+        torch.tensor(seq_lens, device=device, dtype=torch.int),
+    )
     assert attn_metadata.seq_lens == seq_lens
     assert attn_metadata.max_prefill_seq_len == max(seq_lens)
     assert attn_metadata.max_decode_seq_len == 0
@@ -93,7 +98,8 @@ def test_prepare_prompt(batch_size):
         start_loc.append(start_idx)
     torch.testing.assert_close(
         attn_metadata.query_start_loc,
-        torch.tensor(start_loc, dtype=torch.int32, device=device))
+        torch.tensor(start_loc, dtype=torch.int32, device=device),
+    )
 
     # Test seq start locs. Note that for normal prefill it is
     # equivalent to query_start_loc.
@@ -105,16 +111,22 @@ def test_prepare_prompt(batch_size):
 
     torch.testing.assert_close(
         attn_metadata.seq_start_loc,
-        torch.tensor(start_loc, dtype=torch.int32, device=device))
+        torch.tensor(start_loc, dtype=torch.int32, device=device),
+    )
     torch.testing.assert_close(
         attn_metadata.context_lens_tensor,
-        torch.zeros(attn_metadata.context_lens_tensor.shape[0],
-                    dtype=torch.int,
-                    device=device))
+        torch.zeros(
+            attn_metadata.context_lens_tensor.shape[0],
+            dtype=torch.int,
+            device=device,
+        ),
+    )
 
-    expected = torch.tensor([[] for _ in range(len(seq_group_metadata_list))],
-                            dtype=torch.int32,
-                            device=model_runner.device)
+    expected = torch.tensor(
+        [[] for _ in range(len(seq_group_metadata_list))],
+        dtype=torch.int32,
+        device=model_runner.device,
+    )
     torch.testing.assert_close(attn_metadata.block_tables, expected)
     # Cuda graph should not be used for prerill.
     assert attn_metadata.use_cuda_graph is False
@@ -128,20 +140,25 @@ def test_prepare_prompt(batch_size):
         seq_lens,
         query_lens=seq_lens,
         device=model_runner.device,
-        pin_memory=model_runner.pin_memory)
+        pin_memory=model_runner.pin_memory,
+    )
     assert len(input_tokens) == sum(seq_lens)
     assert len(input_positions) == sum(seq_lens)
     actual = sampling_metadata.selected_token_indices
-    expected = torch.tensor(expected_selected_token_indices,
-                            device=actual.device,
-                            dtype=actual.dtype)
+    expected = torch.tensor(
+        expected_selected_token_indices,
+        device=actual.device,
+        dtype=actual.dtype,
+    )
     torch.testing.assert_close(actual, expected)
     torch.allclose(input_tokens, input_positions)
 
     actual = sampling_metadata.selected_token_indices
-    expected = torch.tensor(expected_selected_token_indices,
-                            device=actual.device,
-                            dtype=actual.dtype)
+    expected = torch.tensor(
+        expected_selected_token_indices,
+        device=actual.device,
+        dtype=actual.dtype,
+    )
     torch.testing.assert_close(actual, expected)
 
 
@@ -179,14 +196,19 @@ def test_prepare_decode_cuda_graph(batch_size):
         seq_group_metadata_list.append(seq_group_metadata)
 
     model_input = model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list)
+        seq_group_metadata_list
+    )
     input_tokens, input_positions, attn_metadata, slot_mapping = (
-        model_input.input_tokens, model_input.input_positions,
-        model_input.attn_metadata, model_input.attn_metadata.slot_mapping)
+        model_input.input_tokens,
+        model_input.input_positions,
+        model_input.attn_metadata,
+        model_input.attn_metadata.slot_mapping,
+    )
     assert len(slot_mapping) == len(input_tokens)
 
     expected_bs = model_runner.vllm_config.pad_for_cudagraph(
-        len(seq_group_metadata_list))
+        len(seq_group_metadata_list)
+    )
     # Verify input metadata is correct for prompts.
     device = model_runner.device
     assert attn_metadata.num_prefills == 0
@@ -205,7 +227,8 @@ def test_prepare_decode_cuda_graph(batch_size):
         start_loc.append(start_idx)
     torch.testing.assert_close(
         attn_metadata.query_start_loc,
-        torch.tensor(start_loc, dtype=torch.int32, device=device))
+        torch.tensor(start_loc, dtype=torch.int32, device=device),
+    )
 
     start_idx = 0
     seq_start_loc = [start_idx]
@@ -214,15 +237,18 @@ def test_prepare_decode_cuda_graph(batch_size):
         seq_start_loc.append(start_idx)
     torch.testing.assert_close(
         attn_metadata.seq_start_loc,
-        torch.tensor(seq_start_loc, dtype=torch.int32, device=device))
+        torch.tensor(seq_start_loc, dtype=torch.int32, device=device),
+    )
 
     torch.testing.assert_close(
         attn_metadata.context_lens_tensor,
-        torch.tensor(context_lens, dtype=torch.int, device=device))
+        torch.tensor(context_lens, dtype=torch.int, device=device),
+    )
     assert attn_metadata.max_decode_seq_len == max(seq_lens)
     torch.testing.assert_close(
-        attn_metadata.seq_lens_tensor[:len(seq_lens)],
-        torch.tensor(seq_lens, dtype=torch.int, device=device))
+        attn_metadata.seq_lens_tensor[: len(seq_lens)],
+        torch.tensor(seq_lens, dtype=torch.int, device=device),
+    )
 
     # block table's first index corresponds to each batch, meaning in
     # decoding it is each token.
@@ -230,7 +256,8 @@ def test_prepare_decode_cuda_graph(batch_size):
     # Block table's second dim correspondsd to each token's block number.
     # It is padded up to
     assert attn_metadata.block_tables.shape[1] == (
-        model_runner.get_max_block_per_batch())
+        model_runner.get_max_block_per_batch()
+    )
     assert attn_metadata.use_cuda_graph is True
 
     assert len(input_tokens) == expected_bs
@@ -247,11 +274,14 @@ def test_prepare_decode_cuda_graph(batch_size):
         # query lens is all 1 for decode.
         query_lens=[1 for _ in range(len(context_lens))],
         device=model_runner.device,
-        pin_memory=model_runner.pin_memory)
+        pin_memory=model_runner.pin_memory,
+    )
     actual = sampling_metadata.selected_token_indices
-    expected = torch.tensor(expected_selected_token_indices,
-                            device=actual.device,
-                            dtype=actual.dtype)
+    expected = torch.tensor(
+        expected_selected_token_indices,
+        device=actual.device,
+        dtype=actual.dtype,
+    )
     torch.testing.assert_close(actual, expected)
 
 
@@ -265,7 +295,8 @@ def test_empty_seq_group():
     )
     seq_group_metadata_list: list[SequenceGroupMetadata] = []
     model_input = model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list)
+        seq_group_metadata_list
+    )
     input_tokens, input_positions, attn_metadata = (
         model_input.input_tokens,
         model_input.input_positions,
@@ -276,7 +307,8 @@ def test_empty_seq_group():
     assert attn_metadata is None
 
     model_input = model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list)
+        seq_group_metadata_list
+    )
     (input_tokens, input_positions, attn_metadata, return_seq_lens) = (
         model_input.input_tokens,
         model_input.input_positions,
@@ -295,7 +327,8 @@ def distributed_init():
         world_size=1,
         rank=0,
         distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
-        local_rank=0)
+        local_rank=0,
+    )
     ensure_model_parallel_initialized(1, 1)
 
 
@@ -373,11 +406,14 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     # Verify attn metadata is consistent. We don't need to test individual
     # values here because they are tested above.
     attn_metadata = model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list).attn_metadata
+        seq_group_metadata_list
+    ).attn_metadata
 
-    for attr_expected, attr_actual in zip(vars(attn_metadata.prefill_metadata),
-                                          vars(prefill_meta_actual)):
+    for attr_expected, attr_actual in zip(
+        vars(attn_metadata.prefill_metadata), vars(prefill_meta_actual)
+    ):
         assert attr_expected[1] == attr_actual[1]
-    for attr_expected, attr_actual in zip(vars(attn_metadata.decode_metadata),
-                                          vars(decode_meta_actual)):
+    for attr_expected, attr_actual in zip(
+        vars(attn_metadata.decode_metadata), vars(decode_meta_actual)
+    ):
         assert attr_expected[1] == attr_actual[1]

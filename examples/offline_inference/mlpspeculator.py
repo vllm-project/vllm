@@ -6,8 +6,9 @@ import time
 from vllm import LLM, SamplingParams
 
 
-def time_generation(llm: LLM, prompts: list[str],
-                    sampling_params: SamplingParams):
+def time_generation(
+    llm: LLM, prompts: list[str], sampling_params: SamplingParams
+):
     # Generate texts from the prompts. The output is a list of RequestOutput
     # objects that contain the prompt, generated text, and other information.
     # Warmup first
@@ -24,11 +25,11 @@ def time_generation(llm: LLM, prompts: list[str],
 
 
 if __name__ == "__main__":
-
     template = (
         "Below is an instruction that describes a task. Write a response "
         "that appropriately completes the request.\n\n### Instruction:\n{}"
-        "\n\n### Response:\n")
+        "\n\n### Response:\n"
+    )
 
     # Sample prompts.
     prompts = [

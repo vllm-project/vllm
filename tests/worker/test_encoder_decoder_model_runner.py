@@ -14,8 +14,9 @@ from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 BATCH_SIZES = [1, 4, 16, 64, 256]
 
 
-def _create_model_runner(model: str, *args,
-                         **kwargs) -> EncoderDecoderModelRunner:
+def _create_model_runner(
+    model: str, *args, **kwargs
+) -> EncoderDecoderModelRunner:
     engine_args = EngineArgs(model, *args, **kwargs)
     engine_config = engine_args.create_engine_config()
     model_runner = EncoderDecoderModelRunner(
@@ -25,13 +26,13 @@ def _create_model_runner(model: str, *args,
     return model_runner
 
 
-@pytest.mark.skipif(condition=current_platform.is_cpu(),
-                    reason="CPU backend is currently "
-                    "unsupported for encoder/ "
-                    "decoder models")
+@pytest.mark.skipif(
+    condition=current_platform.is_cpu(),
+    reason="CPU backend is currently unsupported for encoder/ decoder models",
+)
 def test_empty_seq_group():
     """Verify prepare prompt and decode returns empty output
-       for empty seq group list"""
+    for empty seq group list"""
 
     model_runner = _create_model_runner(
         "facebook/bart-base",
@@ -44,7 +45,8 @@ def test_empty_seq_group():
     )
     seq_group_metadata_list: list[SequenceGroupMetadata] = []
     model_input = model_runner._prepare_model_input_tensors(
-        seq_group_metadata_list)
+        seq_group_metadata_list
+    )
     (
         input_tokens,
         input_positions,
@@ -68,13 +70,13 @@ def test_empty_seq_group():
     assert return_seq_lens is None
 
 
-@pytest.mark.skipif(condition=current_platform.is_cpu(),
-                    reason="CPU backend is currently "
-                    "unsupported for encoder/ "
-                    "decoder models")
+@pytest.mark.skipif(
+    condition=current_platform.is_cpu(),
+    reason="CPU backend is currently unsupported for encoder/ decoder models",
+)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 def test_prepare_prompt(batch_size):
-    '''
+    """
     Test the ability of the encoder/decoder model runner subclass to
     produce prefill-phase model inputs & attention metadata.
 
@@ -90,7 +92,7 @@ def test_prepare_prompt(batch_size):
     * batch_size
     * backend_name: The attention backend under test
     * enforce_eager: Enforce eager mode if True (i.e. no CUDAGraph)
-    '''
+    """
 
     model_runner = _create_model_runner(
         "facebook/bart-base",
@@ -151,8 +153,10 @@ def test_prepare_prompt(batch_size):
     device = model_runner.device
     assert attn_metadata.num_prefills > 0
     assert attn_metadata.num_decode_tokens == 0
-    assert torch.equal(attn_metadata.seq_lens_tensor,
-                       torch.tensor(seq_lens, device=device, dtype=torch.int))
+    assert torch.equal(
+        attn_metadata.seq_lens_tensor,
+        torch.tensor(seq_lens, device=device, dtype=torch.int),
+    )
     assert attn_metadata.seq_lens == seq_lens
     assert attn_metadata.max_prefill_seq_len == max(seq_lens)
     assert attn_metadata.max_decode_seq_len == 0
@@ -160,7 +164,8 @@ def test_prepare_prompt(batch_size):
     assert attn_metadata.encoder_seq_lens == encoder_seq_lens
     assert torch.equal(
         attn_metadata.encoder_seq_lens_tensor,
-        torch.tensor(encoder_seq_lens, device=device, dtype=torch.int))
+        torch.tensor(encoder_seq_lens, device=device, dtype=torch.int),
+    )
     assert attn_metadata.max_encoder_seq_len == max(encoder_seq_lens)
     assert attn_metadata.num_encoder_tokens == sum(encoder_seq_lens)
 
@@ -183,9 +188,11 @@ def test_prepare_prompt(batch_size):
     )
     assert torch.equal(
         attn_metadata.context_lens_tensor,
-        torch.zeros(attn_metadata.context_lens_tensor.shape[0],
-                    dtype=torch.int,
-                    device=device),
+        torch.zeros(
+            attn_metadata.context_lens_tensor.shape[0],
+            dtype=torch.int,
+            device=device,
+        ),
     )
 
     # Verify block tables are correct for prompts
@@ -244,8 +251,9 @@ def test_prepare_prompt(batch_size):
     for seq_len in seq_lens:
         # Compute the index offset of the final token in each
         # prompt (recall that the prompts are concatenated)
-        expected_selected_token_indices.append(selected_token_start_idx +
-                                               seq_len - 1)
+        expected_selected_token_indices.append(
+            selected_token_start_idx + seq_len - 1
+        )
         selected_token_start_idx += seq_len
 
     sampling_metadata = model_input.sampling_metadata
@@ -258,14 +266,14 @@ def test_prepare_prompt(batch_size):
     assert torch.equal(actual, expected)
 
 
-@pytest.mark.skipif(condition=current_platform.is_cpu(),
-                    reason="CPU backend is currently "
-                    "unsupported for encoder/ "
-                    "decoder models")
+@pytest.mark.skipif(
+    condition=current_platform.is_cpu(),
+    reason="CPU backend is currently unsupported for encoder/ decoder models",
+)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("multiple_seqs_per_seq_group", [True, False])
 def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
-    '''
+    """
     Test the ability of the encoder/decoder model runner subclass to
     produce decode-phase model inputs & attention metadata.
 
@@ -282,7 +290,7 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
     * multiple_seqs_per_seq_group
     * backend_name: The attention backend under test
     * enforce_eager: Enforce eager mode if True (i.e. no CUDAGraph)
-    '''
+    """
 
     model_runner = _create_model_runner(
         "facebook/bart-base",
@@ -297,12 +305,7 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
     seq_lens: list[int] = []
     encoder_seq_lens: list[int] = []
     seq_group_metadata_list: list[SequenceGroupMetadata] = []
-    block_tables = {
-        0: [1],
-        1: [3]
-    } if multiple_seqs_per_seq_group else {
-        0: [1]
-    }
+    block_tables = {0: [1], 1: [3]} if multiple_seqs_per_seq_group else {0: [1]}
     cross_block_table = [2]
     for i in range(batch_size):
         # make sure all tokens fit into one block
@@ -314,10 +317,9 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=False,
-            seq_data={
-                0: seq_data,
-                1: seq_data
-            } if multiple_seqs_per_seq_group else {0: seq_data},
+            seq_data={0: seq_data, 1: seq_data}
+            if multiple_seqs_per_seq_group
+            else {0: seq_data},
             sampling_params=SamplingParams(temperature=0),
             block_tables=block_tables,
             encoder_seq_data=encoder_seq_data,
@@ -326,9 +328,11 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
         assert seq_group_metadata.token_chunk_size == 1
         seq_group_metadata_list.append(seq_group_metadata)
         seq_lens.extend(
-            [seq_len for _ in range(len(seq_group_metadata.seq_data))])
+            [seq_len for _ in range(len(seq_group_metadata.seq_data))]
+        )
         encoder_seq_lens.extend(
-            [encoder_seq_len for _ in range(len(seq_group_metadata.seq_data))])
+            [encoder_seq_len for _ in range(len(seq_group_metadata.seq_data))]
+        )
 
     # Build
     # * Decoder model inputs
@@ -353,8 +357,10 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
     device = model_runner.device
     assert attn_metadata.num_prefills == 0
     assert attn_metadata.num_decode_tokens > 0
-    assert torch.equal(attn_metadata.seq_lens_tensor,
-                       torch.tensor(seq_lens, device=device, dtype=torch.int))
+    assert torch.equal(
+        attn_metadata.seq_lens_tensor,
+        torch.tensor(seq_lens, device=device, dtype=torch.int),
+    )
     assert attn_metadata.seq_lens == seq_lens
     assert attn_metadata.max_prefill_seq_len == 0
     assert attn_metadata.max_decode_seq_len == max(seq_lens)
@@ -362,7 +368,8 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
     assert attn_metadata.encoder_seq_lens == encoder_seq_lens
     assert torch.equal(
         attn_metadata.encoder_seq_lens_tensor,
-        torch.tensor(encoder_seq_lens, device=device, dtype=torch.int))
+        torch.tensor(encoder_seq_lens, device=device, dtype=torch.int),
+    )
     assert attn_metadata.max_encoder_seq_len == max(encoder_seq_lens)
     assert attn_metadata.num_encoder_tokens == sum(encoder_seq_lens)
 
@@ -393,30 +400,37 @@ def test_prepare_decode(batch_size, multiple_seqs_per_seq_group):
     )
     assert torch.equal(
         attn_metadata.context_lens_tensor,
-        torch.tensor([seq_len - 1 for seq_len in seq_lens],
-                     dtype=torch.int,
-                     device=device))
+        torch.tensor(
+            [seq_len - 1 for seq_len in seq_lens],
+            dtype=torch.int,
+            device=device,
+        ),
+    )
 
     # Verify block tables are correct for prompts
     # - Decoder self-attention
     flattened_block_tables = [
         block_table for block_table in block_tables.values()
     ]
-    expected = torch.tensor(flattened_block_tables *
-                            len(seq_group_metadata_list),
-                            dtype=torch.int32,
-                            device=model_runner.device)
+    expected = torch.tensor(
+        flattened_block_tables * len(seq_group_metadata_list),
+        dtype=torch.int32,
+        device=model_runner.device,
+    )
     assert torch.equal(
         attn_metadata.block_tables,
         expected,
     )
     # - Encoder/decoder cross-attention
-    expected = torch.tensor([
-        cross_block_table for seq_group_metadata in seq_group_metadata_list
-        for _ in range(len(seq_group_metadata.seq_data))
-    ],
-                            dtype=torch.int32,
-                            device=model_runner.device)
+    expected = torch.tensor(
+        [
+            cross_block_table
+            for seq_group_metadata in seq_group_metadata_list
+            for _ in range(len(seq_group_metadata.seq_data))
+        ],
+        dtype=torch.int32,
+        device=model_runner.device,
+    )
     assert torch.equal(
         attn_metadata.cross_block_tables,
         expected,
@@ -496,12 +510,7 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
         enable_chunked_prefill=False,
         enforce_eager=False,
     )
-    block_tables = {
-        0: [1],
-        1: [3]
-    } if multiple_seqs_per_seq_group else {
-        0: [1]
-    }
+    block_tables = {0: [1], 1: [3]} if multiple_seqs_per_seq_group else {0: [1]}
     seq_lens: list[int] = []
     encoder_seq_lens: list[int] = []
     seq_group_metadata_list: list[SequenceGroupMetadata] = []
@@ -517,10 +526,9 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=False,
-            seq_data={
-                0: seq_data,
-                1: seq_data
-            } if multiple_seqs_per_seq_group else {0: seq_data},
+            seq_data={0: seq_data, 1: seq_data}
+            if multiple_seqs_per_seq_group
+            else {0: seq_data},
             sampling_params=SamplingParams(temperature=0),
             block_tables=block_tables,
             encoder_seq_data=encoder_seq_data,
@@ -528,11 +536,14 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
         )
         assert seq_group_metadata.token_chunk_size == 1
         seq_lens.extend(
-            [seq_len for _ in range(len(seq_group_metadata.seq_data))])
+            [seq_len for _ in range(len(seq_group_metadata.seq_data))]
+        )
         encoder_seq_lens.extend(
-            [encoder_seq_len for _ in range(len(seq_group_metadata.seq_data))])
+            [encoder_seq_len for _ in range(len(seq_group_metadata.seq_data))]
+        )
         expanded_batch_size = expanded_batch_size + len(
-            seq_group_metadata.seq_data)
+            seq_group_metadata.seq_data
+        )
         seq_group_metadata_list.append(seq_group_metadata)
 
     model_input = model_runner.prepare_model_input(seq_group_metadata_list)
@@ -549,11 +560,13 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
     # input sequences will be padded. Create the expected padded tensors
     # accordingly.
     graph_batch_size = model_runner.vllm_config.pad_for_cudagraph(
-        expanded_batch_size)
+        expanded_batch_size
+    )
     cuda_graph_pad_size = graph_batch_size - expanded_batch_size
     padded_seq_lens = seq_lens + list(itertools.repeat(1, cuda_graph_pad_size))
     padded_encoder_seq_lens = encoder_seq_lens + list(
-        itertools.repeat(1, cuda_graph_pad_size))
+        itertools.repeat(1, cuda_graph_pad_size)
+    )
 
     assert return_seq_lens == padded_seq_lens
     assert len(slot_mapping) == len(input_tokens)
@@ -565,7 +578,8 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
     assert attn_metadata.num_decode_tokens > 0
     assert torch.equal(
         attn_metadata.seq_lens_tensor,
-        torch.tensor(padded_seq_lens, device=device, dtype=torch.int))
+        torch.tensor(padded_seq_lens, device=device, dtype=torch.int),
+    )
     assert attn_metadata.seq_lens == padded_seq_lens
     assert attn_metadata.max_prefill_seq_len == 0
     assert attn_metadata.max_decode_seq_len == max(seq_lens)
@@ -573,14 +587,16 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
     assert attn_metadata.encoder_seq_lens == padded_encoder_seq_lens
     assert torch.equal(
         attn_metadata.encoder_seq_lens_tensor,
-        torch.tensor(padded_encoder_seq_lens, device=device, dtype=torch.int))
+        torch.tensor(padded_encoder_seq_lens, device=device, dtype=torch.int),
+    )
     assert attn_metadata.max_encoder_seq_len == max(padded_encoder_seq_lens)
     assert attn_metadata.num_encoder_tokens == sum(padded_encoder_seq_lens)
 
     # Verify block tables are correct for prompts
     # - Decoder self-attention. Pad the block tables as expected.
     flattened_block_tables = [
-        block_table for _ in range(len(seq_group_metadata_list))
+        block_table
+        for _ in range(len(seq_group_metadata_list))
         for block_table in block_tables.values()
     ]
     flattened_block_tables.extend([[] for _ in range(cuda_graph_pad_size)])
@@ -598,7 +614,8 @@ def test_prepare_decode_cuda_graph(batch_size, multiple_seqs_per_seq_group):
     # - Encoder/decoder cross-attention. Pad the cross-attention block tables
     # as expected.
     expected = [
-        cross_block_table for seq_group_metadata in seq_group_metadata_list
+        cross_block_table
+        for seq_group_metadata in seq_group_metadata_list
         for _ in range(len(seq_group_metadata.seq_data))
     ]
     expected.extend([[] for _ in range(cuda_graph_pad_size)])

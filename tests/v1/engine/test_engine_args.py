@@ -19,8 +19,9 @@ def test_prefix_caching_from_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([])
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert (engine_args.enable_prefix_caching
-            ), "V1 turns on prefix caching by default."
+    assert engine_args.enable_prefix_caching, (
+        "V1 turns on prefix caching by default."
+    )
 
     # Turn it off possible with flag.
     args = parser.parse_args(["--no-enable-prefix-caching"])
@@ -36,13 +37,15 @@ def test_prefix_caching_from_cli():
 def test_defaults_with_usage_context():
     engine_args = EngineArgs(model="facebook/opt-125m")
     vllm_config: VllmConfig = engine_args.create_engine_config(
-        UsageContext.LLM_CLASS)
+        UsageContext.LLM_CLASS
+    )
 
     assert vllm_config.scheduler_config.max_num_seqs == 1024
     assert vllm_config.scheduler_config.max_num_batched_tokens == 8192
 
     engine_args = EngineArgs(model="facebook/opt-125m")
     vllm_config = engine_args.create_engine_config(
-        UsageContext.OPENAI_API_SERVER)
+        UsageContext.OPENAI_API_SERVER
+    )
     assert vllm_config.scheduler_config.max_num_seqs == 1024
     assert vllm_config.scheduler_config.max_num_batched_tokens == 2048

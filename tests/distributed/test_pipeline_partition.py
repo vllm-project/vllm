@@ -8,7 +8,6 @@ from vllm.distributed.utils import get_pp_indices
 
 
 def test_custom_layer_partition():
-
     def _verify(partition_str, num_layers, pp_size, goldens):
         bak = os.environ.get("VLLM_PP_LAYER_PARTITION", None)
         os.environ["VLLM_PP_LAYER_PARTITION"] = partition_str
@@ -54,7 +53,9 @@ def test_custom_layer_partition():
         (5, 3, 0, (0, 2)),
         (5, 3, 1, (2, 4)),
         (5, 3, 2, (4, 5)),
-    ])
-def test_uneven_auto_partition(num_hidden_layers: int, pp_size: int,
-                               pp_rank: int, indices: tuple[int, int]):
+    ],
+)
+def test_uneven_auto_partition(
+    num_hidden_layers: int, pp_size: int, pp_rank: int, indices: tuple[int, int]
+):
     assert indices == get_pp_indices(num_hidden_layers, pp_rank, pp_size)

@@ -2,13 +2,17 @@
 
 import requests
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-    OTLPSpanExporter)
+    OTLPSpanExporter,
+)
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import (BatchSpanProcessor,
-                                            ConsoleSpanExporter)
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    ConsoleSpanExporter,
+)
 from opentelemetry.trace import SpanKind, set_tracer_provider
 from opentelemetry.trace.propagation.tracecontext import (
-    TraceContextTextMapPropagator)
+    TraceContextTextMapPropagator,
+)
 
 trace_provider = TracerProvider()
 set_tracer_provider(trace_provider)

@@ -31,8 +31,8 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser()
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
-    parser.set_defaults(model="BAAI/bge-reranker-v2-m3",
-                        task="score",
-                        enforce_eager=True)
+    parser.set_defaults(
+        model="BAAI/bge-reranker-v2-m3", task="score", enforce_eager=True
+    )
     args = parser.parse_args()
     main(args)

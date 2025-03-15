@@ -24,19 +24,20 @@ with depyf.prepare_debug(temp_dir):
     ]
     N = 1
     # Currently, top-p sampling is disabled. `top_p` should be 1.0.
-    sampling_params = SamplingParams(temperature=0.7,
-                                     top_p=1.0,
-                                     n=N,
-                                     max_tokens=16)
+    sampling_params = SamplingParams(
+        temperature=0.7, top_p=1.0, n=N, max_tokens=16
+    )
 
     # Set `enforce_eager=True` to avoid ahead-of-time compilation.
     # In real workloads, `enforace_eager` should be `False`.
 
     # disable custom dispatcher, let Dynamo takes over
     # all the control
-    llm = LLM(model="google/gemma-2b",
-              enforce_eager=True,
-              compilation_config={"level": CompilationLevel.DYNAMO_AS_IS})
+    llm = LLM(
+        model="google/gemma-2b",
+        enforce_eager=True,
+        compilation_config={"level": CompilationLevel.DYNAMO_AS_IS},
+    )
     outputs = llm.generate(prompts, sampling_params)
     for output, answer in zip(outputs, answers):
         prompt = output.prompt
@@ -45,7 +46,8 @@ with depyf.prepare_debug(temp_dir):
         assert generated_text.startswith(answer)
 
 compiled_code = sorted(
-    glob.glob(os.path.join(temp_dir, "__transformed_code*.py")))
+    glob.glob(os.path.join(temp_dir, "__transformed_code*.py"))
+)
 
 # we should only trigger Dynamo compilation three times:
 # one for the profiling phase without kv cache
@@ -60,7 +62,8 @@ assert len(compiled_code) == 3
 
 # check all the compilations are as expected
 compiled_fn = sorted(
-    glob.glob(os.path.join(temp_dir, "__compiled_fn*Captured*.py")))
+    glob.glob(os.path.join(temp_dir, "__compiled_fn*Captured*.py"))
+)
 
 # the first compilation is the profiling phase,
 # it should not have any kv cache

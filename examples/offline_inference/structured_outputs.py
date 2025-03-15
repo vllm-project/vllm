@@ -20,11 +20,14 @@ print(outputs[0].outputs[0].text)
 
 # Guided decoding by Regex
 guided_decoding_params = GuidedDecodingParams(regex="\w+@\w+\.com\n")
-sampling_params = SamplingParams(guided_decoding=guided_decoding_params,
-                                 stop=["\n"])
-prompt = ("Generate an email address for Alan Turing, who works in Enigma."
-          "End in .com and new line. Example result:"
-          "alan.turing@enigma.com\n")
+sampling_params = SamplingParams(
+    guided_decoding=guided_decoding_params, stop=["\n"]
+)
+prompt = (
+    "Generate an email address for Alan Turing, who works in Enigma."
+    "End in .com and new line. Example result:"
+    "alan.turing@enigma.com\n"
+)
 outputs = llm.generate(prompts=prompt, sampling_params=sampling_params)
 print(outputs[0].outputs[0].text)
 
@@ -47,8 +50,10 @@ json_schema = CarDescription.model_json_schema()
 
 guided_decoding_params = GuidedDecodingParams(json=json_schema)
 sampling_params = SamplingParams(guided_decoding=guided_decoding_params)
-prompt = ("Generate a JSON with the brand, model and car_type of"
-          "the most iconic car from the 90's")
+prompt = (
+    "Generate a JSON with the brand, model and car_type of"
+    "the most iconic car from the 90's"
+)
 outputs = llm.generate(
     prompts=prompt,
     sampling_params=sampling_params,
@@ -71,8 +76,10 @@ simplified_sql_grammar = """
 """
 guided_decoding_params = GuidedDecodingParams(grammar=simplified_sql_grammar)
 sampling_params = SamplingParams(guided_decoding=guided_decoding_params)
-prompt = ("Generate an SQL query to show the 'username' and 'email'"
-          "from the 'users' table.")
+prompt = (
+    "Generate an SQL query to show the 'username' and 'email'"
+    "from the 'users' table."
+)
 outputs = llm.generate(
     prompts=prompt,
     sampling_params=sampling_params,

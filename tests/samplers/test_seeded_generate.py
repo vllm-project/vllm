@@ -3,6 +3,7 @@
 
 Run `pytest tests/samplers/test_seeded_generate.py`.
 """
+
 import copy
 import random
 from itertools import combinations
@@ -50,26 +51,27 @@ def test_random_sample_with_seed(
 
     for prompt in example_prompts:
         for params in (
-                sampling_params,
-                sampling_params_seed_1,
-                sampling_params_seed_2,
-                sampling_params,
-                sampling_params_seed_1,
-                sampling_params_seed_2,
+            sampling_params,
+            sampling_params_seed_1,
+            sampling_params_seed_2,
+            sampling_params,
+            sampling_params_seed_1,
+            sampling_params_seed_2,
         ):
             llm._add_request(prompt, params=params)
 
     results = llm._run_engine(use_tqdm=False)
-    all_outputs = [[out.token_ids for out in output.outputs]
-                   for output in results]
+    all_outputs = [
+        [out.token_ids for out in output.outputs] for output in results
+    ]
 
     for i in range(0, len(example_prompts), 6):
-        outputs = all_outputs[i:i + 6]
+        outputs = all_outputs[i : i + 6]
 
         # verify all non-seeded requests differ
         for output_a, output_b in combinations(
             (outputs[0], outputs[1], outputs[2], outputs[3]),
-                2,
+            2,
         ):
             assert output_a != output_b
 

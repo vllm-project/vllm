@@ -19,14 +19,14 @@ from ...utils import RemoteOpenAIServer
 
 @pytest.fixture
 def mary_had_lamb():
-    path = AudioAsset('mary_had_lamb').get_local_path()
+    path = AudioAsset("mary_had_lamb").get_local_path()
     with open(str(path), "rb") as f:
         yield f
 
 
 @pytest.fixture
 def winning_call():
-    path = AudioAsset('winning_call').get_local_path()
+    path = AudioAsset("winning_call").get_local_path()
     with open(str(path), "rb") as f:
         yield f
 
@@ -44,8 +44,9 @@ async def test_basic_audio(mary_had_lamb):
             file=mary_had_lamb,
             language="en",
             response_format="text",
-            temperature=0.0)
-        out = json.loads(transcription)['text']
+            temperature=0.0,
+        )
+        out = json.loads(transcription)["text"]
         assert "Mary had a little lamb," in out
         # This should "force" whisper to continue prompt in all caps
         transcription_wprompt = await client.audio.transcriptions.create(
@@ -54,8 +55,9 @@ async def test_basic_audio(mary_had_lamb):
             language="en",
             response_format="text",
             prompt=prompt,
-            temperature=0.0)
-        out_capital = json.loads(transcription_wprompt)['text']
+            temperature=0.0,
+        )
+        out_capital = json.loads(transcription_wprompt)["text"]
         assert prompt not in out_capital
 
 
@@ -68,10 +70,12 @@ async def test_bad_requests(mary_had_lamb):
 
         # invalid language
         with pytest.raises(openai.BadRequestError):
-            await client.audio.transcriptions.create(model=model_name,
-                                                     file=mary_had_lamb,
-                                                     language="hh",
-                                                     temperature=0.0)
+            await client.audio.transcriptions.create(
+                model=model_name,
+                file=mary_had_lamb,
+                language="hh",
+                temperature=0.0,
+            )
 
         # Expect audio too long: repeat the timeseries
         mary_had_lamb.seek(0)
@@ -79,13 +83,12 @@ async def test_bad_requests(mary_had_lamb):
         repeated_audio = np.tile(audio, 10)
         # Repeated audio to buffer
         buffer = io.BytesIO()
-        sf.write(buffer, repeated_audio, sr, format='WAV')
+        sf.write(buffer, repeated_audio, sr, format="WAV")
         buffer.seek(0)
         with pytest.raises(openai.BadRequestError):
-            await client.audio.transcriptions.create(model=model_name,
-                                                     file=buffer,
-                                                     language="en",
-                                                     temperature=0.0)
+            await client.audio.transcriptions.create(
+                model=model_name, file=buffer, language="en", temperature=0.0
+            )
 
 
 @pytest.mark.asyncio
@@ -95,10 +98,9 @@ async def test_non_asr_model(winning_call):
     server_args = ["--enforce-eager"]
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
-        res = await client.audio.transcriptions.create(model=model_name,
-                                                       file=winning_call,
-                                                       language="en",
-                                                       temperature=0.0)
+        res = await client.audio.transcriptions.create(
+            model=model_name, file=winning_call, language="en", temperature=0.0
+        )
         assert res.code == 400 and not res.text
         assert res.message == "The model does not support Transcriptions API"
 
@@ -112,10 +114,10 @@ async def test_completion_endpoints():
         client = remote_server.get_async_client()
         res = await client.chat.completions.create(
             model=model_name,
-            messages=[{
-                "role": "system",
-                "content": "You are a helpful assistant."
-            }])
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."}
+            ],
+        )
         assert res.code == 400
         assert res.message == "The model does not support Chat Completions API"
 
@@ -136,13 +138,14 @@ async def test_streaming_response(winning_call):
             file=winning_call,
             response_format="json",
             language="en",
-            temperature=0.0)
+            temperature=0.0,
+        )
         # Unfortunately this only works when the openai client is patched
         # to use streaming mode, not exposed in the transcription api.
         original_post = AsyncAPIClient.post
 
         async def post_with_stream(*args, **kwargs):
-            kwargs['stream'] = True
+            kwargs["stream"] = True
             return await original_post(*args, **kwargs)
 
         with patch.object(AsyncAPIClient, "post", new=post_with_stream):
@@ -152,11 +155,12 @@ async def test_streaming_response(winning_call):
                 file=winning_call,
                 language="en",
                 temperature=0.0,
-                extra_body=dict(stream=True))
+                extra_body=dict(stream=True),
+            )
             # Reconstruct from chunks and validate
             async for chunk in res:
                 # just a chunk
-                text = chunk.choices[0]['delta']['content']
+                text = chunk.choices[0]["delta"]["content"]
                 transcription += text
 
         assert transcription == res_no_stream.text
@@ -170,7 +174,7 @@ async def test_stream_options(winning_call):
         original_post = AsyncAPIClient.post
 
         async def post_with_stream(*args, **kwargs):
-            kwargs['stream'] = True
+            kwargs["stream"] = True
             return await original_post(*args, **kwargs)
 
         with patch.object(AsyncAPIClient, "post", new=post_with_stream):
@@ -180,9 +184,12 @@ async def test_stream_options(winning_call):
                 file=winning_call,
                 language="en",
                 temperature=0.0,
-                extra_body=dict(stream=True,
-                                stream_include_usage=True,
-                                stream_continuous_usage_stats=True))
+                extra_body=dict(
+                    stream=True,
+                    stream_include_usage=True,
+                    stream_continuous_usage_stats=True,
+                ),
+            )
             final = False
             continuous = True
             async for chunk in res:
@@ -190,5 +197,5 @@ async def test_stream_options(winning_call):
                     # final usage sent
                     final = True
                 else:
-                    continuous = continuous and hasattr(chunk, 'usage')
+                    continuous = continuous and hasattr(chunk, "usage")
             assert final and continuous

@@ -3,6 +3,7 @@
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 
@@ -60,7 +61,8 @@ async def test_check_models(client: openai.AsyncOpenAI, zephyr_lora_files):
     lora_models = models[1:]
     assert served_model.id == MODEL_NAME
     assert served_model.root == MODEL_NAME
-    assert all(lora_model.root == zephyr_lora_files
-               for lora_model in lora_models)
+    assert all(
+        lora_model.root == zephyr_lora_files for lora_model in lora_models
+    )
     assert lora_models[0].id == "zephyr-lora"
     assert lora_models[1].id == "zephyr-lora2"

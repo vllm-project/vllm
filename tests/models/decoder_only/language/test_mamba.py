@@ -3,6 +3,7 @@
 
 Run `pytest tests/models/test_mamba.py`.
 """
+
 import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -41,11 +42,12 @@ def generate_greedy(model_name, example_prompts, max_tokens):
         input_ids = inputs["input_ids"].to(model.device)
 
         # Generate text using the model's generate method directly
-        generated_ids = model.generate(input_ids,
-                                       max_new_tokens=max_tokens,
-                                       do_sample=False)
-        generated_text = tokenizer.decode(generated_ids[0],
-                                          skip_special_tokens=True)
+        generated_ids = model.generate(
+            input_ids, max_new_tokens=max_tokens, do_sample=False
+        )
+        generated_text = tokenizer.decode(
+            generated_ids[0], skip_special_tokens=True
+        )
 
         outputs.append((generated_ids[0].tolist(), generated_text))
 
@@ -79,9 +81,11 @@ def test_models(
         hf_output_ids, hf_output_str = hf_outputs[i]
         vllm_output_ids, vllm_output_str = vllm_outputs[i]
         assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
+            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}"
+        )
         assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}"
+        )
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -99,10 +103,12 @@ def test_batching(
     with vllm_runner(model, dtype=dtype, max_num_seqs=16) as vllm_model:
         for prompt in example_prompts:
             for_loop_outputs.append(
-                vllm_model.generate_greedy([prompt], max_tokens)[0])
+                vllm_model.generate_greedy([prompt], max_tokens)[0]
+            )
 
-        batched_outputs = vllm_model.generate_greedy(example_prompts,
-                                                     max_tokens)
+        batched_outputs = vllm_model.generate_greedy(
+            example_prompts, max_tokens
+        )
 
     check_outputs_equal(
         outputs_0_lst=for_loop_outputs,
@@ -115,24 +121,23 @@ def test_batching(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [10])
-def test_chunked_prefill_with_parallel_sampling(vllm_runner, example_prompts,
-                                                model: str, dtype: str,
-                                                max_tokens: int) -> None:
+def test_chunked_prefill_with_parallel_sampling(
+    vllm_runner, example_prompts, model: str, dtype: str, max_tokens: int
+) -> None:
     # Tests chunked prefill in conjunction with n>1. In this case, prefill is
     # populated with decoding tokens and we test that it doesn't fail.
     # This test might fail if cache is not allocated correctly for n > 1
     # decoding steps inside a chunked prefill forward pass (where we have both
     # prefill and decode together )
-    sampling_params = SamplingParams(n=3,
-                                     temperature=1,
-                                     seed=0,
-                                     max_tokens=max_tokens)
+    sampling_params = SamplingParams(
+        n=3, temperature=1, seed=0, max_tokens=max_tokens
+    )
     with vllm_runner(
-            model,
-            dtype=dtype,
-            enable_chunked_prefill=True,
-            max_num_batched_tokens=30,
-            max_num_seqs=10  # forces prefill chunks with decoding
+        model,
+        dtype=dtype,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=30,
+        max_num_seqs=10,  # forces prefill chunks with decoding
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
@@ -141,9 +146,14 @@ def test_chunked_prefill_with_parallel_sampling(vllm_runner, example_prompts,
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
-def test_chunked_prefill(vllm_runner, example_prompts, model: str, dtype: str,
-                         max_tokens: int,
-                         chunked_prefill_token_size: int) -> None:
+def test_chunked_prefill(
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+    max_tokens: int,
+    chunked_prefill_token_size: int,
+) -> None:
     """
     Checks exact match decode between huggingface model and vllm runner with
     chunked prefill.
@@ -153,13 +163,16 @@ def test_chunked_prefill(vllm_runner, example_prompts, model: str, dtype: str,
 
     non_chunked = generate_greedy(model, example_prompts, max_tokens)
 
-    with vllm_runner(model,
-                     dtype=dtype,
-                     enable_chunked_prefill=True,
-                     max_num_batched_tokens=max_num_batched_tokens,
-                     max_num_seqs=max_num_seqs) as vllm_model:
-        chunked = vllm_model.generate_greedy(example_prompts,
-                                             max_tokens=max_tokens)
+    with vllm_runner(
+        model,
+        dtype=dtype,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+    ) as vllm_model:
+        chunked = vllm_model.generate_greedy(
+            example_prompts, max_tokens=max_tokens
+        )
 
     check_outputs_equal(
         outputs_0_lst=chunked,
@@ -179,9 +192,8 @@ def test_parallel_sampling(
     dtype: str,
     max_tokens: int,
 ) -> None:
-
     # Numerical differences produce slightly different output for these
-    if 'state-spaces' in model:
+    if "state-spaces" in model:
         example_prompts.pop(0)
         example_prompts.pop(0)
         example_prompts.pop(0)
@@ -190,15 +202,16 @@ def test_parallel_sampling(
         for_loop_outputs = []
         for _ in range(10):
             for_loop_outputs.append(
-                vllm_model.generate_greedy(example_prompts, max_tokens)[0])
-        sampling_params = SamplingParams(n=10,
-                                         temperature=0.001,
-                                         seed=0,
-                                         max_tokens=max_tokens)
+                vllm_model.generate_greedy(example_prompts, max_tokens)[0]
+            )
+        sampling_params = SamplingParams(
+            n=10, temperature=0.001, seed=0, max_tokens=max_tokens
+        )
         n_lt_1_outputs = vllm_model.generate(example_prompts, sampling_params)
     token_ids, texts = n_lt_1_outputs[0]
-    n_lt_1_outputs = [(token_id, text)
-                      for token_id, text in zip(token_ids, texts)]
+    n_lt_1_outputs = [
+        (token_id, text) for token_id, text in zip(token_ids, texts)
+    ]
 
     check_outputs_equal(
         outputs_0_lst=n_lt_1_outputs,
@@ -223,7 +236,8 @@ def test_mamba_cache_cg_padding(
     # tensor dimensions aren't compatible
     vllm_config = EngineArgs(model=model).create_engine_config()
     while len(example_prompts) == vllm_config.pad_for_cudagraph(
-            len(example_prompts)):
+        len(example_prompts)
+    ):
         example_prompts.append(example_prompts[0])
 
     try:
@@ -233,7 +247,8 @@ def test_mamba_cache_cg_padding(
         pytest.fail(
             "Couldn't run batch size which is not equal to a Cuda Graph "
             "captured batch size. "
-            "Could be related to mamba cache not padded correctly")
+            "Could be related to mamba cache not padded correctly"
+        )
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -251,12 +266,15 @@ def test_models_preemption_recompute(
 
     with vllm_runner(model, dtype=dtype, max_num_seqs=16) as vllm_model:
         vllm_model.model.llm_engine.scheduler[
-            0].ENABLE_ARTIFICIAL_PREEMPT = True
+            0
+        ].ENABLE_ARTIFICIAL_PREEMPT = True
         preempt_vllm_outputs = vllm_model.generate_greedy(
-            example_prompts, max_tokens)
+            example_prompts, max_tokens
+        )
 
         vllm_model.model.llm_engine.scheduler[
-            0].ENABLE_ARTIFICIAL_PREEMPT = False
+            0
+        ].ENABLE_ARTIFICIAL_PREEMPT = False
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(
@@ -285,8 +303,10 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
         with vllm_runner(model, dtype=dtype, max_num_seqs=10) as vllm_model:
             vllm_model.generate_greedy([example_prompts[0]] * 100, 10)
     except ValueError:
-        pytest.fail("Mamba inner state wasn't cleaned up properly between"
-                    "steps finished requests registered unnecessarily ")
+        pytest.fail(
+            "Mamba inner state wasn't cleaned up properly between"
+            "steps finished requests registered unnecessarily "
+        )
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -304,8 +324,10 @@ def test_state_cleanup(
             for _ in range(10):
                 vllm_model.generate_greedy([example_prompts[0]] * 100, 1)
     except ValueError:
-        pytest.fail("Mamba inner state wasn't cleaned up between states, "
-                    "could be related to finished_requests_ids")
+        pytest.fail(
+            "Mamba inner state wasn't cleaned up between states, "
+            "could be related to finished_requests_ids"
+        )
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -316,25 +338,31 @@ def test_multistep(
     dtype: str,
     example_prompts,
 ) -> None:
-    with vllm_runner(model, num_scheduler_steps=8,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(
+        model, num_scheduler_steps=8, max_num_seqs=2
+    ) as vllm_model:
         vllm_model.generate_greedy([example_prompts[0]] * 10, 1)
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [64])
-def test_multistep_correctness(vllm_runner, model: str, dtype: str,
-                               max_tokens: int, example_prompts) -> None:
-    with vllm_runner(model, num_scheduler_steps=8,
-                     max_num_seqs=2) as vllm_model:
+def test_multistep_correctness(
+    vllm_runner, model: str, dtype: str, max_tokens: int, example_prompts
+) -> None:
+    with vllm_runner(
+        model, num_scheduler_steps=8, max_num_seqs=2
+    ) as vllm_model:
         vllm_outputs_multistep = vllm_model.generate_greedy(
-            example_prompts, max_tokens)
+            example_prompts, max_tokens
+        )
 
-    with vllm_runner(model, num_scheduler_steps=1,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(
+        model, num_scheduler_steps=1, max_num_seqs=2
+    ) as vllm_model:
         vllm_outputs_single_step = vllm_model.generate_greedy(
-            example_prompts, max_tokens)
+            example_prompts, max_tokens
+        )
 
     check_outputs_equal(
         outputs_0_lst=vllm_outputs_multistep,

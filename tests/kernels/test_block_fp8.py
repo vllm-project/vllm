@@ -9,12 +9,15 @@ import torch
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8, w8a8_block_fp8_matmul)
+    per_token_group_quant_fp8,
+    w8a8_block_fp8_matmul,
+)
 from vllm.platforms import current_platform
 
 if current_platform.get_device_capability() < (9, 0):
-    pytest.skip("FP8 Triton requires CUDA 9.0 or higher",
-                allow_module_level=True)
+    pytest.skip(
+        "FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True
+    )
 
 # Test configurations
 DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
@@ -36,14 +39,14 @@ OUT_DTYPES = [torch.bfloat16]  # [torch.float32, torch.half, torch.bfloat16]
 SEEDS = [0]
 
 
-def native_per_token_group_quant_fp8(x,
-                                     group_size,
-                                     eps=1e-10,
-                                     dtype=torch.float8_e4m3fn):
+def native_per_token_group_quant_fp8(
+    x, group_size, eps=1e-10, dtype=torch.float8_e4m3fn
+):
     """Function to perform per-token-group quantization on an input tensor
     `x` using native torch."""
-    assert x.shape[-1] % group_size == 0, ("the last dimension of `x` cannot "
-                                           "be divisible by `group_size`")
+    assert x.shape[-1] % group_size == 0, (
+        "the last dimension of `x` cannot be divisible by `group_size`"
+    )
     assert x.is_contiguous(), "`x` is not contiguous"
 
     finfo = torch.finfo(dtype)
@@ -51,22 +54,20 @@ def native_per_token_group_quant_fp8(x,
     fp8_max = finfo.max
 
     x_ = x.reshape(x.numel() // group_size, group_size)
-    amax = x_.abs().max(dim=-1,
-                        keepdim=True)[0].clamp(min=eps).to(torch.float32)
+    amax = (
+        x_.abs().max(dim=-1, keepdim=True)[0].clamp(min=eps).to(torch.float32)
+    )
     x_s = amax / fp8_max
     x_q = (x_ / x_s).clamp(min=fp8_min, max=fp8_max).to(dtype)
     x_q = x_q.reshape(x.shape)
-    x_s = x_s.reshape(x.shape[:-1] + (x.shape[-1] // group_size, ))
+    x_s = x_s.reshape(x.shape[:-1] + (x.shape[-1] // group_size,))
 
     return x_q, x_s
 
 
-def native_w8a8_block_fp8_matmul(A,
-                                 B,
-                                 As,
-                                 Bs,
-                                 block_size,
-                                 output_dtype=torch.float16):
+def native_w8a8_block_fp8_matmul(
+    A, B, As, Bs, block_size, output_dtype=torch.float16
+):
     """Matrix multiplication with block-wise quantization using native torch."""
     A = A.to(torch.float32)
     B = B.to(torch.float32)
@@ -79,7 +80,7 @@ def native_w8a8_block_fp8_matmul(A,
 
     M = A.numel() // A.shape[-1]
     N, K = B.shape
-    origin_C_shape = A.shape[:-1] + (N, )
+    origin_C_shape = A.shape[:-1] + (N,)
     A = A.reshape(M, A.shape[-1])
     As = As.reshape(M, As.shape[-1])
     n_tiles = (N + block_n - 1) // block_n
@@ -91,18 +92,22 @@ def native_w8a8_block_fp8_matmul(A,
     C = torch.zeros(C_shape, dtype=torch.float32, device=A.device)
 
     A_tiles = [
-        A[:, i * block_k:min((i + 1) * block_k, K)] for i in range(k_tiles)
+        A[:, i * block_k : min((i + 1) * block_k, K)] for i in range(k_tiles)
     ]
-    B_tiles = [[
-        B[
-            j * block_n:min((j + 1) * block_n, N),
-            i * block_k:min((i + 1) * block_k, K),
-        ] for i in range(k_tiles)
-    ] for j in range(n_tiles)]
+    B_tiles = [
+        [
+            B[
+                j * block_n : min((j + 1) * block_n, N),
+                i * block_k : min((i + 1) * block_k, K),
+            ]
+            for i in range(k_tiles)
+        ]
+        for j in range(n_tiles)
+    ]
     C_tiles = [
-        C[:, j * block_n:min((j + 1) * block_n, N)] for j in range(n_tiles)
+        C[:, j * block_n : min((j + 1) * block_n, N)] for j in range(n_tiles)
     ]
-    As_tiles = [As[:, i:i + 1] for i in range(k_tiles)]
+    As_tiles = [As[:, i : i + 1] for i in range(k_tiles)]
 
     for i in range(k_tiles):
         for j in range(n_tiles):
@@ -132,24 +137,30 @@ def torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
     for i in range(w1.shape[0]):
         mask = topk_ids == i
         if mask.sum():
-            inter_out = native_w8a8_block_fp8_matmul(a_q[mask],
-                                                     w1[i],
-                                                     a_s[mask],
-                                                     w1_s[i],
-                                                     block_shape,
-                                                     output_dtype=a.dtype)
+            inter_out = native_w8a8_block_fp8_matmul(
+                a_q[mask],
+                w1[i],
+                a_s[mask],
+                w1_s[i],
+                block_shape,
+                output_dtype=a.dtype,
+            )
             act_out = SiluAndMul().forward_native(inter_out)
             act_out_q, act_out_s = native_per_token_group_quant_fp8(
-                act_out, block_k)
+                act_out, block_k
+            )
             act_out = act_out.to(torch.float32)
-            out[mask] = native_w8a8_block_fp8_matmul(act_out_q,
-                                                     w2[i],
-                                                     act_out_s,
-                                                     w2_s[i],
-                                                     block_shape,
-                                                     output_dtype=a.dtype)
-    return (out.view(B, -1, w2.shape[1]) *
-            topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
+            out[mask] = native_w8a8_block_fp8_matmul(
+                act_out_q,
+                w2[i],
+                act_out_s,
+                w2_s[i],
+                block_shape,
+                output_dtype=a.dtype,
+            )
+    return (
+        out.view(B, -1, w2.shape[1]) * topk_weight.view(B, -1, 1).to(out.dtype)
+    ).sum(dim=1)
 
 
 # Skip all tests if CUDA is not available
@@ -163,7 +174,8 @@ def setup_cuda():
 
 @pytest.mark.parametrize(
     "num_tokens,d,dtype,group_size,seed",
-    itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE, SEEDS))
+    itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE, SEEDS),
+)
 @torch.inference_mode()
 def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
     torch.manual_seed(seed)
@@ -172,15 +184,16 @@ def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
     ref_out, ref_scale = native_per_token_group_quant_fp8(x, group_size)
     out, scale = per_token_group_quant_fp8(x, group_size)
 
-    assert torch.allclose(out.to(torch.float32),
-                          ref_out.to(torch.float32),
-                          rtol=0.15)
+    assert torch.allclose(
+        out.to(torch.float32), ref_out.to(torch.float32), rtol=0.15
+    )
     assert torch.allclose(scale, ref_scale)
 
 
 @pytest.mark.parametrize(
     "M,N,K,block_size,out_dtype,seed",
-    itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS))
+    itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS),
+)
 @torch.inference_mode()
 def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     torch.manual_seed(seed)
@@ -201,20 +214,23 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     As = torch.rand(M, k_tiles, dtype=torch.float32) * factor_for_scale
     Bs = torch.rand(n_tiles, k_tiles, dtype=torch.float32) * factor_for_scale
 
-    ref_out = native_w8a8_block_fp8_matmul(A_fp8, B_fp8, As, Bs, block_size,
-                                           out_dtype)
+    ref_out = native_w8a8_block_fp8_matmul(
+        A_fp8, B_fp8, As, Bs, block_size, out_dtype
+    )
     out = w8a8_block_fp8_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
 
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    rel_diff = torch.mean(
+        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
+    ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.001
 
 
 @pytest.mark.parametrize(
     "M,N,K,E,topk,block_size,dtype,seed",
-    itertools.product(M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES,
-                      SEEDS))
+    itertools.product(
+        M_moe, N_moe, K_moe, E, TOP_KS, BLOCK_SIZE, DTYPES, SEEDS
+    ),
+)
 @torch.inference_mode()
 def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     torch.manual_seed(seed)
@@ -224,8 +240,9 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
 
     a = torch.randn((M, K), dtype=dtype) / 10
 
-    w1_bf16 = (torch.rand(
-        (E, 2 * N, K), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+    w1_bf16 = (
+        (torch.rand((E, 2 * N, K), dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+    )
     w1 = w1_bf16.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
     del w1_bf16
 
@@ -239,10 +256,14 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     k_tiles_w1 = (K + block_k - 1) // block_k
     k_tiles_w2 = (N + block_k - 1) // block_k
 
-    w1_s = torch.rand(
-        (E, n_tiles_w1, k_tiles_w1), dtype=torch.float32) * factor_for_scale
-    w2_s = torch.rand(
-        (E, n_tiles_w2, k_tiles_w2), dtype=torch.float32) * factor_for_scale
+    w1_s = (
+        torch.rand((E, n_tiles_w1, k_tiles_w1), dtype=torch.float32)
+        * factor_for_scale
+    )
+    w2_s = (
+        torch.rand((E, n_tiles_w2, k_tiles_w2), dtype=torch.float32)
+        * factor_for_scale
+    )
 
     score = torch.randn((M, E), dtype=dtype)
 
@@ -258,13 +279,14 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
         w2_scale=w2_s,
         block_shape=block_size,
     )
-    ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, score, topk,
-                                       block_size)
+    ref_out = torch_w8a8_block_fp8_moe(
+        a, w1, w2, w1_s, w2_s, score, topk, block_size
+    )
 
     print(f"{out.sum()=}")
     print(f"{ref_out.sum()=}")
 
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    rel_diff = torch.mean(
+        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
+    ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.03
