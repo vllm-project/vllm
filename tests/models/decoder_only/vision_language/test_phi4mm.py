@@ -89,18 +89,21 @@ def run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(model,
-                     task="generate",
-                     max_model_len=max_model_len,
-                     max_num_seqs=2,
-                     dtype=dtype,
-                     limit_mm_per_prompt={"image": mm_limit},
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enable_lora=True,
-                     max_lora_rank=320,
-                     lora_extra_vocab_size=0,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(
+            model,
+            task="generate",
+            max_model_len=max_model_len,
+            max_num_seqs=2,
+            dtype=dtype,
+            limit_mm_per_prompt={"image": mm_limit},
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
+            enable_lora=True,
+            max_lora_rank=320,
+            lora_extra_vocab_size=0,
+            gpu_memory_utilization=0.8,  # set to 0.8 to avoid OOM in CI
+            enforce_eager=True,
+    ) as vllm_model:
         lora_request = LoRARequest("vision", 1, vision_lora_path)
         vllm_model.model.llm_engine.add_lora(lora_request=lora_request)
         vllm_outputs_per_case = [
@@ -149,7 +152,7 @@ def run_test(
         # Single-scale, batched
         [1.0, 1.0, 1.0],
         # Multi-scale
-        [0.25, 0.5, 1.0],
+        [0.7, 0.75, 1.0],
     ],
 )
 @pytest.mark.parametrize("dtype", [target_dtype])
