@@ -18,8 +18,8 @@ logger = init_logger(__name__)
 class BlockHashType(NamedTuple):
     """Hash value of a block (int), the token IDs in the block, and extra keys.
     We keep a tuple of token IDs and extra keys to reduce the likelihood of
-    hash collisions when the hash value is the same. But please note that 
-    hash collisions can still theoretically occur, albeit with an extremely 
+    hash collisions when the hash value is the same. But please note that
+    hash collisions can still theoretically occur, albeit with an extremely
     low probability.
     """
     # Hash value of the block in an integer.
@@ -148,7 +148,7 @@ class FreeKVCacheBlockQueue:
     builtin deque to support removing a block in the middle of the queue
     in O(1) time. To close the performance gap to the builtin deque which is
     implemented in C++, this class does not allocate any Python objects when
-    manipulating the linked list. Instead, this class manipulates the 
+    manipulating the linked list. Instead, this class manipulates the
     prev_free_block and next_free_block attributes of the given blocks.
 
     The queue is ordered by block ID in the beginning. When a block is allocated
@@ -178,7 +178,7 @@ class FreeKVCacheBlockQueue:
 
     def popleft(self) -> KVCacheBlock:
         """Pop the first free block and reduce num_free_blocks by 1.
-        
+
         Returns:
             The first free block.
         """
@@ -191,7 +191,7 @@ class FreeKVCacheBlockQueue:
 
     def remove(self, block: KVCacheBlock) -> None:
         """Remove a block in the free list and reduce num_free_blocks by 1.
-        
+
         Args:
             block: The block to remove.
         """
@@ -235,7 +235,7 @@ class FreeKVCacheBlockQueue:
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
-        
+
         Returns:
             A list of free blocks.
         """
@@ -251,10 +251,10 @@ def need_extra_keys(request: Request) -> bool:
     """Check whether the blocks allocated to this request need extra hash keys.
 
     Args:
-        request (Request): The request. 
+        request (Request): The request.
 
     Returns:
-        bool: Whether blocks allocated to this request need extra hash keys. 
+        bool: Whether blocks allocated to this request need extra hash keys.
     """
 
     # Multimodal requests need to include the MM hash.
@@ -269,13 +269,13 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     computation. For multi-modal inputs, the extra keys are
     (mm_hash, start_offset) that indicate a mm input contained in the
     block and its starting offset in the block tokens.
-    
+
     Args:
         request: The request object.
         start_token_idx: The start token index of the block.
         end_token_idx: The end token index of the block.
         start_mm_idx: The start multi-modal index of the block.
-    
+
     Returns:
         A tuple of extra keys and the next multi-modal index.
     """
@@ -333,10 +333,10 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
 
 def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
     """Generate extra keys related to LoRA for block hash computation.
-    
+
     Args:
         request: The request object.
-    
+
     Returns:
         Return LoRA id of the request if it is a LoRA request. Return empty
         list otherwise.
@@ -351,13 +351,13 @@ def generate_block_hash_extra_keys(
         start_mm_idx: int) -> tuple[Optional[tuple[Any, ...]], int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs and request specific metadata (e.g., LoRA ID).
-    
+
     Args:
         request: The request object.
         start_token_idx: The start token index of the block.
         end_token_idx: The end token index of the block.
         start_mm_idx: The start multi-modal index of the block.
-    
+
     Returns:
         A tuple of extra keys and the next multi-modal index.
     """
@@ -452,7 +452,7 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
                                  kv_cache_spec: KVCacheSpec,
                                  available_memory: int):
     """
-    Checks whether `available_memory` is enough for the KV cache to hold at 
+    Checks whether `available_memory` is enough for the KV cache to hold at
     least one request with the model's max_model_len.
 
     Args:
@@ -474,14 +474,29 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
     for layer_spec in kv_cache_spec.values():
         needed_memory += layer_spec.bytes_for_tokens(max_model_len)
 
+    # Calculate more helpful metrics for error reporting
+    needed_gb = needed_memory / 1024 / 1024 / 1024
+    available_gb = available_memory / 1024 / 1024 / 1024
+    deficit_gb = needed_gb - available_gb
+
     if needed_memory > available_memory:
+        # Calculate approx max sequence length with current memory
+        possible_len = int(max_model_len * (available_memory / needed_memory))
+
         raise ValueError(
-            f"To serve at least one request with the models's max seq len "
-            f"({max_model_len}), ({needed_memory/1024/1024/1024:.2f} GB KV "
-            f"cache is needed, which is larger than the available KV cache "
-            f"memory ({available_memory/1024/1024/1024:.2f} GB). Try "
-            f"increasing `gpu_memory_utilization` or decreasing "
-            f"`max_model_len` when initializing the engine.")
+            f"Insufficient memory for KV cache allocation:\n"
+            f"- Required: {needed_gb:.2f} GB for max sequence length "
+            f"{max_model_len}\n"
+            f"- Available: {available_gb:.2f} GB "
+            f"(deficit: {deficit_gb:.2f} GB)\n"
+            f"- Approximate max possible sequence length with current memory: "
+            f"{possible_len}\n\n"
+            f"Solutions:\n"
+            f"1. Increase `gpu_memory_utilization`\n"
+            f"   (currently: "
+            f"{vllm_config.scheduler_config.gpu_memory_utilization})\n"
+            f"2. Decrease `max_model_len` to {possible_len} or less\n"
+            f"3. Use a smaller model or a GPU with more memory")
 
 
 def is_kv_cache_type_uniform(kv_cache_spec: KVCacheSpec) -> bool:
@@ -567,22 +582,52 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
 
     Returns:
         The generated KVCacheConfigs
+
+    Raises:
+        ValueError: If there is not enough memory available for the KV cache
+        NotImplementedError: If the model has non-uniform KV cache types
     """
-    # Use the max number of layers to conservatively determine
-    # the number of blocks.
-    num_layers = max(len(kv_cache_spec) for kv_cache_spec in kv_cache_specs)
-    kv_cache_configs = []
-    for kv_cache_spec in kv_cache_specs:
-        check_enough_kv_cache_memory(vllm_config, kv_cache_spec,
-                                     available_memory)
-        if is_kv_cache_type_uniform(kv_cache_spec):
-            # KV cache of all layers are the same, which is true for
-            # most models. Allocate the same amount of memory for
-            # each layer.
-            kv_cache_configs.append(
-                _get_kv_cache_config_uniform_type(vllm_config, kv_cache_spec,
-                                                  available_memory,
-                                                  num_layers))
+    try:
+        # Use the max number of layers to conservatively determine
+        # the number of blocks.
+        num_layers = max(
+            len(kv_cache_spec) for kv_cache_spec in kv_cache_specs)
+        kv_cache_configs = []
+
+        for kv_cache_spec in kv_cache_specs:
+            check_enough_kv_cache_memory(vllm_config, kv_cache_spec,
+                                         available_memory)
+            if is_kv_cache_type_uniform(kv_cache_spec):
+                # KV cache of all layers are the same, which is true for
+                # most models. Allocate the same amount of memory for
+                # each layer.
+                kv_cache_configs.append(
+                    _get_kv_cache_config_uniform_type(vllm_config,
+                                                      kv_cache_spec,
+                                                      available_memory,
+                                                      num_layers))
+            else:
+                raise NotImplementedError(
+                    "Models with non-uniform KV cache types are not supported. "
+                    "This is an unusual case and might indicate an issue with"
+                    " your configuration.")
+
+        if not kv_cache_configs:
+            raise ValueError(
+                "Failed to generate any valid KV cache configurations. "
+                "This could be due to insufficient GPU memory or an "
+                "incompatible model architecture.")
+
+        return kv_cache_configs
+
+    except Exception as e:
+        # More context to any errors that occur during KV cache configuration
+        if isinstance(e, (ValueError, NotImplementedError)):
+            # Re-raise with the original message
+            raise
         else:
-            raise NotImplementedError
-    return kv_cache_configs
+            # For unexpected errors, add more context
+            raise ValueError(
+                f"Unexpected error during KV cache configuration: {str(e)}. "
+                f"This might be due to insufficient GPU memory or an "
+                f"incompatible model configuration.") from e
