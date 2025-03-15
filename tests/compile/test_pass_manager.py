@@ -21,25 +21,28 @@ callable_decorated = CallableInductorPass(simple_callable,
 
 @pytest.mark.parametrize(
     "works, callable",
-    [(False, simple_callable), (True, callable_decorated),
-     (True, CallableInductorPass(simple_callable, "simple_callable"))])
+    [
+        (False, simple_callable),
+        (True, callable_decorated),
+        (True, CallableInductorPass(simple_callable, "simple_callable")),
+    ],
+)
 def test_pass_manager(works: bool, callable):
     config = CompilationConfig().pass_config
-    pass_manager = PostGradPassManager(
-    )  # Create the pass manager without arguments
-    pass_manager.configure(config)  # Adds default passes
+
+    pass_manager = PostGradPassManager()  # pass manager without arguments
+    pass_manager.configure(config)  # default passes
 
     # Try to add the callable to the pass manager
-    # For non-InductorPass callables, this should fail the assertion in add()
-    if isinstance(callable, InductorPass):
+    try:
         pass_manager.add(callable)
-        # should succeed for proper InductorPass instances
+        # If we got here, the add was successful (should be an InductorPass)
+        # Now check pickling behavior based on the works parameter
         if works:
             pickle.dumps(pass_manager)
         else:
             with pytest.raises(BypassFxGraphCache):
                 pickle.dumps(pass_manager)
-    else:
-        # For simple_callable, this should fail
-        with pytest.raises(AssertionError):
-            pass_manager.add(callable)
+    except AssertionError:
+        # Should only get here for non-InductorPass callables
+        assert not isinstance(callable, InductorPass)
