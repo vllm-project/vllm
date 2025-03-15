@@ -258,7 +258,6 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         # TODO: Use AutoModelForVision2Seq once transformers supports this
         auto_cls=AutoModelForPreTraining,
-        dtype="bfloat16",
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
     ),
@@ -272,7 +271,6 @@ VLM_TEST_SETTINGS = {
         }),
         max_model_len=2048,
         max_num_seqs=2,
-        dtype="bfloat16",
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
         patch_hf_runner=model_utils.glm4v_patch_hf_runner,
         # The image embeddings match with HF but the outputs of the language
@@ -295,7 +293,6 @@ VLM_TEST_SETTINGS = {
         }),
         multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
         max_model_len=8192,
-        dtype="bfloat16",
         use_tokenizer_eos=True,
         num_logprobs=10,
         patch_hf_runner=model_utils.h2ovl_patch_hf_runner,
@@ -324,10 +321,6 @@ VLM_TEST_SETTINGS = {
         }),
         multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
         max_model_len=4096,
-        # NOTE: Mono-InternVL-2B doesn't work with fp16,
-        # it will result NaN during inference.
-        # See: https://huggingface.co/OpenGVLab/Mono-InternVL-2B/discussions/9
-        dtype="bfloat16",
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
     ),
