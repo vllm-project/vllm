@@ -41,7 +41,7 @@ def create_orca_header(metrics_format: str,
         logger.warning("Warning: `metadata_fields` are not supported in the"
                        "ORCA response header yet.")
 
-    if metrics_format not in ["TEXT", "JSON"]:
+    if metrics_format.lower() not in ["text", "json"]:
         logger.warning(
             "Warning: `%s` format is not supported in the ORCA response header",
             format,
@@ -58,7 +58,7 @@ def create_orca_header(metrics_format: str,
     }
     # output example:
     # endpoint-load-metrics: TEXT named_metrics.kv_cache_utilization=0.4
-    if metrics_format == "TEXT":
+    if metrics_format.lower() == "text":
         native_http_header = ", ".join([
             f"named_metrics.{metric_name}={value}"
             for metric_name, value in named_metrics
@@ -68,7 +68,7 @@ def create_orca_header(metrics_format: str,
 
     # output example:
     # endpoint-load-metrics: JSON “named_metrics”: {“custom-metric-util”: 0.4}
-    elif metrics_format == "JSON":
+    elif metrics_format.lower() == "json":
         header["endpoint-load-metrics"] = f"JSON {json.dumps(orca_report)}"
 
     return header
