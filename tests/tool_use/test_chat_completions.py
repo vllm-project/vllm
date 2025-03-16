@@ -143,5 +143,4 @@ async def test_chat_completion_with_tools(client: openai.AsyncOpenAI,
     assert chunk.choices[0].finish_reason == stop_reason
     assert chunk.choices[0].finish_reason != 'tool_calls'
     assert len(chunks)
-    print(chunks)
-    # assert "".join(chunks) == output_text
+    assert "".join(chunks) == output_text
