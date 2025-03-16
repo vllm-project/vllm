@@ -236,13 +236,13 @@ class Phi4MiniJsonToolParser(ToolParser):
                                 prefix = find_common_prefix(prev_args_json, cur_args_json)
                                 argument_diff = prefix[sent:]
                             else:
-                                argument_diff = None
+                                argument_diff = "null"
                         else:
-                            argument_diff = None
+                            argument_diff = "null"
                     else:
-                        argument_diff = None
+                        argument_diff = "null"
 
-                    if argument_diff:
+                    if argument_diff != "null":
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(
                                 index=self.current_tool_id,
