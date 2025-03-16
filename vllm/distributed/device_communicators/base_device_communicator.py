@@ -35,6 +35,21 @@ class DeviceCommunicatorBase:
         dist.all_reduce(input_, group=self.device_group)
         return input_
 
+    def reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor:
+        input_size = input_.size()
+        assert input_size[0] % self.world_size == 0, (
+            f"reduce scatter doesn't work when input size {input_size} is not "
+            f"divisible by world size {self.world_size}")
+        output_size = (input_size[0] // self.world_size, ) + input_size[1:]
+        # Allocate output tensor.
+        output_tensor = torch.empty(output_size,
+                                    dtype=input_.dtype,
+                                    device=input_.device)
+        dist.reduce_scatter_tensor(output_tensor,
+                                   input_,
+                                   group=self.device_group)
+        return output_tensor
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if dim < 0:
             # Convert negative dim to positive.

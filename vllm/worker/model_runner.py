@@ -1556,7 +1556,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             capture_inputs)
 
                     with set_forward_context(attn_metadata, self.vllm_config,
-                                             virtual_engine):
+                                             virtual_engine, batch_size):
                         graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
@@ -1736,9 +1736,24 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
+        num_tokens = (model_input.input_tokens.shape[0]
+                      if model_input.input_tokens is not None else None)
+
+        # only do sequence parallelism when num of tokens
+        # is divisible by parallel size.
+        # sequence parallelism uses torch.distributed.reduce_scatter which only
+        # supports the case when size is divisible by parallel size
+        enable_sequence_parallel = (
+            self.vllm_config.parallel_config.enable_sequence_parallel
+            and num_tokens is not None and num_tokens %
+            self.vllm_config.parallel_config.tensor_parallel_size == 0)
+
         if not bypass_model_exec:
-            with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config, virtual_engine):
+            with set_forward_context(
+                    model_input.attn_metadata,
+                    self.vllm_config,
+                    virtual_engine,
+                    enable_sequence_parallel=enable_sequence_parallel):
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
@@ -1785,8 +1800,14 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     torch.tensor(model_forward_time + orig_model_forward_time))
             return hidden_or_intermediate_states
 
-        logits = self.model.compute_logits(hidden_or_intermediate_states,
-                                           model_input.sampling_metadata)
+        with set_forward_context(
+                model_input.attn_metadata,
+                self.vllm_config,
+                virtual_engine,
+                enable_sequence_parallel=enable_sequence_parallel,
+        ):
+            logits = self.model.compute_logits(hidden_or_intermediate_states,
+                                               model_input.sampling_metadata)
 
         if not self.is_driver_worker:
             return []

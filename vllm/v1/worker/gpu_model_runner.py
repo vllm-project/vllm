@@ -815,7 +815,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # depending on the input multimodal items.
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
-
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
 
@@ -984,9 +983,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
+        # only do sequence parallelism when num of tokens
+        # is divisible by parallel size.
+        # sequence parallelism uses torch.distributed.reduce_scatter which only
+        # supports the case when size is divisible by parallel size
+        enable_sequence_parallel = (
+            self.vllm_config.parallel_config.enable_sequence_parallel
+            and num_input_tokens %
+            self.vllm_config.parallel_config.tensor_parallel_size == 0)
+
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                enable_sequence_parallel=enable_sequence_parallel,
+        ):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -999,7 +1011,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         hidden_states = hidden_states[:num_scheduled_tokens]
         sample_hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(sample_hidden_states, None)
+        with set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                enable_sequence_parallel=enable_sequence_parallel):
+            logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
@@ -1166,7 +1182,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc_np[req_idx].item()
             prompt_hidden_states = hidden_states[offset:offset + num_logits]
-            logits = self.model.compute_logits(prompt_hidden_states, None)
+
+            enable_sequence_parallel = (
+                self.vllm_config.parallel_config.enable_sequence_parallel
+                and num_tokens %
+                self.vllm_config.parallel_config.tensor_parallel_size == 0)
+            with set_forward_context(
+                    None,
+                    self.vllm_config,
+                    enable_sequence_parallel=enable_sequence_parallel):
+                logits = self.model.compute_logits(prompt_hidden_states, None)
 
             # Get the "target" tokens for each index. For prompt at index i,
             # the token at prompt index i+1 is the "sampled" token we want
@@ -1243,9 +1268,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            with set_forward_context(None,
-                                     self.vllm_config,
-                                     num_tokens=num_tokens):
+            enable_sequence_parallel = (
+                self.vllm_config.parallel_config.enable_sequence_parallel
+                and num_tokens %
+                self.vllm_config.parallel_config.tensor_parallel_size == 0)
+
+            with set_forward_context(
+                    None,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    enable_sequence_parallel=enable_sequence_parallel,
+            ):
                 hidden_states = model(
                     input_ids=input_ids,
                     positions=positions,
@@ -1262,7 +1295,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
 
-        logits = self.model.compute_logits(hidden_states, None)
+        enable_sequence_parallel = (
+            self.vllm_config.parallel_config.enable_sequence_parallel
+            and hidden_states.size()[0] %
+            self.vllm_config.parallel_config.tensor_parallel_size == 0)
+        with set_forward_context(
+                None,
+                self.vllm_config,
+                enable_sequence_parallel=enable_sequence_parallel):
+            logits = self.model.compute_logits(hidden_states, None)
         num_reqs = logits.size(0)
 
         dummy_tensors = lambda v: torch.full(
