@@ -942,17 +942,14 @@ class OpenAIServingChat(OpenAIServing):
 
         request_metadata.final_usage_info = usage
 
-        response = tuple([
-            ChatCompletionResponse(
-                id=request_id,
-                created=created_time,
-                model=model_name,
-                choices=choices,
-                usage=usage,
-                prompt_logprobs=clamp_prompt_logprobs(
-                    final_res.prompt_logprobs),
-            ), final_res.inband_engine_stats
-        ])
+        response = ChatCompletionResponse(
+            id=request_id,
+            created=created_time,
+            model=model_name,
+            choices=choices,
+            usage=usage,
+            prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
+        ), final_res.inband_engine_stats
 
         return response
 

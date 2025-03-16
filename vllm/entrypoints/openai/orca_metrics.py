@@ -74,7 +74,7 @@ def create_orca_header(metrics_format: str,
     return header
 
 
-def metrics_header(m: InbandEngineStats,
+def metrics_header(m: Optional[InbandEngineStats],
                    metrics_format: str) -> Optional[Mapping[str, str]]:
     if not m or not metrics_format:
         return None

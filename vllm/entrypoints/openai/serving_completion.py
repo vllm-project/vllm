@@ -244,7 +244,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
             return fake_stream_generator()
 
-        return tuple([response, inband_engine_stats])
+        return response, inband_engine_stats
 
     async def completion_stream_generator(
         self,
@@ -413,7 +413,8 @@ class OpenAIServingCompletion(OpenAIServing):
             assert prompt_token_ids is not None
             prompt_logprobs = clamp_prompt_logprobs(final_res.prompt_logprobs)
             prompt_text = final_res.prompt
-            if (not latest_engine_stats or latest_engine_stats.now
+            if not latest_engine_stats or (
+                    final_res.inband_engine_stats and latest_engine_stats.now
                     < final_res.inband_engine_stats.now):
                 latest_engine_stats = final_res.inband_engine_stats
 
@@ -482,15 +483,13 @@ class OpenAIServingCompletion(OpenAIServing):
 
         request_metadata.final_usage_info = usage
 
-        return tuple([
-            CompletionResponse(
-                id=request_id,
-                created=created_time,
-                model=model_name,
-                choices=choices,
-                usage=usage,
-            ), latest_engine_stats
-        ])
+        return CompletionResponse(
+            id=request_id,
+            created=created_time,
+            model=model_name,
+            choices=choices,
+            usage=usage,
+        ), latest_engine_stats
 
     def _create_completion_logprobs(
         self,
