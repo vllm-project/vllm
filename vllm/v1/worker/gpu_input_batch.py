@@ -324,8 +324,9 @@ class InputBatch:
             self.allowed_token_ids_mask_cpu_tensor[req_index][
                 sampling_params.allowed_token_ids] = False
 
-        self.bad_words_token_ids[
-            req_index] = sampling_params.bad_words_token_ids
+        if sampling_params.bad_words_token_ids:
+            self.bad_words_token_ids[
+                req_index] = sampling_params.bad_words_token_ids
 
         # Add request lora ID
         if request.lora_request:
