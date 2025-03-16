@@ -261,7 +261,6 @@ class Phi4MiniJsonToolParser(ToolParser):
                         self.streamed_args_for_tool[self.current_tool_id] += argument_diff
             self.prev_tool_call_arr = tool_call_arr
             return delta
-
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             logger.debug("Skipping chunk as a result of tool")
