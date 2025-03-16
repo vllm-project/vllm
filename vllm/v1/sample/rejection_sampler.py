@@ -331,8 +331,7 @@ def sample_recovered_tokens(
     return recovered_token_ids
 
 
-# NOTE(woosuk): To avoid recompilation, we shouldn't specialize on
-# `max_spec_len`.
+# NOTE(woosuk): Don't specialize on `max_spec_len` to avoid recompilation.
 @triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_greedy_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
@@ -375,8 +374,7 @@ def rejection_greedy_sample_kernel(
             num_draft_tokens, bonus_token_id)
 
 
-# NOTE(woosuk): To avoid recompilation, we shouldn't specialize on
-# `max_spec_len`.
+# NOTE(woosuk): Don't specialize on `max_spec_len` to avoid recompilation.
 @triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_random_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
