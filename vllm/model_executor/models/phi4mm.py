@@ -33,7 +33,7 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .idefics2_vision_model import Idefics2VisionTransformer
-from .interfaces import SupportsLoRA, SupportsMultiModal
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsV0Only
 from .phi4mm_audio import AudioEmbedding
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
@@ -1433,7 +1433,8 @@ def cat_with_pad(tensors, dim, padding_value=0):
     "image", get_max_phi4mm_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_phi4mm)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi4mm)
-class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
+class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal,
+                        SupportsV0Only):
     """
     Implements the Phi-4-multimodal-instruct model in vLLM.
     """
