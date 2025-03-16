@@ -206,7 +206,6 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            get_flash_attn_version,
                                            is_block_tables_empty)
 from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
-from vllm.config import ModelConfig
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
@@ -231,16 +230,6 @@ if TYPE_CHECKING:
                                           ModelInputForGPUWithSamplingMetadata)
 
 is_hip = current_platform.is_rocm()
-
-
-def _get_mla_dims(model_config: ModelConfig):
-    # TODO(lucas): see if this makes
-    hf_text_config = model_config.hf_text_config
-    assert hasattr(hf_text_config, "qk_rope_head_dim")
-    assert hasattr(hf_text_config, "kv_lora_rank")
-    qk_rope_head_dim = hf_text_config.qk_rope_head_dim
-    kv_lora_rank = hf_text_config.kv_lora_rank
-    return kv_lora_rank, qk_rope_head_dim
 
 
 class MLACommonBackend(AttentionBackend):
@@ -333,9 +322,9 @@ class MLACommonState(AttentionState, Generic[T]):
                                               PAD_SLOT_ID,
                                               dtype=torch.long,
                                               device=self.runner.device)
-        # self._graph_seq_lens = torch.ones(max_batch_size,
-        #                                   dtype=torch.int32,
-        #                                   device=self.runner.device)
+        self._graph_seq_lens = torch.ones(max_batch_size,
+                                          dtype=torch.int32,
+                                          device=self.runner.device)
         self._graph_block_tables = torch.from_numpy(
             self.runner.graph_block_tables).to(device=self.runner.device)
 
@@ -348,7 +337,7 @@ class MLACommonState(AttentionState, Generic[T]):
 
         self._is_graph_capturing = False
         del self._graph_slot_mapping
-        #del self._graph_seq_lens
+        del self._graph_seq_lens
         del self._graph_block_tables
         del self._positions
 
@@ -362,10 +351,7 @@ class MLACommonState(AttentionState, Generic[T]):
             is_encoder_decoder_model: bool = False) -> T:
         assert self._is_graph_capturing
 
-        kv_lora_rank, qk_rope_head_dim = _get_mla_dims(
-            self.runner.model_config)
-
-        attn_metadata = MLACommonMetadata(
+        attn_metadata = self.runner.attn_backend.make_metadata(
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
             use_cuda_graph=True,
@@ -374,7 +360,7 @@ class MLACommonState(AttentionState, Generic[T]):
             num_decode_tokens=batch_size,
             slot_mapping=self._graph_slot_mapping[:batch_size],
             seq_lens=None,
-            seq_lens_tensor=None,  #self._graph_seq_lens[:batch_size],
+            seq_lens_tensor=self._graph_seq_lens[:batch_size],
             max_query_len=1,
             max_decode_query_len=1,
             max_prefill_seq_len=0,
@@ -383,8 +369,6 @@ class MLACommonState(AttentionState, Generic[T]):
             seq_start_loc=None,
             context_lens_tensor=None,
             block_tables=self._graph_block_tables[:batch_size],
-            kv_lora_rank=kv_lora_rank,
-            qk_rope_head_dim=qk_rope_head_dim,
             input_positions=self._positions[:batch_size])
 
         if is_encoder_decoder_model:
@@ -398,7 +382,7 @@ class MLACommonState(AttentionState, Generic[T]):
                                 is_encoder_decoder_model: bool = False):
         input_buffers = {
             "slot_mapping": attn_metadata.slot_mapping,
-            #"seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
+            "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
             "block_tables": attn_metadata.decode_metadata.block_tables,
             "input_positions": attn_metadata.decode_metadata.input_positions,
         }
@@ -518,10 +502,6 @@ class MLACommonMetadata(AttentionMetadata):
     _cached_prefill_metadata: Optional[Any] = None
     _cached_decode_metadata: Optional[Any] = None
 
-    # The dimension of kv_lora_rank and rope dimension
-    qk_rope_head_dim: Optional[int] = None
-    kv_lora_rank: Optional[int] = None
-
     # Used when chunked prefill is enabled to simulate worst case workspace
     # allocations, hopefully to avoid going OOM
     is_profile_run: bool = False
@@ -587,8 +567,6 @@ class MLACommonMetadata(AttentionMetadata):
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
             is_profile_run=self.is_profile_run,
             # MLACommonMetadata Chunk prefill specific
             context_chunk_cu_seq_lens=self.context_chunk_cu_seq_lens,
@@ -645,8 +623,6 @@ class MLACommonMetadata(AttentionMetadata):
             if self.seq_start_loc is not None else None,
             context_lens_tensor=None,
             block_tables=block_tables,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
             input_positions=input_positions,
             is_profile_run=self.is_profile_run)
         return self._cached_decode_metadata
@@ -960,9 +936,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             assert max(context_chunk_seq_tot) <= \
                 self.context_chunk_workspace_size
 
-        qk_rope_head_dim, kv_lora_rank = _get_mla_dims(
-            self.runner.model_config)
-
         return self.runner.attn_backend.make_metadata(
             # Required by ModelRunner
             use_cuda_graph=use_captured_graph,  # Not Attention Related
@@ -986,8 +959,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             seq_start_loc=seq_start_loc_tensor,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
-            qk_rope_head_dim=qk_rope_head_dim,
-            kv_lora_rank=kv_lora_rank,
             is_profile_run=self.runner.in_profile_run,
             # MLACommonMetadata Chunk prefill specific
             context_chunk_cu_seq_lens=context_chunk_cu_seq_lens,
