@@ -104,5 +104,5 @@ class Phi4MiniJsonToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Optional[DeltaMessage]:
-        
+
         return None
