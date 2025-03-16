@@ -537,7 +537,7 @@ __global__ void Marlin(
     int prob_m,           // batch dimension m
     int prob_n,           // output dimension n
     int prob_k,           // reduction dimension k
-    int stride_am,        // A.stride(0), equal to prob_k is A is contiguous
+    int lda,              // A.stride(0), equal to prob_k is A is contiguous
     int* locks,           // extra global storage for barrier synchronization
     bool use_atomic_add,  // whether to use atomic add to reduce
     bool use_fp32_reduce  // whether to use fp32 global reduce
@@ -601,7 +601,7 @@ __global__ void Marlin(
   // We can easily implement parallel problem execution by just remapping
   // indices and advancing global pointers
   if (slice_col_par >= n_tiles) {
-    A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * stride_am / 8;
+    A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * lda / 8;
     C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
     locks += (slice_col_par / n_tiles) * n_tiles;
     slice_col = slice_col_par % n_tiles;
@@ -632,7 +632,7 @@ __global__ void Marlin(
       }
     }
     if (slice_col == n_tiles) {
-      A += 16 * thread_m_blocks * stride_am / 8;
+      A += 16 * thread_m_blocks * lda / 8;
       C += 16 * thread_m_blocks * prob_n / 8;
       locks += n_tiles;
       slice_col = 0;
@@ -644,7 +644,7 @@ __global__ void Marlin(
   // A sizes/strides
 
   // stride of the A matrix in global memory
-  int a_gl_stride = stride_am / 8;
+  int a_gl_stride = lda / 8;
   // stride of an A matrix tile in shared memory
   constexpr int a_sh_stride = 16 * thread_k_blocks / 8;
   // delta between subsequent A tiles in global memory
@@ -1781,7 +1781,7 @@ __global__ void Marlin(
                HAS_ZP, GROUP_BLOCKS, IS_ZP_FLOAT>                              \
             <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                 \
                 A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,      \
-                num_groups, prob_m, prob_n, prob_k, stride_am, locks,          \
+                num_groups, prob_m, prob_n, prob_k, lda, locks,          \
                 use_atomic_add, use_fp32_reduce);                              \
       }                                                                        \
     }
@@ -2072,7 +2072,7 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
 template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
                void* zp, void* g_idx, void* perm, void* a_tmp, int prob_m,
-               int prob_n, int prob_k, int stride_am, void* workspace,
+               int prob_n, int prob_k, int lda, void* workspace,
                vllm::ScalarType const& q_type, bool has_act_order,
                bool is_k_full, bool has_zp, int num_groups, int group_size,
                int dev, cudaStream_t stream, int thread_k, int thread_n,
@@ -2245,7 +2245,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
                   ", num_bits = ", num_bits);
     }
 
-    A_ptr += 16 * thread_m_blocks * (stride_am / 8) * par;
+    A_ptr += 16 * thread_m_blocks * (lda / 8) * par;
     C_ptr += 16 * thread_m_blocks * (prob_n / 8) * par;
   }
 }
