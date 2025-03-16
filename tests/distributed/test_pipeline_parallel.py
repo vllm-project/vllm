@@ -9,7 +9,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import json
 import os
 from dataclasses import dataclass
-from typing import List, Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple, Optional
 
 import pytest
 
@@ -22,6 +22,18 @@ from ..utils import compare_two_settings, fork_new_process_for_each_test
 logger = init_logger("test_pipeline_parallel")
 
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    For PP, we fall back to V0 by default. This means
+    that the TP baseline runs with V1 while the PP engine
+    runs with V0. This gives divergent results with dummy
+    weights. Once we enable V1 by default for PP, we can
+    remove this.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 class ParallelSetup(NamedTuple):
@@ -38,14 +50,14 @@ class PPTestOptions(NamedTuple):
 
 @dataclass
 class PPTestSettings:
-    parallel_setups: List[ParallelSetup]
+    parallel_setups: list[ParallelSetup]
     # NOTE: the length of distributed_backends and
     # vllm_major_versions should be the same, and they
     # are first zipped together to iterate over all
     # test settings.
-    distributed_backends: List[str]
+    distributed_backends: list[str]
     # vllm major version: "0" for V0, "1" for V1
-    vllm_major_versions: List[str]
+    vllm_major_versions: list[str]
     task: TaskOption
     test_options: PPTestOptions
 
@@ -214,7 +226,7 @@ MULTIMODAL_MODELS = {
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": PPTestSettings.fast(),
     "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(),
     "allenai/Molmo-7B-D-0924": PPTestSettings.fast(),
-    "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.fast(),
+    "microsoft/Phi-3.5-vision-instruct": PPTestSettings.fast(),
     "mistralai/Pixtral-12B-2409": PPTestSettings.fast(load_format="dummy"),
     "Qwen/Qwen-VL-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
@@ -237,7 +249,7 @@ TEST_MODELS = [
     "BAAI/bge-multilingual-gemma2",
     # [MULTIMODAL GENERATION]
     "OpenGVLab/InternVL2-1B",
-    "microsoft/Phi-3-vision-128k-instruct",
+    "microsoft/Phi-3.5-vision-instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     # [LANGUAGE GENERATION - HYBRID ARCH]
     "ai21labs/Jamba-tiny-dev",
@@ -324,8 +336,8 @@ def _compare_tp(
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
     if distributed_backend == "ray" and (vllm_major_version == "1"
                                          or specific_case):
-        # For V1, test Ray ADAG for all the tests
-        # For V0, test Ray ADAG for a subset of the tests
+        # For V1, test Ray Compiled Graph for all the tests
+        # For V0, test Ray Compiled Graph for a subset of the tests
         pp_env = {
             "VLLM_USE_V1": vllm_major_version,
             "VLLM_USE_RAY_COMPILED_DAG": "1",
@@ -333,7 +345,7 @@ def _compare_tp(
             "VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL": "1",
         }
         # Temporary. Currently when zeromq + SPMD is used, it does not properly
-        # terminate because of aDAG issue.
+        # terminate because of a Ray Compiled Graph issue.
         common_args.append("--disable-frontend-multiprocessing")
     else:
         pp_env = None
@@ -367,8 +379,9 @@ def _compare_tp(
         if pp_env is None:
             raise
         else:
-            # Ray ADAG tests are flaky, so we don't want to fail the test
-            logger.exception("Ray ADAG tests failed")
+            # Ray Compiled Graph tests are flaky,
+            # so we don't want to fail the test
+            logger.exception("Ray Compiled Graph tests failed")
 
 
 @pytest.mark.parametrize(

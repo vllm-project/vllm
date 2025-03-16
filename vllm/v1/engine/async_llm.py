@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 import os
-from typing import AsyncGenerator, List, Mapping, Optional, Set, Type, Union
+from collections.abc import AsyncGenerator, Mapping
+from typing import Optional, Union
 
 import numpy as np
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
@@ -24,7 +27,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import cdiv, kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
-from vllm.v1.engine.parallel_sampling import generate_parallel_sampling_async
+from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
@@ -39,7 +42,7 @@ class AsyncLLM(EngineClient):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[Executor],
+        executor_class: type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         input_registry: InputRegistry = INPUT_REGISTRY,
@@ -47,6 +50,12 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
+        if not envs.VLLM_USE_V1:
+            raise ValueError(
+                "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
+                "This should not happen. As a workaround, try using "
+                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
+                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
         assert start_engine_loop
 
@@ -54,12 +63,11 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers: List[StatLoggerBase] = []
+        self.stat_loggers: list[StatLoggerBase] = []
         if self.log_stats:
-            self.stat_loggers.extend([
-                LoggingStatLogger(),
-                PrometheusStatLogger(vllm_config),
-            ])
+            if logger.isEnabledFor(logging.INFO):
+                self.stat_loggers.append(LoggingStatLogger())
+            self.stat_loggers.append(PrometheusStatLogger(vllm_config))
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -71,9 +79,7 @@ class AsyncLLM(EngineClient):
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
-            model_config=vllm_config.model_config,
-            cache_config=vllm_config.cache_config,
-            lora_config=vllm_config.lora_config,
+            vllm_config=vllm_config,
             tokenizer=self.tokenizer,
             input_registry=input_registry,
         )
@@ -94,21 +100,49 @@ class AsyncLLM(EngineClient):
         self.output_handler: Optional[asyncio.Task] = None
 
     @classmethod
+    def from_vllm_config(
+        cls,
+        vllm_config: VllmConfig,
+        start_engine_loop: bool = True,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        disable_log_requests: bool = False,
+        disable_log_stats: bool = False,
+    ) -> "AsyncLLM":
+        if not envs.VLLM_USE_V1:
+            raise ValueError(
+                "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
+                "This should not happen. As a workaround, try using "
+                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
+                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+
+        # FIXME(rob): refactor VllmConfig to include the StatLoggers
+        # include StatLogger in the Oracle decision.
+        if stat_loggers is not None:
+            raise ValueError("Custom StatLoggers are not yet supported on V1. "
+                             "Explicitly set VLLM_USE_V1=0 to disable V1.")
+
+        # Create the LLMEngine.
+        return cls(
+            vllm_config=vllm_config,
+            executor_class=Executor.get_class(vllm_config),
+            start_engine_loop=start_engine_loop,
+            log_requests=not disable_log_requests,
+            log_stats=not disable_log_stats,
+            usage_context=usage_context,
+        )
+
+    @classmethod
     def from_engine_args(
         cls,
         engine_args: AsyncEngineArgs,
-        engine_config: Optional[VllmConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
         # Create the engine configs.
-        if engine_config is None:
-            vllm_config = engine_args.create_engine_config(usage_context)
-        else:
-            vllm_config = engine_config
-
+        vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
 
         # Create the AsyncLLM.
@@ -144,25 +178,30 @@ class AsyncLLM(EngineClient):
         """Add new request to the AsyncLLM."""
 
         # 1) Create a new output queue for the request.
-        if self.output_processor.is_request_active(request_id):
-            raise ValueError(f"Request id {request_id} already running.")
         queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
 
-        # 2) Convert Input --> Request.
-        request = self.processor.process_inputs(request_id, prompt, params,
-                                                arrival_time, lora_request,
-                                                trace_headers,
-                                                prompt_adapter_request,
-                                                priority)
+        # 2) Fan out child requests (for n>1)
+        parent_req = ParentRequest.from_params(request_id, params)
+        n = params.n if isinstance(params, SamplingParams) else 1
+        for idx in range(n):
+            if parent_req is not None:
+                request_id, params = parent_req.get_child_info(idx)
 
-        # 3) Add the request to OutputProcessor (this process).
-        self.output_processor.add_request(request, queue)
+            # 3) Convert Input --> Request.
+            request = self.processor.process_inputs(request_id, prompt, params,
+                                                    arrival_time, lora_request,
+                                                    trace_headers,
+                                                    prompt_adapter_request,
+                                                    priority)
 
-        # 4) Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+            # 4) Add the request to OutputProcessor (this process).
+            self.output_processor.add_request(request, parent_req, idx, queue)
 
-        if self.log_requests:
-            logger.info("Added request %s.", request_id)
+            # 5) Add the EngineCoreRequest to EngineCore (separate process).
+            await self.engine_core.add_request_async(request)
+
+            if self.log_requests:
+                logger.info("Added request %s.", request_id)
 
         return queue
 
@@ -171,7 +210,7 @@ class AsyncLLM(EngineClient):
     # requests we don't need to send multiple messages to core proc,
     # and so we don't need multiple streams which then get
     # re-multiplexed in the API server anyhow.
-    async def _generate(
+    async def generate(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -188,8 +227,8 @@ class AsyncLLM(EngineClient):
             * 3) Adding the Request to the Detokenizer.
             * 4) Adding the Request to the EngineCore (separate process).
 
-        A separate output_handler loop runs in a background AsyncIO task, 
-        pulling outputs from EngineCore and putting them into the 
+        A separate output_handler loop runs in a background AsyncIO task,
+        pulling outputs from EngineCore and putting them into the
         per-request AsyncStream.
 
         The caller of generate() iterates the returned AsyncGenerator,
@@ -242,30 +281,6 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             raise
 
-    def generate(
-        self,
-        prompt: PromptType,
-        sampling_params: SamplingParams,
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        priority: int = 0,
-    ) -> AsyncGenerator[RequestOutput, None]:
-        kwargs = dict(prompt=prompt,
-                      sampling_params=sampling_params,
-                      request_id=request_id,
-                      lora_request=lora_request,
-                      trace_headers=trace_headers,
-                      prompt_adapter_request=prompt_adapter_request,
-                      priority=priority)
-        if sampling_params.n is None or sampling_params.n == 1:
-            return self._generate(**kwargs)
-        else:
-            # Special handling for parallel sampling requests
-            return generate_parallel_sampling_async(generate=self._generate,
-                                                    **kwargs)
-
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
 
@@ -273,13 +288,14 @@ class AsyncLLM(EngineClient):
             while True:
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
+                num_outputs = len(outputs.outputs)
 
-                iteration_stats = IterationStats() if self.log_stats else None
+                iteration_stats = IterationStats() if (
+                    self.log_stats and num_outputs) else None
 
                 # Split outputs into chunks of at most
                 # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                 # event loop for too long.
-                num_outputs = len(outputs.outputs)
                 if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
                     slices = (outputs.outputs, )
                 else:
@@ -305,7 +321,7 @@ class AsyncLLM(EngineClient):
                 # 4) Logging.
                 # TODO(rob): make into a coroutine and launch it in
                 # background thread once Prometheus overhead is non-trivial.
-                self._log_stats(
+                self._record_stats(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
                 )
@@ -317,14 +333,13 @@ class AsyncLLM(EngineClient):
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
-        request_ids = [request_id]
+        request_ids = self.output_processor.abort_requests((request_id, ))
         await self.engine_core.abort_requests_async(request_ids)
-        self.output_processor.abort_requests(request_ids)
 
         if self.log_requests:
             logger.info("Aborted request %s.", request_id)
 
-    def _log_stats(
+    def _record_stats(
         self,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
@@ -333,10 +348,9 @@ class AsyncLLM(EngineClient):
             return
 
         assert scheduler_stats is not None
-        assert iteration_stats is not None
-        for logger in self.stat_loggers:
-            logger.log(scheduler_stats=scheduler_stats,
-                       iteration_stats=iteration_stats)
+        for stat_logger in self.stat_loggers:
+            stat_logger.record(scheduler_stats=scheduler_stats,
+                               iteration_stats=iteration_stats)
 
     def encode(
         self,
@@ -372,7 +386,8 @@ class AsyncLLM(EngineClient):
         scheduler_outputs=None,
         model_output=None,
     ) -> None:
-        logger.debug("Called do_log_stats.")
+        for stat_logger in self.stat_loggers:
+            stat_logger.log()
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")
@@ -392,6 +407,9 @@ class AsyncLLM(EngineClient):
     async def wake_up(self) -> None:
         await self.engine_core.wake_up_async()
 
+    async def is_sleeping(self) -> bool:
+        return await self.engine_core.is_sleeping_async()
+
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
         return await self.engine_core.add_lora_async(lora_request)
@@ -400,7 +418,7 @@ class AsyncLLM(EngineClient):
         """Remove an already loaded LoRA adapter."""
         return await self.engine_core.remove_lora_async(lora_id)
 
-    async def list_loras(self) -> Set[int]:
+    async def list_loras(self) -> set[int]:
         """List all registered adapters."""
         return await self.engine_core.list_loras_async()
 

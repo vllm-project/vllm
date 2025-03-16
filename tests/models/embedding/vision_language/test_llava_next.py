@@ -1,14 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Type
-
 import pytest
 import torch.nn.functional as F
 from transformers import AutoModelForVision2Seq
 
+from vllm.platforms import current_platform
+
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import large_gpu_test
 from ..utils import check_embeddings_close
+
+# Llava Next embedding implementation is only supported by CUDA.
+# If run on ROCm, hf_model.model.resize_token_embeddings will
+# cause the following error:
+#    RuntimeError: Calling torch.linalg.cholesky on a CUDA tensor
+#    requires compiling PyTorch with MAGMA. Please use PyTorch
+#    built with MAGMA support.
+# If run on CPU, hf_model.model.resize_token_embeddings will
+# cause the following error:
+#    RuntimeError: Calling torch.linalg.cholesky on a CPU tensor
+#    requires compiling PyTorch with LAPACK. Please use PyTorch
+#    built with LAPACK support.
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="Llava Next model uses op that is only supported in CUDA")
 
 llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n'  # noqa: E501
 
@@ -35,9 +50,9 @@ MODELS = ["royokong/e5-v"]
 
 
 def _run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
-    input_texts: List[str],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    input_texts: list[str],
     input_images: PromptImageInput,
     model: str,
     *,

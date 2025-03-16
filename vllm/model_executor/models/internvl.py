@@ -7,9 +7,10 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
-                    TypedDict, TypeVar, Union)
+from typing import (List, Literal, Optional, Set, Tuple, TypedDict, TypeVar,
+                    Union)
 
 import torch
 import torch.nn as nn
@@ -31,12 +32,12 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptReplacementDetails)
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -599,12 +600,12 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             image_token_id=MultiModalFieldConfig.shared("image", num_images),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         if "image_num_patches" in out_mm_kwargs:
@@ -636,7 +637,7 @@ class InternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            return PromptReplacementDetails(
+            return PromptUpdateDetails(
                 full=hf_processor.get_image_repl_full(feature_size,
                                                       num_patches),
                 features=hf_processor.get_image_repl_features(
@@ -903,7 +904,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         else:
             self.visual_token_mask = None
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -913,7 +915,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
@@ -978,5 +980,12 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(self)
+        # unused modules appear in OpenGVLab/InternVideo2_5_Chat_8B
+        skip_prefixes = [
+            "action_embed", "temporal_embed", "track_embed",
+            "track_embed_decoder", "box_token", "cg_criterion", "cg_model",
+            "loc_encoder", "loc_decoder", "sam", "temporal_token",
+            "track_token"
+        ]
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)
