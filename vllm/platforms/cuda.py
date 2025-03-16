@@ -4,7 +4,7 @@ pynvml. However, it should not initialize cuda context.
 """
 
 import os
-from functools import lru_cache, wraps
+from functools import wraps
 from typing import (TYPE_CHECKING, Callable, List, Optional, Tuple, TypeVar,
                     Union)
 
@@ -111,13 +111,15 @@ class CudaPlatformBase(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
+        compilation_config = vllm_config.compilation_config
+        model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
                 if envs.VLLM_USE_V1:
                     raise NotImplementedError(
                         "Multi-step scheduling is not supported (and not "
-                        "needed) on VLLM V1. Please launch without "
+                        "needed) on vLLM V1. Please launch without "
                         "--num-scheduler-steps.")
                 else:
                     parallel_config.worker_cls = \
@@ -142,6 +144,29 @@ class CudaPlatformBase(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
+        # TODO(lucas): handle this more gracefully
+        # Note: model_config may be None during testing
+        if model_config is not None and model_config.use_mla:
+            # if `VLLM_ATTENTION_BACKEND` is not set and we are using MLA, then
+            # we default to FlashMLA backend, so we need to force the blocksize
+            # here
+            use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None \
+                or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
+            from vllm.attention.backends.flashmla import is_flashmla_supported
+            if use_flashmla and is_flashmla_supported()[0] \
+                and cache_config.block_size != 64:
+                cache_config.block_size = 64
+                logger.info(
+                    "Forcing kv cache block size to 64 for FlashMLA backend.")
+
+        if (parallel_config.data_parallel_size > 1
+                and compilation_config.use_cudagraph):
+            logger.info(
+                "Data Parallel: Forcing enforce eager to be True since DP is "
+                "currently not supported with CUDA Graphs.")
+            vllm_config.model_config.enforce_eager = True
+            compilation_config.use_cudagraph = False
+
     @classmethod
     def get_current_memory_usage(cls,
                                  device: Optional[torch.types.Device] = None
@@ -153,14 +178,52 @@ class CudaPlatformBase(Platform):
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
-        if use_v1:
-            logger.info("Using Flash Attention backend on V1 engine.")
-            return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
         if use_mla:
-            logger.info("Using FlashInfer MLA backend.")
-            return "vllm.attention.backends.flashinfer_mla.FlashInferMLABackend"
-            # logger.info("Using Triton MLA backend.")
-            # return "vllm.attention.backends.triton_mla.TritonMLABackend"
+            if selected_backend == _Backend.FLASHINFER:
+                if use_v1:
+                    logger.info("Using FlashInfer MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla.flashinfer_mla."
+                            "FlashInferMLABackend")
+                else:
+                    logger.info("Using FlashInfer MLA backend.")
+                    return ("vllm.attention.backends.mla.flashinfer_mla."
+                            "FlashInferMLABackend")
+            # TODO(lucas): refactor to  be more concise
+            #  we should probably consider factoring out V1 here
+            if selected_backend == _Backend.TRITON_MLA or block_size != 64:
+                if use_v1:
+                    logger.info_once("Using Triton MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "triton_mla.TritonMLABackend")
+                else:
+                    logger.info("Using Triton MLA backend.")
+                    return "vllm.attention.backends.triton_mla.TritonMLABackend"
+            else:
+                from vllm.attention.backends.flashmla import (
+                    is_flashmla_supported)
+                if not is_flashmla_supported()[0]:
+                    logger.warning(
+                        "FlashMLA backend is not supported due to %s",
+                        is_flashmla_supported()[1])
+                elif block_size != 64:
+                    logger.warning(
+                        "FlashMLA backend is not supported for block size %d"
+                        " (currently only supports block size 64).",
+                        block_size)
+                else:
+                    if use_v1:
+                        logger.info_once(
+                            "Using FlashMLA backend on V1 engine.")
+                        return ("vllm.v1.attention.backends.mla."
+                                "flashmla.FlashMLABackend")
+                    else:
+                        logger.info("Using FlashMLA backend.")
+                        return ("vllm.attention.backends."
+                                "flashmla.FlashMLABackend")
+        if use_v1:
+            logger.info_once("Using Flash Attention backend on V1 engine.")
+            return ("vllm.v1.attention.backends.flash_attn."
+                    "FlashAttentionBackend")
         if selected_backend == _Backend.FLASHINFER:
             logger.info("Using FlashInfer backend.")
             return "vllm.attention.backends.flashinfer.FlashInferBackend"
@@ -192,7 +255,7 @@ class CudaPlatformBase(Platform):
                 "Cannot use FlashAttention-2 backend for FP8 KV cache.")
             logger.warning(
                 "Please use FlashInfer backend with FP8 KV Cache for "
-                "better performance by setting environment variable  "
+                "better performance by setting environment variable "
                 "VLLM_ATTENTION_BACKEND=FLASHINFER")
             target_backend = _Backend.XFORMERS
         elif block_size % 16 != 0:
@@ -239,6 +302,10 @@ class CudaPlatformBase(Platform):
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
 
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        return cls.has_device_capability(89)
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
@@ -247,7 +314,6 @@ class CudaPlatformBase(Platform):
 class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
-    @lru_cache(maxsize=8)
     @with_nvml_context
     def get_device_capability(cls,
                               device_id: int = 0
@@ -261,7 +327,6 @@ class NvmlCudaPlatform(CudaPlatformBase):
             return None
 
     @classmethod
-    @lru_cache(maxsize=8)
     @with_nvml_context
     def has_device_capability(
         cls,
@@ -274,14 +339,12 @@ class NvmlCudaPlatform(CudaPlatformBase):
             return False
 
     @classmethod
-    @lru_cache(maxsize=8)
     @with_nvml_context
     def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
         return cls._get_physical_device_name(physical_device_id)
 
     @classmethod
-    @lru_cache(maxsize=8)
     @with_nvml_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
         physical_device_id = device_id_to_physical_device_id(device_id)
@@ -289,7 +352,6 @@ class NvmlCudaPlatform(CudaPlatformBase):
         return pynvml.nvmlDeviceGetUUID(handle)
 
     @classmethod
-    @lru_cache(maxsize=8)
     @with_nvml_context
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         physical_device_id = device_id_to_physical_device_id(device_id)

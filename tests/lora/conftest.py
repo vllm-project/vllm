@@ -2,11 +2,10 @@
 
 import tempfile
 from collections import OrderedDict
-from typing import Dict, List, TypedDict
+from typing import TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
-import safetensors
 import torch
 import torch.nn as nn
 from huggingface_hub import snapshot_download
@@ -37,7 +36,7 @@ class ContextInfo(TypedDict):
     context_length: str
 
 
-LONG_LORA_INFOS: List[ContextIDInfo] = [{
+LONG_LORA_INFOS: list[ContextIDInfo] = [{
     "lora_id": 1,
     "context_length": "16k",
 }, {
@@ -175,43 +174,10 @@ def sql_lora_files(sql_lora_huggingface_id):
 
 
 @pytest.fixture(scope="session")
-def lora_bias_files():
-    return snapshot_download(repo_id="followumesh/granite-3b-lora8-bias")
-
-
-@pytest.fixture(scope="session")
 def mixtral_lora_files():
     # Note: this module has incorrect adapter_config.json to test
     # https://github.com/vllm-project/vllm/pull/5909/files.
     return snapshot_download(repo_id="SangBinCho/mixtral-lora")
-
-
-@pytest.fixture(scope="session")
-def mixtral_lora_files_all_target_modules():
-    return snapshot_download(repo_id="dyang415/mixtral-lora-v0")
-
-
-@pytest.fixture(scope="session")
-def jamba_lora_files():
-    #   some of the adapters have unnecessary weights for serving,
-    #   hence we remove them
-    def remove_unnecessary_weights(path):
-        lora_path = f"{adapter_path}/adapter_model.safetensors"
-        tensors = safetensors.torch.load_file(lora_path)
-        nonlora_keys = []
-        for k in list(tensors.keys()):
-            if "lora" not in k:
-                nonlora_keys.append(k)
-        for k in nonlora_keys:
-            del tensors[k]
-        safetensors.torch.save_file(tensors, lora_path)
-
-    adapter_path = snapshot_download(
-        repo_id=
-        "hf-100/Jamba-1.5-mini-Spellbound-StoryWriter-0.1-6583896-ckpt53-lora")
-
-    remove_unnecessary_weights(adapter_path)
-    return adapter_path
 
 
 @pytest.fixture(scope="session")
@@ -238,6 +204,11 @@ def baichuan_zero_lora_files():
 @pytest.fixture(scope="session")
 def baichuan_regex_lora_files():
     return snapshot_download(repo_id="jeeejeee/baichuan-7b-lora-zero-regex")
+
+
+@pytest.fixture(scope="session")
+def ilama_lora_files():
+    return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")
 
 
 @pytest.fixture(scope="session")
@@ -285,7 +256,7 @@ def long_context_infos(long_context_lora_files_16k_1,
                        long_context_lora_files_16k_2,
                        long_context_lora_files_32k):
     cleanup_dist_env_and_memory(shutdown_ray=True)
-    infos: Dict[int, ContextInfo] = {}
+    infos: dict[int, ContextInfo] = {}
     for lora_checkpoint_info in LONG_LORA_INFOS:
         lora_id = lora_checkpoint_info["lora_id"]
         if lora_id == 1:

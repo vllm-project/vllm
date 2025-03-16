@@ -2,9 +2,10 @@
 
 import functools
 from collections import UserDict
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Mapping, NamedTuple,
-                    Optional, Protocol, Union)
+from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional,
+                    Protocol, Union)
 
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
@@ -331,10 +332,14 @@ class InputRegistry:
 
         if mm_registry.has_processor(model_config):
             tokenizer = cached_tokenizer_from_config(model_config)
-            processor = mm_registry.create_processor(model_config, tokenizer)
+            processor = mm_registry.create_processor(model_config,
+                                                     tokenizer,
+                                                     disable_cache=True)
             profiler = MultiModalProfiler(processor)
-            dummy_data = profiler.get_dummy_data(
-                seq_len, is_encoder_data=is_encoder_data)
+            dummy_data_factory = (profiler.get_encoder_dummy_data
+                                  if is_encoder_data else
+                                  profiler.get_decoder_dummy_data)
+            dummy_data = dummy_data_factory(seq_len)
         else:
             model_cls, _ = get_model_architecture(model_config)
             if is_encoder_data:
@@ -343,7 +348,11 @@ class InputRegistry:
                 dummy_factory = self._get_dummy_data_factory(model_cls)
             mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
             mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-                dummy_factory, overrides=model_config.mm_processor_kwargs)
+                dummy_factory,
+                overrides=model_config.mm_processor_kwargs,
+                requires_kw_only=False,
+                allow_var_kwargs=True,
+            )
 
             dummy_data = dummy_factory(InputContext(model_config), seq_len,
                                        _MultiModalCounts(mm_counts),
@@ -376,6 +385,7 @@ class InputRegistry:
         self,
         ctx: InputContext,
         inputs: ProcessorInputs,
+        **kwargs: object,
     ) -> ProcessorInputs:
         """The default input processor is a no-op."""
         return inputs
@@ -442,6 +452,8 @@ class InputRegistry:
             model_config.mm_processor_kwargs,
             inputs.get("mm_processor_kwargs", {}),  # type: ignore
             processor,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
         )
 
         processed_inputs = processor(

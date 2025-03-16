@@ -23,12 +23,12 @@ Therefore, it is recommended to install vLLM with a **fresh new** environment. I
 You can install vLLM using either `pip` or `uv pip`:
 
 ```console
-# Install vLLM with CUDA 12.1.
+# Install vLLM with CUDA 12.4.
 pip install vllm # If you are using pip.
 uv pip install vllm # If you are using uv.
 ```
 
-As of now, vLLM's binaries are compiled with CUDA 12.1 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 11.8 and public PyTorch release versions:
+As of now, vLLM's binaries are compiled with CUDA 12.4 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.1, 11.8, and public PyTorch release versions:
 
 ```console
 # Install vLLM with CUDA 11.8.
@@ -148,7 +148,7 @@ To build vLLM using an existing PyTorch installation:
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 python use_existing_torch.py
-pip install -r requirements-build.txt
+pip install -r requirements/build.txt
 pip install -e . --no-build-isolation
 ```
 

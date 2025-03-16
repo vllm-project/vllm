@@ -2,8 +2,9 @@
 
 import os
 import threading
+from collections.abc import Iterable
 from concurrent import futures
-from typing import Callable, Dict, Iterable, Literal
+from typing import Callable, Literal
 
 import grpc
 import pytest
@@ -18,6 +19,16 @@ from opentelemetry.sdk.environment_variables import (
 from vllm import LLM, SamplingParams
 from vllm.tracing import SpanAttributes
 
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    Since this module is V0 only, set VLLM_USE_V1=0 for
+    all tests in the module.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 FAKE_TRACE_SERVER_ADDRESS = "localhost:4317"
 
 FieldName = Literal['bool_value', 'string_value', 'int_value', 'double_value',
@@ -25,7 +36,7 @@ FieldName = Literal['bool_value', 'string_value', 'int_value', 'double_value',
 
 
 def decode_value(value: AnyValue):
-    field_decoders: Dict[FieldName, Callable] = {
+    field_decoders: dict[FieldName, Callable] = {
         "bool_value": (lambda v: v.bool_value),
         "string_value": (lambda v: v.string_value),
         "int_value": (lambda v: v.int_value),

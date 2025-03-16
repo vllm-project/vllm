@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from typing import Dict, List
 
 import pytest
 import torch
 from safetensors.torch import load_file
 from torch import nn
 
+from vllm import envs
 from vllm.config import LoRAConfig
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
@@ -72,9 +72,9 @@ def test_from_lora_tensors(sql_lora_files, device):
             assert lora.embeddings_tensor is None
 
 
-def create_lora(lora_id: int, model: nn.Module, sub_modules: List[str],
+def create_lora(lora_id: int, model: nn.Module, sub_modules: list[str],
                 device: torch.device) -> LoRAModel:
-    loras: Dict[str, LoRALayerWeights] = {}
+    loras: dict[str, LoRALayerWeights] = {}
     for name in sub_modules:
         w = model.get_submodule(name).weight
         loras[name] = LoRALayerWeights(
@@ -96,7 +96,7 @@ def create_packed_lora(
     empty_replaced_module_name=None,
 ) -> LoRAModel:
     w = model.get_submodule(module_name).weight
-    loras: Dict[str, LoRALayerWeights] = {}
+    loras: dict[str, LoRALayerWeights] = {}
     for replaced_module_name in replaced_module_names:
         if replaced_module_name == empty_replaced_module_name:
             continue
@@ -411,6 +411,7 @@ def test_lru_lora_model_manager(dist_init, dummy_model, device):
     assert manager.device == device
 
 
+@pytest.mark.skipif(envs.VLLM_USE_V1, reason="Test leverages V0 internals.")
 @pytest.mark.parametrize("device", DEVICES)
 def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
                                           sql_lora_files, device):
@@ -490,6 +491,7 @@ def test_lru_cache_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
             device)
 
 
+@pytest.mark.skipif(envs.VLLM_USE_V1, reason="Test leverages V0 internals.")
 @pytest.mark.parametrize("device", DEVICES)
 def test_worker_adapter_manager(llama_2_7b_model_extra_embeddings,
                                 sql_lora_files, device):

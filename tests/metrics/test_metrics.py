@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import time
-from typing import List
 
 import pytest
 import ray
 from prometheus_client import REGISTRY
 
+import vllm.envs as envs
 from vllm import EngineArgs, LLMEngine
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -14,6 +14,15 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.metrics import RayPrometheusStatLogger
 from vllm.sampling_params import SamplingParams
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This module tests V0 internals, so set VLLM_USE_V1=0.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
 
 MODELS = [
     "distilbert/distilgpt2",
@@ -132,7 +141,7 @@ def test_metric_counter_generation_tokens_multi_step(
     "served_model_name",
     [None, [], ["ModelName0"], ["ModelName0", "ModelName1", "ModelName2"]])
 def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
-                                   served_model_name: List[str]) -> None:
+                                   served_model_name: list[str]) -> None:
     with vllm_runner(model,
                      dtype=dtype,
                      disable_log_stats=False,
@@ -141,8 +150,10 @@ def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
         stat_logger = vllm_model.model.llm_engine.stat_loggers['prometheus']
         metrics_tag_content = stat_logger.labels["model_name"]
 
+    if envs.VLLM_CI_USE_S3:
+        model = f"{MODEL_WEIGHTS_S3_BUCKET}/{model}"
     if served_model_name is None or served_model_name == []:
-        assert metrics_tag_content == f"{MODEL_WEIGHTS_S3_BUCKET}/{model}", (
+        assert metrics_tag_content == model, (
             f"Metrics tag model_name is wrong! expect: {model!r}\n"
             f"actual: {metrics_tag_content!r}")
     else:
@@ -215,8 +226,9 @@ def test_engine_log_metrics_regression(
     while engine.has_unfinished_requests():
         engine.step()
 
-    assert_metrics(f"{MODEL_WEIGHTS_S3_BUCKET}/{model}", engine,
-                   disable_log_stats, len(example_prompts))
+    if envs.VLLM_CI_USE_S3:
+        model = f"{MODEL_WEIGHTS_S3_BUCKET}/{model}"
+    assert_metrics(model, engine, disable_log_stats, len(example_prompts))
 
 
 @pytest.mark.parametrize("model", MODELS)
