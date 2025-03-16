@@ -148,6 +148,7 @@ class OpenVINOModelRunner(ModelRunnerBase):
                 seq_len = min(
                     seq_data.get_len(),
                     computed_len + seq_group_metadata.token_chunk_size,
+                    self.model_config.max_model_len,
                 )
                 if is_prompt:
                     tokens = seq_data.get_token_ids()[computed_len:seq_len]
