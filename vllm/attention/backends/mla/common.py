@@ -414,8 +414,8 @@ class MLACommonState(AttentionState, Generic[T]):
                                     is_encoder_decoder_model: bool = False):
         input_positions = attn_metadata.input_positions
         num_positions = input_positions.shape[0]
-        # input_buffers["seq_lens_tensor"].copy_(
-        #     attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
+        input_buffers["seq_lens_tensor"].copy_(
+            attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
         input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
         # CUDA graph buffer is padded so only perform a partial copy based on
@@ -535,22 +535,13 @@ class MLACommonMetadata(AttentionMetadata):
     # Set by MLAAttentionState in `begin_forward` so it doesn't get broadcasted
     context_chunk_workspace: Optional[torch.Tensor] = None
 
-    def __post_init__(self):
-        supported_head_sizes = MLACommonBackend.get_supported_head_sizes()
-
-        if self.kv_lora_rank + self.qk_rope_head_dim \
-            not in supported_head_sizes:
-            raise ValueError(
-                f"Only {supported_head_sizes} are supported for head_dim,",
-                f" received {self.head_dim}.")
-
     @property
     def prefill_metadata(self):
         if self.num_prefills == 0:
             return None
 
-        if self._cached_prefill_common_metadata is not None:
-            return self._cached_prefill_common_metadata
+        if self._cached_prefill_metadata is not None:
+            return self._cached_prefill_metadata
 
         assert self.seq_lens is not None
         assert self.seq_lens_tensor is not None
@@ -605,15 +596,15 @@ class MLACommonMetadata(AttentionMetadata):
             context_chunk_seq_tot=self.context_chunk_seq_tot,
             context_chunk_max_seq_lens=self.context_chunk_max_seq_lens,
         )
-        return self._cached_prefill_common_metadata
+        return self._cached_prefill_metadata
 
     @property
     def decode_metadata(self):
         if self.num_decode_tokens == 0:
             return None
 
-        if self._cached_decode_common_metadata is not None:
-            return self._cached_decode_common_metadata
+        if self._cached_decode_metadata is not None:
+            return self._cached_decode_metadata
         #assert self.seq_lens_tensor is not None
 
         # Compute some attn_metadata fields which default to None
@@ -658,7 +649,7 @@ class MLACommonMetadata(AttentionMetadata):
             qk_rope_head_dim=self.qk_rope_head_dim,
             input_positions=input_positions,
             is_profile_run=self.is_profile_run)
-        return self._cached_decode_common_metadata
+        return self._cached_decode_metadata
 
     def advance_step(self,
                      model_input: "ModelInputForGPUWithSamplingMetadata",
@@ -714,7 +705,7 @@ class MLACommonMetadata(AttentionMetadata):
         assert self.context_lens_tensor.shape == (num_queries, )
 
         assert self.block_tables is not None
-        assert self.block_tabxles.shape[0] == num_seqs
+        assert self.block_tables.shape[0] == num_seqs
 
         # Update query lengths. Note that we update only queries and not seqs,
         # since tensors may be padded due to captured cuda graph batch size

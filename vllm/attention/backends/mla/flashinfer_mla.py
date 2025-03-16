@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type
 
 import torch
@@ -15,7 +15,7 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
 from vllm.attention.backends.utils import (PerLayerParameters,
                                            infer_global_hyperparameters,
                                            is_block_tables_empty)
-from vllm.config import get_current_vllm_config
+from vllm.config import ModelConfig, get_current_vllm_config
 from vllm.utils import get_kv_cache_torch_dtype
 
 if TYPE_CHECKING:
@@ -29,6 +29,16 @@ except ImportError:
     if not TYPE_CHECKING:
         BatchMLAPagedAttentionWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
+
+
+def _get_mla_dims(model_config: ModelConfig):
+    # TODO(lucas): see if this makes
+    hf_text_config = model_config.hf_text_config
+    assert hasattr(hf_text_config, "qk_rope_head_dim")
+    assert hasattr(hf_text_config, "kv_lora_rank")
+    qk_rope_head_dim = hf_text_config.qk_rope_head_dim
+    kv_lora_rank = hf_text_config.kv_lora_rank
+    return kv_lora_rank, qk_rope_head_dim
 
 
 class FlashInferMLABackend(MLACommonBackend):
@@ -63,7 +73,52 @@ class FlashInferMLABackend(MLACommonBackend):
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
 
-class FlashInferMLAState(MLACommonState):
+@dataclass
+class FlashInferMLAMetadata(MLACommonMetadata):
+    decode_wrapper: Optional[BatchMLAPagedAttentionWrapper] = None
+
+    # An example for paged_kv_indices, paged_kv_indptr:
+    # request 1, page indices [0, 5, 8]
+    # request 2, page indices [1, 6, 7]
+    # request 3, page indices [3, 4]
+    # paged_kv_indices is a concatenation of page indices of all requests:
+    # [0, 5, 8, 1, 6, 7, 3, 4]
+    # paged_kv_indptr is used to index into paged_kv_indices:
+    # [0, 3, 6, 8]
+    # The indptr of the paged kv cache, shape: [batch_size + 1]
+    paged_kv_indptr_host: Optional[torch.Tensor] = None
+    # The page indices of the paged kv cache
+    paged_kv_indices_host: Optional[torch.Tensor] = None
+
+    query_start_loc_host: Optional[torch.Tensor] = None
+    seq_lens_tensor_host: Optional[torch.Tensor] = None
+
+    block_table_bound: Optional[torch.Tensor] = None
+
+    sm_scale: float = 1.0
+    logits_soft_cap: Optional[float] = None
+    window_left: int = -1
+
+    # The data type of the paged kv cache
+    data_type: torch.dtype = None
+    # The data type of the query
+    q_data_type: torch.dtype = None
+    # FlashInfer 0.2 encourages passing host tensors
+    device: torch.device = torch.device("cpu")
+
+    _cached_prefill_metadata: Optional["FlashInferMLAMetadata"] = None
+    _cached_decode_metadata: Optional["FlashInferMLAMetadata"] = None
+
+    @property
+    def decode_metadata(self):
+        decode_metadata = super().decode_metadata
+        # TODO: cache assignment?
+        if decode_metadata is not None:
+            decode_metadata.decode_wrapper = self.decode_wrapper
+        return decode_metadata
+
+
+class FlashInferMLAState(MLACommonState[FlashInferMLAMetadata]):
 
     def __init__(self, runner):
         super().__init__(runner)
@@ -75,8 +130,13 @@ class FlashInferMLAState(MLACommonState):
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
-        print("Creating FlashInferMLAState")
         self.vllm_config = get_current_vllm_config()
+
+        self.kv_lora_rank, self.qk_rope_head_dim = _get_mla_dims(
+            self.runner.model_config)
+        self.num_heads = self.runner.model_config.get_num_attention_heads(
+            self.runner.parallel_config)
+        self.page_size = self.runner.block_size
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -115,10 +175,10 @@ class FlashInferMLAState(MLACommonState):
         with super().graph_capture(max_batch_size):
             yield
 
-        # del self._graph_decode_workspace_buffer
-        # del self._graph_indices_buffer
-        # del self._graph_indptr_buffer
-        # del self._graph_decode_wrapper
+        del self._graph_decode_workspace_buffer
+        del self._graph_indices_buffer
+        del self._graph_indptr_buffer
+        del self._graph_decode_wrapper
 
     def graph_clone(self, batch_size: int):
         assert self._is_graph_capturing
@@ -158,28 +218,22 @@ class FlashInferMLAState(MLACommonState):
         seq_lens_tensor_host = torch.zeros((batch_size, ), dtype=torch.int32)
         global_params = infer_global_hyperparameters(self.vllm_config,
                                                      FlashInferMLAImpl)
-        common_metadata = super().graph_capture_get_metadata_for_batch(
+        metadata = super().graph_capture_get_metadata_for_batch(
             batch_size, is_encoder_decoder_model)
 
-        print("!!! global_params.sm_scale", global_params.sm_scale)
-
-        attn_metadata = FlashInferMLAMetadata(
-            **asdict(common_metadata),
-            num_heads=self.runner.model_config.get_num_attention_heads(
-                self.runner.parallel_config),
-            paged_kv_indices_host=paged_kv_indices_tensor_host,
-            paged_kv_indptr_host=paged_kv_indptr_tensor_host,
-            query_start_loc_host=query_start_loc_host,
-            seq_lens_tensor_host=seq_lens_tensor_host,
-            page_size=self.runner.block_size,
-            data_type=kv_cache_dtype,
-            q_data_type=self.runner.model_config.dtype,
-            sm_scale=0.07216878364870323,
-            device=self.runner.device,
-            decode_wrapper=self._graph_decode_wrapper,
-        )
-        attn_metadata.begin_forward()
-        return attn_metadata
+        metadata.num_heads = self.runner.model_config.get_num_attention_heads(
+            self.runner.parallel_config)
+        metadata.paged_kv_indices_host = paged_kv_indices_tensor_host
+        metadata.paged_kv_indptr_host = paged_kv_indptr_tensor_host
+        metadata.query_start_loc_host = query_start_loc_host
+        metadata.seq_lens_tensor_host = seq_lens_tensor_host
+        metadata.data_type = kv_cache_dtype
+        metadata.q_data_type = self.runner.model_config.dtype
+        metadata.sm_scale = global_params.sm_scale
+        metadata.device = self.runner.device
+        metadata.decode_wrapper = self._graph_decode_wrapper
+        self._plan(metadata)
+        return metadata
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
@@ -191,6 +245,31 @@ class FlashInferMLAState(MLACommonState):
         skip_fields.add('decode_wrapper')
         return super().asdict_zerocopy(skip_fields)
 
+    def _plan(self, metadata: FlashInferMLAMetadata):
+        if metadata.num_decode_tokens > 0:
+            assert metadata.paged_kv_indices_host is not None
+            assert metadata.paged_kv_indptr_host is not None
+
+            assert metadata.decode_wrapper is not None
+
+            metadata.decode_wrapper.plan(
+                qo_indptr=metadata.query_start_loc_host[metadata.
+                                                        num_prefills:],
+                kv_indptr=metadata.paged_kv_indptr_host[metadata.
+                                                        num_prefills:],
+                kv_indices=metadata.paged_kv_indices_host,
+                kv_len_arr=metadata.seq_lens_tensor_host[metadata.
+                                                         num_prefills:],
+                num_heads=metadata.num_heads,
+                head_dim_ckv=self.kv_lora_rank,
+                head_dim_kpe=self.qk_rope_head_dim,
+                page_size=self.page_size,
+                causal=True,
+                sm_scale=metadata.sm_scale,
+                q_data_type=metadata.q_data_type,
+                kv_data_type=metadata.data_type,
+            )
+
     def begin_forward(self, model_input):
         assert not self._is_graph_capturing
         super().begin_forward(model_input)
@@ -201,158 +280,16 @@ class FlashInferMLAState(MLACommonState):
         # In case of multistep chunked-prefill, there might be prefill requests
         # scheduled while CUDA graph mode is enabled. We don't run graph in that
         # case.
-        print("begin_forward", model_input.input_tokens.shape[0])
         if use_cuda_graph and is_decode:
             batch_size = model_input.input_tokens.shape[0]
             state = (self.runner.graph_runners[model_input.virtual_engine]
                      [batch_size].attn_state)
-            print("choosing decode_wrapper", batch_size)
         model_input.attn_metadata.decode_wrapper = state._get_decode_wrapper()
-        # print(model_input.attn_metadata._cached_decode_metadata)
-        model_input.attn_metadata.begin_forward()
+        self._plan(model_input.attn_metadata)
 
 
-@dataclass
-class FlashInferMLAMetadata(MLACommonMetadata):
-    decode_wrapper: Optional[BatchMLAPagedAttentionWrapper] = None
-
-    # An example for paged_kv_indices, paged_kv_indptr:
-    # request 1, page indices [0, 5, 8]
-    # request 2, page indices [1, 6, 7]
-    # request 3, page indices [3, 4]
-    # paged_kv_indices is a concatenation of page indices of all requests:
-    # [0, 5, 8, 1, 6, 7, 3, 4]
-    # paged_kv_indptr is used to index into paged_kv_indices:
-    # [0, 3, 6, 8]
-    # The indptr of the paged kv cache, shape: [batch_size + 1]
-    paged_kv_indptr_host: Optional[torch.Tensor] = None
-    # The page indices of the paged kv cache
-    paged_kv_indices_host: Optional[torch.Tensor] = None
-
-    query_start_loc_host: Optional[torch.Tensor] = None
-    seq_lens_tensor_host: Optional[torch.Tensor] = None
-
-    block_table_bound: Optional[torch.Tensor] = None
-
-    page_size: int = 16
-    num_heads: int = 128
-    sm_scale: float = 1.0
-    logits_soft_cap: Optional[float] = None
-    window_left: int = -1
-
-    # The data type of the paged kv cache
-    data_type: torch.dtype = None
-    # The data type of the query
-    q_data_type: torch.dtype = None
-    # FlashInfer 0.2 encourages passing host tensors
-    device: torch.device = torch.device("cpu")
-
-    _cached_prefill_metadata: Optional["FlashInferMLAMetadata"] = None
-    _cached_decode_metadata: Optional["FlashInferMLAMetadata"] = None
-
-    def begin_forward(self):
-        if self.num_decode_tokens > 0:
-            assert self.paged_kv_indices_host is not None
-            assert self.paged_kv_indptr_host is not None
-
-            # self.paged_kv_indices_host = self.paged_kv_indices.to(self.device)
-            # self.paged_kv_indptr_host = self.paged_kv_indptr.to(self.device)
-
-            # handle model warmup path
-            # if self.block_table_bound is not None:
-            #     self.block_table_bound = self.block_table_bound\
-            #       .to(self.device)
-            # if self.seq_lens_tensor is not None:
-            #     self.seq_lens_tensor_host = self.seq_lens_tensor.to(
-            #         self.device)
-
-            assert self.decode_wrapper is not None
-
-            print("plan::", self.decode_wrapper,
-                  self.decode_wrapper._use_cuda_graph)
-            print("  num_prefills:", self.num_prefills)
-            print("  query_start_loc_host:", self.query_start_loc_host)
-            print("  paged_kv_indptr_host:", self.paged_kv_indptr_host)
-            print("  paged_kv_indices_host:", self.paged_kv_indices_host,
-                  self.paged_kv_indices_host.shape)
-            print("  seq_lens_tensor_host:", self.seq_lens_tensor_host)
-            print("  sm_scale", self.sm_scale)
-            print("  num_heads", self.num_heads)
-            print("  head_dim_ckv", self.kv_lora_rank)
-            print("  head_dim_kpe", self.qk_rope_head_dim)
-            print("  page_size", self.page_size)
-            print("  q_data_type", self.q_data_type)
-            print("  data_type", self.data_type)
-
-            self.decode_wrapper.plan(
-                qo_indptr=self.query_start_loc_host[self.num_prefills:],
-                kv_indptr=self.paged_kv_indptr_host[self.num_prefills:],
-                kv_indices=self.paged_kv_indices_host,
-                kv_len_arr=self.seq_lens_tensor_host[self.num_prefills:],
-                num_heads=self.num_heads,
-                head_dim_ckv=self.kv_lora_rank,
-                head_dim_kpe=self.qk_rope_head_dim,
-                page_size=self.page_size,
-                causal=True,
-                sm_scale=0.07216878364870323,
-                q_data_type=self.q_data_type,
-                kv_data_type=self.data_type,
-            )
-
-            print("self.decode_wrapper", self.decode_wrapper._qo_indptr_buf,
-                  self.decode_wrapper._qo_indptr_buf.data_ptr())
-            print("self.decode_wrapper", self.decode_wrapper._kv_indptr_buf,
-                  self.decode_wrapper._kv_indptr_buf.data_ptr())
-            print(
-                "self.decode_wrapper", self.decode_wrapper.
-                _kv_indices_buf[:len(self.paged_kv_indices_host)],
-                self.decode_wrapper._kv_indices_buf.data_ptr())
-            print("self.decode_wrapper", self.decode_wrapper._kv_len_arr_buf,
-                  self.decode_wrapper._kv_len_arr_buf.data_ptr())
-            print("self.decode_wrapper", self.decode_wrapper._page_size)
-            print("self.decode_wrapper", self.decode_wrapper._sm_scale)
-            print("self.decode_wrapper", self.decode_wrapper._causal)
-            print("len(self.paged_kv_indices_host)",
-                  len(self.paged_kv_indices_host))
-
-            self._cached_decode_metadata = None
-            print("planning done!")
-
-    @property
-    def prefill_metadata(self) -> Optional["FlashInferMLAMetadata"]:
-        if self.num_prefills == 0:
-            return None
-
-        if self._cached_prefill_metadata is not None:
-            return self._cached_prefill_metadata
-
-        self._cached_prefill_metadata = FlashInferMLAMetadata(
-            **asdict(super().prefill_metadata),
-            page_size=self.page_size,
-            num_heads=self.num_heads,
-        )
-
-        return self._cached_prefill_metadata
-
-    @property
-    def decode_metadata(self) -> Optional["FlashInferMLAMetadata"]:
-        if self.num_decode_tokens == 0:
-            return None
-
-        if self._cached_decode_metadata is not None:
-            return self._cached_decode_metadata
-
-        self._cached_decode_metadata = FlashInferMLAMetadata(
-            **asdict(super().decode_metadata),
-            decode_wrapper=self.decode_wrapper,
-            page_size=self.page_size,
-            num_heads=self.num_heads,
-        )
-
-        return self._cached_decode_metadata
-
-
-class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder):
+class FlashInferMLAMetadataBuilder(
+        MLACommonMetadataBuilder[FlashInferMLAMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         super().__init__(input_builder)
@@ -397,7 +334,6 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder):
             self.window_left = inferred_params.window_left
             self.logits_soft_cap = inferred_params.logits_soft_cap
             self.sm_scale = inferred_params.sm_scale
-            print("[0] self.sm_scale:", self.sm_scale)
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -449,11 +385,11 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder):
                                  -1 if cuda graph is not used.
             batch_size: The maybe padded batch size.
         """
-        common_metadata = \
+        metadata = \
             super().build(seq_lens, query_lens, cuda_graph_pad_size, batch_size)
 
-        query_start_loc_host = common_metadata.query_start_loc.to("cpu")
-        seq_lens_tensor_host = common_metadata.seq_lens_tensor.to("cpu")
+        query_start_loc_host = metadata.query_start_loc.to("cpu")
+        seq_lens_tensor_host = metadata.seq_lens_tensor.to("cpu")
 
         if cuda_graph_pad_size > 0:
             self.paged_kv_indptr.extend([self.paged_kv_indptr[-1]] *
@@ -497,19 +433,17 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder):
             kv_cache_dtype = get_kv_cache_torch_dtype(
                 self.runner.kv_cache_dtype, self.runner.model_config.dtype)
 
-        return FlashInferMLAMetadata(
-            **asdict(common_metadata),
-            num_heads=self.runner.model_config.get_num_attention_heads(
-                self.runner.parallel_config),
-            paged_kv_indices_host=paged_kv_indices_tensor,
-            paged_kv_indptr_host=paged_kv_indptr_tensor,
-            query_start_loc_host=query_start_loc_host,
-            seq_lens_tensor_host=seq_lens_tensor_host,
-            page_size=self.runner.block_size,
-            data_type=kv_cache_dtype,
-            q_data_type=self.runner.model_config.dtype,
-            sm_scale=self.sm_scale,
-            device=self.runner.device)
+        metadata.num_heads = self.runner.model_config.get_num_attention_heads(
+            self.runner.parallel_config)
+        metadata.paged_kv_indices_host = paged_kv_indices_tensor
+        metadata.paged_kv_indptr_host = paged_kv_indptr_tensor
+        metadata.query_start_loc_host = query_start_loc_host
+        metadata.seq_lens_tensor_host = seq_lens_tensor_host
+        metadata.data_type = kv_cache_dtype
+        metadata.q_data_type = self.runner.model_config.dtype
+        metadata.sm_scale = self.global_hyperparameters.sm_scale
+        metadata.device = self.runner.device
+        return metadata
 
     def advance_step(self,
                      model_input: "ModelInputForGPUWithSamplingMetadata",
@@ -561,14 +495,14 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "TritonMLAImpl")
+                                      "FlashInferMLAImpl")
 
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        attn_metadata: FlashInferMLAMetadata,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
         if self.kv_cache_dtype.startswith("fp8"):
