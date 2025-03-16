@@ -76,5 +76,10 @@ if __name__ == "__main__":
                              GPUs_per_dp_rank))
         proc.start()
         procs.append(proc)
+    exit_code = 0
     for proc in procs:
         proc.join()
+        if proc.exitcode:
+            exit_code = proc.exitcode
+
+    exit(exit_code)
