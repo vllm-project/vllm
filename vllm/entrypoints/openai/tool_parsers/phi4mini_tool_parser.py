@@ -127,7 +127,7 @@ class Phi4MiniJsonToolParser(ToolParser):
 
         if not matches:
             return DeltaMessage(
-                content=delta_text
+            content=delta_text
             )
         
         try:
@@ -140,7 +140,6 @@ class Phi4MiniJsonToolParser(ToolParser):
                 try:
                     tool_call_arr = json.loads(json_content)
                 except json.JSONDecodeError:
-                    # If we can't parse the complete JSON yet, try partial parsing
                     is_complete = False
                     try:
                         flags = (Allow.ALL if self.current_tool_name_sent 
