@@ -418,7 +418,9 @@ def rejection_random_sample_kernel(
                                   (start_idx + pos) * vocab_size +
                                   draft_token_id)
             uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
-            if draft_prob == 0 or (target_prob / draft_prob >= uniform_prob):
+            # NOTE(woosuk): While the draft probability should never be 0,
+            # we check it to avoid NaNs. If it happens to be 0, we reject.
+            if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
                 # Accept.
                 token_id = draft_token_id
             else:
