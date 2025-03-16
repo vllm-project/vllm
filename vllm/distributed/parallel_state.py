@@ -900,7 +900,13 @@ def initialize_model_parallel(
     from vllm.config import get_current_vllm_config
     config = get_current_vllm_config()
     if config is not None:
-        data_parallel_size = config.parallel_config.data_parallel_size
+        if (config.parallel_config.distributed_executor_backend ==
+                "external_launcher"):
+            # do not use config.parallel_config to avoid hanging
+            data_parallel_size = world_size // (pipeline_model_parallel_size *
+                                                tensor_model_parallel_size)
+        else:
+            data_parallel_size = config.parallel_config.data_parallel_size
 
     # the layout order is: DP x PP x TP
     # to get group_ranks for each dimension, transpose that dimension to the
