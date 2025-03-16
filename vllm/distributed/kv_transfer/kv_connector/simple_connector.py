@@ -320,17 +320,14 @@ class SimpleConnector(KVConnectorBase):
 
                 if self.is_deepseek_mla and self.use_mla_opt:
                     layer.self_attn.attn = layer.self_attn.mla_attn
-                    k_c_normed = keys[i -
-                                      model_executable.model.start_layer].to(
-                                          kv_cache.device)
-                    k_pe_sqz = values[i -
-                                      model_executable.model.start_layer].to(
-                                          kv_cache.device)
-                    k_c_normed = k_c_normed.squeeze(1)
-                    k_pe_sqz = k_pe_sqz.squeeze(1)
+                    k_c_normed_k_pe = keys[
+                        i - model_executable.model.start_layer].to(
+                            kv_cache.device).squeeze(1)
+                    k_c_normed = k_c_normed_k_pe[:, :model_config.kv_lora_rank]
+                    k_pe = k_c_normed_k_pe[:, model_config.kv_lora_rank:]
                     ops.concat_and_cache_mla(
-                        k_c_normed[:, :model_config.kv_lora_rank],
-                        k_pe_sqz[:, model_config.kv_lora_rank:],
+                        k_c_normed,
+                        k_pe,
                         kv_cache,
                         slot_mapping[start_pos:end_pos],
                         layer.self_attn.attn.kv_cache_dtype,
