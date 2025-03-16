@@ -8,12 +8,12 @@ import triton.language as tl
 
 from vllm.logger import init_logger
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.utils import compiled_softmax
 
 logger = init_logger(__name__)
 
 PLACEHOLDER_TOKEN_ID: tl.constexpr = -1
 GREEDY_TEMPERATURE: tl.constexpr = -1
-TINY: tl.constexpr = 1.1754943508222875e-38  # torch.finfo(torch.float32).tiny
 
 
 class RejectionSampler(nn.Module):
@@ -72,6 +72,7 @@ class RejectionSampler(nn.Module):
 
         num_draft_tokens = [len(ids) for ids in draft_token_ids]
         max_spec_len = max(num_draft_tokens)
+        assert max_spec_len > 0
         # [num_tokens, vocab_size]
         target_probs = compute_probs(
             target_logits,
@@ -176,7 +177,6 @@ def rejection_sample(
 
     is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
     if not sampling_metadata.all_random:
-        print("GREEDY")
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_probs.argmax(dim=-1)
         rejection_greedy_sample_kernel[(batch_size, )](
@@ -191,7 +191,6 @@ def rejection_sample(
         )
         if sampling_metadata.all_greedy:
             return output_token_ids
-    print("RANDOM")
 
     # Generate uniform probabilities for rejection sampling.
     # [num_tokens]
@@ -244,6 +243,7 @@ def compute_probs(
     batch_size = temperature.shape[0]
     vocab_size = logits.shape[-1]
     num_tokens = logits.shape[0] - batch_size
+
     scaled_logits = torch.empty(
         (num_tokens, vocab_size),
         dtype=torch.float32,
@@ -259,10 +259,11 @@ def compute_probs(
         vocab_size,
         BLOCK_SIZE=block_size,
     )
+
     if all_greedy:
         output_prob = scaled_logits
     else:
-        output_prob = torch.softmax(scaled_logits, dim=-1, dtype=torch.float32)
+        output_prob = compiled_softmax(scaled_logits)
     return output_prob
 
 

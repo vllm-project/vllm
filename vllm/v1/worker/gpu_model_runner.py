@@ -1029,21 +1029,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             bonus_token_ids = sampler_output.sampled_token_ids
 
-            # torch.cuda.synchronize()
-            start = time.time()
-            output_token_ids = self.rejection_sampler(
-                draft_token_ids,
-                None,  # draft_probs
-                logits,
-                bonus_token_ids,
-                sampling_metadata,
-            )
-            sampler_output.sampled_token_ids = output_token_ids
-            end = time.time()
-            print(f"Rejection sampler CPU took {(end - start) * 1000:.4f} ms")
-            # torch.cuda.synchronize()
-            # end = time.time()
-            # print(f"Rejection sampler GPU took {(end - start) * 1000:.4f} ms")
+            has_draft_tokens = any(len(ids) > 0 for ids in draft_token_ids)
+            if has_draft_tokens:
+                output_token_ids = self.rejection_sampler(
+                    draft_token_ids,
+                    None,  # draft_probs
+                    logits,
+                    bonus_token_ids,
+                    sampling_metadata,
+                )
+                sampler_output.sampled_token_ids = output_token_ids
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -1339,9 +1334,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         logits.shape[-1],
                                         device=self.device,
                                         dtype=logits.dtype)
+            # NOTE(woosuk): Here, we should use int32 because the sampler
+            # uses int32 for bonus_token_ids.
             bonus_token_ids = torch.zeros(num_reqs,
                                           device=self.device,
-                                          dtype=torch.int64)
+                                          dtype=torch.int32)
             self.rejection_sampler(
                 draft_token_ids,
                 draft_probs,
