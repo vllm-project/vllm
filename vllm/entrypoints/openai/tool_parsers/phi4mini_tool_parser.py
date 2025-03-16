@@ -4,7 +4,7 @@ import json
 import re
 from collections.abc import Sequence
 from json import JSONDecodeError
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Any, Optional, Union, cast
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -41,10 +41,10 @@ class Phi4MiniJsonToolParser(ToolParser):
 
         # initialize properties used for state when parsing tool calls in
         # streaming mode
-        self.prev_tool_call_arr: List[Dict[str, Any]] = []
+        self.prev_tool_call_arr: list[dict[str, Any]] = []
         self.current_tool_id: int = -1
         self.current_tool_name_sent: bool = False
-        self.streamed_args_for_tool: List[str] = [
+        self.streamed_args_for_tool: list[str] = [
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token: str = "functools"
 
@@ -61,46 +61,56 @@ class Phi4MiniJsonToolParser(ToolParser):
 
         if not matches:
             print("No function calls found")
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
+            return ExtractedToolCallInformation(
+                tools_called=False,
+                tool_calls=[],
+                content=model_output
+            )
 
     
         try:
-            function_call_arr: List[Dict[str, Any]] = []
+            function_call_arr: list[dict[str, Any]] = []
             try:
                 json_content = '[' + matches.group(1)+ ']'
 
                 function_call_arr = json.loads(json_content) 
-                print(f"Successfully extracted {len(function_call_arr)} function calls")
+                print(f"Successfully extracted {len(function_call_arr)} "
+                      "function calls")
             except json.JSONDecodeError as e:
                 print(f"Error parsing JSON: {e}")
 
-            tool_calls: List[ToolCall] = [
+            tool_calls: list[ToolCall] = [
                 ToolCall(
-                    id=f"chatcmpl-tool-{random_uuid()}",  # Add missing required id field
+                    id=f"chatcmpl-tool-{random_uuid()}",
                     type="function",
                     function=FunctionCall(
                         name=raw_function_call["name"],
                         # function call args are JSON but as a string
-                        arguments=json.dumps(raw_function_call["arguments"] \
-                                if "arguments" in raw_function_call \
-                                else raw_function_call["parameters"])))
+                        arguments=json.dumps(
+                            raw_function_call["arguments"]
+                            if "arguments" in raw_function_call
+                            else raw_function_call["parameters"]
+                        ))
+                )
                 for raw_function_call in function_call_arr
             ]
 
             # get any content before the tool call
-            ret = ExtractedToolCallInformation(tools_called=True,
-                                               tool_calls=tool_calls,
-                                               content=None)
+            ret = ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=tool_calls,
+                content=None
+            )
             return ret
 
         except Exception:
             logger.exception("Error in extracting tool call from response.")
             # return information to just treat the tool call as regular JSON
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
+            return ExtractedToolCallInformation(
+                tools_called=False,
+                tool_calls=[],
+                content=model_output
+            )
 
     def extract_tool_calls_streaming(
         self,
@@ -113,7 +123,8 @@ class Phi4MiniJsonToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> Optional[DeltaMessage]:
 
-        # If not starting with the bot token or doesn't contain function call pattern, treat as regular content
+        # If not starting with the bot token or doesn't contain function call pattern,
+        # treat as regular content
         pattern = r'functools\[(.*?)\]'
         matches = re.search(pattern, current_text, re.DOTALL)
 
@@ -121,7 +132,7 @@ class Phi4MiniJsonToolParser(ToolParser):
             return DeltaMessage(content=delta_text)
         
         try:
-            tool_call_arr: List[Dict[str, Any]] = []
+            tool_call_arr: list[dict[str, Any]] = []
             is_complete: bool = True
             
             try:
@@ -133,18 +144,19 @@ class Phi4MiniJsonToolParser(ToolParser):
                     # If we can't parse the complete JSON yet, try partial parsing
                     is_complete = False
                     try:
-                        flags = Allow.ALL if self.current_tool_name_sent else Allow.ALL & ~Allow.STR
+                        flags = (Allow.ALL if self.current_tool_name_sent 
+                                else Allow.ALL & ~Allow.STR)
                         obj, _ = partial_json_loads(matches.group(1), flags)
                         if isinstance(obj, dict):
-                            tool_call_arr = [cast(Dict[str, Any], obj)]
+                            tool_call_arr = [cast(dict[str, Any], obj)]
                         elif isinstance(obj, list):
-                            tool_call_arr = cast(List[Dict[str, Any]], obj)
+                            tool_call_arr = cast(list[dict[str, Any]], obj)
                     except Exception:
                         logger.debug('not enough tokens to parse into JSON yet')
                         return None
 
             except Exception as e:
-                logger.debug(f"Error parsing JSON in streaming: {e}")
+                logger.debug("Error parsing JSON in streaming: %s", str(e))
                 return None
 
             # If no valid tool calls extracted, return None
@@ -162,10 +174,12 @@ class Phi4MiniJsonToolParser(ToolParser):
             # case: we are starting a new tool in the array
             if len(tool_call_arr) > self.current_tool_id + 1:
                 # If we're moving on to a new call, make sure we finish streaming the previous one
-                if self.current_tool_id >= 0 and len(self.prev_tool_call_arr) > self.current_tool_id:
+                if (self.current_tool_id >= 0 and 
+                        len(self.prev_tool_call_arr) > self.current_tool_id):
                     current_tool_call = self.prev_tool_call_arr[self.current_tool_id]
                     cur_arguments = current_tool_call.get("arguments")
-                    function_name = current_tool_call.get("name", "unknown_function")  # Ensure name is not None
+                    # Ensure name is not None
+                    function_name = current_tool_call.get("name", "unknown_function")
                     if cur_arguments:
                         cur_args_json = json.dumps(cur_arguments)
                         sent = len(self.streamed_args_for_tool[self.current_tool_id])
@@ -192,7 +206,9 @@ class Phi4MiniJsonToolParser(ToolParser):
                 return delta
 
             # Get the current tool call we're working with
-            current_tool_call = tool_call_arr[self.current_tool_id] if len(tool_call_arr) > self.current_tool_id else {}
+            current_tool_call = (tool_call_arr[self.current_tool_id] 
+                               if len(tool_call_arr) > self.current_tool_id 
+                               else {})
 
             # If the tool name hasn't been sent yet, send it if available
             if not self.current_tool_name_sent:
@@ -206,7 +222,8 @@ class Phi4MiniJsonToolParser(ToolParser):
                             id=f"chatcmpl-tool-{random_uuid()}",
                             function=DeltaFunctionCall(
                                 name=str(function_name),
-                                arguments=json.dumps(cur_arguments) if cur_arguments else ""
+                                arguments=(json.dumps(cur_arguments) 
+                                         if cur_arguments else "")
                             ).model_dump(exclude_none=True)
                         )
                     ])
@@ -225,11 +242,13 @@ class Phi4MiniJsonToolParser(ToolParser):
                     if is_complete:
                         argument_diff = cur_args_json[sent:]
                     elif self.current_tool_id < len(self.prev_tool_call_arr):
-                        prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get("arguments")
+                        prev_arguments = self.prev_tool_call_arr[self.current_tool_id].get(
+                            "arguments")
                         if prev_arguments:
                             prev_args_json = json.dumps(prev_arguments)
                             if cur_args_json != prev_args_json:
-                                prefix = find_common_prefix(prev_args_json, cur_args_json)
+                                prefix = find_common_prefix(
+                                    prev_args_json, cur_args_json)
                                 argument_diff = prefix[sent:]
 
                     if argument_diff is not None:
