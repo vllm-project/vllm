@@ -331,7 +331,6 @@ class MLACommonState(AttentionState, Generic[T]):
         self._positions = torch.zeros((max_batch_size, ),
                                       dtype=torch.long,
                                       device=self.runner.device)
-        print("graph_capture, MLA Common")
 
         yield
 
@@ -369,7 +368,8 @@ class MLACommonState(AttentionState, Generic[T]):
             seq_start_loc=None,
             context_lens_tensor=None,
             block_tables=self._graph_block_tables[:batch_size],
-            input_positions=self._positions[:batch_size])
+            input_positions=self._positions[:batch_size],
+            head_dim=self.runner.model_config.get_head_size())
 
         if is_encoder_decoder_model:
             raise NotImplementedError(
@@ -502,6 +502,11 @@ class MLACommonMetadata(AttentionMetadata):
     _cached_prefill_metadata: Optional[Any] = None
     _cached_decode_metadata: Optional[Any] = None
 
+    num_prefill_tokens: int
+
+    # The dimension of the attention heads
+    head_dim: Optional[int] = None
+
     # Used when chunked prefill is enabled to simulate worst case workspace
     # allocations, hopefully to avoid going OOM
     is_profile_run: bool = False
@@ -514,6 +519,14 @@ class MLACommonMetadata(AttentionMetadata):
     context_chunk_max_seq_lens: Optional[List[int]] = None
     # Set by MLAAttentionState in `begin_forward` so it doesn't get broadcasted
     context_chunk_workspace: Optional[torch.Tensor] = None
+
+    def __post_init__(self):
+        supported_head_sizes = MLACommonBackend.get_supported_head_sizes()
+        if self.head_dim is not None and self.head_dim \
+                not in supported_head_sizes:
+            raise ValueError(
+                f"Only {supported_head_sizes} are supported for head_dim,",
+                f" received {self.head_dim}.")
 
     @property
     def prefill_metadata(self):
@@ -567,6 +580,7 @@ class MLACommonMetadata(AttentionMetadata):
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
+            head_dim=self.head_dim,
             is_profile_run=self.is_profile_run,
             # MLACommonMetadata Chunk prefill specific
             context_chunk_cu_seq_lens=self.context_chunk_cu_seq_lens,
@@ -583,7 +597,7 @@ class MLACommonMetadata(AttentionMetadata):
 
         if self._cached_decode_metadata is not None:
             return self._cached_decode_metadata
-        #assert self.seq_lens_tensor is not None
+        assert self.seq_lens_tensor is not None
 
         # Compute some attn_metadata fields which default to None
         slot_mapping = (None if self.slot_mapping is None else
@@ -624,6 +638,7 @@ class MLACommonMetadata(AttentionMetadata):
             context_lens_tensor=None,
             block_tables=block_tables,
             input_positions=input_positions,
+            head_dim=self.head_dim,
             is_profile_run=self.is_profile_run)
         return self._cached_decode_metadata
 
@@ -959,6 +974,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             seq_start_loc=seq_start_loc_tensor,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
+            head_dim=self.runner.model_config.get_head_size(),
             is_profile_run=self.runner.in_profile_run,
             # MLACommonMetadata Chunk prefill specific
             context_chunk_cu_seq_lens=context_chunk_cu_seq_lens,
