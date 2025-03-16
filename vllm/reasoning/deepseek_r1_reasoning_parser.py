@@ -162,7 +162,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         if self.end_token not in model_output:
             return model_output, None
         else:
-            reasoning_content, end, content = model_output.partition(
+            reasoning_content, _, content = model_output.partition(
                 self.think_end_token)
             # If the end token is not found, return the model output as is.
             # It should not happen since we already checked for the presence
