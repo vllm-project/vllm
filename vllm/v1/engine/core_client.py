@@ -495,7 +495,7 @@ class SyncMPClient(MPClient):
         self.call_utility("wake_up")
 
     def is_sleeping(self) -> bool:
-        return self._call_utility("is_sleeping")
+        return self.call_utility("is_sleeping")
 
     def execute_dummy_batch(self) -> None:
         self.call_utility("execute_dummy_batch")
@@ -614,7 +614,7 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("wake_up")
 
     async def is_sleeping_async(self) -> bool:
-        return await self._call_utility_async("is_sleeping")
+        return await self.call_utility_async("is_sleeping")
 
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
