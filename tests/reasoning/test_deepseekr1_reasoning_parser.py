@@ -105,6 +105,20 @@ EMPTY_STREAMING = {
     "reasoning_content": None,
     "content": None,
 }
+NEW_LINE = {
+    "output": "\n<think>This is a reasoning section</think>\nThis is the rest",
+    "reasoning_content": "This is a reasoning section",
+    "content": "\nThis is the rest",
+}
+# Streaming cannot handle new lines at the beginning of the output
+# because we need to support <think>...</think> and </think>...
+# We cannot know if the text before <think> is reasoning content
+# or not.
+NEW_LINE_STREAMING = {
+    "output": "\n<think>This is a reasoning section</think>\nThis is the rest",
+    "reasoning_content": "\nThis is a reasoning section",
+    "content": "\nThis is the rest",
+}
 
 TEST_CASES = [
     pytest.param(
@@ -216,6 +230,16 @@ TEST_CASES = [
         True,
         EMPTY_STREAMING,
         id="empty_streaming",
+    ),
+    pytest.param(
+        False,
+        NEW_LINE,
+        id="new_line",
+    ),
+    pytest.param(
+        True,
+        NEW_LINE_STREAMING,
+        id="new_line_streaming",
     ),
 ]
 
