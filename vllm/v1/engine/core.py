@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import gc
 import queue
 import signal
 import threading
@@ -330,6 +331,12 @@ class EngineCoreProc(EngineCore):
         engine_core = None
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
+
+            # Freeze the gc after initialization to prevent pauses
+            # trying to clean up lifetime objects. Performance
+            # optimization at high QPS.
+            gc.collect()
+            gc.freeze()
             engine_core.run_busy_loop()
 
         except SystemExit:
