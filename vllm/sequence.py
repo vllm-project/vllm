@@ -2,6 +2,7 @@
 """Sequence and its related classes."""
 import copy
 import enum
+import time
 from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
@@ -630,6 +631,20 @@ class SequenceGroupState(msgspec.Struct,
         return self.num_steps - self.current_step
 
 
+@dataclass
+class InbandEngineStats:
+    now: float
+
+    # System stats (should have _sys suffix)
+    #   Scheduler State
+    num_running_sys: int
+    num_waiting_sys: int
+    num_swapped_sys: int
+    #   KV Cache Usage in %
+    gpu_cache_usage_sys: float
+    cpu_cache_usage_sys: float
+
+
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
 
@@ -681,6 +696,13 @@ class SequenceGroup:
                                       time_in_queue=None,
                                       spec_token_acceptance_counts=[0] *
                                       draft_size)
+        self.inband_engine_stats = InbandEngineStats(now=time.time(),
+                                                     num_running_sys=0,
+                                                     num_waiting_sys=0,
+                                                     num_swapped_sys=0,
+                                                     gpu_cache_usage_sys=0.0,
+                                                     cpu_cache_usage_sys=0.0)
+
         self.last_token_latency = 0.0
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
@@ -825,6 +847,10 @@ class SequenceGroup:
     def set_finished_time(self, time: Optional[float]) -> None:
         """Sets the finished time for Request level timings."""
         self.metrics.finished_time = time
+
+    def set_final_engine_stats_snapshot(self,
+                                        stats: InbandEngineStats) -> None:
+        self.inband_engine_stats = stats
 
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
