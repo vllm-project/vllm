@@ -6,7 +6,6 @@ import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
 
 from vllm.logger import init_logger
-from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import random_sample
 
@@ -47,7 +46,7 @@ class RejectionSampler(nn.Module):
         bonus_token_ids_tensor: torch.Tensor,  # [batch_size, 1]
         target_probs: torch.Tensor,  # [num_total_tokens, vocab_size]
         sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
+    ) -> torch.Tensor:
         '''
         Args:
             draft_token_ids (List[List[int]]):
@@ -78,9 +77,8 @@ class RejectionSampler(nn.Module):
                 Additional metadata needed for sampling, such as temperature,
                 top-k/top-p parameters, or other relevant information.
         Returns:
-            SamplerOutput:
-                An object containing the results of the sampling process 
-                (output_token_ids).
+            output_token_ids (torch.Tensor):
+                A tensor containing the final output token IDs.
         '''
 
         # NOTE: The following input preparationg can be moved
@@ -121,7 +119,7 @@ class RejectionSampler(nn.Module):
         # [batch_size, max_spec_len + 1, vocab_size]
         target_probs: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
+    ) -> torch.Tensor:
         # Add 1 to include the 'bonus' token.
         if sampling_metadata.all_greedy:
             # Produce a mask that remains 1 (True) until the first
@@ -222,8 +220,7 @@ class RejectionSampler(nn.Module):
                              first_zero_idx] = recovered_bonus_token_ids[
                                  torch.arange(batch_size), first_zero_idx]
 
-        return SamplerOutput(sampled_token_ids=output_token_ids,
-                             logprobs_tensors=None)
+        return output_token_ids
 
     def compute_probs(self, logits: torch.Tensor,
                       sampling_metadata: SamplingMetadata,

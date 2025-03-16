@@ -75,7 +75,7 @@ def test_perfect_match(sampler):
     expected = torch.tensor([[1, 2, 3, 4]],
                             dtype=torch.int,
                             device=logits.device)
-    assert torch.equal(output.sampled_token_ids, expected)
+    assert torch.equal(output, expected)
 
 
 def test_early_mismatch(sampler):
@@ -92,7 +92,7 @@ def test_early_mismatch(sampler):
     expected = torch.tensor([[1, 5, INVALID_TOKEN_ID, INVALID_TOKEN_ID]],
                             dtype=torch.int,
                             device=logits.device)
-    assert torch.equal(output.sampled_token_ids, expected)
+    assert torch.equal(output, expected)
 
 
 def test_multiple_sequences(sampler):
@@ -110,7 +110,7 @@ def test_multiple_sequences(sampler):
     expected = torch.tensor([[1, 2, 5], [3, 4, INVALID_TOKEN_ID]],
                             dtype=torch.int,
                             device=logits.device)
-    assert torch.equal(output.sampled_token_ids, expected)
+    assert torch.equal(output, expected)
 
 
 def test_single_token_sequence(sampler):
@@ -125,7 +125,7 @@ def test_single_token_sequence(sampler):
 
     output = sampler(spec_tokens, None, bonus_token_tensor, logits, metadata)
     expected = torch.tensor([[1, 2]], dtype=torch.int, device=logits.device)
-    assert torch.equal(output.sampled_token_ids, expected)
+    assert torch.equal(output, expected)
 
 
 def test_empty_sequence(sampler):
@@ -140,7 +140,7 @@ def test_empty_sequence(sampler):
 
     output = sampler(spec_tokens, None, bonus_token_tensor, logits, metadata)
     expected = torch.tensor([[5]], dtype=torch.int, device=logits.device)
-    assert torch.equal(output.sampled_token_ids, expected)
+    assert torch.equal(output, expected)
 
 
 def test_multiple_mismatches(sampler):
@@ -159,7 +159,7 @@ def test_multiple_mismatches(sampler):
                              [4, 8, INVALID_TOKEN_ID, INVALID_TOKEN_ID]],
                             dtype=torch.int,
                             device=logits.device)
-    assert torch.equal(output.sampled_token_ids, expected)
+    assert torch.equal(output, expected)
 
 
 @pytest.mark.parametrize(
@@ -181,7 +181,7 @@ def test_parametrized_cases(sampler, spec_tokens, output_tokens, expected):
     expected_tensor = torch.tensor(expected,
                                    dtype=torch.int,
                                    device=logits.device)
-    assert torch.equal(output.sampled_token_ids, expected_tensor)
+    assert torch.equal(output, expected_tensor)
 
 
 ########################### Tests for Random Sampling ###################
@@ -218,8 +218,7 @@ def test_deterministic_when_seeded(sampler, k: int, vocab_size: int,
         sampling_metadata = create_sampling_metadata(all_greedy=False,
                                                      generators=seeded_seqs)
         rep_result = sampler(draft_token_ids.tolist(), draft_probs,
-                             bonus_token_ids, target_probs,
-                             sampling_metadata).sampled_token_ids
+                             bonus_token_ids, target_probs, sampling_metadata)
 
         results.append(rep_result)
 
@@ -352,7 +351,7 @@ def estimate_rejection_sampling_pdf(
     sampling_metadata = create_sampling_metadata(all_greedy=False)
     output_token_ids = sampler(draft_token_ids.tolist(), draft_probs,
                                bonus_token_ids, target_probs,
-                               sampling_metadata).sampled_token_ids
+                               sampling_metadata)
     output_token_ids = output_token_ids[:, :-1].flatten()
 
     hist = torch.histogram(output_token_ids.to(dtype=torch.float,

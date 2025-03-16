@@ -1022,16 +1022,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             recover_logits_idx = np.cumsum(sample_lens) - 1
             target_probs = self.rejection_sampler.compute_probs(
                 logits, sampling_metadata, sample_lens)
-            bonus_token_ids = self.model.sample(
+            sampler_output = self.model.sample(
                 logits=logits[recover_logits_idx, :],
                 sampling_metadata=sampling_metadata,
-            ).sampled_token_ids
-            sampler_output = self.rejection_sampler(
+            )
+            bonus_token_ids = sampler_output.sampled_token_ids
+            output_token_ids = self.rejection_sampler(
                 draft_token_ids,
                 None,  # draft_probs
                 bonus_token_ids,
                 target_probs,
                 sampling_metadata)
+            sampler_output.sampled_token_ids = output_token_ids
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
