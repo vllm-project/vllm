@@ -3,20 +3,16 @@
 import json
 import re
 from collections.abc import Sequence
-from typing import Any, Optional, cast
+from typing import Any, Optional
 
-from partial_json_parser.core.options import Allow
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaFunctionCall, DeltaMessage,
-                                              DeltaToolCall,
+                                              DeltaMessage,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
-from vllm.entrypoints.openai.tool_parsers.utils import (find_common_prefix,
-                                                        partial_json_loads)
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
