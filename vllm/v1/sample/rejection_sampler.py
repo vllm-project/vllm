@@ -7,7 +7,6 @@ import triton
 import triton.language as tl
 
 from vllm.logger import init_logger
-from vllm.utils import is_pin_memory_available
 from vllm.v1.sample.metadata import SamplingMetadata
 
 logger = init_logger(__name__)
@@ -21,28 +20,40 @@ class RejectionSampler(nn.Module):
 
     def __init__(
         self,
+        pin_memory: bool,
+        device: torch.device,
         max_batch_size: int = 8 * 1024,
         max_num_draft_tokens: int = 32 * 1024,
     ):
         super().__init__()
         self.max_batch_size = max_batch_size
         self.max_num_draft_tokens = max_num_draft_tokens
+        self.pin_memory = pin_memory
+        self.device = device
 
         self.cu_num_tokens_buffer = torch.empty(
             max_batch_size,
             dtype=torch.int32,
             device="cpu",
-            pin_memory=is_pin_memory_available(),
+            pin_memory=self.pin_memory,
         )
         self.cu_num_tokens_buffer_np = self.cu_num_tokens_buffer.numpy()
+        self.cu_num_tokens_buffer_device = torch.empty_like(
+            self.cu_num_tokens_buffer,
+            device=self.device,
+        )
 
         self.token_ids_buffer = torch.empty(
             max_num_draft_tokens,
             dtype=torch.int64,
             device="cpu",
-            pin_memory=is_pin_memory_available(),
+            pin_memory=self.pin_memory,
         )
         self.token_ids_buffer_np = self.token_ids_buffer.numpy()
+        self.token_ids_buffer_device = torch.empty_like(
+            self.token_ids_buffer,
+            device=self.device,
+        )
 
     def forward(
         self,
@@ -57,9 +68,7 @@ class RejectionSampler(nn.Module):
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
         token_ids, cu_num_draft_tokens = self._async_copy_to_device(
-            draft_token_ids,
-            target_logits.device,
-        )
+            draft_token_ids)
 
         num_draft_tokens = [len(ids) for ids in draft_token_ids]
         max_spec_len = max(num_draft_tokens)
@@ -69,6 +78,7 @@ class RejectionSampler(nn.Module):
             sampling_metadata.temperature,
             cu_num_draft_tokens,
             max_spec_len,
+            sampling_metadata.all_greedy,
         )
 
         output_token_ids = rejection_sample(
@@ -103,27 +113,32 @@ class RejectionSampler(nn.Module):
     def _async_copy_to_device(
         self,
         draft_token_ids: list[list[int]],
-        device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        flattened_token_ids = sum(draft_token_ids, [])
-        cu_num_tokens = [0] * len(draft_token_ids)
+        start = 0
         for i, token_ids in enumerate(draft_token_ids):
-            prev = cu_num_tokens[i - 1] if i > 0 else 0
-            cu_num_tokens[i] = prev + len(token_ids)
+            end = start + len(token_ids)
+            self.token_ids_buffer_np[start:end] = token_ids
+            self.cu_num_tokens_buffer_np[i] = end
+            start = end
+        num_draft_tokens = end
 
-        num_draft_tokens = len(flattened_token_ids)
         assert num_draft_tokens <= self.max_num_draft_tokens
-        self.token_ids_buffer_np[:num_draft_tokens] = flattened_token_ids
-        draft_token_ids_cpu = self.token_ids_buffer[:num_draft_tokens]
-        draft_token_ids_gpu = draft_token_ids_cpu.to(device=device,
-                                                     non_blocking=True)
+        draft_token_ids_device = (
+            self.token_ids_buffer_device[:num_draft_tokens])
+        draft_token_ids_device.copy_(
+            self.token_ids_buffer[:num_draft_tokens],
+            non_blocking=True,
+        )
 
-        batch_size = len(cu_num_tokens)
-        self.cu_num_tokens_buffer_np[:batch_size] = cu_num_tokens
-        cu_num_draft_tokens_cpu = self.cu_num_tokens_buffer[:batch_size]
-        cu_num_draft_tokens_gpu = cu_num_draft_tokens_cpu.to(device=device,
-                                                             non_blocking=True)
-        return draft_token_ids_gpu, cu_num_draft_tokens_gpu
+        batch_size = len(draft_token_ids)
+        assert batch_size <= self.max_batch_size
+        cu_num_draft_tokens_device = (
+            self.cu_num_tokens_buffer_device[:batch_size])
+        cu_num_draft_tokens_device.copy_(
+            self.cu_num_tokens_buffer[:batch_size],
+            non_blocking=True,
+        )
+        return draft_token_ids_device, cu_num_draft_tokens_device
 
 
 def rejection_sample(
@@ -161,6 +176,7 @@ def rejection_sample(
 
     is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
     if not sampling_metadata.all_random:
+        print("GREEDY")
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_probs.argmax(dim=-1)
         rejection_greedy_sample_kernel[(batch_size, )](
@@ -171,9 +187,11 @@ def rejection_sample(
             bonus_token_ids,
             is_greedy,
             max_spec_len,
+            num_warps=1,
         )
         if sampling_metadata.all_greedy:
             return output_token_ids
+    print("RANDOM")
 
     # Generate uniform probabilities for rejection sampling.
     # [num_tokens]
@@ -211,6 +229,7 @@ def rejection_sample(
         max_spec_len,
         vocab_size,
         IS_NGRAM=draft_probs is None,
+        num_warps=1,
     )
     return output_token_ids
 
@@ -220,23 +239,30 @@ def compute_probs(
     temperature: torch.Tensor,  # [batch_size]
     cu_num_draft_tokens: torch.Tensor,  # [batch_size]
     max_spec_len: int,
+    all_greedy: bool,
 ) -> torch.Tensor:
     batch_size = temperature.shape[0]
     vocab_size = logits.shape[-1]
     num_tokens = logits.shape[0] - batch_size
-    output_prob = torch.empty(
+    scaled_logits = torch.empty(
         (num_tokens, vocab_size),
         dtype=torch.float32,
         device=logits.device,
     )
-    compute_probs_kernel[(batch_size, max_spec_len)](
-        output_prob,
+    block_size = 8192
+    num_blocks = triton.cdiv(vocab_size, block_size)
+    compute_probs_kernel[(batch_size, max_spec_len, num_blocks)](
+        scaled_logits,
         logits,
         temperature,
         cu_num_draft_tokens,
         vocab_size,
-        triton.next_power_of_2(vocab_size),
+        BLOCK_SIZE=block_size,
     )
+    if all_greedy:
+        output_prob = scaled_logits
+    else:
+        output_prob = torch.softmax(scaled_logits, dim=-1, dtype=torch.float32)
     return output_prob
 
 
@@ -305,7 +331,9 @@ def sample_recovered_tokens(
     return recovered_token_ids
 
 
-@triton.jit
+# NOTE(woosuk): To avoid recompilation, we shouldn't specialize on
+# `max_spec_len`.
+@triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_greedy_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
@@ -347,7 +375,9 @@ def rejection_greedy_sample_kernel(
             num_draft_tokens, bonus_token_id)
 
 
-@triton.jit
+# NOTE(woosuk): To avoid recompilation, we shouldn't specialize on
+# `max_spec_len`.
+@triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_random_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
@@ -409,12 +439,12 @@ def rejection_random_sample_kernel(
 
 @triton.jit
 def compute_probs_kernel(
-    output_prob_ptr,  # [num_tokens, vocab_size]
+    output_logits_ptr,  # [num_tokens, vocab_size]
     logits_ptr,  # [num_tokens_with_bonus, vocab_size]
     temperature_ptr,  # [batch_size]
     cu_num_draft_tokens_ptr,  # [batch_size]
     vocab_size,
-    PADDED_VOCAB_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     if req_idx == 0:
@@ -428,26 +458,25 @@ def compute_probs_kernel(
     if pos >= end_idx - start_idx:
         return
 
-    vocab_offset = tl.arange(0, PADDED_VOCAB_SIZE)
+    block_id = tl.program_id(2)
+    block_offset = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     # NOTE(woosuk): We need to add `req_idx` to `start_idx + pos` because
     # `logits_ptr` has the shape of `[num_tokens_with_bonus, vocab_size]`,
     # not `[num_tokens, vocab_size]`.
     logits = tl.load(logits_ptr + (start_idx + pos + req_idx) * vocab_size +
-                     vocab_offset,
-                     mask=vocab_offset < vocab_size,
-                     other=float("-inf"))
+                     block_offset,
+                     mask=block_offset < vocab_size)
     logits = logits.to(dtype=tl.float32)
     temperature = tl.load(temperature_ptr + req_idx)
     if temperature == GREEDY_TEMPERATURE:
         # Greedy sampling. Just return the logits.
-        output_prob = logits
+        scaled_logits = logits
     else:
         # Random sampling.
-        output_prob = tl.softmax(logits / temperature)
-
-    tl.store(output_prob_ptr + (start_idx + pos) * vocab_size + vocab_offset,
-             output_prob,
-             mask=vocab_offset < vocab_size)
+        scaled_logits = logits / temperature
+    tl.store(output_logits_ptr + (start_idx + pos) * vocab_size + block_offset,
+             scaled_logits,
+             mask=block_offset < vocab_size)
 
 
 @triton.jit

@@ -151,7 +151,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_spec_decode = False
         if self.speculative_config:
             self.use_spec_decode = True
-            self.rejection_sampler = RejectionSampler()
             # TODO: find a better way to check if we are using ngram.
             assert self.speculative_config.ngram_prompt_lookup_min, \
                     "Currently, only ngram spec decode is supported in V1."
@@ -163,6 +162,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     np.zeros(1024, dtype=np.int32),
                     self.speculative_config.ngram_prompt_lookup_min,
                     self.speculative_config.num_speculative_tokens,
+                )
+                self.rejection_sampler = RejectionSampler(
+                    pin_memory=self.pin_memory,
+                    device=self.device,
                 )
 
         # Request states.
@@ -1026,6 +1029,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             bonus_token_ids = sampler_output.sampled_token_ids
 
+            # torch.cuda.synchronize()
+            start = time.time()
             output_token_ids = self.rejection_sampler(
                 draft_token_ids,
                 None,  # draft_probs
@@ -1034,6 +1039,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata,
             )
             sampler_output.sampled_token_ids = output_token_ids
+            end = time.time()
+            print(f"Rejection sampler CPU took {(end - start) * 1000:.4f} ms")
+            # torch.cuda.synchronize()
+            # end = time.time()
+            # print(f"Rejection sampler GPU took {(end - start) * 1000:.4f} ms")
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -1071,7 +1081,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Includes spec decode tokens.
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
                 sampled_token_ids, self.input_batch.vocab_size)
-
+        avg_len = sum(
+            len(ids)
+            for ids in valid_sampled_token_ids) / len(valid_sampled_token_ids)
+        print(f"Average length of valid sampled token ids: {avg_len:.2f}")
         if not self.use_spec_decode:
             spec_token_ids = None
         else:
@@ -1314,6 +1327,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     "initializing the engine.") from e
             else:
                 raise e
+        if self.use_spec_decode:
+            draft_token_ids = [[0] for _ in range(num_reqs)]
+            num_tokens = sum(len(ids) for ids in draft_token_ids)
+            num_tokens_with_bonus = num_tokens + num_reqs
+            # draft_probs = torch.randn(
+            #     num_tokens, logits.shape[-1], device=self.device,
+            #     dtype=logits.dtype)
+            draft_probs = None
+            target_logits = torch.randn(num_tokens_with_bonus,
+                                        logits.shape[-1],
+                                        device=self.device,
+                                        dtype=logits.dtype)
+            bonus_token_ids = torch.zeros(num_reqs,
+                                          device=self.device,
+                                          dtype=torch.int64)
+            self.rejection_sampler(
+                draft_token_ids,
+                draft_probs,
+                target_logits,
+                bonus_token_ids,
+                dummy_metadata,
+            )
         return sampler_output
 
     def profile_run(self) -> None:
