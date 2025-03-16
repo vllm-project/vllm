@@ -50,7 +50,7 @@ class RejectionSampler(nn.Module):
         draft_token_ids: list[list[int]],
         # [num_tokens, vocab_size]
         draft_probs: Optional[torch.Tensor],
-        # [num_tokens, vocab_size]
+        # [num_tokens_with_bonus, vocab_size]
         target_logits: torch.Tensor,
         # [batch_size]
         bonus_token_ids: torch.Tensor,
@@ -219,14 +219,19 @@ def rejection_sample(
 
 
 def compute_probs(
-    logits: torch.Tensor,  # [num_tokens, vocab_size]
+    logits: torch.Tensor,  # [num_tokens_with_bonus, vocab_size]
     temperature: torch.Tensor,  # [batch_size]
     cu_num_draft_tokens: torch.Tensor,  # [batch_size]
     max_spec_len: int,
 ) -> torch.Tensor:
-    output_prob = torch.empty_like(logits, dtype=torch.float32)
     batch_size = temperature.shape[0]
     vocab_size = logits.shape[-1]
+    num_tokens = logits.shape[0] - batch_size
+    output_prob = torch.empty(
+        (num_tokens, vocab_size),
+        dtype=torch.float32,
+        device=logits.device,
+    )
     compute_probs_kernel[(batch_size, max_spec_len)](
         output_prob,
         logits,
@@ -408,7 +413,7 @@ def rejection_random_sample_kernel(
 @triton.jit
 def compute_probs_kernel(
     output_prob_ptr,  # [num_tokens, vocab_size]
-    logits_ptr,  # [num_tokens, vocab_size]
+    logits_ptr,  # [num_tokens_with_bonus, vocab_size]
     temperature_ptr,  # [batch_size]
     cu_num_draft_tokens_ptr,  # [batch_size]
     vocab_size,
@@ -427,7 +432,10 @@ def compute_probs_kernel(
         return
 
     vocab_offset = tl.arange(0, PADDED_VOCAB_SIZE)
-    logits = tl.load(logits_ptr + (start_idx + pos) * vocab_size +
+    # NOTE(woosuk): We need to add `req_idx` to `start_idx + pos` because
+    # `logits_ptr` has the shape of `[num_tokens_with_bonus, vocab_size]`,
+    # not `[num_tokens, vocab_size]`.
+    logits = tl.load(logits_ptr + (start_idx + pos + req_idx) * vocab_size +
                      vocab_offset,
                      mask=vocab_offset < vocab_size,
                      other=float("-inf"))
