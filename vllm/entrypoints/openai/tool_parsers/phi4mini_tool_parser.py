@@ -259,8 +259,8 @@ class Phi4MiniJsonToolParser(ToolParser):
                             )
                         ])
                         self.streamed_args_for_tool[self.current_tool_id] += argument_diff
-            
-            self.prev_tool_call_arr = tool_call_arr 
+             
+            self.prev_tool_call_arr = tool_call_arr
             return delta
 
         except Exception:
