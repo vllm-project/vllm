@@ -61,9 +61,10 @@ class Phi4MiniJsonToolParser(ToolParser):
 
         if not matches:
             print("No function calls found")
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
+            return ExtractedToolCallInformation(
+                            tools_called=False,
+                            tool_calls=[],
+                            content=model_output)
 
     
         try:
@@ -171,10 +172,9 @@ class Phi4MiniJsonToolParser(ToolParser):
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(
                                 index=self.current_tool_id,
-                                type="function",  # Always set type to "function"
-                                function=DeltaFunctionCall(
-                                    name=function_name,  # Use the extracted name
-                                    arguments=argument_diff
+                                type="function", 
+                                name=function_name, 
+                                arguments=argument_diff
                                 ).model_dump(exclude_none=True)
                             )
                         ])
@@ -217,15 +217,13 @@ class Phi4MiniJsonToolParser(ToolParser):
                 # Stream arguments
             else:
                 cur_arguments = current_tool_call.get("arguments")
-                function_name = current_tool_call.get("name", "unknown_function")  # Ensure name is not None
+                function_name = current_tool_call.get("name", "unknown_function")
                 delta = None
-                check_arguments = True
 
                 if cur_arguments:
                     sent = len(self.streamed_args_for_tool[self.current_tool_id])
                     cur_args_json = json.dumps(cur_arguments)
                     
-                    # If we have a complete JSON or previous arguments to compare with
                     if is_complete:
                         argument_diff = cur_args_json[sent:]
                     elif self.current_tool_id < len(self.prev_tool_call_arr):
@@ -246,9 +244,9 @@ class Phi4MiniJsonToolParser(ToolParser):
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(
                                 index=self.current_tool_id,
-                                type="function",  # Always set type to "function"
+                                type="function",  
                                 function=DeltaFunctionCall(
-                                    name=function_name,  # Always include the function name
+                                    name=function_name,  
                                     arguments=argument_diff
                                 ).model_dump(exclude_none=True)
                             )
