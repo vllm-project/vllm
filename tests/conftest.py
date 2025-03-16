@@ -703,10 +703,10 @@ class VllmRunner:
     - `trust_remote_code`: Set to `True` instead of `False` for convenience.
     - `seed`: Set to `0` instead of `None` for test reproducibility.
     - `max_model_len`: Set to `1024` instead of `None` to reduce memory usage.
-    - `block_size`: Set to `1024` instead of `None` to reduce memory usage.
+    - `block_size`: Set to `16` instead of `None` to reduce memory usage.
     - `enable_chunked_prefill`: Set to `False` instead of `None` for
       test reproducibility.
-    - `enforce_eager`: Set to `False` instead of `None` to reduce memory usage.
+    - `enforce_eager`: Set to `False` instead of `None` for faster CI.
     """
 
     def __init__(
