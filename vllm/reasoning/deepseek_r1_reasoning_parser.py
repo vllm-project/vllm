@@ -152,10 +152,9 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
 
         # Check if the start token is present in the model output, remove it
         # if it is present.
-        start_token_index = model_output.find(self.think_start_token)
-        if start_token_index != -1:
-            model_output = model_output[start_token_index +
-                                        len(self.think_start_token):]
+        model_output_parts = model_output.partition(self.think_start_token)
+        model_output = model_output_parts[2] if model_output_parts[
+            1] else model_output_parts[0]
 
         # DeepSeek R1 doesn't generate <think> now.
         # Thus we assume the reasoning content is always at the start.
@@ -163,18 +162,11 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         if self.end_token not in model_output:
             return model_output, None
         else:
-            # Find the end token index in the model output.
-            end_token_index = model_output.find(self.think_end_token)
+            reasoning_content, end, content = model_output.partition(
+                self.think_end_token)
             # If the end token is not found, return the model output as is.
             # It should not happen since we already checked for the presence
             # of the end token.
-            if end_token_index == -1:
-                return model_output, None
-            # Extract the reasoning content before the end token.
-            reasoning_content = model_output[:end_token_index]
-            # Extract the content after the end token.
-            content = model_output[end_token_index +
-                                   len(self.think_end_token):]
-            if len(content) == 0:
-                return reasoning_content, None
+            # If generation stops right after end-of-think, return null content
+            content = content or None
             return reasoning_content, content
