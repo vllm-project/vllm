@@ -152,7 +152,8 @@ class CudaPlatformBase(Platform):
             # here
             use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None \
                 or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
-            from vllm.attention.backends.flashmla import is_flashmla_supported
+            from vllm.attention.backends.mla.flashmla import (
+                is_flashmla_supported)
             if use_flashmla and is_flashmla_supported()[0] \
                 and cache_config.block_size != 64:
                 cache_config.block_size = 64
@@ -197,9 +198,10 @@ class CudaPlatformBase(Platform):
                             "triton_mla.TritonMLABackend")
                 else:
                     logger.info("Using Triton MLA backend.")
-                    return "vllm.attention.backends.triton_mla.TritonMLABackend"
+                    return ("vllm.attention.backends.mla."
+                            "triton_mla.TritonMLABackend")
             else:
-                from vllm.attention.backends.flashmla import (
+                from vllm.attention.backends.mla.flashmla import (
                     is_flashmla_supported)
                 if not is_flashmla_supported()[0]:
                     logger.warning(
@@ -218,7 +220,7 @@ class CudaPlatformBase(Platform):
                                 "flashmla.FlashMLABackend")
                     else:
                         logger.info("Using FlashMLA backend.")
-                        return ("vllm.attention.backends."
+                        return ("vllm.attention.backends.mla."
                                 "flashmla.FlashMLABackend")
         if use_v1:
             logger.info_once("Using Flash Attention backend on V1 engine.")
