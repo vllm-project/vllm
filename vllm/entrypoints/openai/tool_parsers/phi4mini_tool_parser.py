@@ -108,6 +108,5 @@ class Phi4MiniJsonToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Optional[DeltaMessage]:
-
-        # case: we are starting a new tool in the array
+        
         return None
