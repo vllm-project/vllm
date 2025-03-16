@@ -9,9 +9,9 @@ from model import (EarlyStopping, LstmMemoryPredict, MlpMemoryPredict,
                    MlpMemoryPredictClassification)
 from util import onehot_to_sequence, sequence_to_onehot
 
-window_size = 4
+window_size = 5
 mod = 100
-data_file_path = os.path.dirname(os.path.abspath(__file__)) + "/../data/output.csv"
+data_file_path = os.path.dirname(os.path.abspath(__file__)) + "/../data/pure_sequence.csv"
 output_log = os.path.dirname(os.path.abspath(__file__)) + "/../data/output.txt"
 
 # Redirect output
@@ -44,7 +44,7 @@ def loss_fn(input, outputs, labels):
     return criterion(diff_out, diff_label)
     
 # Train the model
-for epoch in range(20):
+for epoch in range(30):
     model.train()
     early_stopping = EarlyStopping(patience=3)
     for inputs, label, input_onehot, label_onehot in train_loader:
