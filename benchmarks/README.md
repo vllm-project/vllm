@@ -82,10 +82,10 @@ Then run the benchmarking script
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 MODEL_NAME="NousResearch/Hermes-3-Llama-3.1-8B"
 NUM_PROMPTS=10
-BACKEND="openai-chat"
+BACKEND="vllm"
 DATASET_NAME="sharegpt"
 DATASET_PATH="<your data path>/ShareGPT_V3_unfiltered_cleaned_split.json"
-python3 vllm/benchmarks/benchmark_serving.py --backend ${BACKEND} --model ${MODEL_NAME} --endpoint /v1/chat/completions --dataset-name ${DATASET_NAME} --dataset-path ${DATASET_PATH} --num-prompts ${NUM_PROMPTS}
+python3 vllm/benchmarks/benchmark_serving.py --backend ${BACKEND} --model ${MODEL_NAME} --endpoint /v1/completions --dataset-name ${DATASET_NAME} --dataset-path ${DATASET_PATH} --num-prompts ${NUM_PROMPTS}
 ```
 
 If successful, you will see the following output
