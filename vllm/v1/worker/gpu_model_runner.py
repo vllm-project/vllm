@@ -1076,10 +1076,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Includes spec decode tokens.
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
                 sampled_token_ids, self.input_batch.vocab_size)
-        avg_len = sum(
-            len(ids)
-            for ids in valid_sampled_token_ids) / len(valid_sampled_token_ids)
-        print(f"Average length of valid sampled token ids: {avg_len:.2f}")
         if not self.use_spec_decode:
             spec_token_ids = None
         else:
