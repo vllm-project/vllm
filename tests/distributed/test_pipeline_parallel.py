@@ -39,6 +39,7 @@ def use_v0_only(monkeypatch):
 class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
+    sp_enabled: bool
     eager_mode: bool
     chunked_prefill: bool
 
@@ -81,22 +82,27 @@ class PPTestSettings:
             parallel_setups=[
                 ParallelSetup(tp_size=tp_base,
                               pp_size=pp_base,
+                              sp_enabled=False,
                               eager_mode=False,
                               chunked_prefill=False),
                 ParallelSetup(tp_size=tp_base,
                               pp_size=2 * pp_base,
+                              sp_enabled=False,
                               eager_mode=False,
                               chunked_prefill=True),
                 ParallelSetup(tp_size=tp_base,
                               pp_size=2 * pp_base,
+                              sp_enabled=False,
                               eager_mode=True,
                               chunked_prefill=False),
                 ParallelSetup(tp_size=2 * tp_base,
                               pp_size=pp_base,
+                              sp_enabled=False,
                               eager_mode=False,
                               chunked_prefill=True),
                 ParallelSetup(tp_size=2 * tp_base,
                               pp_size=pp_base,
+                              sp_enabled=False,
                               eager_mode=True,
                               chunked_prefill=False),
             ],
@@ -121,11 +127,48 @@ class PPTestSettings:
             parallel_setups=[
                 ParallelSetup(tp_size=tp_base,
                               pp_size=pp_base,
+                              sp_enabled=False,
                               eager_mode=True,
-                              chunked_prefill=False),
+                              chunked_prefill=False)
             ],
             distributed_backends=["mp"],
             vllm_major_versions=["0"],
+            task=task,
+            test_options=PPTestOptions(multi_node_only=multi_node_only,
+                                       load_format=load_format),
+        )
+
+    @staticmethod
+    def sp(
+        *,
+        tp_base: int = 2,
+        pp_base: int = 1,
+        task: TaskOption = "auto",
+        multi_node_only: bool = False,
+        load_format: Optional[str] = None,
+    ):
+        return PPTestSettings(
+            parallel_setups=[
+                ParallelSetup(tp_size=tp_base,
+                              pp_size=pp_base,
+                              sp_enabled=True,
+                              eager_mode=False,
+                              chunked_prefill=False),
+                ParallelSetup(tp_size=2 * tp_base,
+                              pp_size=pp_base,
+                              sp_enabled=True,
+                              eager_mode=False,
+                              chunked_prefill=True),
+
+                # current sp doesn't support combination with pp
+                # ParallelSetup(tp_size=2 * tp_base,
+                #               pp_size=2 * pp_base,
+                #               sp_enabled=True,
+                #               eager_mode=True,
+                #               chunked_prefill=False),
+            ],
+            distributed_backends=["mp", "mp"],
+            vllm_major_versions=["0", "1"],
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
@@ -271,10 +314,10 @@ def _compare_tp(
     (
         tp_size,
         pp_size,
+        sp_enabled,
         eager_mode,
         chunked_prefill,
     ) = parallel_setup
-
     multi_node_only, load_format = test_options
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
@@ -363,6 +406,9 @@ def _compare_tp(
         "--distributed-executor-backend",
         distributed_backend,
     ]
+
+    if sp_enabled:
+        pp_args.append("--enable-sequence-parallel")
 
     # compare without pipeline parallelism
     # NOTE: use mp backend for TP
@@ -462,6 +508,48 @@ def test_tp_language_embedding(
 )
 @create_new_process_for_each_test()
 def test_tp_multimodal_generation(
+    model_id: str,
+    parallel_setup: ParallelSetup,
+    distributed_backend: str,
+    vllm_major_version: str,
+    task: TaskOption,
+    test_options: PPTestOptions,
+    num_gpus_available,
+):
+    _compare_tp(model_id,
+                parallel_setup,
+                distributed_backend,
+                vllm_major_version,
+                task,
+                test_options,
+                num_gpus_available,
+                method="generate",
+                is_multimodal=True)
+
+
+SP_TEXT_GENERATION_MODELS = {
+    # [Decoder-only]
+    "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.sp(),
+}
+
+SP_TEST_MODELS = [
+    # TODO support other models
+    # [LANGUAGE GENERATION]
+    "meta-llama/Llama-3.2-1B-Instruct",
+]
+
+
+@pytest.mark.parametrize(
+    ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
+     "task", "test_options"),
+    [
+        params for model_id, settings in SP_TEXT_GENERATION_MODELS.items()
+        for params in settings.iter_params(model_id)
+        if model_id in SP_TEST_MODELS
+    ],
+)
+@fork_new_process_for_each_test
+def test_tp_sp_generation(
     model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
