@@ -105,7 +105,6 @@ class Phi4MiniJsonToolParser(ToolParser):
 
         except Exception:
             logger.exception("Error in extracting tool call from response.")
-            # return information to just treat the tool call as regular JSON
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
@@ -123,8 +122,6 @@ class Phi4MiniJsonToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> Optional[DeltaMessage]:
 
-        # If not starting with the bot token or doesn't contain function call pattern,
-        # treat as regular content
         pattern = r'functools\[(.*?)\]'
         matches = re.search(pattern, current_text, re.DOTALL)
 
@@ -166,7 +163,6 @@ class Phi4MiniJsonToolParser(ToolParser):
             # Normalize the arguments/parameters field
             for tool in tool_call_arr:
                 if "parameters" in tool:
-                    assert "arguments" not in tool, "model generated both parameters and arguments"
                     tool["arguments"] = tool["parameters"]
 
             delta: Optional[DeltaMessage] = None
@@ -236,7 +232,7 @@ class Phi4MiniJsonToolParser(ToolParser):
                 if cur_arguments:
                     sent = len(self.streamed_args_for_tool[self.current_tool_id])
                     cur_args_json = json.dumps(cur_arguments)
-                    argument_diff: Optional[str] = None
+                    # argument_diff: Optional[str] = None
                     
                     # If we have a complete JSON or previous arguments to compare with
                     if is_complete:
