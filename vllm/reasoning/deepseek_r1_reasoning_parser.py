@@ -168,5 +168,5 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
             # It should not happen since we already checked for the presence
             # of the end token.
             # If generation stops right after end-of-think, return null content
-            content = content or None
-            return reasoning_content, content
+            final_content = content or None
+            return reasoning_content, final_content
