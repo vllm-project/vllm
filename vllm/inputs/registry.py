@@ -330,11 +330,6 @@ class InputRegistry:
         from vllm.multimodal import MultiModalKwargs
         from vllm.multimodal.profiling import MultiModalProfiler
 
-        if seq_len > model_config.max_model_len:
-            raise AssertionError(
-                f"Profiling attempted with sequence length ({seq_len}) "
-                f"greater than model length ({model_config.max_model_len})")
-
         if mm_registry.has_processor(model_config):
             tokenizer = cached_tokenizer_from_config(model_config)
             processor = mm_registry.create_processor(model_config,
