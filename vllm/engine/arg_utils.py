@@ -1487,13 +1487,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # No MistralTokenizer support so far (not compatible
-        # with xgrammar)
-        if model_config.tokenizer_mode == "mistral":
-            _raise_or_fallback(feature_name="--tokenizer-mode mistral",
-                               recommend_to_remove=False)
-            return False
-
         # No CPU offloading yet.
         if self.cpu_offload_gb != EngineArgs.cpu_offload_gb:
             _raise_or_fallback(feature_name="--cpu-offload-gb",
