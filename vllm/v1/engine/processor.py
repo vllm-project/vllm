@@ -225,7 +225,7 @@ class Processor:
                 sorted_mm_hashes,
             ) = merge_and_sort_multimodal_metadata(
                 decoder_inputs.multi_modal_placeholders,
-                decoder_inputs.multi_modal_hashes,
+                decoder_inputs.multi_modal_hashes if self.use_hash else None,
             )
 
             # NOTE: Sort multimodal inputs/kwargs ONLY IF there are multiple
