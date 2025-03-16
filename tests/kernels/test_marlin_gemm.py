@@ -220,6 +220,7 @@ def test_gptq_marlin_gemm(
         if group_size == size_k:
             return
 
+    a_input=rand_data((size_m, size_k))
     b_weight = rand_data((size_k, size_n))
 
     w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
@@ -230,45 +231,38 @@ def test_gptq_marlin_gemm(
     workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
                                 GPTQ_MARLIN_MAX_PARALLEL)
 
-    def check_for_input(a_input):
-        opcheck(torch.ops._C.gptq_marlin_gemm,
-                (a_input, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
-                 workspace.scratch, quant_type.id, a_input.shape[0],
-                 b_weight.shape[1], a_input.shape[1], is_k_full, False,
-                 use_atomic_add, use_fp32_reduce, False),
-                test_utils=DEFAULT_OPCHECK_TEST_UTILS)
+    opcheck(torch.ops._C.gptq_marlin_gemm,
+            (a_input, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
+                workspace.scratch, quant_type.id, a_input.shape[0],
+                b_weight.shape[1], a_input.shape[1], is_k_full, False,
+                use_atomic_add, use_fp32_reduce, False),
+            test_utils=DEFAULT_OPCHECK_TEST_UTILS)
 
-        output = ops.gptq_marlin_gemm(
-            a_input,
-            marlin_q_w,
-            marlin_s,
-            marlin_zp,
-            g_idx,
-            sort_indices,
-            workspace.scratch,
-            quant_type,
-            a_input.shape[0],
-            b_weight.shape[1],
-            a_input.shape[1],
-            is_k_full=is_k_full,
-            has_zp=False,
-            use_atomic_add=use_atomic_add,
-            use_fp32_reduce=use_fp32_reduce,
-            is_zp_float=False,
-        )
-        output_ref = torch.matmul(a_input, w_ref)
+    output = ops.gptq_marlin_gemm(
+        a_input,
+        marlin_q_w,
+        marlin_s,
+        marlin_zp,
+        g_idx,
+        sort_indices,
+        workspace.scratch,
+        quant_type,
+        a_input.shape[0],
+        b_weight.shape[1],
+        a_input.shape[1],
+        is_k_full=is_k_full,
+        has_zp=False,
+        use_atomic_add=use_atomic_add,
+        use_fp32_reduce=use_fp32_reduce,
+        is_zp_float=False,
+    )
+    output_ref = torch.matmul(a_input, w_ref)
 
-        torch.cuda.synchronize()
+    torch.cuda.synchronize()
 
-        max_diff = compute_max_diff(output, output_ref)
+    max_diff = compute_max_diff(output, output_ref)
 
-        assert max_diff < 0.04
-
-    check_for_input(a_input=rand_data((size_m, size_k)))
-    if not act_order:
-        # check for non-contiguous input
-        check_for_input(a_input=rand_data((size_m, size_k + 16))[:,
-                                                                 8:size_k + 8])
+    assert max_diff < 0.04
 
 
 # TODO: find better way to test this?
@@ -604,6 +598,52 @@ def test_marlin_qqq_gemm(
         a_input.shape[1],
     )
     output_ref = torch.matmul(q_a.half() * s_a.half(), w_ref)
+
+    torch.cuda.synchronize()
+
+    max_diff = compute_max_diff(output, output_ref)
+
+    assert max_diff < 0.04
+
+
+def test_marlin_gemm_subset_input():
+    quant_type = scalar_types.uint4
+    group_size = 128
+
+    size_m, size_k, size_n = 32, 1024, 2048
+    big_m = size_m * 2
+    big_k = size_k * 2
+
+    a_input = rand_data((big_m, big_k))[8:size_m + 8, 8:size_k + 8]
+    b_weight = rand_data((size_k, size_n))
+
+    w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
+        b_weight, quant_type, group_size, False)
+
+    marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
+
+    workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
+                                GPTQ_MARLIN_MAX_PARALLEL)
+
+    output = ops.gptq_marlin_gemm(
+        a_input,
+        marlin_q_w,
+        marlin_s,
+        marlin_zp,
+        g_idx,
+        sort_indices,
+        workspace.scratch,
+        quant_type,
+        a_input.shape[0],
+        b_weight.shape[1],
+        a_input.shape[1],
+        is_k_full=True,
+        has_zp=False,
+        use_atomic_add=False,
+        use_fp32_reduce=True,
+        is_zp_float=False,
+    )
+    output_ref = torch.matmul(a_input, w_ref)
 
     torch.cuda.synchronize()
 
