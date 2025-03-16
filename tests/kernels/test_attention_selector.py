@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -39,40 +38,34 @@ def test_env(
         m.setenv("VLLM_USE_V1", "1" if use_v1 else "0")
         m.setenv(STR_BACKEND_ENV_VAR, name)
 
-        # Set up the platform based on device type
-        platform_map = {
-            "cpu": CpuPlatform(),
-            "hip": RocmPlatform(),
-            "openvino": OpenVinoPlatform(),
-            "cuda": CudaPlatform()
-        }
-
-        # Set the current platform using monkeypatch
-        m.setattr("vllm.attention.selector", "current_platform",
-                  platform_map[device])
-
-        # Mock openvino module if needed
-        if device == "openvino":
-            m.setitem(sys.modules, 'openvino', Mock())
-
-        # Get the backend
-        backend = get_attn_backend(16, torch.float16, torch.float16, 16, False)
-
-        # Determine expected backend
         if device == "cpu":
-            expected = "TORCH_SDPA"
+            with patch("vllm.attention.selector.current_platform",
+                       CpuPlatform()):
+                backend = get_attn_backend(16, torch.float16, torch.float16,
+                                           16, False)
+            assert backend.get_name() == "TORCH_SDPA"
         elif device == "hip":
-            expected = "ROCM_ATTN_VLLM_V1" if use_v1 else "ROCM_FLASH"
+            with patch("vllm.attention.selector.current_platform",
+                       RocmPlatform()):
+                backend = get_attn_backend(16, torch.float16, torch.float16,
+                                           16, False)
+            EXPECTED = "ROCM_ATTN_VLLM_V1" if use_v1 else "ROCM_FLASH"
+            assert backend.get_name() == EXPECTED
         elif device == "openvino":
-            expected = "OPENVINO"
-        elif device == "cuda" and name in ["XFORMERS", "FLASHINFER"]:
-            expected = "FLASH_ATTN_VLLM_V1" if use_v1 else name
+            with patch("vllm.attention.selector.current_platform",
+                       OpenVinoPlatform()), patch.dict('sys.modules',
+                                                       {'openvino': Mock()}):
+                backend = get_attn_backend(16, torch.float16, torch.float16,
+                                           16, False)
+            assert backend.get_name() == "OPENVINO"
         else:
-            # Skip test for other combinations
-            pytest.skip(f"Skipping test for device={device}, name={name}")
-
-        # Assert the expected backend
-        assert backend.get_name() == expected
+            if name in ["XFORMERS", "FLASHINFER"]:
+                with patch("vllm.attention.selector.current_platform",
+                           CudaPlatform()):
+                    backend = get_attn_backend(16, torch.float16,
+                                               torch.float16, 16, False)
+                EXPECTED = "FLASH_ATTN_VLLM_V1" if use_v1 else name
+                assert backend.get_name() == EXPECTED
 
 
 def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
@@ -130,13 +123,10 @@ def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.parametrize("use_v1", [True, False])
 def test_invalid_env(use_v1: bool, monkeypatch: pytest.MonkeyPatch):
 
-    with monkeypatch.context() as m:
+    with monkeypatch.context() as m, patch(
+            "vllm.attention.selector.current_platform", CudaPlatform()):
         m.setenv("VLLM_USE_V1", "1" if use_v1 else "0")
         m.setenv(STR_BACKEND_ENV_VAR, STR_INVALID_VAL)
-
-        # Set the current platform to CUDA using monkeypatch
-        monkeypatch.setattr("vllm.attention.selector", "current_platform",
-                            CudaPlatform())
 
         # Test with head size 32
         backend = get_attn_backend(32, torch.float16, None, 16, False)
