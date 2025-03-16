@@ -607,7 +607,7 @@ def test_marlin_qqq_gemm(
 
 
 def test_marlin_gemm_subset_input():
-    quant_type = scalar_types.uint4
+    quant_type = scalar_types.uint4b8
     group_size = 128
 
     size_m, size_k, size_n = 32, 1024, 2048
