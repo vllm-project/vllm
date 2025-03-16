@@ -176,7 +176,7 @@ __global__ void __launch_bounds__(64)
     for (int k_0_1 = 0; k_0_1 < 2; ++k_0_1) {
       {
         unsigned int addr;
-        __asm__ __volatile__(
+        asm volatile(
             "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, "
             "addr; }\n"
             : "=r"(addr)
@@ -184,7 +184,7 @@ __global__ void __launch_bounds__(64)
                           (((((int)threadIdx.x) & 15) * 40) +
                            ((((int)threadIdx.x) >> 4) * 8)))));
 
-        __asm__ __volatile__(
+        asm volatile(
             "ldmatrix.sync.aligned.m8n8.x4.shared.b16"
             "{%0, %1, %2, %3}, [%4];\n"
             : "=r"(((unsigned*)(A_shared_warp + 0))[0]),
@@ -197,7 +197,7 @@ __global__ void __launch_bounds__(64)
       for (int ax1_0 = 0; ax1_0 < N / 32; ++ax1_0) {
         {
           unsigned int addr;
-          __asm__ __volatile__(
+          asm volatile(
               "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, "
               "addr; }\n"
               : "=r"(addr)
@@ -206,7 +206,7 @@ __global__ void __launch_bounds__(64)
                                          (ax1_0 * 16))])) +
                             (((((int)threadIdx.x) & 15) * (N + 8)) +
                              ((((int)threadIdx.x) >> 4) * 8)))));
-          __asm__ __volatile__(
+          asm volatile(
               "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16"
               "{%0, %1, %2, %3}, [%4];\n"
               : "=r"(((unsigned*)(B_shared_warp + (ax1_0 * 8)))[0]),
@@ -219,7 +219,7 @@ __global__ void __launch_bounds__(64)
       for (int j_0_4 = 0; j_0_4 < N / 32; ++j_0_4) {
   #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
         {
-          __asm__ __volatile__(
+          asm volatile(
               "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
               "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
               : "=f"(((float*)(C_warp + (j_0_4 * 8)))[0]),
@@ -236,7 +236,7 @@ __global__ void __launch_bounds__(64)
         }
 
         {
-          __asm__ __volatile__(
+          asm volatile(
               "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
               "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
               : "=f"(((float*)(C_warp + ((j_0_4 * 8) + 4)))[0]),
@@ -253,7 +253,7 @@ __global__ void __launch_bounds__(64)
         }
 
         {
-          __asm__ __volatile__(
+          asm volatile(
               "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
               "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
               : "=f"(((float*)(C_warp + (j_0_4 * 8)))[0]),
@@ -270,7 +270,7 @@ __global__ void __launch_bounds__(64)
         }
 
         {
-          __asm__ __volatile__(
+          asm volatile(
               "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32"
               "{%0, %1, %2, %3}, {%4, %5}, {%6}, {%7, %8, %9, %10};\n"
               : "=f"(((float*)(C_warp + ((j_0_4 * 8) + 4)))[0]),
@@ -287,7 +287,7 @@ __global__ void __launch_bounds__(64)
         }
   #else
         {
-          __asm__ __volatile__(
+          asm volatile(
               "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
               "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, "
               "%13};\n"
@@ -308,7 +308,7 @@ __global__ void __launch_bounds__(64)
         }
 
         {
-          __asm__ __volatile__(
+          asm volatile(
               "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
               "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, "
               "%13};\n"

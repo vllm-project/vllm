@@ -9,6 +9,10 @@
 #include <c10/util/Half.h>
 #include <c10/cuda/CUDAException.h>  // For C10_CUDA_CHECK and C10_CUDA_KERNEL_LAUNCH_CHECK
 
+#ifdef _WIN32
+#include <math.h> 
+#endif
+
 #ifndef USE_ROCM
     #include <cub/block/block_load.cuh>
     #include <cub/block/block_store.cuh>
@@ -308,15 +312,15 @@ template<int kNThreads, int kNItems, typename input_t, typename weight_t>
 void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
     // Only kNRows == 1 is tested for now, which ofc doesn't differ from previously when we had each block
     // processing 1 row.
-    constexpr int kNRows = 1;
+    static constexpr int kNRows = 1;
     // kIsVariableB, kIsVariableC and kHasZ are all set to True to reduce binary size
-    constexpr bool kIsVariableB = true;
-    constexpr bool kIsVariableC = true;
-    constexpr bool kHasZ = true;
+    static constexpr bool kIsVariableB = true;
+    static constexpr bool kIsVariableC = true;
+    static constexpr bool kHasZ = true;
     BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
         BOOL_SWITCH(params.query_start_loc_ptr != nullptr , kVarlen, [&] {
             using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ,  kVarlen, input_t, weight_t>;
-            constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
+            static constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
             dim3 grid(params.batch, params.dim / kNRows);
             auto kernel = &selective_scan_fwd_kernel<Ktraits>;
             if (kSmemSize >= 48 * 1024) {

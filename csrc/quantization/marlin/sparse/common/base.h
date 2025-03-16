@@ -44,7 +44,7 @@ using I4 = Vec<int, 4>;
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#matrix-fragments-for-mma-m16n8k16-with-floating-point-type
 using FragA = Vec<half2, 4>;
 using FragB = Vec<half2, 2>;
-using FragM = Vec<uint, 1>;
+using FragM = Vec<unsigned int, 1>;
 using FragC = Vec<float, 4>;
 using FragS = Vec<half2, 1>;  // quantization scales
 

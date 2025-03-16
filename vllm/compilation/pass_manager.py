@@ -20,7 +20,15 @@ class PlaceHolder:
     pass
 
 
-if torch.__version__ < "2.6":
+"""
+Torch major / minor version that does not interfere with nightly builds / torch source compilations
+"""
+
+torch_major_version = int(torch.__version__.split(".")[0])
+torch_minor_version = int(torch.__version__.split(".")[1])
+
+
+if torch_major_version <= 2 and torch_minor_version <= 5:
     Parent = PlaceHolder  # type: ignore
 else:
     Parent = torch._inductor.custom_graph_pass.CustomGraphPass  # type: ignore

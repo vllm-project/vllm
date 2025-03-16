@@ -54,6 +54,13 @@ else:
 
 from packaging.version import Version
 
+"""
+Torch major / minor version that does not interfere with nightly builds / torch source compilations
+"""
+
+torch_major_version = int(torch.__version__.split(".")[0])
+torch_minor_version = int(torch.__version__.split(".")[1])
+
 logger = init_logger(__name__)
 
 # This value is chosen to have a balance between ITL and TTFT. Note it is
@@ -3140,7 +3147,7 @@ class CompilationConfig(BaseModel):
         #    and it is not yet a priority. RFC here:
         #    https://github.com/vllm-project/vllm/issues/14703
 
-        if Version(torch.__version__) >= Version("2.6"):
+        if torch_major_version >= 2 and torch_major_version >= 6:
             KEY = 'enable_auto_functionalized_v2'
             if KEY not in self.inductor_compile_config:
                 self.inductor_compile_config[KEY] = False

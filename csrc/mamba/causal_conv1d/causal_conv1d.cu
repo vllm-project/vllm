@@ -15,7 +15,20 @@
 
 #include "static_switch.h"
 
-
+// Helper function to set the maximum dynamic shared memory attribute.
+// This function is defined at file scope so that the preprocessor directives
+// are not embedded inside a lambda.
+template <typename KernelT>
+void set_max_dynamic_shared_memory(KernelT kernel, int smem_size) {
+    if (smem_size >= 48 * 1024) {
+#ifndef USE_ROCM
+        C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+#else
+        C10_CUDA_CHECK(cudaFuncSetAttribute((void*)kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+        std::cerr << "Warning (causal_conv1d fwd launch): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior.\n" << std::endl;
+#endif
+    }
+}
 
 #define CHECK_SHAPE(x, ...) TORCH_CHECK(x.sizes() == torch::IntArrayRef({__VA_ARGS__}), #x " must have shape (" #__VA_ARGS__ ")")
 
@@ -499,18 +512,8 @@ void causal_conv1d_fwd_launch(ConvParamsBase &params, cudaStream_t stream) {
         dim3 grid(params.batch, params.dim);
 
         auto kernel = &causal_conv1d_fwd_kernel<Ktraits>;
-
-        if (kSmemSize >= 48 * 1024) {
-            #ifndef USE_ROCM
-            C10_CUDA_CHECK(cudaFuncSetAttribute(
-                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-            #else
-            // There is a slight signature discrepancy in HIP and CUDA "FuncSetAttribute" function.
-            C10_CUDA_CHECK(cudaFuncSetAttribute(
-                (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-            std::cerr << "Warning (causal_conv1d fwd launch): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
-            #endif
-        }
+		
+		set_max_dynamic_shared_memory(kernel, kSmemSize);        
         kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
 
         C10_CUDA_KERNEL_LAUNCH_CHECK();
