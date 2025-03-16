@@ -194,6 +194,7 @@ class Phi4MiniJsonToolParser(ToolParser):
                             )
                         ])
                         self.streamed_args_for_tool[self.current_tool_id] += argument_diff
+                        
                 
                 # Set up for the new tool
                 self.current_tool_id = len(tool_call_arr) - 1
