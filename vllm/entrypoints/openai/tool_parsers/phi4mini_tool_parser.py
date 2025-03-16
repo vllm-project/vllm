@@ -175,7 +175,7 @@ class Phi4MiniJsonToolParser(ToolParser):
                     # Ensure name is not None
                     function_name = current_tool_call.get(
                         "name", "unknown_function"
-                    )
+                    ) 
                     if cur_arguments:
                         cur_args_json = json.dumps(cur_arguments)
                         sent = len(\
@@ -194,7 +194,7 @@ class Phi4MiniJsonToolParser(ToolParser):
                             )
                         ])
                         self.streamed_args_for_tool[self.current_tool_id] += argument_diff
-                        
+
                 # Set up for the new tool
                 self.current_tool_id = len(tool_call_arr) - 1
                 self.current_tool_name_sent = False
