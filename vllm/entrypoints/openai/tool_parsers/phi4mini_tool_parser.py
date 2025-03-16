@@ -29,7 +29,7 @@ class Phi4MiniJsonToolParser(ToolParser):
     Tool call parser for phi-4-mini models intended for use with the
     examples/tool_chat_template_llama.jinja template.
 
-    Used when --enable-auto-tool-choice --tool-call-parser phi4_mini_json 
+    Used when --enable-auto-tool-choice --tool-call-parser phi4_mini_json  
     are all set
     """
 
