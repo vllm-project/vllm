@@ -6,6 +6,10 @@ import pytest_asyncio
 
 from ...utils import RemoteOpenAIServer
 
+pytestmark = pytest.mark.skip(reason="Currently, these test cases are  \
+                              skipped due to limited resources in the \
+                              test pipeline. You can run these cases locally.")
+
 # a reasoning and tool calling model
 MODEL_NAME = "Qwen/QwQ-32B"
 
