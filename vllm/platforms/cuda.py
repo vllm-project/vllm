@@ -178,7 +178,65 @@ class CudaPlatformBase(Platform):
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
-        if use_mla:
+        # NOTE(andoorve): this whole thing can probably be refactored
+        # to be much cleaner.
+        # Highly nested if statements with semi-duplicated code.
+
+        def _flash_attn_usable() -> bool:
+            if not cls.has_device_capability(80):
+                # Volta and Turing NVIDIA GPUs.
+                logger.info(
+                    "Cannot use FlashAttention-2 backend for Volta and Turing "
+                    "GPUs.")
+                return False
+            elif dtype not in (torch.float16, torch.bfloat16):
+                logger.info(
+                    "Cannot use FlashAttention-2 backend for dtype other than "
+                    "torch.float16 or torch.bfloat16.")
+                return False
+            elif kv_cache_dtype is not None and \
+                kv_cache_dtype.startswith("fp8"):
+                logger.info(
+                    "Cannot use FlashAttention-2 backend for FP8 KV cache.")
+                if not use_v1:
+                    logger.warning(
+                        "Please use FlashInfer backend with FP8 KV Cache for "
+                        "better performance by setting environment variable "
+                        "VLLM_ATTENTION_BACKEND=FLASHINFER")
+                return False
+            elif block_size % 16 != 0:
+                logger.info(
+                    "Cannot use FlashAttention-2 backend for block size not "
+                    "divisible by 16.")
+                return False
+            # FlashAttn is valid for the model, checking if the package is
+            # installed.
+            try:
+                import vllm.vllm_flash_attn  # noqa: F401
+                if use_v1:
+                    from vllm.v1.attention.backends.flash_attn import (  # noqa: F401
+                        FlashAttentionBackend)
+                else:
+                    from vllm.attention.backends.flash_attn import (  # noqa: F401
+                        FlashAttentionBackend)
+
+                supported_sizes = \
+                    FlashAttentionBackend.get_supported_head_sizes()
+                if head_size not in supported_sizes:
+                    logger.info(
+                        "Cannot use FlashAttention-2 backend for head size %d.",
+                        head_size)
+                    return False
+                return True
+            except ImportError:
+                logger.info(
+                    "Cannot use FlashAttention-2 backend because the "
+                    "vllm.vllm_flash_attn package is not found. "
+                    "Make sure that vllm_flash_attn was built and installed "
+                    "(on by default).")
+                return False
+
+        def _mla_backend():
             # TODO(lucas): refactor to  be more concise
             #  we should probably consider factoring out V1 here
             if selected_backend == _Backend.TRITON_MLA or block_size != 64:
@@ -196,11 +254,13 @@ class CudaPlatformBase(Platform):
                     logger.warning(
                         "FlashMLA backend is not supported due to %s",
                         is_flashmla_supported()[1])
+                    return None
                 elif block_size != 64:
                     logger.warning(
                         "FlashMLA backend is not supported for block size %d"
                         " (currently only supports block size 64).",
                         block_size)
+                    return None
                 else:
                     if use_v1:
                         logger.info_once(
@@ -211,79 +271,49 @@ class CudaPlatformBase(Platform):
                         logger.info("Using FlashMLA backend.")
                         return ("vllm.attention.backends."
                                 "flashmla.FlashMLABackend")
+
         if use_v1:
-            logger.info_once("Using Flash Attention backend on V1 engine.")
-            return ("vllm.v1.attention.backends.flash_attn."
-                    "FlashAttentionBackend")
-        if selected_backend == _Backend.FLASHINFER:
-            logger.info("Using FlashInfer backend.")
-            return "vllm.attention.backends.flashinfer.FlashInferBackend"
-        elif selected_backend == _Backend.XFORMERS:
-            logger.info("Using XFormers backend.")
-            return "vllm.attention.backends.xformers.XFormersBackend"
-        elif selected_backend == _Backend.FLASH_ATTN:
-            pass
-        elif selected_backend:
-            raise ValueError(
-                f"Invalid attention backend for {cls.device_name}, "
-                f"with use_v1: {use_v1} use_mla: {use_mla}")
+            if use_mla and _mla_backend() is not None:
+                return _mla_backend()
+            if selected_backend == _Backend.XFORMERS_VLLM_V1:
+                logger.info_once("Using XFormers backend on V1 engine.")
+                return "vllm.v1.attention.backends.xformers.XFormersBackend"
+            elif selected_backend == _Backend.FLASH_ATTN_VLLM_V1:
+                pass
+            elif selected_backend:
+                raise ValueError(
+                    f"Invalid attention backend for {cls.device_name}, "
+                    f"with use_v1: {use_v1} use_mla: {use_mla}")
 
-        target_backend = _Backend.FLASH_ATTN
-        if not cls.has_device_capability(80):
-            # Volta and Turing NVIDIA GPUs.
-            logger.info(
-                "Cannot use FlashAttention-2 backend for Volta and Turing "
-                "GPUs.")
-            target_backend = _Backend.XFORMERS
-        elif dtype not in (torch.float16, torch.bfloat16):
-            logger.info(
-                "Cannot use FlashAttention-2 backend for dtype other than "
-                "torch.float16 or torch.bfloat16.")
-            target_backend = _Backend.XFORMERS
-        elif kv_cache_dtype is not None and \
-            kv_cache_dtype.startswith("fp8"):
-            logger.info(
-                "Cannot use FlashAttention-2 backend for FP8 KV cache.")
-            logger.warning(
-                "Please use FlashInfer backend with FP8 KV Cache for "
-                "better performance by setting environment variable "
-                "VLLM_ATTENTION_BACKEND=FLASHINFER")
-            target_backend = _Backend.XFORMERS
-        elif block_size % 16 != 0:
-            logger.info(
-                "Cannot use FlashAttention-2 backend for block size not "
-                "divisible by 16.")
-            target_backend = _Backend.XFORMERS
+            if _flash_attn_usable():
+                logger.info_once("Using Flash Attention backend on V1 engine.")
+                return (
+                    "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+                )
+            logger.info_once("Using XFormers backend on V1 engine.")
+            return "vllm.v1.attention.backends.xformers.XFormersBackend"
+        else:
+            if use_mla and _mla_backend() is not None:
+                return _mla_backend()
+            if selected_backend == _Backend.FLASHINFER:
+                logger.info("Using FlashInfer backend.")
+                return "vllm.attention.backends.flashinfer.FlashInferBackend"
+            elif selected_backend == _Backend.XFORMERS:
+                logger.info("Using XFormers backend.")
+                return "vllm.attention.backends.xformers.XFormersBackend"
+            elif selected_backend == _Backend.FLASH_ATTN:
+                pass
+            elif selected_backend:
+                raise ValueError(
+                    f"Invalid attention backend for {cls.device_name}, "
+                    f"with use_v1: {use_v1} use_mla: {use_mla}")
 
-        # FlashAttn is valid for the model, checking if the package is
-        # installed.
-        if target_backend == _Backend.FLASH_ATTN:
-            try:
-                import vllm.vllm_flash_attn  # noqa: F401
-                from vllm.attention.backends.flash_attn import (  # noqa: F401
-                    FlashAttentionBackend)
+            if not _flash_attn_usable():
+                logger.info("Using XFormers backend.")
+                return "vllm.attention.backends.xformers.XFormersBackend"
 
-                supported_sizes = \
-                    FlashAttentionBackend.get_supported_head_sizes()
-                if head_size not in supported_sizes:
-                    logger.info(
-                        "Cannot use FlashAttention-2 backend for head size %d.",
-                        head_size)
-                    target_backend = _Backend.XFORMERS
-            except ImportError:
-                logger.info(
-                    "Cannot use FlashAttention-2 backend because the "
-                    "vllm.vllm_flash_attn package is not found. "
-                    "Make sure that vllm_flash_attn was built and installed "
-                    "(on by default).")
-                target_backend = _Backend.XFORMERS
-
-        if target_backend == _Backend.XFORMERS:
-            logger.info("Using XFormers backend.")
-            return "vllm.attention.backends.xformers.XFormersBackend"
-
-        logger.info("Using Flash Attention backend.")
-        return "vllm.attention.backends.flash_attn.FlashAttentionBackend"
+            logger.info("Using Flash Attention backend.")
+            return "vllm.attention.backends.flash_attn.FlashAttentionBackend"
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

@@ -1,19 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with xFormers."""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Optional
 
-import numpy as np
 import torch
-
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (AttentionBias,
                                          BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
+
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.worker.gpu_input_batch import InputBatch
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -23,20 +27,24 @@ class XFormersBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
+    def get_supported_head_sizes() -> list[int]:
+        return PagedAttention.get_supported_head_sizes()
 
     @staticmethod
     def get_name() -> str:
         return "XFORMERS_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type["XFormersImpl"]:
+    def get_impl_cls() -> type["XFormersImpl"]:
         return XFormersImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["AttentionMetadata"]:
         return XFormersMetadata
+
+    @staticmethod
+    def get_builder_cls() -> type["XFormersMetadataBuilder"]:
+        return XFormersMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -44,7 +52,7 @@ class XFormersBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
@@ -53,6 +61,7 @@ class XFormersBackend(AttentionBackend):
     def use_cascade_attention(*args, **kwargs) -> bool:
         # XFormers does not support cascade attention for now
         return False
+
 
 @dataclass
 class XFormersMetadata:
@@ -81,19 +90,54 @@ class XFormersMetadata:
         # when alibi slopes is used. It is because of the limitation
         # from xformer API.
         # will not appear in the __repr__ and __init__
-        self.attn_bias: Optional[List[AttentionBias]] = None
+        self.attn_bias: Optional[list[AttentionBias]] = None
+
+
+class XFormersMetadataBuilder:
+
+    def __init__(self, runner: "GPUModelRunner"):
+        self.runner = runner
+
+    def reorder_batch(self, input_batch: "InputBatch",
+                      scheduler_output: "SchedulerOutput") -> bool:
+        return False
+
+    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+              common_prefix_len: int) -> XFormersMetadata:
+        max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
+        query_start_loc = self.runner.query_start_loc_cpu[:num_reqs + 1].to(
+            self.runner.device, non_blocking=True)
+        seq_lens = self.runner.seq_lens_cpu[:num_reqs].to(self.runner.device,
+                                                          non_blocking=True)
+        block_table = (
+            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
+        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
+            self.runner.device, non_blocking=True).long()
+
+        attn_metadata = XFormersMetadata(
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=max_query_len,
+            query_start_loc=query_start_loc,
+            max_seq_len=max_seq_len,
+            seq_lens=seq_lens,
+            block_table=block_table,
+            slot_mapping=slot_mapping,
+        )
+        return attn_metadata
+
 
 class XFormersImpl(AttentionImpl[XFormersMetadata]):
+
     def __init__(
         self,
         num_heads: int,
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> None:
@@ -164,6 +208,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+
+        assert output is not None, "Output tensor must be provided."
+
         attn_type = self.attn_type
 
         if attn_metadata is None:
@@ -179,7 +226,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             assert value is None
 
         num_actual_tokens = attn_metadata.num_actual_tokens
-        
+
         # Self-attention vs. cross-attention will impact
         # which KV cache memory-mapping & which
         # seqlen datastructures we utilize
@@ -200,11 +247,14 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory
                 # profiling run.
-                PagedAttention.write_to_paged_cache(
-                    key, value, key_cache, value_cache, attn_metadata.slot_mapping,
-                    self.kv_cache_dtype, layer._k_scale, layer._v_scale)
+                PagedAttention.write_to_paged_cache(key, value, key_cache,
+                                                    value_cache,
+                                                    attn_metadata.slot_mapping,
+                                                    self.kv_cache_dtype,
+                                                    layer._k_scale,
+                                                    layer._v_scale)
 
-        if attn_metadata.max_query_len > 1: 
+        if attn_metadata.max_query_len > 1:
             # Prompt run.
             print(attn_metadata.block_table.numel())
             if attn_metadata.max_query_len == num_actual_tokens:
@@ -212,7 +262,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # block tables are empty if the prompt does not have a cached
                 # prefix.
                 out = self._run_memory_efficient_xformers_forward(
-                    query[:num_actual_tokens], key, value, attn_metadata, attn_type=attn_type)
+                    query[:num_actual_tokens],
+                    key,
+                    value,
+                    attn_metadata,
+                    attn_type=attn_type)
                 assert out.shape == output[:num_actual_tokens].shape
                 output[:num_actual_tokens] = out
             else:
@@ -365,9 +419,9 @@ def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     num_kv_heads: int,
     dtype: torch.dtype,
-    seq_lens: List[int],
-) -> List[AttentionBias]:
-    attn_biases: List[AttentionBias] = []
+    seq_lens: list[int],
+) -> list[AttentionBias]:
+    attn_biases: list[AttentionBias] = []
     for seq_len in seq_lens:
         bias = torch.arange(seq_len, dtype=dtype)
         # NOTE(zhuohan): HF uses
@@ -396,6 +450,7 @@ def _make_alibi_bias(
 
     return attn_biases
 
+
 def _get_attn_bias(
     attn_metadata: XFormersMetadata,
     attn_type: str,
@@ -418,12 +473,13 @@ def _get_attn_bias(
             or attn_type == AttentionType.ENCODER_ONLY):
         return attn_metadata.attn_bias
     else:
-        raise AttributeError(f"Invalid or unsupported attention type {str(attn_type)}")
+        raise AttributeError(
+            f"Invalid or unsupported attention type {str(attn_type)}")
 
 
 def _set_attn_bias(
     attn_metadata: XFormersMetadata,
-    attn_bias: List[Optional[AttentionBias]],
+    attn_bias: list[Optional[AttentionBias]],
     attn_type: str,
 ) -> None:
     '''
@@ -442,4 +498,5 @@ def _set_attn_bias(
             or attn_type == AttentionType.ENCODER_ONLY):
         attn_metadata.attn_bias = attn_bias
     else:
-        raise AttributeError(f"Invalid or unsupported attention type {str(attn_type)}")
+        raise AttributeError(
+            f"Invalid or unsupported attention type {str(attn_type)}")

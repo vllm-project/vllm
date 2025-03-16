@@ -19,7 +19,8 @@ else:
     _flashmla_C_AVAILABLE = False
 
 
-def is_flashmla_supported() -> Tuple[bool, Optional[str]]:
+def is_flashmla_supported(
+        block_size: Optional[int] = None) -> Tuple[bool, Optional[str]]:
     """
     Return: is_supported_flag, unsupported_reason (optional).
     """
@@ -32,6 +33,9 @@ def is_flashmla_supported() -> Tuple[bool, Optional[str]]:
             "compiled due to insufficient nvcc version or a supported arch "\
             "(only sm90a currently) was not in the list of target arches to "\
             "compile for."
+    if block_size is not None and block_size != 64:
+        return False, "FlashMLA backend is not supported for block size %d"\
+                      " (currently only supports block size 64).",
     return True, None
 
 
