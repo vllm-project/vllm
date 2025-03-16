@@ -56,7 +56,6 @@ class RejectionSampler(nn.Module):
         bonus_token_ids: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
-        print("draft_token_ids", draft_token_ids)
         token_ids, cu_num_draft_tokens = self._async_copy_to_device(
             draft_token_ids,
             target_logits.device,
@@ -198,8 +197,6 @@ def rejection_sample(
         device,
     )
 
-    print("recovered_token_ids", recovered_token_ids)
-    print("bonus_token_ids", bonus_token_ids)
     # Rejection sampling for random sampling requests.
     rejection_random_sample_kernel[(batch_size, )](
         output_token_ids,

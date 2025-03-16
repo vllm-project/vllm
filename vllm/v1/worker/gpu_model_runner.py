@@ -1071,8 +1071,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Includes spec decode tokens.
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
                 sampled_token_ids, self.input_batch.vocab_size)
-        print("valid_sampled_token_ids", valid_sampled_token_ids)
-        print("-" * 100)
 
         if not self.use_spec_decode:
             spec_token_ids = None
