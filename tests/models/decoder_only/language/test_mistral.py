@@ -212,7 +212,11 @@ def test_mistral_format(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Torch compile cache is causing issues in CI.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
     with vllm_runner(
             model,
             dtype=dtype,
