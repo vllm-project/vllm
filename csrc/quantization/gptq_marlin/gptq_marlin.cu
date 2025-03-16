@@ -42,7 +42,7 @@ namespace marlin {
 __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int const* __restrict__ perm_int_ptr,
                                     int4* __restrict__ out_int4_ptr, int size_m,
-                                    int size_k, int block_rows) {}
+                                    int size_k, int lda, int block_rows) {}
 
 template <typename scalar_t,  // compute dtype, half or nv_float16
           const vllm::ScalarTypeId w_type_id,  // weight ScalarType id
@@ -459,7 +459,7 @@ __device__ inline void barrier_release(int* lock, bool reset = false) {
 __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int const* __restrict__ perm_int_ptr,
                                     int4* __restrict__ out_int4_ptr, int size_m,
-                                    int size_k, int block_rows) {
+                                    int size_k, int lda, int block_rows) {
   int start_row = block_rows * blockIdx.x;
   int finish_row = start_row + block_rows;
   if (finish_row > size_m) {
@@ -467,16 +467,19 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
   }
   int cur_block_rows = finish_row - start_row;
 
-  int row_stride = size_k * sizeof(half) / 16;
+  int input_row_stride = lda * sizeof(half) / 16;
+  int output_row_stride = size_k * sizeof(half) / 16;
 
   auto permute_row = [&](int row) {
     int iters = size_k / default_threads;
     int rest = size_k % default_threads;
 
-    int offset = row * row_stride;
+    int input_offset = row * input_row_stride;
+    int output_offset = row * output_row_stride;
 
-    half const* a_row_half = reinterpret_cast<half const*>(a_int4_ptr + offset);
-    half* out_half = reinterpret_cast<half*>(out_int4_ptr + offset);
+    half const* a_row_half =
+        reinterpret_cast<half const*>(a_int4_ptr + input_offset);
+    half* out_half = reinterpret_cast<half*>(out_int4_ptr + output_offset);
 
     int base_k = 0;
 
@@ -1781,7 +1784,7 @@ __global__ void Marlin(
                HAS_ZP, GROUP_BLOCKS, IS_ZP_FLOAT>                              \
             <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                 \
                 A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,      \
-                num_groups, prob_m, prob_n, prob_k, lda, locks,          \
+                num_groups, prob_m, prob_n, prob_k, lda, locks,                \
                 use_atomic_add, use_fp32_reduce);                              \
       }                                                                        \
     }
@@ -2185,8 +2188,9 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
     // Permute A columns
     int block_rows = div_ceil(prob_m, blocks);
     permute_cols_kernel<<<blocks, default_threads, 0, stream>>>(
-        A_ptr, perm_ptr, a_tmp_ptr, prob_m, prob_k, block_rows);
+        A_ptr, perm_ptr, a_tmp_ptr, prob_m, prob_k, lda, block_rows);
     A_ptr = a_tmp_ptr;
+    lda = prob_k;
   }
 
   // If we have a full K, then we can run the non-act-order version of Marlin
@@ -2302,6 +2306,9 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   // Verify device and strides
   TORCH_CHECK(a.device().is_cuda(), "A is not on GPU");
   TORCH_CHECK(a.stride(1) == 1, "A.stride(1) is not 1");
+  // We use int4 (16 bytes) to load A, so A must aligned to 16 bytes
+  TORCH_CHECK(a.stride(0) % 8 == 0, "A.stride(0) must divisible by 8");
+  TORCH_CHECK(((uint64_t)a.data_ptr()) % 16 == 0, "A must aligned to 16 bytes");
 
   TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
   TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
@@ -2331,14 +2338,8 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   torch::Tensor a_tmp;
   bool has_act_order = g_idx.size(0) != 0;
   if (has_act_order) {
-    // non-contiguous input is not implemented for act order now
-    TORCH_CHECK(a.is_contiguous(), "When act_order=True, A must be contiguous");
     a_tmp = torch::empty({size_m, size_k}, options);
   } else {
-    // We use int4 (16 bytes) to load A, so A must aligned to 16 bytes
-    TORCH_CHECK(a.stride(0) % 8 == 0, "A.stride(0) must divisible by 8");
-    TORCH_CHECK(((uint64_t)a.data_ptr()) % 16 == 0,
-                "A must aligned to 16 bytes");
     a_tmp = torch::empty({0}, options);
   }
 
