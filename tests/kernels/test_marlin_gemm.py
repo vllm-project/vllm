@@ -220,7 +220,7 @@ def test_gptq_marlin_gemm(
         if group_size == size_k:
             return
 
-    a_input=rand_data((size_m, size_k))
+    a_input = rand_data((size_m, size_k))
     b_weight = rand_data((size_k, size_n))
 
     w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
@@ -233,9 +233,9 @@ def test_gptq_marlin_gemm(
 
     opcheck(torch.ops._C.gptq_marlin_gemm,
             (a_input, marlin_q_w, marlin_s, marlin_zp, g_idx, sort_indices,
-                workspace.scratch, quant_type.id, a_input.shape[0],
-                b_weight.shape[1], a_input.shape[1], is_k_full, False,
-                use_atomic_add, use_fp32_reduce, False),
+             workspace.scratch, quant_type.id, a_input.shape[0],
+             b_weight.shape[1], a_input.shape[1], is_k_full, False,
+             use_atomic_add, use_fp32_reduce, False),
             test_utils=DEFAULT_OPCHECK_TEST_UTILS)
 
     output = ops.gptq_marlin_gemm(
