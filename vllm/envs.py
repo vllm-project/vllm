@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
-    VLLM_MM_INPUT_CACHE_SIZE: int = 256
+    VLLM_MM_INPUT_CACHE_GIB: int = 8
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -73,7 +73,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
-    VLLM_USE_V1: bool = False
+    VLLM_USE_V1: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -83,7 +83,6 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
-    VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -94,6 +93,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
+    VLLM_V0_USE_OUTLINES_CACHE: bool = False
 
 
 def get_default_cache_root():
@@ -431,11 +431,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
-    # Cache size for multimodal feature/input cache for multimodal models
-    # in unit of number of multimodal data items (e.g. image, video, audio).
-    # Default is 256 multimodal data items.
-    "VLLM_MM_INPUT_CACHE_SIZE":
-    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_SIZE", "256")),
+    # Cache size (in GiB) for multimodal input cache
+    # Default is 8GiB
+    "VLLM_MM_INPUT_CACHE_GIB":
+    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "8")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
@@ -520,7 +519,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, use the V1 code path.
     "VLLM_USE_V1":
-    lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
+    lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
@@ -578,15 +577,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RAY_BUNDLE_INDICES":
     lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
 
-    # When on a Nvidia GPU aligns single entries (within a page) so they are 256
-    # byte aligned for better performance, this increases the memory usage of
-    # the cache. Currently this only affects MLA that results in non-256
-    # byte aligned entries. This matches the alignment the CUDA runtime uses
-    # for all allocations. Currently this primarily affects MLA, for most other
-    # models the alignment is already naturally aligned to 256 bytes.
-    "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
-    lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
-
     # In some system, find_loaded_library() may not work. So we allow users to
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH":
@@ -622,6 +612,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
     "VLLM_MARLIN_USE_ATOMIC_ADD":
     lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
+
+    # Whether to turn on the outlines cache for V0
+    # This cache is unbounded and on disk, so it's not safe to use in
+    # an environment with potentially malicious users.
+    "VLLM_V0_USE_OUTLINES_CACHE":
+    lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
 }
 
 # end-env-vars-definition
@@ -636,3 +632,19 @@ def __getattr__(name: str):
 
 def __dir__():
     return list(environment_variables.keys())
+
+
+def is_set(name: str):
+    """Check if an environment variable is explicitly set."""
+    if name in environment_variables:
+        return name in os.environ
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def set_vllm_use_v1(use_v1: bool):
+    if is_set("VLLM_USE_V1"):
+        raise ValueError(
+            "Should not call set_vllm_use_v1() if VLLM_USE_V1 is set "
+            "explicitly by the user. Please raise this as a Github "
+            "Issue and explicitly set VLLM_USE_V1=0 or 1.")
+    os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
