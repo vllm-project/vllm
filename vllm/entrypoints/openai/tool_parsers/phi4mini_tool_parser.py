@@ -126,7 +126,8 @@ class Phi4MiniJsonToolParser(ToolParser):
         matches = re.search(pattern, current_text, re.DOTALL)
 
         if not matches:
-            return DeltaMessage(content=delta_text)
+            return DeltaMessage(\
+                content=delta_text)
         
         try:
             tool_call_arr: list[dict[str, Any]] = []
@@ -156,7 +157,6 @@ class Phi4MiniJsonToolParser(ToolParser):
                 logger.debug("Error parsing JSON in streaming: %s", str(e))
                 return None
 
-            # If no valid tool calls extracted, return None
             if len(tool_call_arr) == 0:
                 return None
 
@@ -169,7 +169,6 @@ class Phi4MiniJsonToolParser(ToolParser):
             
             # case: we are starting a new tool in the array
             if len(tool_call_arr) > self.current_tool_id + 1:
-                # If we're moving on to a new call, make sure we finish streaming the previous one
                 if (self.current_tool_id >= 0 and 
                         len(self.prev_tool_call_arr) > self.current_tool_id):
                     current_tool_call = self.prev_tool_call_arr[self.current_tool_id]
@@ -178,16 +177,17 @@ class Phi4MiniJsonToolParser(ToolParser):
                     function_name = current_tool_call.get("name", "unknown_function")
                     if cur_arguments:
                         cur_args_json = json.dumps(cur_arguments)
-                        sent = len(self.streamed_args_for_tool[self.current_tool_id])
+                        sent = len(\
+                            self.streamed_args_for_tool[self.current_tool_id])
                         argument_diff = cur_args_json[sent:]
 
                         logger.debug("got arguments diff: %s", argument_diff)
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(
                                 index=self.current_tool_id,
-                                type="function",  # Always set type to "function"
+                                type="function",
                                 function=DeltaFunctionCall(
-                                    name=str(function_name),  # Ensure name is string
+                                    name=str(function_name), 
                                     arguments=argument_diff
                                 ).model_dump(exclude_none=True)
                             )
@@ -227,7 +227,8 @@ class Phi4MiniJsonToolParser(ToolParser):
                 # Stream arguments
             else:
                 cur_arguments = current_tool_call.get("arguments")
-                function_name = current_tool_call.get("name", "unknown_function")
+                function_name = current_tool_call.get("name",\
+                                                       "unknown_function")
                 
                 if cur_arguments:
                     sent = len(self.streamed_args_for_tool[self.current_tool_id])
