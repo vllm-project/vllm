@@ -2331,6 +2331,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   torch::Tensor a_tmp;
   bool has_act_order = g_idx.size(0) != 0;
   if (has_act_order) {
+    // non-contiguous input is not implemented for act order now
     TORCH_CHECK(a.is_contiguous(), "When act_order=True, A must be contiguous");
     a_tmp = torch::empty({size_m, size_k}, options);
   } else {
