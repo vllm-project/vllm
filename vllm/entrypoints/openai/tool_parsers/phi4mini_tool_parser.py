@@ -3,10 +3,8 @@
 import json
 import re
 from collections.abc import Sequence
-from json import JSONDecodeError
-from typing import Any, Optional, Union, cast
+from typing import Any, Optional, cast
 
-import partial_json_parser
 from partial_json_parser.core.options import Allow
 from transformers import PreTrainedTokenizerBase
 
@@ -18,7 +16,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (find_common_prefix,
-                                                        is_complete_json,
                                                         partial_json_loads)
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
@@ -171,10 +168,14 @@ class Phi4MiniJsonToolParser(ToolParser):
             if len(tool_call_arr) > self.current_tool_id + 1:
                 if (self.current_tool_id >= 0 and 
                         len(self.prev_tool_call_arr) > self.current_tool_id):
-                    current_tool_call = self.prev_tool_call_arr[self.current_tool_id]
+                    current_tool_call = (
+                        self.prev_tool_call_arr[self.current_tool_id]
+                    )
                     cur_arguments = current_tool_call.get("arguments")
                     # Ensure name is not None
-                    function_name = current_tool_call.get("name", "unknown_function")
+                    function_name = current_tool_call.get(
+                        "name", "unknown_function"
+                    )
                     if cur_arguments:
                         cur_args_json = json.dumps(cur_arguments)
                         sent = len(\
@@ -264,5 +265,5 @@ class Phi4MiniJsonToolParser(ToolParser):
 
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
-            logger.debug("Skipping chunk as a result of tool streaming extraction error")
+            logger.debug("Skipping chunk as a result of tool")
             return None
