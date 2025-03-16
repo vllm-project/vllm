@@ -59,10 +59,12 @@ class Phi4MiniJsonToolParser(ToolParser):
         pattern = r'functools\[(.*?)\]'
         matches = re.search(pattern, model_output, re.DOTALL)
 
-
         if not matches:
             print("No function calls found")
-            return []
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
+
     
         try:
             try:
