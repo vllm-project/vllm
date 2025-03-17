@@ -256,7 +256,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         if attn_metadata.max_query_len > 1:
             # Prompt run.
-            print(attn_metadata.block_table.numel())
             if attn_metadata.max_query_len == num_actual_tokens:
                 # normal attention.
                 # block tables are empty if the prompt does not have a cached
