@@ -43,7 +43,8 @@ def find_loaded_library(lib_name) -> Optional[str]:
         assert filename.rpartition(".so")[0].startswith(lib_name), \
             f"Unexpected filename: {filename} for library {lib_name}"
     else:
-        path = os.path.join(os.path.dirname(__file__), '..', 'cumem_allocator.pyd')
+        path = os.path.join(os.path.dirname(__file__), '..',
+                            'cumem_allocator.pyd')
     return path
 
 

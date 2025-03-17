@@ -3,11 +3,11 @@
 It avoids the need to compile a separate shared library, and is
 convenient for use when we just need to call a few functions.
 """
+import ctypes
 import os
 import platform
-from shutil import which
-import ctypes
 from dataclasses import dataclass
+from shutil import which
 from typing import Any, Dict, List, Optional
 
 # this line makes it possible to directly load `libcudart.so` using `ctypes`
@@ -65,20 +65,38 @@ def find_loaded_library(lib_name) -> Optional[str]:
     elif "cudart" in lib_name:
         cudart_path = os.getenv("VLLM_CUDART_SO_PATH", None)
         if cudart_path is None:
-            cuda_path = os.environ.get("CUDA_HOME") if os.environ.get("CUDA_HOME", None) else os.environ.get("CUDA_ROOT") if os.environ.get("CUDA_ROOT", None) else os.environ.get("CUDA_PATH") if os.environ.get("CUDA_PATH", None) else None
-            cuda_major_version_num = int((torch.version.cuda if torch.version.cuda else "12.").split('.')[0])
-            cuda_major_version_str = str(cuda_major_version_num)
-            if cuda_major_version_num < 12:
-                cuda_major_version_str += "0"
+            cuda_path = None
+            if os.environ.get("CUDA_HOME", None):
+                cuda_path = os.environ.get("CUDA_HOME")
+            elif os.environ.get("CUDA_ROOT", None):
+                cuda_path = os.environ.get("CUDA_ROOT")
+            elif os.environ.get("CUDA_PATH"):
+                cuda_path = os.environ.get("CUDA_PATH", None)
+
+            cuda_major_version = torch.version.cuda.split(
+                '.')[0] if torch.version.cuda else "12"
+            if cuda_major_version < "12":
+                cuda_major_version += "0"
             if cuda_path:
-                cudart_path = os.path.abspath(os.path.join(cuda_path, "bin", f"cudart64_{cuda_major_version_str}.dll"))
-            elif which("nvcc"):
-                cudart_path = os.path.abspath(os.path.join(which("nvcc"), "..", f"cudart64_{cuda_major_version_str}.dll"))
+                cudart_path = os.path.abspath(
+                    os.path.join(cuda_path, "bin",
+                                 f"cudart64_{cuda_major_version}.dll"))
+            else:
+                nvcc_path = which("nvcc")
+                if nvcc_path:
+                    cudart_path = os.path.abspath(
+                        os.path.join(nvcc_path, "..",
+                                     f"cudart64_{cuda_major_version}.dll"))
             if cudart_path:
                 os.environ["VLLM_CUDART_SO_PATH"] = cudart_path
-                logger.info('VLLM_CUDART_SO_PATH resolved to ' + cudart_path)
+                logger.info('VLLM_CUDART_SO_PATH resolved to %s', cudart_path)
             else:
-                raise ValueError('VLLM_CUDART_SO_PATH is not set. VLLM_CUDART_SO_PATH need to be set with the absolute path to cudart dll on Windows (for example, set VLLM_CUDART_SO_PATH=C:\\CUDA\\v12.4\\bin\\cudart64_12.dll)')
+                raise ValueError(
+                    'VLLM_CUDART_SO_PATH is not set. '
+                    'VLLM_CUDART_SO_PATH need to be set with the absolute path '
+                    'to cudart dll on Windows (for example, set '
+                    'VLLM_CUDART_SO_PATH=C:\\CUDA\\v12.4\\bin\\cudart64_12.dll)'
+                )
     return path
 
 

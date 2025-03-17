@@ -5,10 +5,10 @@ import importlib.util
 import json
 import logging
 import os
+import platform
 import re
 import subprocess
 import sys
-import platform
 from pathlib import Path
 from shutil import which
 
@@ -41,7 +41,8 @@ if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
     logger.warning(
         "VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
     VLLM_TARGET_DEVICE = "cpu"
-elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin") or platform.system() == "Windows"):
+elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")
+          or platform.system() == "Windows"):
     logger.warning(
         "vLLM only supports Linux platform (including WSL), Windows and MacOS."
         "Building on %s, "
@@ -56,10 +57,13 @@ elif (sys.platform.startswith("linux") and torch.version.cuda is None
 
 MAIN_CUDA_VERSION = "12.4"
 
-IS_WSL = "microsoft-standard-WSL2" in platform.uname().release or "-Microsoft" in platform.uname().release
+IS_WSL = ("microsoft-standard-WSL2" in platform.uname().release
+          or "-Microsoft" in platform.uname().release)
 
-if (platform.system() == "Windows" or IS_WSL) and os.environ.get("VLLM_FORCE_FA3_WINDOWS_BUILD", "0") != "1":
-    os.environ['VLLM_DISABLE_FA3_BUILD'] = "1"  # FA3 CAUSES COMPILER CRASH ON WSL2 AND WINDOWS, DISABLE IT
+if ((platform.system() == "Windows" or IS_WSL)
+        and os.environ.get("VLLM_FORCE_FA3_WINDOWS_BUILD", "0") != "1"):
+    # FA3 CAUSES COMPILER CRASH ON WSL2 AND WINDOWS, DISABLE IT
+    os.environ['VLLM_DISABLE_FA3_BUILD'] = "1"
 
 
 def is_sccache_available() -> bool:
@@ -175,10 +179,11 @@ class cmake_build_ext(build_ext):
 
         # Pass the python executable to cmake so it can find an exact
         # match.
+        python_exec_path = sys.executable
         if platform.system() == "Windows":
-            cmake_args += ['-DVLLM_PYTHON_EXECUTABLE={}'.format(sys.executable.replace('\\', '\\\\'))]
-        else:
-            cmake_args += ['-DVLLM_PYTHON_EXECUTABLE={}'.format(sys.executable)]
+            python_exec_path = python_exec_path.replace('\\', '\\\\')
+
+        cmake_args += ['-DVLLM_PYTHON_EXECUTABLE={}'.format(python_exec_path)]
 
         # Pass the python path to cmake so it can reuse the build dependencies
         # on subsequent calls to python.
@@ -194,7 +199,8 @@ class cmake_build_ext(build_ext):
             elif 'CUDA_PATH' in os.environ:
                 cuda_path = os.environ.get('CUDA_PATH')
             elif which('nvcc') is not None:
-                cuda_path = os.path.abspath(os.path.join(which('nvcc'), '..', '..'))
+                cuda_path = os.path.abspath(
+                    os.path.join(which('nvcc'), '..', '..'))
 
             if sys.platform.startswith('win32'):
                 if cuda_path:
@@ -204,30 +210,40 @@ class cmake_build_ext(build_ext):
                     ]
             elif IS_WSL:
                 if cuda_path is not None:
-                    cuda_path = os.path.abspath(os.path.join(which('nvcc'), '..', '..'))
+                    cuda_path = os.path.abspath(
+                        os.path.join(which('nvcc'), '..', '..'))
                     if os.path.exists(f'{cuda_path}/include/nvtx3'):
                         cmake_args.append(f'-Dnvtx3_dir={cuda_path}/include')
                     if os.path.exists(f'{cuda_path}/lib64/libcublas.so'):
-                        cmake_args.append(f'-DCUDA_cublas_LIBRARY={cuda_path}/lib64/libcublas.so')
+                        cmake_args.append(
+                            f'-DCUDA_cublas_LIBRARY={cuda_path}/lib64/libcublas.so'
+                        )
 
-            if sys.platform.startswith("linux") and os.environ.get('USE_CUFILE', '0') == '1':
+            if (sys.platform.startswith("linux")
+                    and os.environ.get('USE_CUFILE', '0') == '1'):
                 cmake_args.append('-DUSE_CUFILE=1')
                 cmake_args.append('-DCAFFE2_USE_CUFILE=1')
 
             if os.environ.get('USE_CUDSS', '0') == '1':
                 cmake_args.append('-DUSE_CUDSS=1')
-                if os.environ.get('CUDSS_LIBRARY_PATH'):
-                    cmake_args.append(f'-DCUDSS_LIBRARY_PATH={os.environ.get('CUDSS_LIBRARY_PATH')}')
-                if os.environ.get('CUDSS_INCLUDE_PATH'):
-                    cmake_args.append(f'-DCUDSS_INCLUDE_PATH={os.environ.get('CUDSS_INCLUDE_PATH')}')
+                if os.environ.get('CUDSS_LIBRARY_PATH', None):
+                    cmake_args.append(
+                        f'-DCUDSS_LIBRARY_PATH={os.environ.get("CUDSS_LIBRARY_PATH")}'
+                    )
+                if os.environ.get('CUDSS_INCLUDE_PATH', None):
+                    cmake_args.append(
+                        f'-DCUDSS_INCLUDE_PATH={os.environ.get("CUDSS_INCLUDE_PATH")}'
+                    )
 
             if os.environ.get('USE_CUDNN', '0') == '1':
                 cmake_args.append('-DCAFFE2_USE_CUDNN=1')
 
             if os.environ.get('USE_CUSPARSELT', '0') == '1':
                 cmake_args.append('-DCAFFE2_USE_CUSPARSELT=1')
-                if os.environ.get('CUSPARSELT_INCLUDE_PATH'):
-                    cmake_args.append(f'-DCUSPARSELT_INCLUDE_PATH={os.environ.get('CUSPARSELT_INCLUDE_PATH')}')
+                if os.environ.get('CUSPARSELT_INCLUDE_PATH', None):
+                    cmake_args.append(
+                        f'-DCUSPARSELT_INCLUDE_PATH={os.environ.get("CUSPARSELT_INCLUDE_PATH")}'
+                    )
 
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
@@ -431,7 +447,8 @@ class repackage_wheel(build_ext):
             ]
 
             if os.environ.get("VLLM_DISABLE_FA3_BUILD", "0") != "1":
-                files_to_copy.append("vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so")
+                files_to_copy.append(
+                    "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so")
 
             file_members = filter(lambda x: x.filename in files_to_copy,
                                   wheel.filelist)
@@ -702,7 +719,9 @@ if _is_hip():
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
-    if (envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.0")) and os.environ.get("VLLM_DISABLE_FA3_BUILD", "0") != "1":
+    if (envs.VLLM_USE_PRECOMPILED
+            or get_nvcc_cuda_version() >= Version("12.0")) and os.environ.get(
+                "VLLM_DISABLE_FA3_BUILD", "0") != "1":
         # FA3 requires CUDA 12.0 or later
         ext_modules.append(
             CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
@@ -732,7 +751,7 @@ if not ext_modules:
 else:
     cmdclass = {
         "build_ext":
-            repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
+        repackage_wheel if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
     }
 
 setup(

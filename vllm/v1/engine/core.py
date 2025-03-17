@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import platform
 import queue
 import signal
 import threading
 import time
-import platform
 from concurrent.futures import Future
 from inspect import isclass, signature
 from multiprocessing.connection import Connection

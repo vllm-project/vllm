@@ -7,6 +7,7 @@ from torch import fx as fx
 
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
+from vllm.utils import torch_major_minor_version
 
 from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
@@ -20,15 +21,7 @@ class PlaceHolder:
     pass
 
 
-"""
-Torch major / minor version that does not interfere with nightly builds / torch source compilations
-"""
-
-torch_major_version = int(torch.__version__.split(".")[0])
-torch_minor_version = int(torch.__version__.split(".")[1])
-
-
-if torch_major_version <= 2 and torch_minor_version <= 5:
+if torch_major_minor_version() < "2.6":
     Parent = PlaceHolder  # type: ignore
 else:
     Parent = torch._inductor.custom_graph_pass.CustomGraphPass  # type: ignore

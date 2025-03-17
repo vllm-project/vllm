@@ -515,11 +515,11 @@ inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
 }
 
 inline void prefetch(const void* addr) {
-  #ifdef _WIN32
+#ifdef _WIN32
   __asm("dcbt 0, %0" : : "r"(addr) : "memory");
-  #else
+#else
   __asm__ __volatile__("dcbt 0, %0" : : "r"(addr) : "memory");
-  #endif  
+#endif
 }
 
 };  // namespace vec_op

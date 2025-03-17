@@ -7,18 +7,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import torch
-
-"""
-Torch major / minor version that does not interfere with nightly builds / torch source compilations
-"""
-
-torch_major_version = int(torch.__version__.split(".")[0])
-torch_minor_version = int(torch.__version__.split(".")[1])
-
 import torch._inductor.compile_fx
 import torch.fx as fx
 
 from vllm.config import VllmConfig
+from vllm.utils import torch_major_minor_version
 
 
 class CompilerInterface:
@@ -204,7 +197,7 @@ class InductorAdaptor(CompilerInterface):
 
         original_load_name = None
         hijacked_compile_fx_inner = None
-        if torch_major_version == 2 and torch_minor_version == 5:
+        if torch_major_minor_version() == "2.5":
             original_load = FxGraphCache.load
             original_load_name = "torch._inductor.codecache.FxGraphCache.load"
 
@@ -227,7 +220,7 @@ class InductorAdaptor(CompilerInterface):
                 return inductor_compiled_graph
 
             hijacked_compile_fx_inner = torch._inductor.compile_fx.compile_fx_inner  # noqa
-        elif torch_major_version == 2 and torch_minor_version >= 6:
+        elif torch_major_minor_version() >= "2.6":
             # function renamed in 2.6
             original_load_name = None
 
@@ -307,14 +300,14 @@ class InductorAdaptor(CompilerInterface):
         from torch._inductor.codecache import FxGraphCache
         with patch("torch._inductor.codecache.FxGraphCache._get_shape_env",
                    lambda *args, **kwargs: AlwaysHitShapeEnv()):
-            if torch_major_version == 2 and torch_minor_version == 5:
+            if torch_major_minor_version() == "2.5":
                 inductor_compiled_graph = FxGraphCache._lookup_graph(
                     hash_str, example_inputs, True, False)
                 assert inductor_compiled_graph is not None, (
                     "Inductor cache lookup failed. Please remove"
                     f"the cache directory and try again."  # noqa
                 )
-            elif torch_major_version == 2 and torch_minor_version >= 6:
+            elif torch_major_minor_version() >= "2.6":
                 from torch._inductor.output_code import (
                     CompiledFxGraphConstantsWithGm)
                 constants = CompiledFxGraphConstantsWithGm(graph)
