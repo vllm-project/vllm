@@ -34,6 +34,10 @@ def run(a_q: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
+        current_platform.get_device_capability()),
+    reason="Grouped gemm is not supported on this GPU type.")
 def test_cutlass_moe_no_graph(
     m: int,
     n: int,
@@ -122,6 +126,10 @@ def test_cutlass_moe_no_graph(
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
+        current_platform.get_device_capability()),
+    reason="Grouped gemm is not supported on this GPU type.")
 def test_cutlass_moe_cuda_graph(
     m: int,
     n: int,

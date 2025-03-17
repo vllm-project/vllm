@@ -422,8 +422,6 @@ struct Sm90ColOrScalarBroadcast {
   get_consumer_store_callbacks(ConsumerStoreArgs<Args...> const& args) {
 
     auto [M, N, K, L] = args.problem_shape_mnkl;
-    auto [m, n, k, l] = args.tile_coord_mnkl;
-
     Tensor mCol = make_tensor(make_gmem_ptr(params.ptr_col), make_shape(M,N,L), params.dCol);
     Tensor tCgCol = sm90_partition_for_epilogue<ReferenceSrc>(                         // (CPY,CPY_M,CPY_N,EPI_M,EPI_N)
       mCol, args.tile_shape_mnk, args.tile_coord_mnkl, args.epi_tile, args.tiled_copy, args.thread_idx);

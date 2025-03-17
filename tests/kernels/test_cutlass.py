@@ -515,8 +515,10 @@ def test_cutlass_support_opcheck():
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [False])
-@pytest.mark.skipif(not current_platform.has_device_capability(89),
-                    reason="FP8 is not supported on this GPU type.")
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
+        current_platform.get_device_capability()),
+    reason="Grouped gemm is not supported on this GPU type.")
 def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
                                 per_out_ch: bool, use_bias: bool):
 
@@ -626,12 +628,10 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
                            device="cuda",
                            dtype=torch.int64)
 
-    torch.ops._C.cutlass_grouped_mm(out_tensors_stacked, a_tensors_stacked,
-                                    b_tensors_stacked,
-                                    a_scales_tensors_stacked,
-                                    b_scales_tensors_stacked,
-                                    expert_offsets[:-1], problem_sizes,
-                                    ab_strides, ab_strides, c_strides)
+    ops.cutlass_moe_mm(out_tensors_stacked, a_tensors_stacked,
+                       b_tensors_stacked, a_scales_tensors_stacked,
+                       b_scales_tensors_stacked, expert_offsets[:-1],
+                       problem_sizes, ab_strides, ab_strides, c_strides)
 
     # Validate each group's result against the baseline
     for g in range(num_groups):
@@ -640,4 +640,4 @@ def test_cutlass_fp8_group_gemm(num_groups: int, per_act_token: bool,
         print(baseline)
         print(c)
         print("*")
-        torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-2)
+        torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)

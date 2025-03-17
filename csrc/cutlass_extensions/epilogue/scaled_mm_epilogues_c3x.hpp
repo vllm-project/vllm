@@ -434,8 +434,8 @@ struct ScaledEpilogueArray
   using ScaleAArray = typename SUPER::template ColOrScalarLoadArray<float>;
   using ScaleBArray = typename SUPER::template RowOrScalarLoadArray<float>;
 
-  static ArgumentType prepare_args(const float* const* a_scales_ptr,
-                                   const float* const* b_scales_ptr,
+  static ArgumentType prepare_args(float const* const* a_scales_ptr,
+                                   float const* const* b_scales_ptr,
                                    bool a_col_broadcast, bool b_row_broadcast) {
     auto a_args = SUPER::template args_from_tensor<ScaleAArray, float>(
         a_scales_ptr, a_col_broadcast);

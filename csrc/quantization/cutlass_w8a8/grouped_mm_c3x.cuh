@@ -67,8 +67,9 @@ struct cutlass_3x_group_gemm {
   using StrideC =
       cute::remove_pointer_t<cute::Stride<int64_t, cute::Int<1>, cute::Int<0>>>;
 
-  const int AlignmentAB = 128 / cutlass::sizeof_bits<ElementAB>::value;
-  const int AlignmentC = 128 / cutlass::sizeof_bits<ElementD>::value;
+  static constexpr int AlignmentAB =
+      128 / cutlass::sizeof_bits<ElementAB>::value;
+  static constexpr int AlignmentC = 128 / cutlass::sizeof_bits<ElementD>::value;
 
   using EVTCompute = typename Epilogue::EVTCompute;
 
@@ -76,8 +77,8 @@ struct cutlass_3x_group_gemm {
       typename cutlass::epilogue::collective::CollectiveBuilder<
           ArchTag, OperatorClass, TileShape, ClusterShape,
           cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
-          ElementAccumulator, ElementC, LayoutC*, 4, ElementD, LayoutC*, 4,
-          EpilogueSchedule, EVTCompute>::CollectiveOp;
+          ElementAccumulator, ElementC, LayoutC*, AlignmentC, ElementD,
+          LayoutC*, AlignmentC, EpilogueSchedule, EVTCompute>::CollectiveOp;
 
   static constexpr size_t CEStorageSize =
       sizeof(typename CollectiveEpilogue::SharedStorage);
@@ -86,9 +87,9 @@ struct cutlass_3x_group_gemm {
 
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
-          ArchTag, OperatorClass, ElementAB, LayoutA*, 16, ElementAB, LayoutB*,
-          16, ElementAccumulator, TileShape, ClusterShape, Stages,
-          KernelSchedule>::CollectiveOp;
+          ArchTag, OperatorClass, ElementAB, LayoutA*, AlignmentAB, ElementAB,
+          LayoutB*, AlignmentAB, ElementAccumulator, TileShape, ClusterShape,
+          Stages, KernelSchedule>::CollectiveOp;
 
   using KernelType = enable_sm90_or_later<cutlass::gemm::kernel::GemmUniversal<
       ProblemShape, CollectiveMainloop, CollectiveEpilogue>>;
@@ -126,12 +127,12 @@ void cutlass_group_gemm_caller(
   torch::Tensor b_scales_ptrs = torch::empty(groups, options_int);
 
   get_group_gemm_starts<<<1, groups, 0, stream>>>(
-      reinterpret_cast<int32_t*>(expert_offsets.data_ptr()),
-      reinterpret_cast<int64_t*>(a_ptrs.data_ptr()),
-      reinterpret_cast<int64_t*>(b_ptrs.data_ptr()),
-      reinterpret_cast<int64_t*>(out_ptrs.data_ptr()),
-      reinterpret_cast<int64_t*>(a_scales_ptrs.data_ptr()),
-      reinterpret_cast<int64_t*>(b_scales_ptrs.data_ptr()),
+      static_cast<int32_t*>(expert_offsets.data_ptr()),
+      static_cast<int64_t*>(a_ptrs.data_ptr()),
+      static_cast<int64_t*>(b_ptrs.data_ptr()),
+      static_cast<int64_t*>(out_ptrs.data_ptr()),
+      static_cast<int64_t*>(a_scales_ptrs.data_ptr()),
+      static_cast<int64_t*>(b_scales_ptrs.data_ptr()),
       reinterpret_cast<int64_t>(a_tensors.data_ptr()),
       reinterpret_cast<int64_t>(b_tensors.data_ptr()),
       reinterpret_cast<int64_t>(out_tensors.data_ptr()),
@@ -146,27 +147,26 @@ void cutlass_group_gemm_caller(
   using StrideC = typename GemmKernel::InternalStrideC;
 
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
-      reinterpret_cast<ProblemShape::UnderlyingProblemShape*>(
+      static_cast<ProblemShape::UnderlyingProblemShape*>(
           problem_sizes.data_ptr());
   ProblemShape prob_shape{groups, problem_sizes_as_shapes, nullptr};
 
   typename GemmKernel::MainloopArguments mainloop_args{
-      reinterpret_cast<const ElementAB_Type**>(a_ptrs.data_ptr()),
-      reinterpret_cast<StrideA*>(a_strides.data_ptr()),
-      reinterpret_cast<const ElementAB_Type**>(b_ptrs.data_ptr()),
-      reinterpret_cast<StrideB*>(b_strides.data_ptr())};
+      static_cast<const ElementAB_Type**>(a_ptrs.data_ptr()),
+      static_cast<StrideA*>(a_strides.data_ptr()),
+      static_cast<const ElementAB_Type**>(b_ptrs.data_ptr()),
+      static_cast<StrideB*>(b_strides.data_ptr())};
 
   // Currently, we are only able to do broadcast on either all or none a_scales
   // and on either all or none b_scales
   typename GemmKernel::EpilogueArguments epilogue_args{
-      Gemm::Epilogue::prepare_args(reinterpret_cast<const ElementAccumulator**>(
-                                       a_scales_ptrs.data_ptr()),
-                                   reinterpret_cast<const ElementAccumulator**>(
-                                       b_scales_ptrs.data_ptr()),
-                                   per_act_token, per_out_ch),
-      nullptr, reinterpret_cast<StrideC*>(c_strides.data_ptr()),
-      reinterpret_cast<ElementC_Type**>(out_ptrs.data_ptr()),
-      reinterpret_cast<StrideC*>(c_strides.data_ptr())};
+      Gemm::Epilogue::prepare_args(
+          static_cast<const ElementAccumulator**>(a_scales_ptrs.data_ptr()),
+          static_cast<const ElementAccumulator**>(b_scales_ptrs.data_ptr()),
+          per_act_token, per_out_ch),
+      nullptr, static_cast<StrideC*>(c_strides.data_ptr()),
+      static_cast<ElementC_Type**>(out_ptrs.data_ptr()),
+      static_cast<StrideC*>(c_strides.data_ptr())};
 
   typename GemmKernel::Arguments args{
       cutlass::gemm::GemmUniversalMode::kGrouped, prob_shape, mainloop_args,
