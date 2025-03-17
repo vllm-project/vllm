@@ -77,8 +77,13 @@ if __name__ == "__main__":
         procs.append(proc)
     exit_code = 0
     for proc in procs:
-        proc.join()
-        if proc.exitcode:
+        proc.join(timeout=300)
+        if proc.exitcode is None:
+            print(f"Killing process {proc.pid} that "
+                  f"didn't stop within 5 minutes.")
+            proc.kill()
+            exit_code = 1
+        elif proc.exitcode:
             exit_code = proc.exitcode
 
     exit(exit_code)

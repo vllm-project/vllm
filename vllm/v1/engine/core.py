@@ -529,7 +529,9 @@ class DPEngineCoreProc(EngineCoreProc):
                     self.scheduler.has_unfinished_requests())
             else:
                 if self.scheduler.has_finished_requests():
+                    # This won't involve a forward-pass.
                     self._process_engine_step()
+
                 if not self.global_unfinished_reqs:
                     continue
 

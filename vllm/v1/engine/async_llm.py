@@ -64,7 +64,7 @@ class AsyncLLM(EngineClient):
         self.log_requests = log_requests
         self.log_stats = log_stats
 
-        #TODO clean this up
+        # Set up stat loggers; independent set for each DP rank.
         self.stat_loggers: list[list[StatLoggerBase]] = []
         if self.log_stats:
             for i in range(vllm_config.parallel_config.data_parallel_size):
