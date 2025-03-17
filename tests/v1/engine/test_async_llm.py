@@ -80,9 +80,11 @@ async def generate(engine: AsyncLLM,
                          [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
                           (VISION_ENGINE_ARGS, VISION_PROMPT)])
 @pytest.mark.asyncio
-async def test_load(monkeypatch, output_kind: RequestOutputKind,
-                    engine_args_and_prompt: tuple[AsyncEngineArgs,
-                                                  PromptType]):
+async def test_load(
+    monkeypatch: pytest.MonkeyPatch,
+    output_kind: RequestOutputKind,
+    engine_args_and_prompt: tuple[AsyncEngineArgs, PromptType],
+):
     # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
     # so that in the future when we switch, we don't have to change all the
     # tests.
@@ -126,7 +128,8 @@ async def test_load(monkeypatch, output_kind: RequestOutputKind,
                          [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
                           (VISION_ENGINE_ARGS, VISION_PROMPT)])
 @pytest.mark.asyncio
-async def test_abort(monkeypatch, output_kind: RequestOutputKind,
+async def test_abort(monkeypatch: pytest.MonkeyPatch,
+                     output_kind: RequestOutputKind,
                      engine_args_and_prompt: tuple[AsyncEngineArgs,
                                                    PromptType]):
 
