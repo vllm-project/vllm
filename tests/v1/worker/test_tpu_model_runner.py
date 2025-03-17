@@ -17,47 +17,54 @@ torch_xla_patcher = mock.patch.dict(
         "torch_xla.core.xla_model": mock.MagicMock(),
         "torch_xla.runtime": mock.MagicMock(),
     })
+torch_xla_patcher.start()
 
 # Mock the PallasAttentionBackend
 pallas_attention_backend_patcher = mock.patch(
     "vllm.v1.worker.tpu_model_runner.PallasAttentionBackend", )
+pallas_attention_backend_patcher.start()
 
 
 @pytest.fixture
 def model_runner():
-    with torch_xla_patcher, pallas_attention_backend_patcher:
-        scheduler_config = SchedulerConfig(
-            max_num_seqs=10,
-            max_num_batched_tokens=512,
-            max_model_len=512,
-        )
-        model_config = ModelConfig(
-            model="facebook/opt-125m",
-            task="generate",
-            tokenizer="facebook/opt-125m",
-            tokenizer_mode="auto",
-            trust_remote_code=True,
-            dtype="float16",  # TPUs typically use bfloat16
-            seed=42,
-        )
-        cache_config = CacheConfig(
-            block_size=16,
-            gpu_memory_utilization=0.9,
-            swap_space=0,
-            cache_dtype="auto",
-        )
-        vllm_config = VllmConfig(
-            model_config=model_config,
-            cache_config=cache_config,
-            scheduler_config=scheduler_config,
-        )
+    # Patchers have already been started at module level.
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=10,
+        max_num_batched_tokens=512,
+        max_model_len=512,
+    )
+    model_config = ModelConfig(
+        model="facebook/opt-125m",
+        task="generate",
+        tokenizer="facebook/opt-125m",
+        tokenizer_mode="auto",
+        trust_remote_code=True,
+        dtype="bfloat16",  # TPUs typically use bfloat16
+        seed=42,
+    )
+    cache_config = CacheConfig(
+        block_size=16,
+        gpu_memory_utilization=0.9,
+        swap_space=0,
+        cache_dtype="auto",
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        cache_config=cache_config,
+        scheduler_config=scheduler_config,
+    )
+    device = "xla:0"  # Mocking TPU device
+    with mock.patch("vllm.v1.worker.tpu_model_runner.torch"), \
+         mock.patch("vllm.v1.worker.tpu_model_runner.xm"), \
+         mock.patch("vllm.v1.worker.tpu_model_runner.xr"):
+        return TPUModelRunner(vllm_config, device)
 
-        device = "xla:0"  # Mocking TPU device
-        with torch_xla_patcher, pallas_attention_backend_patcher, mock.patch(
-                "vllm.v1.worker.tpu_model_runner.torch"), mock.patch(
-                    "vllm.v1.worker.tpu_model_runner.xm"), mock.patch(
-                        "vllm.v1.worker.tpu_model_runner.xr"):
-            return TPUModelRunner(vllm_config, device)
+
+@pytest.fixture(autouse=True, scope="session")
+def cleanup_patches():
+    yield
+    torch_xla_patcher.stop()
+    pallas_attention_backend_patcher.stop()
 
 
 def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
