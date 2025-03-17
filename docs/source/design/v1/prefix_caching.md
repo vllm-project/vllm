@@ -203,7 +203,7 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 :alt: Example Time 3
 :::
 
-**Time 4: Request 1 comes in with the 14 prompt tokens, where the first 11 tokens are the same as request 0.** We can see that only 2 blocks (11 tokens) hit the cache, because the 3rd block only matches 3 of 4 tokens.
+**Time 4: Request 1 comes in with the 14 prompt tokens, where the first 10 tokens are the same as request 0.** We can see that only 2 blocks (10 tokens) hit the cache, because the 3rd block only matches 2 of 4 tokens.
 
 :::{image} /assets/design/v1/prefix_caching/example-time-4.png
 :alt: Example Time 4
