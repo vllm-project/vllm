@@ -1172,8 +1172,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             start_idx = request.num_computed_tokens
             start_tok = start_idx + 1
             num_remaining_tokens = num_prompt_tokens - start_tok
-            if num_tokens < num_remaining_tokens:
+            if num_tokens <= num_remaining_tokens:
                 # This is a chunk, more tokens remain.
+                # In the == case, there are no more prompt logprobs to produce
+                # but we want to defer returning them to the next step where we
+                # have new generated tokens to return.
                 num_logits = num_tokens
                 if start_idx == 0:
                     # Store the tensors for subsequent iterations.
@@ -1185,6 +1188,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     del in_progress_dict[req_id]
                 completed_prefill_reqs.append(req_id)
                 prompt_logprobs_dict[req_id] = logprobs_tensors
+
+            if num_logits <= 0:
+                # This can happen for the final chunk if we prefilled exactly
+                # (num_prompt_tokens - 1) tokens for this request in the prior
+                # step. There are no more prompt logprobs to produce.
+                continue
 
             # Get the logits corresponding to this req's prompt tokens.
             # If this is a partial request (i.e. chunked prefill),
