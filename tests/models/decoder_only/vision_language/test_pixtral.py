@@ -29,9 +29,9 @@ if TYPE_CHECKING:
     from _typeshed import StrPath
 
 PIXTRAL_ID = "mistralai/Pixtral-12B-2409"
-MISTRAL_SMALL_3_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+MISTRAL_SMALL_3_1_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 
-MODELS = [PIXTRAL_ID, MISTRAL_SMALL_3_ID]
+MODELS = [PIXTRAL_ID, MISTRAL_SMALL_3_1_ID]
 
 IMG_URLS = [
     "https://picsum.photos/id/237/400/300",
@@ -131,11 +131,11 @@ assert FIXTURES_PATH.exists()
 
 FIXTURE_LOGPROBS_CHAT = {
     PIXTRAL_ID: FIXTURES_PATH / "pixtral_chat.json",
-    MISTRAL_SMALL_3_ID: FIXTURES_PATH / "mistral_small_3_chat.json",
+    MISTRAL_SMALL_3_1_ID: FIXTURES_PATH / "mistral_small_3_chat.json",
 }
 FIXTURE_LOGPROBS_ENGINE = {
     PIXTRAL_ID: FIXTURES_PATH / "pixtral_chat_engine.json",
-    MISTRAL_SMALL_3_ID: FIXTURES_PATH / "mistral_small_3_engine.json",
+    MISTRAL_SMALL_3_1_ID: FIXTURES_PATH / "mistral_small_3_engine.json",
 }
 
 OutputsLogprobs = list[tuple[list[int], str, Optional[SampleLogprobs]]]
