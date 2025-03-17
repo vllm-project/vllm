@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 from collections.abc import AsyncGenerator, Mapping
+from copy import copy
 from typing import Optional, Union
 
 import numpy as np
@@ -25,6 +26,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import cdiv, kill_process_tree
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -177,33 +179,45 @@ class AsyncLLM(EngineClient):
     ) -> asyncio.Queue[RequestOutput]:
         """Add new request to the AsyncLLM."""
 
-        # 1) Create a new output queue for the request.
+        # Create a new output queue for the request.
         queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
 
-        # 2) Fan out child requests (for n>1)
-        parent_req = ParentRequest.from_params(request_id, params)
+        # Convert Input --> Request.
+        request = self.processor.process_inputs(request_id, prompt, params,
+                                                arrival_time, lora_request,
+                                                trace_headers,
+                                                prompt_adapter_request,
+                                                priority)
+
         n = params.n if isinstance(params, SamplingParams) else 1
-        for idx in range(n):
-            if parent_req is not None:
+
+        if n == 1:
+            await self._add_request(request, None, 0, queue)
+
+        else:
+            # Fan out child requests (for n>1).
+            parent_req = ParentRequest(request_id, params)
+            for idx in range(n):
                 request_id, params = parent_req.get_child_info(idx)
-
-            # 3) Convert Input --> Request.
-            request = self.processor.process_inputs(request_id, prompt, params,
-                                                    arrival_time, lora_request,
-                                                    trace_headers,
-                                                    prompt_adapter_request,
-                                                    priority)
-
-            # 4) Add the request to OutputProcessor (this process).
-            self.output_processor.add_request(request, parent_req, idx, queue)
-
-            # 5) Add the EngineCoreRequest to EngineCore (separate process).
-            await self.engine_core.add_request_async(request)
-
-            if self.log_requests:
-                logger.info("Added request %s.", request_id)
+                child_req = request if idx == n - 1 else copy(request)
+                child_req.request_id = request_id
+                child_req.sampling_params = params
+                await self._add_request(child_req, parent_req, idx, queue)
 
         return queue
+
+    async def _add_request(self, request: EngineCoreRequest,
+                           parent_req: Optional[ParentRequest], index: int,
+                           queue: asyncio.Queue[RequestOutput]):
+
+        # Add the request to OutputProcessor (this process).
+        self.output_processor.add_request(request, parent_req, index, queue)
+
+        # Add the EngineCoreRequest to EngineCore (separate process).
+        await self.engine_core.add_request_async(request)
+
+        if self.log_requests:
+            logger.info("Added request %s.", request.request_id)
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
