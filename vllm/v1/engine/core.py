@@ -503,8 +503,6 @@ class DPEngineCoreProc(EngineCoreProc):
         super().__init__(input_path, output_path, vllm_config, executor_class,
                          log_stats, dp_rank)
 
-        self.counter = 0
-
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
