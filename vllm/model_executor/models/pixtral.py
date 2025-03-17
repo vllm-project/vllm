@@ -73,7 +73,7 @@ class PixtralImagePixelInputs(TypedDict):
     """
     A boolean mask indicating which image embeddings correspond
     to patch tokens.
-    
+
     Shape: `(batch_size, num_images, num_embeds)`
     """
 
@@ -849,10 +849,10 @@ class VisionTransformer(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            images: list of N_img images of variable sizes, 
+            images: list of N_img images of variable sizes,
                 each of shape (C, H, W)
         Returns:
-            image_features: tensor of token features for 
+            image_features: tensor of token features for
                 all tokens of all images of shape (N_toks, D)
         """
         # pass images through initial convolution independently
@@ -935,7 +935,8 @@ class PatchMerger(nn.Module):
         # x is (N, vision_encoder_dim)
         x = self.permute(x, image_sizes)
 
-        # x is (N / spatial_merge_size ** 2, vision_encoder_dim * spatial_merge_size ** 2)
+        # x is (N / spatial_merge_size ** 2,
+        #       vision_encoder_dim * spatial_merge_size ** 2)
         x = self.merging_layer(x)
 
         # x is (N / spatial_merge_size ** 2, vision_encoder_dim)
