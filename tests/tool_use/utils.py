@@ -46,6 +46,7 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "NousResearch/Hermes-3-Llama-3.1-8B",
         "arguments": [
+            "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "hermes", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_hermes.jinja")
         ],
@@ -60,6 +61,7 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "meta-llama/Meta-Llama-3.1-8B-Instruct",
         "arguments": [
+            "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "llama3_json", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_llama3.1_json.jinja")
         ],
@@ -70,6 +72,7 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "meta-llama/Llama-3.2-3B-Instruct",
         "arguments": [
+            "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "llama3_json", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_llama3.2_json.jinja")
         ],
@@ -80,6 +83,7 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "mistralai/Mistral-7B-Instruct-v0.3",
         "arguments": [
+            "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "mistral", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja"),
             "--ignore-patterns=\"consolidated.safetensors\""
@@ -111,22 +115,28 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "ibm-granite/granite-3.0-8b-instruct",
         "arguments": [
+            "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "granite", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_granite.jinja")
         ],
     },
     "granite-3.1-8b": {
-        "model": "ibm-granite/granite-3.1-8b-instruct",
+        "model":
+        "ibm-granite/granite-3.1-8b-instruct",
         "arguments": [
+            "--enforce-eager",
+            "--no-enable-prefix-caching",
             "--tool-call-parser",
             "granite",
         ],
-        "supports_parallel": True,
+        "supports_parallel":
+        True,
     },
     "internlm": {
         "model":
         "internlm/internlm2_5-7b-chat",
         "arguments": [
+            "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "internlm", "--chat-template",
             str(VLLM_PATH /
                 "examples/tool_chat_template_internlm2_tool.jinja"),
@@ -139,6 +149,7 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "Team-ACE/ToolACE-8B",
         "arguments": [
+            "--enforce-eager", "--no-enable-prefix-caching",
             "--tool-call-parser", "pythonic", "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_toolace.jinja")
         ],
