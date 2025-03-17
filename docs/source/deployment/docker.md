@@ -61,7 +61,7 @@ RUN uv pip install --system git+https://github.com/huggingface/transformers.git
 
 ## Building vLLM's Docker Image from Source
 
-You can build and run vLLM from source via the provided <gh-file:dockerfiles/Dockerfile>. To build vLLM:
+You can build and run vLLM from source via the provided <gh-file:docker/Dockerfile>. To build vLLM:
 
 ```console
 # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
