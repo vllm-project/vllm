@@ -301,6 +301,8 @@ def generate_uniform_probs(
     )
     start_idx = 0
     for req_idx, n in enumerate(num_draft_tokens):
+        # Do not generate random numbers for requests with no draft tokens.
+        # This can be important for reproducibility.
         if n == 0:
             continue
         end_idx = start_idx + n
@@ -335,6 +337,8 @@ def sample_recovered_tokens(
     )
     q.exponential_()
     for i, generator in sampling_metadata.generators.items():
+        # Do not generate random numbers for requests with no draft tokens.
+        # This can be important for reproducibility.
         if num_draft_tokens[i] > 0:
             q[i].exponential_(generator=generator)
 
