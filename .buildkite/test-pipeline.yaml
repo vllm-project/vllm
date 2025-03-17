@@ -226,10 +226,13 @@ steps:
     - python3 offline_inference/basic/chat.py
     - python3 offline_inference/prefix_caching.py
     - python3 offline_inference/llm_engine_example.py
-    - python3 offline_inference/vision_language.py
-    - python3 offline_inference/vision_language_multi_image.py
+    - python3 offline_inference/audio_language.py --seed 0
+    - python3 offline_inference/vision_language.py --seed 0
+    - python3 offline_inference/vision_language_embedding.py --seed 0
+    - python3 offline_inference/vision_language_multi_image.py --seed 0
     - VLLM_USE_V1=0 python3 other/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 other/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference/encoder_decoder.py
+    - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
     - python3 offline_inference/basic/classify.py
     - python3 offline_inference/basic/embed.py
     - python3 offline_inference/basic/score.py
