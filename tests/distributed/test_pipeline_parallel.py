@@ -24,6 +24,18 @@ logger = init_logger("test_pipeline_parallel")
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
 
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    For PP, we fall back to V0 by default. This means
+    that the TP baseline runs with V1 while the PP engine
+    runs with V0. This gives divergent results with dummy
+    weights. Once we enable V1 by default for PP, we can
+    remove this.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
@@ -214,7 +226,7 @@ MULTIMODAL_MODELS = {
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf": PPTestSettings.fast(),
     "openbmb/MiniCPM-Llama3-V-2_5": PPTestSettings.fast(),
     "allenai/Molmo-7B-D-0924": PPTestSettings.fast(),
-    "microsoft/Phi-3-vision-128k-instruct": PPTestSettings.fast(),
+    "microsoft/Phi-3.5-vision-instruct": PPTestSettings.fast(),
     "mistralai/Pixtral-12B-2409": PPTestSettings.fast(load_format="dummy"),
     "Qwen/Qwen-VL-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2-Audio-7B-Instruct": PPTestSettings.fast(),
@@ -237,7 +249,7 @@ TEST_MODELS = [
     "BAAI/bge-multilingual-gemma2",
     # [MULTIMODAL GENERATION]
     "OpenGVLab/InternVL2-1B",
-    "microsoft/Phi-3-vision-128k-instruct",
+    "microsoft/Phi-3.5-vision-instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     # [LANGUAGE GENERATION - HYBRID ARCH]
     "ai21labs/Jamba-tiny-dev",
@@ -338,6 +350,10 @@ def _compare_tp(
     else:
         pp_env = None
 
+    tp_env = {
+        "VLLM_USE_V1": vllm_major_version,
+    }
+
     pp_args = [
         *common_args,
         "--pipeline-parallel-size",
@@ -362,14 +378,20 @@ def _compare_tp(
     ]
 
     try:
-        compare_two_settings(model_id, pp_args, tp_args, pp_env, method=method)
+        compare_two_settings(model_id,
+                             pp_args,
+                             tp_args,
+                             pp_env,
+                             tp_env,
+                             method=method)
     except Exception:
-        if pp_env is None:
-            raise
-        else:
-            # Ray Compiled Graph tests are flaky,
+        testing_ray_compiled_graph = pp_env is not None
+        if testing_ray_compiled_graph and vllm_major_version == "0":
+            # Ray Compiled Graph tests are flaky for V0,
             # so we don't want to fail the test
             logger.exception("Ray Compiled Graph tests failed")
+        else:
+            raise
 
 
 @pytest.mark.parametrize(

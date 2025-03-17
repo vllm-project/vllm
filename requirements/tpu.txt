@@ -3,12 +3,12 @@
 
 # Dependencies for TPU
 cmake>=3.26
-ninja
 packaging
 setuptools-scm>=8
 wheel
-jinja2
+jinja2>=3.1.6
 ray[default]
+ray[data]
 
 # Install torch_xla
 --pre
