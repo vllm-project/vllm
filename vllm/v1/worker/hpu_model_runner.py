@@ -532,11 +532,6 @@ class HpuModelAdapter:
             self._prepare_cos_sin(kwargs['positions'])
         with set_forward_context(kwargs['attn_metadata'], self.vllm_config):
             hidden_states = self.model(*args, **kwargs)
-
-
-#            hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-#            hidden_states = hidden_states.index_select(0,
-#                                                       selected_token_indices)
         return hidden_states
 
     def compute_logits(self, *args, **kwargs):
@@ -634,8 +629,6 @@ class HPUModelRunner:
         vllm_config: VllmConfig,
         device: torch.device = 'hpu',
     ):
-        #TODO(kzawora): remove this, this is ugly and only used for diagnostics
-        self._ENGINE_ITER = 0
         # TODO: use ModelRunnerBase.__init__(self, vllm_config=vllm_config)
         environment.set_model_config(vllm_config.model_config)
         self.vllm_config = vllm_config
@@ -704,8 +697,7 @@ class HPUModelRunner:
 
         self.use_hpu_graph = not self.model_config.enforce_eager
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
-        self.cudagraph_batch_sizes = [1, 2, 4] + [i for i in range(8, 513, 8)]
-        self.max_batch_size = 256  # TODO(kzawora): fix this garbage
+        self.max_batch_size = self.scheduler_config.max_num_seqs
         self.input_ids = torch.zeros(
             (self.max_batch_size, self.max_num_tokens),
             dtype=torch.int32,
@@ -873,10 +865,6 @@ class HPUModelRunner:
                 req_data.new_block_ids)
             self.input_batch.block_table.append_row(req_index, start_index,
                                                     req_data.new_block_ids)
-            #if self.input_batch.num_computed_tokens_cpu[req_index] < \
-            # self.input_batch.num_prompt_tokens[req_index]:
-            #    import pdb; pdb.set_trace()
-            #    assert len(self.requests[req_id].output_token_ids) == 0
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -1247,8 +1235,6 @@ class HPUModelRunner:
                 num_blocks = np.ceil(context_lens / self.block_size).astype(
                     np.int32).tolist()
                 max_num_blocks = max(num_blocks)
-                #if bucketing:
-                #    max_num_blocks = self.bucketing_ctx.get_padded_decode_num_blocks(max_num_blocks) # noqa
                 prefix_block_tables = torch.ones(
                     (padded_batch_size, max_num_blocks),
                     dtype=torch.int32,
@@ -1256,8 +1242,6 @@ class HPUModelRunner:
                 for i, n in enumerate(num_blocks):
                     prefix_block_tables[i, :n] = block_table_cpu_tensor[
                         batch_idx + i, :n]
-                    #last_block_delta = n * self.block_size -  context_lens[i]
-                    #query_start_loc_np[i] += last_block_delta
                 context_lens_tensor = torch.zeros((padded_batch_size),
                                                   dtype=torch.int32,
                                                   device='cpu')
@@ -1268,17 +1252,6 @@ class HPUModelRunner:
                     prefix_block_tables.flatten(), self.device)
                 context_lens_tensor_device = _async_h2d_tensor_copy(
                     context_lens_tensor, self.device)
-                #import pdb; pdb.set_trace()
-                #block_indices = torch.div(slot_mapping,
-                #                          self.block_size,
-                #                          rounding_mode="floor")
-                #intersection = list(
-                #    set(block_indices.flatten().tolist())
-                #    & set(prefix_block_tables.flatten().tolist()))
-                #import pdb; pdb.set_trace()
-                #assert len(
-                #    intersection
-                #) == 0, "slot_mapping and prefix_block_tables intersect"
                 attn_metadata = \
                     HPUAttentionMetadataV1.make_cached_prefill_metadata(
                     seq_lens_tensor=seq_lens_tensor_device,
@@ -1342,7 +1315,6 @@ class HPUModelRunner:
 
         # TOKEN_IDS. [batch, 1]
         token_ids = torch.zeros((padded_batch_size, 1), dtype=torch.int32)
-        #import pdb; pdb.set_trace()
         token_ids[:num_decodes] = torch.gather(input=torch.from_numpy(
             self.input_batch.token_ids_cpu),
                                                dim=1,
@@ -1360,7 +1332,6 @@ class HPUModelRunner:
                                                          self.block_size))
         block_offsets = padded_index % self.block_size
         slot_mapping = block_number * self.block_size + block_offsets
-        #import pdb; pdb.set_trace()
         # Set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
         slot_mapping = slot_mapping[:padded_batch_size]
@@ -1549,14 +1520,13 @@ class HPUModelRunner:
         # then we'll execute prefills in batches of up to max_prefill_batch_size elements. # noqa
         # All shapes used in forward passes are bucketed appropriately to mitigate risk of graph recompilations. # noqa
 
-        # We can do sampling directly after executing each forward pass (split_sampler=True), # noqa
-        # or execute all forward passes, join the results and execute it once (split_sampler=False). # noqa
+        # We perform sampling directly after executing each forward pass
         # Everything is done asynchronously - the only sync point is the place
         # where we copy the generated tokens back to the host.
 
         # Example: If a batch has 6 requests, 3 prefills and 3 decodes, the unprocessed sequences in batch will be laid as follows: # noqa
         # [D0, D1, D2, P0, P1, P2]
-        # If we assume max_prefill_batch_size=2, and split_sampler=True the flow of this method will look as follows: # noqa
+        # If we assume max_prefill_batch_size=2, the flow of this method will look as follows: # noqa
         # prepare_inputs: bucket [D0, D1, D2] -> [D0, D1, D2, 0] (BS=4 bucket, 1 seq padding) # noqa
         # prepare_inputs: bucket [P0, P1, P2] -> [P0, P1], [P2] (BS=2 + BS=1 bucket, no seqs padding) # noqa
         # decode forward pass BS4 [D0, D1, D2, 0]
@@ -1588,18 +1558,6 @@ class HPUModelRunner:
         # On CPU, sanitize [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] -> [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2] # noqa
         # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
 
-        # Example2: Same thing, but max_prefill_batch_size=4 and split_sampler=False: # noqa
-        # prepare_inputs: bucket [D0, D1, D2] -> [D0, D1, D2, 0] (BS=4 bucket, 1 seq padding) # noqa
-        # prepare_inputs: bucket [P0, P1, P2] -> [P0, P1, P2, 0] (BS=4 bucket, 1 seq padding) # noqa
-        # decode forward pass BS4 [D0, D1, D2, 0]
-        # decode compute_logits BS4 [D0, D1, D2, 0]
-        # prefill[iter 0] forward pass BS4 [P0, P1, P2, 0]
-        # prefill[iter 0] compute_logits BS4 [P0, P1, P2, 0]
-        # Join the prefill and decode on device into [D0, D1, D2, 0, P0, P1, P2, 0] # noqa
-        # joint sampler BS8 [D0, D1, D2, 0, P0, P1, P2, 0] -> [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] # noqa
-        # Transfer [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] to CPU
-        # On CPU, sanitize [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] -> [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2] # noqa
-        # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
         batch_changed = self._update_states(scheduler_output)
         # If necessary, swap decodes/prompts to have all decodes on the start
         ensure_decodes_first(self.input_batch)
@@ -1672,7 +1630,7 @@ class HPUModelRunner:
             htorch.core.mark_step()
 
         # From this point onward, all operations are done on CPU.
-        # If sampler was split, we already have tokens. Let's copy the data to
+        # We already have tokens. Let's copy the data to
         # CPU as is, and then discard padded tokens.
         prefill_output_cpu = prefill_output_device.cpu(
         ) if prefill_output_device is not None else None
@@ -1728,29 +1686,6 @@ class HPUModelRunner:
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
         )
 
-        if False:
-            for req_id in self.input_batch.req_ids[:num_reqs]:
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                if self.input_batch.token_ids_cpu[
-                        req_idx, self.input_batch.num_tokens[req_idx] -
-                        1] not in [0, self._tokenizer.eos_token_id, 0]:
-                    continue
-                token_ids = self.input_batch.token_ids_cpu[req_idx]
-                #prompt = self._tokenizer.decode(
-                #    token_ids[:self.input_batch.
-                #              num_prompt_tokens_cpu[req_idx]])
-                seq_len = (req_state.num_computed_tokens +
-                           scheduler_output.num_scheduled_tokens[req_id])
-                req_state = self.requests[req_id]
-                #prompt = self._tokenizer.decode(req_state.prompt_token_ids)
-                generated = self._tokenizer.decode(req_state.output_token_ids)
-                if 'The final answer is' not in generated:
-                    logger.info(
-                        f'[ENGINE_ITER {self._ENGINE_ITER}] REQ:{req_id} IDX:{req_idx} finished: {generated!r}'  # noqa
-                    )
-            logger.info("_ENGINE_ITER %s finished", self._ENGINE_ITER)
-        self._ENGINE_ITER += 1
-        #import pdb; pdb.set_trace()
         return model_runner_output
 
     def load_model(self) -> None:
@@ -2135,31 +2070,6 @@ class HPUModelRunner:
                              seq_or_block=max_seq_len,
                              is_prompt=True,
                              kv_caches=kv_caches)
-
-    @torch.inference_mode()
-    def capture_model(self) -> None:
-        start_time = time.perf_counter()
-        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
-
-        with set_forward_context(None):
-            # Trigger CUDA graph capture for specific shapes.
-            # Capture the large shapes first so that the smaller shapes
-            # can reuse the memory pool allocated for the large shapes.
-            for num_tokens in reversed(self.cudagraph_batch_sizes):
-                self.model(
-                    self.input_ids[:num_tokens],
-                    self.positions[:num_tokens],
-                    kv_caches=self.kv_caches,
-                    attn_metadata=None,
-                )
-
-        end_time = time.perf_counter()
-        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
-        elapsed_time = end_time - start_time
-        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
-        # This usually takes 5~20 seconds.
-        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
-                    elapsed_time, cuda_graph_size / (1 << 30))
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
