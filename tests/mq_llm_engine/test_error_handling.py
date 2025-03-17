@@ -235,25 +235,28 @@ async def test_bad_request(tmp_socket):
 
 
 @pytest.mark.asyncio
-async def test_mp_crash_detection(monkeypatch):
+async def test_mp_crash_detection(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
 
-    parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
-    parser = make_arg_parser(parser)
-    args = parser.parse_args([])
+        parser = FlexibleArgumentParser(
+            description="vLLM's remote OpenAI server.")
+        parser = make_arg_parser(parser)
+        args = parser.parse_args([])
 
-    # When LLMEngine is loaded, it will crash.
-    def mock_init():
-        raise ValueError
+        # When LLMEngine is loaded, it will crash.
+        def mock_init():
+            raise ValueError
 
-    monkeypatch.setattr(LLMEngine, "__init__", mock_init)
+        m.setattr(LLMEngine, "__init__", mock_init)
 
-    start = time.perf_counter()
-    async with build_async_engine_client(args):
-        pass
-    end = time.perf_counter()
+        start = time.perf_counter()
+        async with build_async_engine_client(args):
+            pass
+        end = time.perf_counter()
 
-    assert end - start < 60, ("Expected vLLM to gracefully shutdown in <60s "
-                              "if there is an error in the startup.")
+        assert end - start < 60, (
+            "Expected vLLM to gracefully shutdown in <60s "
+            "if there is an error in the startup.")
 
 
 @pytest.mark.asyncio
