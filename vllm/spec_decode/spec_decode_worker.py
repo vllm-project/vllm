@@ -1363,13 +1363,15 @@ def prepare_prefill_hidden_states(
     # be concatanated with 1:N token (since output of scorer has to be
     # the input for proposer). Therefore, we shift the hidden states to
     # align n-1th hidden state with nth token.
-    if previous_non_terminal_hidden_states is None:
-        return HiddenStates(prefill_hidden_states.roll(
-            shifts=1, dims=0)) if prefill_hidden_states is not None else None
 
     # previous_non_terminal_hidden_states is used for EAGLE + chunked
     # prefill, where it tracks the hidden states of the last token in
-    # the previous prompt chunk.
+    # the previous prompt chunk. prefill_seq_group_meta_data records
+    # the corresponding metadata.
+    if (prefill_seq_group_meta_data is None
+            or previous_non_terminal_hidden_states is None):
+        return HiddenStates(prefill_hidden_states.roll(
+            shifts=1, dims=0)) if prefill_hidden_states is not None else None
 
     # get the chunk sizes in seq_groups & get first chunk indices
     device = prefill_hidden_states.device
