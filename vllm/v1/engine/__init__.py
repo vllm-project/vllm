@@ -52,7 +52,7 @@ class EngineCoreRequest(
     # Detokenizer, but set to None when it is added to EngineCoreClient.
     prompt: Optional[str]
     prompt_token_ids: list[int]
-    mm_inputs: Optional[list[Optional[MultiModalKwargs]]]
+    mm_inputs: Optional[list[MultiModalKwargs]]
     mm_hashes: Optional[list[str]]
     mm_placeholders: Optional[list[PlaceholderRange]]
     sampling_params: SamplingParams

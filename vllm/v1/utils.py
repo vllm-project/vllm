@@ -86,6 +86,9 @@ class ConstantList(Generic[T], Sequence):
     def __len__(self):
         return len(self._x)
 
+    def __repr__(self):
+        return f"ConstantList({self._x})"
+
 
 class BackgroundProcHandle:
     """
