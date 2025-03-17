@@ -2,7 +2,6 @@
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 import itertools
-from typing import Tuple
 
 import pytest
 import torch
@@ -288,7 +287,7 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
 
 def per_block_cast_to_fp8(
         x: torch.Tensor,
-        block_size_n: int = 128) -> Tuple[torch.Tensor, torch.Tensor]:
+        block_size_n: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 2
     m, n = x.shape
     x_padded = torch.zeros(
