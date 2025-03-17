@@ -681,6 +681,17 @@ def hf_runner():
 
 
 class VllmRunner:
+    """
+    The default value of some arguments have been modified from
+    :class:`~vllm.LLM` as follows:
+    - `trust_remote_code`: Set to `True` instead of `False` for convenience.
+    - `seed`: Set to `0` instead of `None` for test reproducibility.
+    - `max_model_len`: Set to `1024` instead of `None` to reduce memory usage.
+    - `block_size`: Set to `16` instead of `None` to reduce memory usage.
+    - `enable_chunked_prefill`: Set to `False` instead of `None` for
+      test reproducibility.
+    - `enforce_eager`: Set to `False` instead of `None` to test CUDA graph.
+    """
 
     def __init__(
         self,
@@ -688,6 +699,8 @@ class VllmRunner:
         task: TaskOption = "auto",
         tokenizer_name: Optional[str] = None,
         tokenizer_mode: str = "auto",
+        trust_remote_code: bool = True,
+        seed: Optional[int] = 0,
         # Use smaller max model length, otherwise bigger model cannot run due
         # to kv cache size limit.
         max_model_len: int = 1024,
@@ -695,7 +708,7 @@ class VllmRunner:
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
         block_size: int = 16,
-        enable_chunked_prefill: bool = False,
+        enable_chunked_prefill: Optional[bool] = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
         **kwargs,
@@ -705,8 +718,9 @@ class VllmRunner:
             task=task,
             tokenizer=tokenizer_name,
             tokenizer_mode=tokenizer_mode,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             dtype=dtype,
+            seed=seed,
             swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,
