@@ -29,7 +29,6 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
@@ -132,14 +131,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-
-        if self.is_multimodal_model:
-            # NOTE: Initialized client is only used for processing dummy
-            # multimodal data into multimodal kwargs for GPU memory profiling.
-            # Only applicable to multimodal models with legacy input mapper.
-            self.mm_input_mapper_profiling = MMInputCacheClient(
-                self.model_config)
-            self.mm_input_mapper_profiling.use_cache = False
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
@@ -1376,32 +1367,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_registry=self.mm_registry,
             )
             dummy_mm_data = dummy_request_data.multi_modal_data
+            if not isinstance(dummy_mm_data, MultiModalKwargs):
+                # TODO: Delete this check once input mapper is fully removed.
+                raise RuntimeError(
+                    "Legacy input mapper is not supported in V1")
 
-            # Dummy data definition in V0 may contain multiple multimodal items
+            # Dummy data definition may contain multiple multimodal items
             # (e.g, multiple images) for a single request, therefore here we
             # always replicate first item by max_num_mm_items times since in V1
             # they are scheduled to be processed separately.
-
-            # Case when models have a merged processor, their dummy data is
-            # already batched `MultiModalKwargs`, therefore we take the first
-            # `MultiModalKwargsItem` from the desired modality to profile on.
-            if isinstance(dummy_mm_data, MultiModalKwargs):
-                dummy_mm_item = dummy_mm_data.get_item(
-                    modality=dummy_data_modality, item_index=0)
-                dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
-
-            # Case when models have dummy data explicitly defined as
-            # `MultiModalDataDict`, so they need to be processed through input
-            # mapper.
-            # TODO (ywang96): deprecate this path once merged processor is
-            # supported on all models.
-            else:
-                mm_kwargs_list = self.mm_input_mapper_profiling.process_inputs(
-                    mm_data=dummy_mm_data,
-                    mm_hashes=None,
-                    mm_processor_kwargs=None,
-                    precomputed_mm_inputs=None)
-                dummy_mm_kwargs = mm_kwargs_list[0]
+            dummy_mm_item = dummy_mm_data.get_item(
+                modality=dummy_data_modality, item_index=0)
+            dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
 
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items)
