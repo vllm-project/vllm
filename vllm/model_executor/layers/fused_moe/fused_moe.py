@@ -1297,23 +1297,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
 
     config = get_config_func(M)
 
-    # XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-
-    # We can reuse the memory between these because by the time we need
-    # cache3, we're done with cache1
-    cache13 = torch.empty(M * top_k_num * max(N, K),
-                          device=hidden_states.device,
-                          dtype=hidden_states.dtype)
-    intermediate_cache1 = cache13[:M * top_k_num * N].view(M, top_k_num, N)
-    intermediate_cache3 = cache13[:M * top_k_num * K].view(M, top_k_num, K)
-
-    # This needs separate memory since it's used concurrently with cache1
-    #intermediate_cache2 = torch.empty((M * top_k_num, N // 2),
-    #                                  device=hidden_states.device,
-    #                                  dtype=hidden_states.dtype)
-
-    # XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-
     if hidden_states.dtype == torch.bfloat16:
         compute_type = tl.bfloat16
     elif hidden_states.dtype == torch.float16:
@@ -1365,7 +1348,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         intermediate_cache2 = torch.empty((new_M, N // 2),
                                           device=hidden_states.device,
                                           dtype=hidden_states.dtype)
-        intermediate_cache3 = cache13[:(new_M * w2.shape[1])].view(new_M, w2.shape[1])
+        intermediate_cache3 = cache13[:(new_M * w2.shape[1])].view(
+            new_M, w2.shape[1])
     else:
         # We can reuse the memory between these because by the time we need
         # cache3, we're done with cache1
