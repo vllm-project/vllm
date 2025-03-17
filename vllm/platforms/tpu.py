@@ -108,12 +108,6 @@ class TpuPlatform(Platform):
                     parallel_config.worker_cls = \
                         "vllm.worker.tpu_worker.TPUWorker"
 
-        # Adjust scheduler config for V1
-        # TODO: Add support for these
-        if envs.VLLM_USE_V1 and vllm_config.cache_config.enable_prefix_caching:
-            logger.warning("[V1][TPU] Disable prefix caching")
-            vllm_config.cache_config.enable_prefix_caching = False
-
         assert not vllm_config.speculative_config, (
             "Speculative decoding is not yet supported for TPU backend")
 

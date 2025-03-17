@@ -29,7 +29,6 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
@@ -37,6 +36,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -82,8 +82,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
-        self.is_multimodal_model = model_config.is_multimodal_model
+        # NOTE(woosuk): sliding_window is None for models with interleaved
+        # attention. Use interleaved_sliding_window instead.
         self.sliding_window = model_config.get_sliding_window()
+        self.interleaved_sliding_window = getattr(
+            model_config.hf_text_config, "interleaved_sliding_window", None)
+        self.window_size = (self.sliding_window
+                            or self.interleaved_sliding_window)
+
+        self.is_multimodal_model = model_config.is_multimodal_model
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
@@ -124,14 +131,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-
-        if self.is_multimodal_model:
-            # NOTE: Initialized client is only used for processing dummy
-            # multimodal data into multimodal kwargs for GPU memory profiling.
-            # Only applicable to multimodal models with legacy input mapper.
-            self.mm_input_mapper_profiling = MMInputCacheClient(
-                self.model_config)
-            self.mm_input_mapper_profiling.use_cache = False
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
@@ -674,7 +673,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_query_heads=self.num_query_heads,
             num_kv_heads=self.num_kv_heads,
             use_alibi=False,  # FIXME
-            use_sliding_window=self.sliding_window is not None,
+            use_sliding_window=self.window_size is not None,
             num_sms=self.num_sms,
         )
         return common_prefix_len if use_cascade else 0
@@ -1013,29 +1012,39 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
         else:
-            target_probs = self.model.sampler.compute_probs(
-                logits, sampling_metadata)
             draft_token_ids = [
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
                 for req_id in self.input_batch.req_ids
             ]
-            sampler_output = self.rejection_sampler(draft_token_ids,
-                                                    target_probs,
-                                                    sampling_metadata)
+            sample_lens = [len(tokens) + 1 for tokens in draft_token_ids]
+            recover_logits_idx = np.cumsum(sample_lens) - 1
+            target_probs = self.rejection_sampler.compute_probs(
+                logits, sampling_metadata, sample_lens)
+            sampler_output = self.model.sample(
+                logits=logits[recover_logits_idx, :],
+                sampling_metadata=sampling_metadata,
+            )
+            bonus_token_ids = sampler_output.sampled_token_ids
+            output_token_ids = self.rejection_sampler(
+                draft_token_ids,
+                None,  # draft_probs
+                bonus_token_ids,
+                target_probs,
+                sampling_metadata)
+            sampler_output.sampled_token_ids = output_token_ids
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
-        for i, req_id in enumerate(self.input_batch.req_ids):
+        for i, generator in self.input_batch.generators.items():
+            req_id = self.input_batch.req_ids[i]
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
             if seq_len < req_state.num_tokens:
-                # Ignore the sampled token.
+                # Ignore the sampled token for partial prefills.
                 # Rewind the generator state as if the token was not sampled.
-                generator = self.input_batch.generators.get(i)
-                if generator is not None:
-                    # This relies on cuda-specific torch-internal impl details
-                    generator.set_offset(generator.get_offset() - 4)
+                # This relies on cuda-specific torch-internal impl details
+                generator.set_offset(generator.get_offset() - 4)
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
@@ -1069,7 +1078,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids = None
         else:
             spec_token_ids = self.generate_draft_token_ids(
-                valid_sampled_token_ids)
+                valid_sampled_token_ids, sampling_metadata)
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1083,6 +1092,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def generate_draft_token_ids(
         self,
         sampled_token_ids: list[list[int]],
+        sampling_metadata: SamplingMetadata,
     ) -> list[list[int]]:
         # TODO(woosuk): Optimize.
         draft_token_ids: list[list[int]] = []
@@ -1090,6 +1100,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
                 # Skip speculative decoding.
+                draft_token_ids.append([])
+                continue
+
+            # Skip requests that require top-p, top-k, etc.
+            req_id = self.input_batch.req_ids[i]
+            if not is_spec_decode_supported(req_id, self.input_batch):
                 draft_token_ids.append([])
                 continue
 
@@ -1288,9 +1304,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
         )
-        sampler_output = self.model.sample(logits=logits,
-                                           sampling_metadata=dummy_metadata)
-
+        try:
+            sampler_output = self.model.sample(
+                logits=logits, sampling_metadata=dummy_metadata)
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                raise RuntimeError(
+                    "CUDA out of memory occurred when warming up sampler with "
+                    f"{num_reqs} dummy requests. Please try lowering "
+                    "`max_num_seqs` or `gpu_memory_utilization` when "
+                    "initializing the engine.") from e
+            else:
+                raise e
         return sampler_output
 
     def profile_run(self) -> None:
@@ -1342,32 +1367,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_registry=self.mm_registry,
             )
             dummy_mm_data = dummy_request_data.multi_modal_data
+            if not isinstance(dummy_mm_data, MultiModalKwargs):
+                # TODO: Delete this check once input mapper is fully removed.
+                raise RuntimeError(
+                    "Legacy input mapper is not supported in V1")
 
-            # Dummy data definition in V0 may contain multiple multimodal items
+            # Dummy data definition may contain multiple multimodal items
             # (e.g, multiple images) for a single request, therefore here we
             # always replicate first item by max_num_mm_items times since in V1
             # they are scheduled to be processed separately.
-
-            # Case when models have a merged processor, their dummy data is
-            # already batched `MultiModalKwargs`, therefore we take the first
-            # `MultiModalKwargsItem` from the desired modality to profile on.
-            if isinstance(dummy_mm_data, MultiModalKwargs):
-                dummy_mm_item = dummy_mm_data.get_item(
-                    modality=dummy_data_modality, item_index=0)
-                dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
-
-            # Case when models have dummy data explicitly defined as
-            # `MultiModalDataDict`, so they need to be processed through input
-            # mapper.
-            # TODO (ywang96): deprecate this path once merged processor is
-            # supported on all models.
-            else:
-                mm_kwargs_list = self.mm_input_mapper_profiling.process_inputs(
-                    mm_data=dummy_mm_data,
-                    mm_hashes=None,
-                    mm_processor_kwargs=None,
-                    precomputed_mm_inputs=None)
-                dummy_mm_kwargs = mm_kwargs_list[0]
+            dummy_mm_item = dummy_mm_data.get_item(
+                modality=dummy_data_modality, item_index=0)
+            dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
 
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items)
