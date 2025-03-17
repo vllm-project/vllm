@@ -97,6 +97,7 @@ class TokenizerDataCache:
                 # REF: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
                 metadata.update({
                     "vocab_type": xgr.VocabType.BYTE_FALLBACK,
+                    "add_prefix_space": True
                 })
 
             cls._cache[tokenizer_hash] = TokenizerData(
