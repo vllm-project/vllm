@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
@@ -651,8 +652,10 @@ class TPUModelRunner:
         )
         # check there is no new graph compilation, all the graphs should be
         # captured and compiled during warming up.
-        if not self.enforce_eager:
-            assert self.num_xla_graphs == xr.get_num_cached_compilation_graph()
+        if envs.VLLM_XLA_CHECK_RECOMPILATION and not self.enforce_eager:
+            curr_cached_graph = xr.get_num_cached_compilation_graph()
+            assert self.num_xla_graphs == curr_cached_graph, (
+                "Recompilation after warm up is detected.")
         return model_runner_output
 
     def load_model(self) -> None:
