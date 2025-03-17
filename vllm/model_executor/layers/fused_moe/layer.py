@@ -7,7 +7,7 @@ from typing import Callable, List, Optional, Tuple
 import torch
 from torch.nn.parameter import UninitializedParameter
 
-from vllm import envs
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -99,6 +99,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
+        if current_platform.is_rocm():
+            if envs.VLLM_ROCM_USE_AITER_MOE:
+                # reshaping weights is required for aiter moe kernel.
+                from aiter.ops.shuffle import shuffle_weight
+
+                shuffled_w13_weight = shuffle_weight(layer.w13_weight.data)
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13_weight,
+                                                    requires_grad=False)
+
+                shuffled_w2_weight = shuffle_weight(layer.w2_weight.data)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2_weight,
+                                                    requires_grad=False)
+       
         if current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
                 import intel_extension_for_pytorch as ipex
