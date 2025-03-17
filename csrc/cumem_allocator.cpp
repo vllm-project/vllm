@@ -5,6 +5,16 @@
 
 #include "cumem_allocator_compat.h"
 
+#ifndef USE_ROCM
+static const char* PYARGS_PARSE = "KKKK";
+#else
+#define MEMCREATE_CHUNK_SIZE (256 * 1024 * 1024)
+#define TEMP_ARR_SIZE 128
+#define MIN(a, b) (a < b ? a : b)
+
+static const char* PYARGS_PARSE = "KKKO";
+#endif
+
 extern "C" {
 
 #define PY_SSIZE_T_CLEAN
@@ -49,7 +59,12 @@ void ensure_context(unsigned long long device) {
 }
 
 void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
+#ifndef USE_ROCM
                     CUmemGenericAllocationHandle* p_memHandle) {
+#else
+                    CUmemGenericAllocationHandle** p_memHandle,
+                    size_t num_chunks) {
+#endif
   ensure_context(device);
   // Define memory allocation properties
   CUmemAllocationProp prop = {};
@@ -58,6 +73,7 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   prop.location.id = device;
   prop.allocFlags.compressionType = CU_MEM_ALLOCATION_COMP_NONE;
 
+#ifndef USE_ROCM
   // Allocate memory using cuMemCreate
   CUDA_CHECK(cuMemCreate(p_memHandle, size, &prop, 0));
   if (error_code != 0) {
@@ -67,6 +83,22 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   if (error_code != 0) {
     return;
   }
+#else
+  for (auto i = 0; i < num_chunks; ++i) {
+    CUDA_CHECK(cuMemCreate(p_memHandle[i], MIN(size - i * MEMCREATE_CHUNK_SIZE, MEMCREATE_CHUNK_SIZE), &prop, 0));
+    if (error_code != 0) {
+      return;
+    }
+  }
+  for (auto i = 0; i < num_chunks; ++i) {
+    void* map_addr = (void*)((uintptr_t)d_mem + i * MEMCREATE_CHUNK_SIZE);
+    CUDA_CHECK(cuMemMap(map_addr, MIN(size - i * MEMCREATE_CHUNK_SIZE, MEMCREATE_CHUNK_SIZE), 0, *(p_memHandle[i]), 0));
+    if (error_code != 0) {
+      return;
+    }
+  }
+#endif
+
   CUmemAccessDesc accessDesc = {};
   accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   accessDesc.location.id = device;
@@ -82,10 +114,16 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 
 void unmap_and_release(unsigned long long device, ssize_t size,
                        CUdeviceptr d_mem,
+#ifndef USE_ROCM
                        CUmemGenericAllocationHandle* p_memHandle) {
+#else
+                       CUmemGenericAllocationHandle** p_memHandle,
+                       size_t num_chunks) {
+#endif
   // std::cout << "unmap_and_release: device=" << device << ", size=" << size <<
   // ", d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
   ensure_context(device);
+#ifndef USE_ROCM
   CUDA_CHECK(cuMemUnmap(d_mem, size));
   if (error_code != 0) {
     return;
@@ -94,6 +132,21 @@ void unmap_and_release(unsigned long long device, ssize_t size,
   if (error_code != 0) {
     return;
   }
+#else
+  for (auto i = 0; i < num_chunks; ++i) {
+    void* map_addr = (void*)((uintptr_t)d_mem + i * MEMCREATE_CHUNK_SIZE);
+    CUDA_CHECK(cuMemUnmap(map_addr, MIN(size - i * MEMCREATE_CHUNK_SIZE, MEMCREATE_CHUNK_SIZE)));
+    if (error_code != 0) {
+      return;
+    }
+  }
+  for (auto i = 0; i < num_chunks; ++i) {
+    CUDA_CHECK(cuMemRelease(*(p_memHandle[i])));
+    if (error_code != 0) {
+      return;
+    }
+  }
+#endif
 }
 
 PyObject* create_tuple_from_c_integers(unsigned long long a,
@@ -118,6 +171,31 @@ PyObject* create_tuple_from_c_integers(unsigned long long a,
   // so we do not need to Py_DECREF the PyLong objects explicitly.
 
   return tuple;  // Return the created tuple
+}
+
+PyObject* create_tuple_from_c_mixed(unsigned long long a,
+                                    unsigned long long b,
+                                    unsigned long long c,
+                                    CUmemGenericAllocationHandle** vec,
+                                    size_t num_chunks) {
+  PyObject* tuple = PyTuple_New(4);
+  if (!tuple) {
+    return NULL;
+  }
+
+  // PyObject* list = PyList_New(vec.size());
+  PyObject* list = PyList_New(num_chunks);
+  for (auto i = 0; i < num_chunks; ++i) {
+    PyObject* val = PyLong_FromUnsignedLongLong((unsigned long long)(vec[i]));
+    PyList_SetItem(list, i, val);
+  }
+
+  PyTuple_SetItem(tuple, 0, PyLong_FromUnsignedLongLong(a));
+  PyTuple_SetItem(tuple, 1, PyLong_FromUnsignedLongLong(b));
+  PyTuple_SetItem(tuple, 2, PyLong_FromUnsignedLongLong(c));
+  PyTuple_SetItem(tuple, 3, list);
+
+  return tuple;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,10 +229,21 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   if (error_code != 0) {
     return nullptr;
   }
+
+#ifndef USE_ROCM
   // allocate the CUmemGenericAllocationHandle
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)malloc(
           sizeof(CUmemGenericAllocationHandle));
+#else
+  size_t num_chunks = (size + MEMCREATE_CHUNK_SIZE - 1) / MEMCREATE_CHUNK_SIZE;
+  CUmemGenericAllocationHandle* p_memHandle[TEMP_ARR_SIZE];
+  for (auto i = 0; i < num_chunks; ++i) {
+    p_memHandle[i] =
+      (CUmemGenericAllocationHandle*)malloc(
+        sizeof(CUmemGenericAllocationHandle));
+  }
+#endif
 
   if (!g_python_malloc_callback) {
     std::cerr << "ERROR: g_python_malloc_callback not set.\n";
@@ -164,9 +253,16 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   // Acquire GIL (not in stable ABI officially, but often works)
   PyGILState_STATE gstate = PyGILState_Ensure();
 
+#ifndef USE_ROCM
   PyObject* arg_tuple = create_tuple_from_c_integers(
       (unsigned long long)device, (unsigned long long)alignedSize,
       (unsigned long long)d_mem, (unsigned long long)p_memHandle);
+#else
+  PyObject* arg_tuple = create_tuple_from_c_mixed(
+      (unsigned long long)device, (unsigned long long)alignedSize,
+      (unsigned long long)d_mem, p_memHandle,
+      num_chunks);
+#endif
 
   // Call g_python_malloc_callback
   PyObject* py_result =
@@ -182,7 +278,11 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   PyGILState_Release(gstate);
 
   // do the final mapping
+#ifndef USE_ROCM
   create_and_map(device, alignedSize, d_mem, p_memHandle);
+#else
+  create_and_map(device, alignedSize, d_mem, p_memHandle, num_chunks);
+#endif
 
   return (void*)d_mem;
 }
@@ -210,9 +310,14 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   }
 
   unsigned long long recv_device, recv_size;
-  unsigned long long recv_d_mem, recv_p_memHandle;
+  unsigned long long recv_d_mem;
+#ifndef USE_ROCM
+  unsigned long long recv_p_memHandle;
+#else
+  PyObject* recv_p_memHandle;
+#endif
   // Unpack the tuple into four C integers
-  if (!PyArg_ParseTuple(py_result, "KKKK", &recv_device, &recv_size,
+  if (!PyArg_ParseTuple(py_result, PYARGS_PARSE, &recv_device, &recv_size,
                         &recv_d_mem, &recv_p_memHandle)) {
     // PyArg_ParseTuple sets an error if it fails
     return;
@@ -226,16 +331,35 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   // Free memory
 
   CUdeviceptr d_mem = (CUdeviceptr)recv_d_mem;
+#ifndef USE_ROCM
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)recv_p_memHandle;
+
   unmap_and_release(device, size, d_mem, p_memHandle);
+#else
+  Py_ssize_t num_chunks = PyList_Size(recv_p_memHandle);
+  // v_memAllocHandlerPtr_t p_memHandle(num_chunks);
+  CUmemGenericAllocationHandle* p_memHandle[TEMP_ARR_SIZE];
+  for (auto i = 0; i < num_chunks; ++i) {
+    PyObject* item = PyList_GetItem(recv_p_memHandle, i);
+    p_memHandle[i] = (CUmemGenericAllocationHandle*)PyLong_AsUnsignedLongLong(item);
+  }
+
+  unmap_and_release(device, size, d_mem, p_memHandle, num_chunks);
+#endif
 
   // free address and the handle
   CUDA_CHECK(cuMemAddressFree(d_mem, size));
   if (error_code != 0) {
     return;
   }
+#ifndef USE_ROCM
   free(p_memHandle);
+#else
+  for (auto i = 0; i < num_chunks; ++i) {
+    free(p_memHandle[i]);
+  }
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -271,19 +395,35 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
   }
 
   unsigned long long recv_device, recv_size;
-  unsigned long long recv_d_mem, recv_p_memHandle;
+  unsigned long long recv_d_mem;
+#ifndef USE_ROCM
+  unsigned long long recv_p_memHandle;
+#else
+  PyObject* recv_p_memHandle;
+#endif
   // Unpack the tuple into four C integers
-  if (!PyArg_ParseTuple(args, "KKKK", &recv_device, &recv_size, &recv_d_mem,
+  if (!PyArg_ParseTuple(args, PYARGS_PARSE, &recv_device, &recv_size, &recv_d_mem,
                         &recv_p_memHandle)) {
     // PyArg_ParseTuple sets an error if it fails
     return nullptr;
   }
 
   CUdeviceptr d_mem_ptr = (CUdeviceptr)recv_d_mem;
+#ifndef USE_ROCM
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)recv_p_memHandle;
 
   unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle);
+#else
+  Py_ssize_t num_chunks = PyList_Size(recv_p_memHandle);
+  CUmemGenericAllocationHandle* p_memHandle[TEMP_ARR_SIZE];
+  for (auto i = 0; i < num_chunks; ++i) {
+    PyObject* item = PyList_GetItem(recv_p_memHandle, i);
+    p_memHandle[i] = (CUmemGenericAllocationHandle*)PyLong_AsUnsignedLongLong(item);
+  }
+
+  unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle, num_chunks);
+#endif
 
   if (error_code != 0) {
     error_code = no_error;
@@ -301,19 +441,35 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
   }
 
   unsigned long long recv_device, recv_size;
-  unsigned long long recv_d_mem, recv_p_memHandle;
+  unsigned long long recv_d_mem;
+#ifndef USE_ROCM
+  unsigned long long recv_p_memHandle;
+#else
+  PyObject* recv_p_memHandle;
+#endif
   // Unpack the tuple into four C integers
-  if (!PyArg_ParseTuple(args, "KKKK", &recv_device, &recv_size, &recv_d_mem,
+  if (!PyArg_ParseTuple(args, PYARGS_PARSE, &recv_device, &recv_size, &recv_d_mem,
                         &recv_p_memHandle)) {
     // PyArg_ParseTuple sets an error if it fails
     return nullptr;
   }
 
   CUdeviceptr d_mem_ptr = (CUdeviceptr)recv_d_mem;
+#ifndef USE_ROCM
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)recv_p_memHandle;
 
   create_and_map(recv_device, recv_size, d_mem_ptr, p_memHandle);
+#else
+  Py_ssize_t num_chunks = PyList_Size(recv_p_memHandle);
+  CUmemGenericAllocationHandle* p_memHandle[TEMP_ARR_SIZE];
+  for (auto i = 0; i < num_chunks; ++i) {
+    PyObject* item = PyList_GetItem(recv_p_memHandle, i);
+    p_memHandle[i] = (CUmemGenericAllocationHandle*)PyLong_AsUnsignedLongLong(item);
+  }
+
+  create_and_map(recv_device, recv_size, d_mem_ptr, p_memHandle, num_chunks);
+#endif
 
   if (error_code != 0) {
     error_code = no_error;
