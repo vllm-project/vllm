@@ -125,8 +125,15 @@ class ShmRingBuffer:
                        lambda *args, **kwargs: None):
                 try:
                     self.shared_memory = shared_memory.SharedMemory(name=name)
-                    assert (
-                        self.shared_memory.size == self.total_bytes_of_buffer)
+                    # See https://shorturl.at/3oULr
+                    # Because some platforms choose to allocate chunks
+                    # of memory based upon that platform’s memory page
+                    # size, the exact size of the shared memory block
+                    # may be larger or equal to the size requested.
+                    # When attaching to an existing shared memory
+                    # block, the size parameter is ignored.
+                    assert (self.shared_memory.size
+                            >= self.total_bytes_of_buffer)
                 except FileNotFoundError:
                     # we might deserialize the object in a different node
                     # in this case, this object is not used,

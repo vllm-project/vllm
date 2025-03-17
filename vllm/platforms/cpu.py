@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import sys
 from typing import TYPE_CHECKING, Optional
 
 import psutil
@@ -148,6 +149,17 @@ class CpuPlatform(Platform):
         # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(
             vllm_config.parallel_config.tensor_parallel_size)
+        if sys.platform == "darwin" and \
+                envs.VLLM_WORKER_MULTIPROC_METHOD == "fork":
+            if os.environ.get('VLLM_WORKER_MULTIPROC_METHOD', None) is None:
+                logger.warning(
+                    "On macOS, setting VLLM_WORKER_MULTIPROC_METHOD to fork "
+                    "may cause issues. If it triggers a crash, set "
+                    "VLLM_WORKER_MULTIPROC_METHOD to 'spawn' automatically "
+                    "to resolve the issue. "
+                    "To override that behavior, please set "
+                    "VLLM_WORKER_MULTIPROC_METHOD=fork explicitly.")
+                os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
