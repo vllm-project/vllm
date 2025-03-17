@@ -1191,7 +1191,7 @@ class EngineArgs:
         NOTE: for autoselection of V0 vs V1 engine, we need to
         create the ModelConfig first, since ModelConfig's attrs
         (e.g. the model arch) are needed to make the decision.
-        
+
         This function set VLLM_USE_V1=X if VLLM_USE_V1 is
         unspecified by the user.
 
@@ -1575,10 +1575,6 @@ class EngineArgs:
 
         #############################################################
         # Experimental Features - allow users to opt in.
-
-        # MLA is is supported on V1, but off by default for now.
-        if model_config.use_mla and _warn_or_fallback("MLA"):
-            return False
 
         # LoRA is supported on V1, but off by default for now.
         if self.enable_lora and _warn_or_fallback("LORA"):
