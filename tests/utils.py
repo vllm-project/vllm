@@ -566,6 +566,7 @@ def init_test_distributed_environment(
 
 
 def multi_process_parallel(
+    monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
     pp_size: int,
     test_target: Any,
@@ -582,7 +583,13 @@ def multi_process_parallel(
     refs = []
     for rank in range(tp_size * pp_size):
         refs.append(
-            test_target.remote(tp_size, pp_size, rank, distributed_init_port))
+            test_target.remote(
+                monkeypatch,
+                tp_size,
+                pp_size,
+                rank,
+                distributed_init_port,
+            ), )
     ray.get(refs)
 
     ray.shutdown()
@@ -700,7 +707,7 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
     """
     Get a pytest mark, which skips the test if the GPU doesn't meet
     a minimum memory requirement in GB.
-    
+
     This can be leveraged via `@large_gpu_test` to skip tests in environments
     without enough resources, or called when filtering tests to run directly.
     """
