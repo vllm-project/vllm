@@ -453,7 +453,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=1) and not core_model and not quant_model'
 
-- label: SSM and Hybrid Models Test # X min
+- label: SSM and Hybrid Models Test # 12min
   source_file_dependencies:
       - vllm/
       - tests/models/decoder_only/language/test_hybrid.py
