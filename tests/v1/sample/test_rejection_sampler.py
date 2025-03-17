@@ -9,7 +9,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
                                               RejectionSampler)
 
-DEVICE = "cpu"
+DEVICE = "cuda"
 
 
 @pytest.fixture

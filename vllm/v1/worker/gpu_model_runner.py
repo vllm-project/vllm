@@ -1363,9 +1363,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 raise e
         if self.use_spec_decode:
             draft_token_ids = [[0] for _ in range(num_reqs)]
-            dummy_spec_decode_metadata = (
-                SpecDecodeMetadata.make_dummy_for_profiling(
-                    draft_token_ids, self.device))
+            dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+                draft_token_ids, self.device)
 
             num_tokens = sum(len(ids) for ids in draft_token_ids)
             num_tokens_with_bonus = num_tokens + num_reqs

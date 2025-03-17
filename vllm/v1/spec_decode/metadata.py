@@ -25,7 +25,7 @@ class SpecDecodeMetadata:
         self.max_spec_len = max(self.num_draft_tokens)
 
     @classmethod
-    def make_dummy_for_profiling(
+    def make_dummy(
         cls,
         draft_token_ids: list[list[int]],
         device: torch.device,
