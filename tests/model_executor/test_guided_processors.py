@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import pickle
 
 import pytest
@@ -227,4 +228,5 @@ def test_pickle_xgrammar_tokenizer_data():
     depickled: TokenizerData = pickle.loads(pickled)
 
     assert depickled is not None
-    assert depickled.vocab_type == xgr.VocabType.BYTE_LEVEL
+    assert json.loads(
+        depickled.metadata)['vocab_type'] == xgr.VocabType.BYTE_LEVEL.value

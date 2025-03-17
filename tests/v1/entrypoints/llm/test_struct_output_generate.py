@@ -30,7 +30,10 @@ def test_guided_json_completion(
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    llm = LLM(model=model_name, max_model_len=1024)
+    params = dict(model=model_name, max_model_len=1024)
+    if "mistral" in model_name:
+        params['tokenizer_mode'] = 'mistral'
+    llm = LLM(**params)
     sampling_params = SamplingParams(temperature=1.0,
                                      max_tokens=1000,
                                      guided_decoding=GuidedDecodingParams(
@@ -67,7 +70,10 @@ def test_guided_json_object(
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    llm = LLM(model=model_name, max_model_len=1024)
+    params = dict(model=model_name, max_model_len=1024)
+    if "mistral" in model_name:
+        params['tokenizer_mode'] = 'mistral'
+    llm = LLM(**params)
     sampling_params = SamplingParams(temperature=1.0,
                                      max_tokens=100,
                                      n=2,
@@ -107,7 +113,10 @@ def test_guided_json_unsupported_schema(
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    llm = LLM(model=model_name, max_model_len=1024)
+    params = dict(model=model_name, max_model_len=1024)
+    if "mistral" in model_name:
+        params['tokenizer_mode'] = 'mistral'
+    llm = LLM(**params)
     sampling_params = SamplingParams(temperature=1.0,
                                      max_tokens=1000,
                                      guided_decoding=GuidedDecodingParams(
@@ -135,7 +144,10 @@ def test_guided_grammar_ebnf(
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    llm = LLM(model=model_name, max_model_len=1024)
+    params = dict(model=model_name, max_model_len=1024)
+    if "mistral" in model_name:
+        params['tokenizer_mode'] = 'mistral'
+    llm = LLM(**params)
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      max_tokens=1000,
@@ -178,7 +190,10 @@ def test_guided_grammar_lark(
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    llm = LLM(model=model_name, max_model_len=1024)
+    params = dict(model=model_name, max_model_len=1024)
+    if "mistral" in model_name:
+        params['tokenizer_mode'] = 'mistral'
+    llm = LLM(**params)
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      max_tokens=1000,
@@ -225,7 +240,10 @@ def test_guided_grammar_ebnf_invalid(
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    llm = LLM(model=model_name, max_model_len=1024)
+    params = dict(model=model_name, max_model_len=1024)
+    if "mistral" in model_name:
+        params['tokenizer_mode'] = 'mistral'
+    llm = LLM(**params)
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      max_tokens=1000,
@@ -254,7 +272,10 @@ def test_guided_regex(
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    llm = LLM(model=model_name, max_model_len=1024)
+    params = dict(model=model_name, max_model_len=1024)
+    if "mistral" in model_name:
+        params['tokenizer_mode'] = 'mistral'
+    llm = LLM(**params)
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      guided_decoding=GuidedDecodingParams(
@@ -291,7 +312,10 @@ def test_guided_choice_completion(
     model_name: str,
 ):
     monkeypatch.setenv("VLLM_USE_V1", "1")
-    llm = LLM(model=model_name, max_model_len=1024)
+    params = dict(model=model_name, max_model_len=1024)
+    if "mistral" in model_name:
+        params['tokenizer_mode'] = 'mistral'
+    llm = LLM(**params)
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      guided_decoding=GuidedDecodingParams(
