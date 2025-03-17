@@ -13,6 +13,7 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -165,7 +166,7 @@ class Processor:
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
         # 3. Apply prompt adapter to prompt token ids if one exists.
-        processed_inputs = self.input_preprocessor.preprocess(
+        processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
             request_id=request_id,
             lora_request=lora_request,
@@ -202,17 +203,20 @@ class Processor:
             self.tokenizer.get_lora_tokenizer(lora_request))
 
         # Multimodal related.
-        if (decoder_mm_data := decoder_inputs.multi_modal_data):
-            assert isinstance(decoder_mm_data, MultiModalKwargs)
+        sorted_mm_inputs: Optional[list[MultiModalKwargs]] = None
+        sorted_mm_positions: Optional[list[PlaceholderRange]] = None
+        sorted_mm_hashes: Optional[list[str]] = None
+        if (decoder_mm_inputs := decoder_inputs.multi_modal_data):
+            assert isinstance(decoder_mm_inputs, MultiModalKwargs)
 
-            # The output of merged multi-modal processor (`decoder_mm_data`)
+            # The output of merged multi-modal processor (`decoder_mm_inputs`)
             # contains the kwargs for all items from all modalities.
             # This code separates them so that there is one set of kwargs
             # per item per modality.
-            precomputed_mm_inputs = [
+            individual_mm_inputs = [
                 MultiModalKwargs.from_items([item])
-                for modality in decoder_mm_data.modalities
-                for item in decoder_mm_data.get_items(modality)
+                for modality in decoder_mm_inputs.modalities
+                for item in decoder_mm_inputs.get_items(modality)
             ]
 
             # Merge and flatten multimodal placeholders, hashes and inputs
@@ -229,7 +233,7 @@ class Processor:
             )
 
             # NOTE: Sort multimodal inputs/kwargs ONLY IF there are multiple
-            # modalities involved AND the model supports merged input processor.
+            # modalities involved.
             if len(sorted_modalities) > 1:
                 modality_order_dict = {
                     modality: order
@@ -238,20 +242,16 @@ class Processor:
 
                 # Sanity check to make sure each multimodal input has only one
                 # modality key.
-                for mm_input in precomputed_mm_inputs:
+                for mm_input in individual_mm_inputs:
                     assert len(mm_input.modalities) == 1
 
                 # Sort MultiModalKwargs to match sorted_mm_positions
                 sorted_mm_inputs = sorted(
-                    precomputed_mm_inputs,
+                    individual_mm_inputs,
                     key=lambda mm_input: modality_order_dict[list(
                         mm_input.modalities)[0]])
             else:
-                sorted_mm_inputs = precomputed_mm_inputs
-        else:
-            sorted_mm_inputs = None
-            sorted_mm_hashes = None
-            sorted_mm_positions = None
+                sorted_mm_inputs = individual_mm_inputs
 
         return EngineCoreRequest(
             request_id=request_id,

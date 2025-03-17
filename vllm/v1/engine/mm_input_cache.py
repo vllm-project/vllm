@@ -9,14 +9,16 @@ from vllm.multimodal.processing import ProcessingCache
 # server in the core process (=P1).
 #
 # -- Client:
-#  - Apply BaseMultiModalProcessor with built-in caching functionality
+#  - BaseMultiModalProcessor to process MultiModalData into MultiModalKwargs
+#    with built-in caching functionality, with mm_hash as its identifier.
 #
 # -- Server:
-#  - Perform caching of the received MultiModalKwargs.
+#  - MMInputCacheServer to perform caching of the received MultiModalKwargs.
 #
-# The caching for both client and server is mirrored/similar, and this allows us
+# The caching for both client and server is mirrored, and this allows us
 # to avoid the serialization of "mm_inputs" (like pixel values) between
-# client (=P0) and server (=P1) processes.
+# client (=P0) and server (=P1) processes if the mm_hash is found in the client
+# cache.
 
 # Both Client and Server must use the same cache size
 # (to perform mirrored caching). This cache size is set by the environment
