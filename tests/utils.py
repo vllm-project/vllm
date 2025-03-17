@@ -12,7 +12,7 @@ import time
 import warnings
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union
 
 import cloudpickle
 import openai
@@ -755,13 +755,15 @@ def spawn_new_process_for_each_test(
 def create_new_process_for_each_test(
     method: Optional[Literal["spawn", "fork"]] = None
 ) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
-    """creates a new process for each test function.
+    """Creates a decorator that runs each test function in a new process.
 
     Args:
-        method: The process creation method, either "spawn" or "fork".
+        method: The process creation method. Can be either "spawn" or "fork". 
+               If not specified,
+               it defaults to "spawn" on ROCm platforms and "fork" otherwise.
 
     Returns:
-        A decorator function that will run the test in a new process.
+        A decorator to run test functions in separate processes.
     """
     if method is None:
         method = "spawn" if current_platform.is_rocm() else "fork"
