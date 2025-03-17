@@ -1935,6 +1935,9 @@ class CUDAGraphRunner(nn.Module):
         # Capture the graph.
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
+            if hasattr(self.model, "capture_mode"):
+                self.model.capture_mode = True
+
             output_hidden_or_intermediate_states = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -1959,6 +1962,9 @@ class CUDAGraphRunner(nn.Module):
             # in the graph's memory pool
             gc.collect()
         torch.cuda.synchronize()
+
+        if hasattr(self.model, "capture_mode"):
+            self.model.capture_mode = False
 
         # Save the input and output buffers.
         self.input_buffers = {
