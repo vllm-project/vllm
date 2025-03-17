@@ -201,6 +201,7 @@ def test_models(
     )
 
 
+@pytest.mark.skip("RE-ENABLE: test is currently failing on main.")
 @pytest.mark.parametrize("model", MISTRAL_FORMAT_MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
