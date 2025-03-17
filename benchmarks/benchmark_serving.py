@@ -684,6 +684,15 @@ def main(args: argparse.Namespace):
                         "Invalid metadata format. Please use KEY=VALUE format."
                     )
 
+        if not args.save_detailed:
+            # Remove fields with too many data points
+            for field in [
+                    "input_lens", "output_lens", "ttfts", "itls",
+                    "generated_texts", "errors"
+            ]:
+                if field in result_json:
+                    del result_json[field]
+
         # Traffic
         result_json["request_rate"] = (args.request_rate if args.request_rate
                                        < float("inf") else "inf")
@@ -827,6 +836,12 @@ if __name__ == "__main__":
         "--save-result",
         action="store_true",
         help="Specify to save benchmark results to a json file",
+    )
+    parser.add_argument(
+        "--save-detailed",
+        action="store_true",
+        help="When saving the results, whether to include per request "
+        "information such as response, error, ttfs, tpots, etc.",
     )
     parser.add_argument(
         "--metadata",
