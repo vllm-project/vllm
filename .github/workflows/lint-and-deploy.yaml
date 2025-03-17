@@ -50,7 +50,7 @@ jobs:
         uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
 
       - name: Build the Docker image vllm cpu
-        run: docker buildx build -f Dockerfile.cpu -t vllm-cpu-env .
+        run: docker buildx build -f docker/Dockerfile.cpu -t vllm-cpu-env .
 
       - name: Configuration of docker images, network and namespace for the kind cluster
         run: |

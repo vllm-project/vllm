@@ -10,5 +10,5 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Try building the docker image
-docker build -t cpu-test -f Dockerfile.ppc64le .
+docker build -t cpu-test -f docker/Dockerfile.ppc64le .
 
