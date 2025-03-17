@@ -948,6 +948,7 @@ V1 currently uses a simplified attention pattern:
 - Uses causal attention for all tokens, including image tokens
 - Generates reasonable outputs but does not match the original model's attention for text + image inputs
 - Will be updated in the future to support the correct behavior
+- Does not support `"do_pan_and_scan": True`
 
 This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
 :::
