@@ -8,11 +8,48 @@ import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
-from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
-                           PromptLogprobs, SequenceGroupMetadata,
+from vllm.sequence import (CompletionSequenceGroupOutput, HiddenStates,
+                           Logprob, PromptLogprobs, SequenceGroupMetadata,
                            SequenceOutput)
 
 SeqId = int
+
+
+def get_non_terminal_hidden_states(
+        prefill_hidden_states: torch.Tensor,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        proposer_model_type: Optional[str] = None) -> Optional[HiddenStates]:
+    """
+    Given prefill hidden states, extract the hidden states of the last token
+    in a non-terminal chunk for speculative decoding methods such as EAGLE. 
+    """
+    if proposer_model_type != 'eagle':
+        return None
+
+    non_terminal_seq_group_meta = []
+    non_terminal_seq_group_inds = []
+    token_chunk_sizes = []
+    for i, sg in enumerate(seq_group_metadata_list):
+        if sg.is_prompt and not sg.do_sample:
+            non_terminal_seq_group_meta.append(sg)
+            non_terminal_seq_group_inds.append(i)
+        token_chunk_sizes.append(sg.token_chunk_size)
+
+    if not non_terminal_seq_group_meta:
+        device = prefill_hidden_states.device
+        non_terminal_seq_group_inds = torch.tensor(non_terminal_seq_group_inds,
+                                                   dtype=torch.int64,
+                                                   device=device)
+        token_chunk_sizes = torch.tensor(token_chunk_sizes,
+                                         dtype=torch.int64,
+                                         device=device)
+        non_terminal_hidden_inds = (torch.cumsum(
+            token_chunk_sizes,
+            dim=0).add_(-1)).index_select(0, non_terminal_seq_group_inds)
+        return HiddenStates(
+            prefill_hidden_states.index_select(0, non_terminal_hidden_inds),
+            seq_group_metadata_list=non_terminal_seq_group_meta)
+    return None
 
 
 def get_all_num_logprobs(

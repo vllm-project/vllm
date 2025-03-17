@@ -24,7 +24,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SequenceGroupMetadata,
-                           get_all_seq_ids_and_request_ids)
+                           get_all_seq_ids, get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 
 if current_platform.is_cuda_alike():
@@ -44,6 +44,7 @@ from vllm.spec_decode.target_model_runner import TargetModelRunner
 from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    create_sequence_group_output,
                                    get_all_num_logprobs,
+                                   get_non_terminal_hidden_states,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.utils import resolve_obj_by_qualname
@@ -257,22 +258,22 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             spec_decode_sampler=spec_decode_sampler,
             allow_zero_draft_token_step=allow_zero_draft_token_step,
             enable_lm_head_weight_load=enable_lm_head_weight_load,
-            num_spec_prefill_steps=num_spec_prefill_steps)
+            num_spec_prefill_steps=num_spec_prefill_steps,
+            proposer_model_type=draft_model_config.hf_config.model_type)
 
-    def __init__(
-        self,
-        proposer_worker: ProposerWorkerBase,
-        scorer_worker: WorkerBase,
-        spec_decode_sampler: SpecDecodeBaseSampler,
-        disable_mqa_scorer: bool = False,
-        disable_logprobs: bool = False,
-        disable_log_stats: bool = False,
-        metrics_collector: Optional[AsyncMetricsCollector] = None,
-        disable_by_batch_size: Optional[int] = None,
-        allow_zero_draft_token_step: Optional[bool] = True,
-        enable_lm_head_weight_load: Optional[bool] = False,
-        num_spec_prefill_steps: int = 1,
-    ):
+    def __init__(self,
+                 proposer_worker: ProposerWorkerBase,
+                 scorer_worker: WorkerBase,
+                 spec_decode_sampler: SpecDecodeBaseSampler,
+                 disable_mqa_scorer: bool = False,
+                 disable_logprobs: bool = False,
+                 disable_log_stats: bool = False,
+                 metrics_collector: Optional[AsyncMetricsCollector] = None,
+                 disable_by_batch_size: Optional[int] = None,
+                 allow_zero_draft_token_step: Optional[bool] = True,
+                 enable_lm_head_weight_load: Optional[bool] = False,
+                 num_spec_prefill_steps: int = 1,
+                 proposer_model_type: Optional[str] = None):
         """
         Create a SpecDecodeWorker.
 
@@ -308,6 +309,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 before the speculative decoding starts. This is only used when
                 the draft model is a deepseek_mtp model that requires prefill
                 kv cache separately for each MTP layer.
+            proposer_model_type: proposer's architecture, needed for deciding 
+                how prefill & hidden states should be managed
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
@@ -339,6 +342,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # Hidden states from target model to pass to proposer
         # in the subsequent step.
         self.previous_hidden_states: Optional[HiddenStates] = None
+        self.non_terminal_hidden_states: Optional[HiddenStates] = None
+        self.proposer_model_type = proposer_model_type
         self._disable_logprobs = disable_logprobs
         self._disable_log_stats = disable_log_stats
         self._num_spec_prefill_steps = num_spec_prefill_steps
@@ -698,13 +703,22 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 self.previous_hidden_states.update(hidden_states,
                                                    seq_group_meta_with_hidden)
 
+        non_terminal_hidden_states = self.non_terminal_hidden_states
+        self.non_terminal_hidden_states = get_non_terminal_hidden_states(
+            sampler_output.prefill_hidden_states,
+            execute_model_req.seq_group_metadata_list,
+            proposer_model_type=self.proposer_model_type)
+
         if not skip_proposer:
             # We prepare the prefill hidden states here so that there no
             # additional complexity in worker for spec_decode vs non_spec_decode
             # flow and execute_model doesn't need additional modifications.
             execute_model_req.previous_hidden_states = \
                 prepare_prefill_hidden_states(
-                    sampler_output.prefill_hidden_states)
+                    sampler_output.prefill_hidden_states,
+                    execute_model_req.seq_group_metadata_list,
+                    non_terminal_hidden_states
+                )
             for i in range(self._num_spec_prefill_steps):
                 execute_model_req.spec_step_idx = i
                 self.proposer_worker.execute_model(execute_model_req)
@@ -778,6 +792,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         # Pass last hidden states from target model to proposer
         execute_model_req.previous_hidden_states = self.previous_hidden_states
+        non_terminal_hidden_states = self.non_terminal_hidden_states
         self.previous_hidden_states = None
 
         with Timer() as proposal_timer:
@@ -807,11 +822,31 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             if execute_model_req.seq_group_metadata_list[idx].is_prompt
         ]
         if len(non_spec_indices):
-            all_hidden_states = proposal_scores.hidden_states
-            if all_hidden_states is not None:
-                prefill_hidden_states = all_hidden_states[non_spec_indices]
-                execute_model_req.previous_hidden_states = \
-                    prepare_prefill_hidden_states(prefill_hidden_states)
+            if self.proposer_model_type != 'eagle':
+                all_hidden_states = proposal_scores.hidden_states
+                if all_hidden_states is not None:
+                    prefill_hidden_states = all_hidden_states[non_spec_indices]
+                    execute_model_req.previous_hidden_states = \
+                        prepare_prefill_hidden_states(prefill_hidden_states)
+            else:
+                prefill_hidden_states = proposal_scores.prefill_hidden_states
+                if prefill_hidden_states is not None:
+                    prefill_hidden_states = (
+                        proposal_scores.prefill_hidden_states)
+                    self.non_terminal_hidden_states = \
+                        get_non_terminal_hidden_states(
+                            prefill_hidden_states,
+                            non_spec_seqs,
+                            proposer_model_type=self.proposer_model_type
+                        )
+                    execute_model_req.previous_hidden_states = \
+                        prepare_prefill_hidden_states(
+                            prefill_hidden_states,
+                            prefill_seq_group_meta_data=non_spec_seqs,
+                            previous_non_terminal_hidden_states= \
+                            non_terminal_hidden_states
+                    )
+                proposal_scores.prefill_hidden_states = None
             # Sync proposer KV cache for prefills.
             prefill_req = execute_model_req.clone(non_spec_seqs)
             # TODO avoid sampling here?
@@ -1315,12 +1350,51 @@ def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,
 
 
 def prepare_prefill_hidden_states(
-        prefill_hidden_states: torch.Tensor) -> HiddenStates:
+    prefill_hidden_states: torch.Tensor,
+    prefill_seq_group_meta_data: Optional[List[SequenceGroupMetadata]] = None,
+    previous_non_terminal_hidden_states: Optional[HiddenStates] = None
+) -> HiddenStates:
     # For prefill step in proposer, we run the model for N-1 tokens
     # because Nth token will be processed in the first decode step. For
     # N-1 tokens, the input should be 0:N-1 hidden states which should
     # be concatanated with 1:N token (since output of scorer has to be
     # the input for proposer). Therefore, we shift the hidden states to
     # align n-1th hidden state with nth token.
-    return HiddenStates(prefill_hidden_states.roll(
-        shifts=1, dims=0)) if prefill_hidden_states is not None else None
+    if previous_non_terminal_hidden_states is None:
+        return HiddenStates(prefill_hidden_states.roll(
+            shifts=1, dims=0)) if prefill_hidden_states is not None else None
+
+    # previous_non_terminal_hidden_states is used for EAGLE + chunked
+    # prefill, where it tracks the hidden states of the last token in
+    # the previous prompt chunk.
+
+    # get the chunk sizes in seq_groups & get first chunk indices
+    device = prefill_hidden_states.device
+    chunk_sizes = torch.tensor(
+        [0] + [sg.token_chunk_size for sg in prefill_seq_group_meta_data[:-1]],
+        dtype=torch.int64,
+        device=device)
+
+    all_indices = chunk_sizes.cumsum(0)
+
+    # filter for seqs with previous non terminal hidden states
+    prefill_seq_ids = torch.tensor(
+        get_all_seq_ids(prefill_seq_group_meta_data), device=device)
+    previous_seq_ids = torch.tensor(
+        previous_non_terminal_hidden_states._seq_ids, device=device)
+
+    matches = torch.isin(prefill_seq_ids, previous_seq_ids)
+    prefill_indices = all_indices[matches]
+
+    _, previous_non_terminal_indices = torch.where(
+        prefill_seq_ids.unsqueeze(1) == previous_seq_ids)
+
+    prefill_hidden_states = prefill_hidden_states.roll(shifts=1, dims=0)
+
+    # fill the first token of each chunk with the last token
+    # from the previous chunk
+    if prefill_indices.numel() > 0:
+        prefill_hidden_states[prefill_indices] = (
+            previous_non_terminal_hidden_states.
+            hidden_states[previous_non_terminal_indices])
+    return HiddenStates(prefill_hidden_states)
