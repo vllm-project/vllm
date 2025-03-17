@@ -262,8 +262,9 @@ class CudaPlatformBase(Platform):
                         "Cannot use FlashAttention-2 backend for head size %d.",
                         head_size)
                     target_backend = _Backend.XFORMERS
-                if (kv_cache_dtype.startswith("fp8")
-                        and get_flash_attn_version() != 3):
+                fp8_kv_cache = (kv_cache_dtype is not None
+                                and kv_cache_dtype.startswith("fp8"))
+                if (fp8_kv_cache and get_flash_attn_version() != 3):
                     logger.info(
                         "Cannot use FlashAttention-2 backend for FP8 KV cache."
                     )

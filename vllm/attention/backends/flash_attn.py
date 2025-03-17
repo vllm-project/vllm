@@ -881,7 +881,7 @@ class FlashAttentionImpl(AttentionImpl):
                     _,
                     block_tables_arg,
                 ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
-                descale_shape = (seq_lens_arg.shape[0], key.shape[1])
+                descale_shape = (seq_lens_arg.shape[0], key_cache.shape[-2])
                 flash_attn_with_kvcache(
                     q=decode_query.unsqueeze(1),
                     k_cache=key_cache,

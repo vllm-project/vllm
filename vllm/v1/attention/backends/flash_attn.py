@@ -411,9 +411,9 @@ def cascade_attention(
     block_table: torch.Tensor,
     common_prefix_len: int,
     fa_version: int,
-    q_descale: torch.Tensor,
-    k_descale: torch.Tensor,
-    v_descale: torch.Tensor,
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
     # TODO: Support sliding window.
@@ -443,9 +443,12 @@ def cascade_attention(
         softcap=logits_soft_cap,
         return_softmax_lse=True,
         fa_version=fa_version,
-        q_descale=q_descale.expand(descale_shape),
-        k_descale=k_descale.expand(descale_shape),
-        v_descale=v_descale.expand(descale_shape),
+        q_descale=q_descale.expand(descale_shape)
+        if q_descale is not None else None,
+        k_descale=k_descale.expand(descale_shape)
+        if k_descale is not None else None,
+        v_descale=v_descale.expand(descale_shape)
+        if v_descale is not None else None,
     )
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
@@ -466,9 +469,12 @@ def cascade_attention(
         softcap=logits_soft_cap,
         return_softmax_lse=True,
         fa_version=fa_version,
-        q_descale=q_descale.expand(descale_shape),
-        k_descale=k_descale.expand(descale_shape),
-        v_descale=v_descale.expand(descale_shape),
+        q_descale=q_descale.expand(descale_shape)
+        if q_descale is not None else None,
+        k_descale=k_descale.expand(descale_shape)
+        if k_descale is not None else None,
+        v_descale=v_descale.expand(descale_shape)
+        if v_descale is not None else None,
     )
 
     # Merge prefix and suffix outputs, and store the result in output.

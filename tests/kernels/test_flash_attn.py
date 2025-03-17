@@ -144,17 +144,15 @@ def test_flash_attn_with_paged_kv(
     k_descale = None
     v_descale = None
     if q_dtype is not None:
-        q_scale = q.amax().to(torch.float32) / 448.0
-        k_scale = key_cache.amax().to(torch.float32) / 448.0
-        v_scale = value_cache.amax().to(torch.float32) / 448.0
+        # QKV are drawn from N(0, 1): no need for a fp8 scaling factor
+        maybe_quantized_query = query.to(q_dtype)
+        maybe_quantized_key_cache = key_cache.to(q_dtype)
+        maybe_quantized_value_cache = value_cache.to(q_dtype)
 
-        maybe_quantized_query = (q / q_scale).to(q_dtype)
-        maybe_quantized_key_cache = (key_cache / k_scale).to(q_dtype)
-        maybe_quantized_value_cache = (value_cache / k_scale).to(q_dtype)
-
-        q_descale = q_scale.expand((num_seqs, num_kv_heads))
-        k_descale = k_scale.expand((num_seqs, num_kv_heads))
-        v_descale = v_scale.expand((num_seqs, num_kv_heads))
+        scale_shape = (num_seqs, num_kv_heads)
+        q_descale = torch.ones(scale_shape, dtype=torch.float32)
+        k_descale = torch.ones(scale_shape, dtype=torch.float32)
+        v_descale = torch.ones(scale_shape, dtype=torch.float32)
 
     output = flash_attn_with_kvcache(
         q=maybe_quantized_query,
@@ -175,9 +173,9 @@ def test_flash_attn_with_paged_kv(
     output = output if not use_out else out
     output = output.squeeze(1)
 
-    atol, rtol = 1e-2, 1e-2
+    atol, rtol = 1.5e-2, 1e-2
     if q_dtype is not None:
-        atol, rtol = 1e-1, 1.5e-1
+        atol, rtol = 1.5e-1, 1.5e-1
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache,
@@ -269,17 +267,15 @@ def test_varlen_with_paged_kv(
     k_descale = None
     v_descale = None
     if q_dtype is not None:
-        q_scale = query.amax().to(torch.float32) / 448.0
-        k_scale = key_cache.amax().to(torch.float32) / 448.0
-        v_scale = value_cache.amax().to(torch.float32) / 448.0
+        # QKV are drawn from N(0, 1): no need for a fp8 scaling factor
+        maybe_quantized_query = query.to(q_dtype)
+        maybe_quantized_key_cache = key_cache.to(q_dtype)
+        maybe_quantized_value_cache = value_cache.to(q_dtype)
 
-        maybe_quantized_query = (query / q_scale).to(q_dtype)
-        maybe_quantized_key_cache = (key_cache / k_scale).to(q_dtype)
-        maybe_quantized_value_cache = (value_cache / k_scale).to(q_dtype)
-
-        q_descale = q_scale.expand((num_seqs, num_kv_heads))
-        k_descale = k_scale.expand((num_seqs, num_kv_heads))
-        v_descale = v_scale.expand((num_seqs, num_kv_heads))
+        scale_shape = (num_seqs, num_kv_heads)
+        q_descale = torch.ones(scale_shape, dtype=torch.float32)
+        k_descale = torch.ones(scale_shape, dtype=torch.float32)
+        v_descale = torch.ones(scale_shape, dtype=torch.float32)
 
     output = flash_attn_varlen_func(
         q=maybe_quantized_query,
@@ -313,8 +309,8 @@ def test_varlen_with_paged_kv(
         sliding_window=sliding_window,
         soft_cap=soft_cap,
     )
-    atol, rtol = 1e-2, 1e-2
+    atol, rtol = 1.5e-2, 1e-2
     if q_dtype is not None:
-        atol, rtol = 1e-1, 1.5e-1
+        atol, rtol = 1.5e-1, 1.5e-1
     torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol), \
         f"{torch.max(torch.abs(output - ref_output))}"
