@@ -101,7 +101,7 @@ def use_memory_pool_with_allocator(
     mem_pool = torch.cuda.memory.MemPool(new_alloc._allocator)
     with torch.cuda.memory.use_mem_pool(mem_pool):
         # Force the allocator to have longer lifetime than mempool
-        yield new_alloc
+        yield new_alloc, mem_pool
 
 
 class CuMemAllocator:
