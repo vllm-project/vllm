@@ -123,40 +123,38 @@ def test_cumem_with_cudagraph():
         # sleep mode with pytorch checkpoint
         ("facebook/opt-125m", False),
     ])
-def test_end_to_end(model: str, use_v1: bool):
-    import os
-    os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
-    free, total = torch.cuda.mem_get_info()
-    used_bytes_baseline = total - free  # in case other process is running
-    llm = LLM(model, enable_sleep_mode=True)
-    prompt = "How are you?"
-    sampling_params = SamplingParams(temperature=0, max_tokens=10)
-    output = llm.generate(prompt, sampling_params)
+def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1" if use_v1 else "0")
+        free, total = torch.cuda.mem_get_info()
+        used_bytes_baseline = total - free  # in case other process is running
+        llm = LLM(model, enable_sleep_mode=True)
+        prompt = "How are you?"
+        sampling_params = SamplingParams(temperature=0, max_tokens=10)
+        output = llm.generate(prompt, sampling_params)
 
-    # the benefit of `llm.sleep(level=2)` is mainly CPU memory usage,
-    # which is difficult to measure in the test. therefore, we only
-    # test sleep level 1 here.
-    llm.sleep(level=1)
+        # the benefit of `llm.sleep(level=2)` is mainly CPU memory usage,
+        # which is difficult to measure in the test. therefore, we only
+        # test sleep level 1 here.
+        llm.sleep(level=1)
 
-    free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
-    used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
-    # now the memory usage is mostly cudagraph memory pool,
-    # and it should be less than the model weights (1B model, 2GiB weights)
+        free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
+        used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
+        # now the memory usage is mostly cudagraph memory pool,
+        # and it should be less than the model weights (1B model, 2GiB weights)
 
-    # NOTE: In V1, the memory buffer for logits (max_num_reqs x vocab_size)
-    # is captured but cannot be releasesd from PyTorch due to a known bug,
-    # therefore high memory usage after `llm.sleep` is called is expected.
-    # FIXME(youkaichao & ywang96): Fix memory buffer issue with sleep mode
-    # in V1.
-    if use_v1:
-        assert used_bytes < 7 * GiB_bytes
-    else:
-        assert used_bytes < 2 * GiB_bytes
+        # NOTE: In V1, the memory buffer for logits (max_num_reqs x vocab_size)
+        # is captured but cannot be releasesd from PyTorch due to a known bug,
+        # therefore high memory usage after `llm.sleep` is called is expected.
+        # FIXME(youkaichao & ywang96): Fix memory buffer issue with sleep mode
+        # in V1.
+        if use_v1:
+            assert used_bytes < 7 * GiB_bytes
+        else:
+            assert used_bytes < 2 * GiB_bytes
 
-    llm.wake_up()
-    output2 = llm.generate(prompt, sampling_params)
+        llm.wake_up()
+        output2 = llm.generate(prompt, sampling_params)
 
-    # cmp output
-    assert output[0].outputs[0].text == output2[0].outputs[0].text
-
-    del os.environ["VLLM_USE_V1"]
+        # cmp output
+        assert output[0].outputs[0].text == output2[0].outputs[0].text
