@@ -152,7 +152,7 @@ class CudaPlatformBase(Platform):
             # here
             use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None \
                 or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
-            from vllm.attention.backends.flashmla import is_flashmla_supported
+            from vllm.attention.ops.flashmla import is_flashmla_supported
             if use_flashmla and is_flashmla_supported()[0] \
                 and cache_config.block_size != 64:
                 cache_config.block_size = 64
