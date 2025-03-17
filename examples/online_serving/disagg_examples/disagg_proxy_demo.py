@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
 import argparse
 import ipaddress
 import itertools
 import json
 import logging
 import os
+import sys
 import threading
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
@@ -305,12 +307,11 @@ class Proxy:
             response = StreamingResponse(content=generator)
             return response
         except Exception:
-            import sys
-
             exc_info = sys.exc_info()
+            error_messages = [str(e) for e in exc_info if e]
             print("Error occurred in disagg proxy server")
-            print(exc_info)
-            return StreamingResponse(content=exc_info,
+            print(error_messages)
+            return StreamingResponse(content=iter(error_messages),
                                      media_type="text/event-stream")
 
     def remove_instance_endpoint(self, instance_type, instance):
@@ -343,7 +344,7 @@ class ProxyServer:
     def __init__(
         self,
         args: argparse.Namespace,
-        scheduling_policy: SchedulingPolicy = None,
+        scheduling_policy: Optional[SchedulingPolicy] = None,
         create_completion: Optional[Callable[[Request],
                                              StreamingResponse]] = None,
         create_chat_completion: Optional[Callable[[Request],
@@ -409,3 +410,39 @@ class ProxyServer:
         config = uvicorn.Config(app, port=self.port, loop="uvloop")
         server = uvicorn.Server(config)
         server.run()
+
+
+if __name__ == "__main__":
+    # Todo: allow more config
+    parser = argparse.ArgumentParser("vLLM disaggregated proxy server.")
+    parser.add_argument("--model",
+                        "-m",
+                        type=str,
+                        required=True,
+                        help="Model name")
+
+    parser.add_argument(
+        "--prefill",
+        "-p",
+        type=str,
+        nargs="+",
+        help="List of prefill node URLs (host:port)",
+    )
+
+    parser.add_argument(
+        "--decode",
+        "-d",
+        type=str,
+        nargs="+",
+        help="List of decode node URLs (host:port)",
+    )
+
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Server port number",
+    )
+    args = parser.parse_args()
+    proxy_server = ProxyServer(args=args)
+    proxy_server.run_server()
