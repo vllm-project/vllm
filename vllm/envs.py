@@ -75,6 +75,9 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = True
+    VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -521,6 +524,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, use the V1 code path.
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
+
+    # use aiter ops unless specifically disabled.
+    # Acts as a parent switch to enable the rest of the other operations.
+    "VLLM_ROCM_USE_AITER":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1")),
+
+    # use aiter moe op if aiter ops are enabled.
+    "VLLM_ROCM_USE_AITER_MOE":
+    lambda:
+    (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+     ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
+     ("true", "1")),
+
+    # use aiter block scaled moe op if aiter ops are enabled.
+    # by default this is disabled.
+    "VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE":
+    lambda:
+    (os.getenv("VLLM_ROCM_USE_AITER_MOE", "False").lower() in
+     ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE",
+                                 "false").lower() in ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
