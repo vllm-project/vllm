@@ -1367,8 +1367,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         logits.shape[-1],
                                         device=self.device,
                                         dtype=logits.dtype)
-            # NOTE(woosuk): Here, we should use int32 because the sampler
-            # uses int32 for bonus_token_ids.
+            # NOTE(woosuk): Here, we should use int32 because the sampler uses
+            # int32 for bonus_token_ids. If the dtype mismatches, re-compilation
+            # will occur at runtime.
             bonus_token_ids = torch.zeros(num_reqs,
                                           device=self.device,
                                           dtype=torch.int32)
