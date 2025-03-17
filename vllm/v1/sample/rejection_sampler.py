@@ -21,6 +21,27 @@ MAX_SPEC_LEN = 32
 
 
 class RejectionSampler(nn.Module):
+    """
+    The implementation strictly follows the algorithm described in 
+        https://arxiv.org/abs/2211.17192.
+    However, we want to clarify the terminology used in the implementation:
+    accepted tokens: tokens that are accepted based on the relationship 
+            between the "raw" draft and target probabilities.
+    recovered tokens: tokens that are sampled based on the adjusted probability
+        distribution, which is derived from both the draft and target 
+        probabilities.
+    bonus tokens:
+        If all proposed tokens are accepted, the bonus token is added to the
+        end of the sequence. The bonus token is only sampled from the target
+        probabilities. We pass in the bonus tokens instead of sampling them
+        in the rejection sampler to allow for more flexibility in the
+        sampling process. For example, we can use top_p, top_k sampling for
+        bonus tokens, while spec decode does not support these sampling
+        strategies.
+    output tokens: 
+        Tokens are finally generated with the rejection sampler. 
+        output tokens = accepted tokens + recovered tokens + bonus tokens
+    """
 
     def forward(
         self,
