@@ -1289,7 +1289,6 @@ class HPUModelRunner:
         # padding data can be dummy since we have a causal mask.
 
         block_table_cpu_tensor = self.input_batch.block_table.get_cpu_tensor()
-        # num_reqs = self.input_batch.num_reqs
         if num_decodes == 0:
             return DecodeInputData(num_decodes=0)
 
@@ -1353,8 +1352,6 @@ class HPUModelRunner:
             block_tables_list.append(seq_block_table)
 
         # CONTEXT_LENS [batch_size]
-        #context_lens = (positions.reshape(-1) + 1)
-
         block_list, block_groups, block_usage = \
             self.get_habana_paged_attn_buffers(
             block_tables_list, slot_mapping.tolist(), bucketing)
@@ -1600,8 +1597,7 @@ class HPUModelRunner:
                 htorch.core.mark_step()
                 prefill_output_tokens.extend(sampled_token_ids_device)
 
-            # sampler now returns cpu list instead of device tensor -
-            # and i don't like it
+            # sampler returns device tensors, concat will happen on device
             if len(prefill_output_tokens) > 0:
                 prefill_output_device = torch.tensor(
                     prefill_output_tokens,
