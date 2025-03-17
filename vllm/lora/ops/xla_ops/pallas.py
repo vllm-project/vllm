@@ -40,37 +40,37 @@ def _bgmv_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref, lora_re
         out_ref[...] = acc_ref[...].astype(out_ref.dtype)
 
 
-@functools.partial(jax.jit, static_argnames=["TOKEN_BLOCK_SIZE", "LORA_RANK_BLOCK_SIZE", "DIM_BLOCK_SIZE"])
+@functools.partial(jax.jit, static_argnames=["TOKEN_BLOCK", "LORA_BLOCK", "DIM_BLOCK"])
 def _bgmv(
     idxs: jax.Array,  # (T, ) int32
     inputs: jax.Array,  # (T, D) model dtype
     loras: jax.Array,  # (N, L, D) model dtype
     *,
-    TOKEN_BLOCK_SIZE: int,
-    LORA_RANK_BLOCK_SIZE: int,
-    DIM_BLOCK_SIZE: int
+    TOKEN_BLOCK: int,
+    LORA_BLOCK: int,
+    DIM_BLOCK: int
 ) -> jax.Array:  # (T, L) model dtype
     T, D = inputs.shape
     N, L, _ = loras.shape
 
     return pl.pallas_call(
-        kernel=functools.partial(_bgmv_kernel, TOKEN_BLOCK_SIZE, LORA_RANK_BLOCK_SIZE, N),
+        kernel=functools.partial(_bgmv_kernel, TOKEN_BLOCK, LORA_BLOCK, N),
         out_shape=jax.ShapeDtypeStruct((T, L), dtype=inputs.dtype),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=1,
-            grid=(T // TOKEN_BLOCK_SIZE, L // LORA_RANK_BLOCK_SIZE,
-                  D // DIM_BLOCK_SIZE),
+            grid=(T // TOKEN_BLOCK, L // LORA_BLOCK,
+                  D // DIM_BLOCK),
             in_specs=[
-                pl.BlockSpec((TOKEN_BLOCK_SIZE, DIM_BLOCK_SIZE),
+                pl.BlockSpec((TOKEN_BLOCK, DIM_BLOCK),
                              lambda i, j, k, block_idx: (i, k)),
-                pl.BlockSpec((N, LORA_RANK_BLOCK_SIZE, DIM_BLOCK_SIZE),
+                pl.BlockSpec((N, LORA_BLOCK, DIM_BLOCK),
                              lambda i, j, k, block_idx: (0, j, k)),
             ],
-            out_specs=pl.BlockSpec((TOKEN_BLOCK_SIZE, LORA_RANK_BLOCK_SIZE),
+            out_specs=pl.BlockSpec((TOKEN_BLOCK, LORA_BLOCK),
                                    lambda i, j, k, block_idx: (i, j)),
             scratch_shapes=[
-                pltpu.VMEM((TOKEN_BLOCK_SIZE, LORA_RANK_BLOCK_SIZE), jnp.float32),
-                pltpu.VMEM((TOKEN_BLOCK_SIZE, LORA_RANK_BLOCK_SIZE), jnp.float32)
+                pltpu.VMEM((TOKEN_BLOCK, LORA_BLOCK), jnp.float32),
+                pltpu.VMEM((TOKEN_BLOCK, LORA_BLOCK), jnp.float32)
             ]),
         compiler_params=pltpu.TPUCompilerParams(
             dimension_semantics=("parallel", "parallel", "arbitrary")),
@@ -99,21 +99,21 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
 
     jax_import_guard()
 
-    TOKEN_BLOCK_SIZE=16
+    TOKEN_BLOCK=16
     if L > D: # Expand
-        LORA_RANK_BLOCK_SIZE=1024
-        DIM_BLOCK_SIZE=256
+        LORA_BLOCK=1024
+        DIM_BLOCK=256
     else: # Shrink
-        LORA_RANK_BLOCK_SIZE=256
-        DIM_BLOCK_SIZE=1024
+        LORA_BLOCK=256
+        DIM_BLOCK=1024
 
 
     kernel = make_kernel_from_pallas(
         functools.partial(
             _bgmv,
-            TOKEN_BLOCK_SIZE=TOKEN_BLOCK_SIZE,
-            LORA_RANK_BLOCK_SIZE=LORA_RANK_BLOCK_SIZE,
-            DIM_BLOCK_SIZE=DIM_BLOCK_SIZE
+            TOKEN_BLOCK=TOKEN_BLOCK,
+            LORA_BLOCK=LORA_BLOCK,
+            DIM_BLOCK=DIM_BLOCK
         ),
         bgmv_shape_function
     )
@@ -121,16 +121,16 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
     # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU
     # register. This has to happen in pytorch, doing it in Jax will lead to NaNs
     L1 = L
-    if LORA_RANK_BLOCK_SIZE > L or L % LORA_RANK_BLOCK_SIZE != 0:
-        L1 = (L // LORA_RANK_BLOCK_SIZE + 1) * LORA_RANK_BLOCK_SIZE
+    if LORA_BLOCK > L or L % LORA_BLOCK != 0:
+        L1 = (L // LORA_BLOCK + 1) * LORA_BLOCK
 
     D1 = D
-    if DIM_BLOCK_SIZE > D or D % DIM_BLOCK_SIZE != 0:
-        D1 = (D // DIM_BLOCK_SIZE + 1) * DIM_BLOCK_SIZE
+    if DIM_BLOCK > D or D % DIM_BLOCK != 0:
+        D1 = (D // DIM_BLOCK + 1) * DIM_BLOCK
 
     T1 = T
-    if TOKEN_BLOCK_SIZE > T or T % TOKEN_BLOCK_SIZE != 0:
-        T1 = (T // TOKEN_BLOCK_SIZE + 1) * TOKEN_BLOCK_SIZE
+    if TOKEN_BLOCK > T or T % TOKEN_BLOCK != 0:
+        T1 = (T // TOKEN_BLOCK + 1) * TOKEN_BLOCK
 
     if D1 != D or L1 != L:
         loras = torch.nn.functional.pad(loras, (0, D1 - D, 0, L1 - L, 0, 0))
