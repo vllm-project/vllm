@@ -150,7 +150,10 @@ def rejection_sample(
     )
     output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
 
-    is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
+    if sampling_metadata.all_greedy:
+        is_greedy = None
+    else:
+        is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_probs.argmax(dim=-1)
@@ -342,7 +345,7 @@ def sample_recovered_tokens(
     return recovered_token_ids
 
 
-# NOTE(woosuk): Don't specialize on `max_spec_len` to avoid recompilation.
+# NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
 @triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_greedy_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
@@ -350,11 +353,16 @@ def rejection_greedy_sample_kernel(
     draft_token_ids_ptr,  # [num_tokens]
     target_argmax_ptr,  # [num_tokens]
     bonus_token_ids_ptr,  # [batch_size]
-    is_greedy_ptr,  # [batch_size]
+    is_greedy_ptr,  # [batch_size] or None
     max_spec_len,
 ):
     req_idx = tl.program_id(0)
-    is_greedy = tl.load(is_greedy_ptr + req_idx)
+    # FIXME(woosuk): Because is_greedy_ptr is not None at profiling run,
+    # re-compilation may happen during runtime when is_greedy_ptr is None.
+    if is_greedy_ptr is None:
+        is_greedy = True
+    else:
+        is_greedy = tl.load(is_greedy_ptr + req_idx)
     if not is_greedy:
         # Early exit for non-greedy sampling requests.
         return
@@ -385,7 +393,7 @@ def rejection_greedy_sample_kernel(
             num_draft_tokens, bonus_token_id)
 
 
-# NOTE(woosuk): Don't specialize on `max_spec_len` to avoid recompilation.
+# NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
 @triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_random_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
@@ -448,6 +456,7 @@ def rejection_random_sample_kernel(
             num_draft_tokens, bonus_token_id)
 
 
+# NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
 @triton.jit(do_not_specialize=["replace_from", "replace_to"])
 def expand_kernel(
     output_ptr,  # [num_tokens]
