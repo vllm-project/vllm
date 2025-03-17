@@ -22,13 +22,13 @@ MAX_SPEC_LEN = 32
 
 class RejectionSampler(nn.Module):
     """
-    The implementation strictly follows the algorithm described in 
+    The implementation strictly follows the algorithm described in
         https://arxiv.org/abs/2211.17192.
     However, we want to clarify the terminology used in the implementation:
-    accepted tokens: tokens that are accepted based on the relationship 
+    accepted tokens: tokens that are accepted based on the relationship
             between the "raw" draft and target probabilities.
     recovered tokens: tokens that are sampled based on the adjusted probability
-        distribution, which is derived from both the draft and target 
+        distribution, which is derived from both the draft and target
         probabilities.
     bonus tokens:
         If all proposed tokens are accepted, the bonus token is added to the
@@ -38,8 +38,8 @@ class RejectionSampler(nn.Module):
         sampling process. For example, we can use top_p, top_k sampling for
         bonus tokens, while spec decode does not support these sampling
         strategies.
-    output tokens: 
-        Tokens are finally generated with the rejection sampler. 
+    output tokens:
+        Tokens are finally generated with the rejection sampler.
         output tokens = accepted tokens + recovered tokens + bonus tokens
     """
 
@@ -68,11 +68,11 @@ class RejectionSampler(nn.Module):
                 different requests are flattened into a single tensor because
                 this is the shape of the output logits.
             bonus_token_ids_tensor (torch.Tensor):
-                A tensor containing bonus tokens. Shape is [batch_size, 1]. 
-                Bonus tokens are added to the end of the sequence if all 
-                proposed tokens are accepted. We generate the bonus tokens 
-                outside of the rejection sampler with the default sampling 
-                strategy. It allows for more flexibility in the sampling 
+                A tensor containing bonus tokens. Shape is [batch_size, 1].
+                Bonus tokens are added to the end of the sequence if all
+                proposed tokens are accepted. We generate the bonus tokens
+                outside of the rejection sampler with the default sampling
+                strategy. It allows for more flexibility in the sampling
                 process such as top_p, top_k sampling.
             sampling_metadata (SamplingMetadata):
                 Additional metadata needed for sampling, such as temperature,
@@ -259,7 +259,7 @@ def generate_uniform_probs(
     device: torch.device,
 ) -> torch.Tensor:
     """
-    Generates a batch of uniform random samples, with optional seeding 
+    Generates a batch of uniform random samples, with optional seeding
     if available.
 
     This method creates a tensor of shape `(num_tokens, )` filled
@@ -274,13 +274,13 @@ def generate_uniform_probs(
         num_draft_tokens : List[List[int]]
             Number of draft tokens per request.
         generators : Optional[Dict[int, torch.Generator]]
-            A dictionary mapping indices in the batch to 
+            A dictionary mapping indices in the batch to
             `torch.Generator` objects.
         device : torch.device
             The device on which to allocate the tensor.
     Returns:
         uniform_rand : torch.Tensor
-            A tensor of shape `(num_tokens, )` containing uniform 
+            A tensor of shape `(num_tokens, )` containing uniform
             random values in the range [0, 1).
     """
     uniform_probs = torch.rand(
