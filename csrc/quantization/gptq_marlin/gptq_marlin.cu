@@ -2067,7 +2067,7 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
     __CALL_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS, \
               true)                                                       \
     __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS, true)
-	
+
 template <typename scalar_t>
 bool gptq_marlin_mm_u4b8_256(
     vllm::ScalarType const& q_type, int thread_m_blocks, int thread_n_blocks,
