@@ -12,7 +12,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import CompilationLevel
 from vllm.platforms import current_platform
 
-from ..utils import fork_new_process_for_each_test
+from ..utils import create_new_process_for_each_test
 
 
 @pytest.fixture(params=None, name="model_info")
@@ -78,7 +78,7 @@ def models_list_fixture(request):
     [CompilationLevel.DYNAMO_ONCE, CompilationLevel.PIECEWISE],
 )
 @pytest.mark.parametrize("model_info", "", indirect=True)
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
     model_info: tuple[str, dict[str, Any]],
