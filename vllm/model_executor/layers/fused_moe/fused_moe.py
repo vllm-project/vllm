@@ -1029,6 +1029,7 @@ def try_get_optimal_moe_config(
                                         is_marlin, block_shape)
     return config
 
+
 def rocm_aiter_topk_softmax(topk_weights: torch.Tensor,
                             topk_indices: torch.Tensor,
                             token_expert_indices: torch.Tensor,
@@ -1275,6 +1276,7 @@ direct_register_custom_op(
     mutates_args=[],
     fake_impl=outplace_fused_experts_fake,
 )
+
 
 def rocm_aiter_fused_experts(
         *,

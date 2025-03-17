@@ -568,7 +568,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                       requires_grad=False)
                 layer.w2_weight = torch.nn.Parameter(shuffle_weight(
                     layer.w2_weight.data),
-                                                     requires_grad=False)  
+                                                     requires_grad=False)
             return
 
         # If checkpoint is fp16, quantize in place.
@@ -614,7 +614,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                       requires_grad=False)
                 layer.w2_weight = torch.nn.Parameter(shuffle_weight(
                     layer.w2_weight),
-                                                     requires_grad=False) 
+                                                     requires_grad=False)
             return
 
         # If checkpoint is fp8, we need to handle that the
