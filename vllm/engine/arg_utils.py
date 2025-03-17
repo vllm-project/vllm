@@ -1298,6 +1298,8 @@ class EngineArgs:
         else:
             self._set_default_args_v0(model_config)
 
+        assert self.enable_chunked_prefill is not None
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
