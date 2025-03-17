@@ -4,16 +4,23 @@ This example shows how to use vLLM for running offline inference with
 the explicit/implicit prompt format on enc-dec LMMs for text generation.
 """
 import time
+from collections.abc import Sequence
+from dataclasses import asdict
+from typing import NamedTuple
 
-from vllm import LLM, SamplingParams
+from vllm import LLM, EngineArgs, PromptType, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.utils import FlexibleArgumentParser
 
 
+class ModelRequestData(NamedTuple):
+    engine_args: EngineArgs
+    prompts: Sequence[PromptType]
+
+
 def run_florence2():
-    # Create a Florence-2 encoder/decoder model instance
-    llm = LLM(
+    engine_args = EngineArgs(
         model="microsoft/Florence-2-large",
         tokenizer="facebook/bart-large",
         max_num_seqs=8,
@@ -39,12 +46,15 @@ def run_florence2():
             "decoder_prompt": "",
         },
     ]
-    return llm, prompts
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
 
 
 def run_mllama():
-    # Create a Mllama encoder/decoder model instance
-    llm = LLM(
+    engine_args = EngineArgs(
         model="meta-llama/Llama-3.2-11B-Vision-Instruct",
         max_model_len=4096,
         max_num_seqs=2,
@@ -69,12 +79,15 @@ def run_mllama():
             "decoder_prompt": "<|image|><|begin_of_text|>Please describe the image.",   # noqa: E501
         },
     ]
-    return llm, prompts
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
 
 
 def run_whisper():
-    # Create a Whisper encoder/decoder model instance
-    llm = LLM(
+    engine_args = EngineArgs(
         model="openai/whisper-large-v3-turbo",
         max_model_len=448,
         max_num_seqs=16,
@@ -99,7 +112,11 @@ def run_whisper():
             "decoder_prompt": "<|startoftranscript|>",
         }
     ]
-    return llm, prompts
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
 
 
 model_example_map = {
@@ -114,7 +131,12 @@ def main(args):
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
 
-    llm, prompts = model_example_map[model]()
+    req_data = model_example_map[model]()
+
+    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    llm = LLM(**engine_args)
+
+    prompts = req_data.prompts
 
     # Create a sampling params object.
     sampling_params = SamplingParams(
@@ -153,6 +175,10 @@ if __name__ == "__main__":
                         default="mllama",
                         choices=model_example_map.keys(),
                         help='Huggingface "model_type".')
+    parser.add_argument("--seed",
+                        type=int,
+                        default=None,
+                        help="Set the seed when initializing `vllm.LLM`.")
 
     args = parser.parse_args()
     main(args)
