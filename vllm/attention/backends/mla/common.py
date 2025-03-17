@@ -1161,7 +1161,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             k_pe = workspace[:toks]\
                 [..., self.kv_lora_rank:].unsqueeze(1)
 
-            kv_nope = self.kv_b_proj(kv_c_normed)[0].view( \
+            kv_nope = self.kv_b_proj(kv_c_normed.contiguous())[0].view( \
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
             k_nope, v = kv_nope\
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
