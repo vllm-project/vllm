@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import bisect
+import gc
 import time
 from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
@@ -219,6 +220,37 @@ class TPUModelRunner:
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
         self.num_reqs_paddings = _get_req_paddings(
             min_req_size=MIN_NUM_SEQS, max_req_size=self.max_num_reqs)
+
+        # Get maximum number of mm items per modality (batch size).
+        self.max_num_mm_items_by_modality = dict()
+        if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
+                and self.encoder_cache_size > 0):
+            max_tokens_by_modality_dict = (
+                MULTIMODAL_REGISTRY.
+                get_max_tokens_per_item_by_nonzero_modality(self.model_config))
+            for modality, max_tokens in max_tokens_by_modality_dict.items():
+                # Check how many items of this modality can be supported by
+                # the encoder budget.
+                encoder_budget = min(self.max_num_encoder_input_tokens,
+                                     self.encoder_cache_size)
+
+                max_num_mm_items_encoder_budget = cdiv(encoder_budget,
+                                                       max_tokens)
+
+                # Check how many items of this modality can be supported by
+                # the decoder budget.
+                max_mm_items_per_req = self.mm_registry.\
+                    get_mm_limits_per_prompt(self.model_config)[modality]
+
+                # NOTE: We do not consider max_num_batched_tokens on purpose
+                # because the multimodal embeddings can be generated in advance
+                # and chunked prefilled.
+                max_num_mm_items_decoder_budget = self.max_num_reqs * \
+                    max_mm_items_per_req
+
+                max_num_mm_items = min(max_num_mm_items_encoder_budget,
+                                       max_num_mm_items_decoder_budget)
+                self.max_num_mm_items_by_modality[modality] = max_num_mm_items
 
     def _update_num_xla_graphs(self, case_str):
         check_comp = self.check_recompilation and not self.enforce_eager
@@ -606,8 +638,10 @@ class TPUModelRunner:
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
+            xm.mark_step()
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
+            xm.mark_step()
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -641,6 +675,7 @@ class TPUModelRunner:
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens
             mm_positions = req_state.mm_positions
+            # TODO unroll loop and assume/enforce --disable_chunked_mm_input
             for i, pos_info in enumerate(mm_positions):
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
@@ -692,6 +727,7 @@ class TPUModelRunner:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
+            xm.mark_step()
         else:
             mm_embeds = []
 
@@ -890,9 +926,36 @@ class TPUModelRunner:
                              inputs_embeds=inputs_embeds)
         self._hidden_states_dtype = out.dtype
 
+    def _precompile_mm_encoder(self)->None:
+        # Pre-compile MM encoder for all supported data modalities. 
+        for mode, max_items_by_mode in \
+            self.max_num_mm_items_by_modality.items():
+            logger.info(
+                "Compiling Multimodal %s Encoder with different input"
+                " shapes.", mode)
+            num_items = 1
+            start = time.perf_counter()
+            while True:
+                logger.info("  -- mode: %s items: %d", mode, num_items)
+                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                    mode, num_items)
+                # Run multimodal encoder.
+                xm.mark_step()
+                self.model.get_multimodal_embeddings(**batched_dummy_mm_inputs)
+                xm.mark_step()
+                if num_items >= max_items_by_mode:
+                    break
+                # No padding for MM encoder just yet.
+                num_items += 1
+
+            xm.wait_device_ops()
+            end = time.perf_counter()
+            logger.info(
+                "Multimodal %s Encoder compilation finished in in %.2f "
+                "[secs].", mode, end - start)
+
     def _precompile_backbone(self) -> None:
         logger.info("Compiling the model with different input shapes.")
-
         start = time.perf_counter()
         for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
@@ -1044,6 +1107,35 @@ class TPUModelRunner:
 
     def get_input_embeddings(self, *args, **kwargs):
         return self.model.get_input_embeddings(*args, **kwargs)
+
+    def _get_mm_dummy_batch(self, modality: str, batch_size: int):
+        # Dummy data for pre-compiling multimodal models.
+        dummy_request_data = self.mm_registry.get_decoder_dummy_data(
+            model_config=self.model_config,
+            seq_len=self.max_num_tokens,
+        )
+        dummy_mm_data = dummy_request_data.multi_modal_data
+
+        # Dummy data definition in V0 may contain multiple multimodal items
+        # (e.g, multiple images) for a single request, therefore here we
+        # always replicate first item by max_num_mm_items times since in V1
+        # they are scheduled to be processed separately.
+        assert isinstance(dummy_mm_data, MultiModalKwargs), (
+            "Expected dummy multimodal data to be of type "
+            f"MultiModalKwargs, got {type(dummy_mm_data)=} instead. "
+            "This is most likely due to the model not having a merged "
+            "processor.")
+
+        # When models have a merged processor, their dummy data is
+        # already batched `MultiModalKwargs`, therefore we take the first
+        # `MultiModalKwargsItem` from the desired modality to profile on.
+        dummy_mm_item = dummy_mm_data.get_item(modality=modality, item_index=0)
+        dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
+
+        batched_dummy_mm_inputs = MultiModalKwargs.batch([dummy_mm_kwargs] *
+                                                         batch_size)
+        return MultiModalKwargs.as_kwargs(batched_dummy_mm_inputs,
+                                          device=self.device)
 
 
 def _get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
