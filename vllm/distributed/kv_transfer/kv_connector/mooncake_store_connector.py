@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-KVStore Based Connector for Distributed Machine Learning Inference
-The KVStoreConnector transfers KV caches between prefill vLLM workers (KV cache
-producer) and decode vLLM workers (KV cache consumer) using a database-style
-KVStore such as MooncakeStore, Redis, and Valkey.
+MooncakeStore Connector for Distributed Machine Learning Inference
+
+The MooncakeStoreConnector transfers KV caches between prefill vLLM workers
+(KV cache producer) and decode vLLM workers (KV cache consumer) using a
+database-style KVStore.
 """
 import hashlib
 from typing import TYPE_CHECKING, List, Tuple, Union

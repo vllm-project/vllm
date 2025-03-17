@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 This file contains a new class `MooncakeStore` that allows developers to
-think of KV cache transfer operations as put new KV cache entries (`insert`)
-into a remote KVStore-based lookup buffer and querying existing KV caches
-(`drop_select`) from this remote lookup buffer.
+think of KV cache transfer operations as putting new KV cache entries
+into a remote KVStore-based lookup buffer and getting existing KV caches
+from this remote lookup buffer.
 """
 import json
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Optional
 
 import torch
 from safetensors.torch import load as safetensors_load
@@ -91,16 +91,6 @@ class MooncakeStore(KVLookupBufferBase):
             logger.error(
                 "An error occurred while loading the configuration: %s", exc)
             raise
-
-    def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
-               key: torch.Tensor, value: torch.Tensor,
-               hidden: torch.Tensor) -> None:
-        raise NotImplementedError
-
-    def drop_select(
-            self, input_tokens: Optional[torch.Tensor],
-            roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
-        raise NotImplementedError
 
     def close(self):
         # MooncakeDistributedStore will automatically call the destructor, so
