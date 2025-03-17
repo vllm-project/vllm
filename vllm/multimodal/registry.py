@@ -11,16 +11,21 @@ import torch.nn as nn
 from vllm.envs import VLLM_MM_INPUT_CACHE_GIB
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               cached_tokenizer_from_config)
+from vllm.transformers_utils.tokenizer import (
+    AnyTokenizer,
+    cached_tokenizer_from_config,
+)
 from vllm.utils import ClassRegistry
 
 from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
 from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
-from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
-                         ProcessingCache)
+from .processing import (
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    ProcessingCache,
+)
 from .profiling import BaseDummyInputsBuilder, MultiModalProfiler
 from .video import VideoPlugin
 
@@ -40,8 +45,7 @@ class ProcessingInfoFactory(Protocol[_I_co]):
     def __call__(
         self,
         ctx: InputProcessingContext,
-    ) -> _I_co:
-        ...
+    ) -> _I_co: ...
 
 
 class DummyInputsBuilderFactory(Protocol[_I]):
@@ -49,8 +53,7 @@ class DummyInputsBuilderFactory(Protocol[_I]):
     Constructs a :class:`BaseDummyInputsBuilder` instance from the context.
     """
 
-    def __call__(self, info: _I) -> BaseDummyInputsBuilder[_I]:
-        ...
+    def __call__(self, info: _I) -> BaseDummyInputsBuilder[_I]: ...
 
 
 class MultiModalProcessorFactory(Protocol[_I]):
@@ -62,8 +65,7 @@ class MultiModalProcessorFactory(Protocol[_I]):
         dummy_inputs: BaseDummyInputsBuilder[_I],
         *,
         cache: Optional[ProcessingCache] = None,
-    ) -> BaseMultiModalProcessor[_I]:
-        ...
+    ) -> BaseMultiModalProcessor[_I]: ...
 
 
 @dataclass(frozen=True)
@@ -93,8 +95,10 @@ class _MultiModalLimits(UserDict["ModelConfig", dict[str, int]]):
         try:
             return super().__getitem__(key)
         except KeyError as exc:
-            msg = (f"Cannot find `mm_limits` for model={key.model}. Did you "
-                   "forget to call `init_mm_limits_per_prompt`?")
+            msg = (
+                f"Cannot find `mm_limits` for model={key.model}. Did you "
+                "forget to call `init_mm_limits_per_prompt`?"
+            )
             raise KeyError(msg) from exc
 
 
@@ -106,13 +110,13 @@ class MultiModalRegistry:
     DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin(), VideoPlugin())
 
     def __init__(
-            self,
-            *,
-            plugins: Sequence[MultiModalPlugin] = DEFAULT_PLUGINS) -> None:
+        self, *, plugins: Sequence[MultiModalPlugin] = DEFAULT_PLUGINS
+    ) -> None:
         self._plugins = {p.get_data_key(): p for p in plugins}
 
-        self._processor_factories = ClassRegistry[nn.Module,
-                                                  _ProcessorFactories]()
+        self._processor_factories = ClassRegistry[
+            nn.Module, _ProcessorFactories
+        ]()
 
         # This is used for non-multimodal models
         self._disabled_limits_per_plugin = {k: 0 for k in self._plugins}
@@ -130,8 +134,10 @@ class MultiModalRegistry:
         if data_type_key in self._plugins:
             logger.warning(
                 "A plugin is already registered for data type %s, "
-                "and will be overwritten by the new plugin %s.", data_type_key,
-                plugin)
+                "and will be overwritten by the new plugin %s.",
+                data_type_key,
+                plugin,
+            )
 
         self._plugins[data_type_key] = plugin
 
@@ -195,15 +201,19 @@ class MultiModalRegistry:
                 raise ValueError(
                     f"You set {data_key}={max_items} (or defaulted to 1) in "
                     f"`--limit-mm-per-prompt`, but found {num_items} items "
-                    "in the same prompt.")
+                    "in the same prompt."
+                )
 
-            input_dict = plugin.map_input(model_config, data_value,
-                                          mm_processor_kwargs)
+            input_dict = plugin.map_input(
+                model_config, data_value, mm_processor_kwargs
+            )
             for input_key, input_tensor in input_dict.items():
                 if input_key in merged_dict:
-                    raise ValueError(f"The input mappers (keys={set(data)}) "
-                                     f"resulted in a conflicting keyword "
-                                     f"argument to `forward()`: {input_key}")
+                    raise ValueError(
+                        f"The input mappers (keys={set(data)}) "
+                        f"resulted in a conflicting keyword "
+                        f"argument to `forward()`: {input_key}"
+                    )
 
                 merged_dict[input_key] = input_tensor
 
@@ -234,8 +244,9 @@ class MultiModalRegistry:
         instance of multimodal data belonging to a specific modality, that are
         passed to the language model for a model class.
         """
-        return self._get_plugin(data_type_key) \
-            .register_max_multimodal_tokens(max_mm_tokens)
+        return self._get_plugin(data_type_key).register_max_multimodal_tokens(
+            max_mm_tokens
+        )
 
     def register_max_image_tokens(
         self,
@@ -252,18 +263,17 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
     ) -> Mapping[str, int]:
         """
-        Get the maximum number of tokens per data item from each modality based 
+        Get the maximum number of tokens per data item from each modality based
         on underlying model configuration.
         """
         if self.has_processor(model_config):
             tokenizer = cached_tokenizer_from_config(model_config)
-            processor = self.create_processor(model_config,
-                                              tokenizer,
-                                              disable_cache=True)
+            processor = self.create_processor(
+                model_config, tokenizer, disable_cache=True
+            )
             seq_len = model_config.max_model_len
             mm_limits = self.get_mm_limits_per_prompt(model_config)
-            return processor.info.get_mm_max_tokens_per_item(
-                seq_len, mm_limits)
+            return processor.info.get_mm_max_tokens_per_item(seq_len, mm_limits)
 
         return {
             key: plugin.get_max_multimodal_tokens(model_config)
@@ -276,19 +286,20 @@ class MultiModalRegistry:
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
-        on underlying model configuration, excluding modalities that user 
+        on underlying model configuration, excluding modalities that user
         explicitly disabled via `limit_mm_per_prompt`.
 
         Note:
-            This is currently directly used only in V1 for profiling the memory 
+            This is currently directly used only in V1 for profiling the memory
             usage of a model.
         """
         mm_limits = self.get_mm_limits_per_prompt(model_config)
 
         return {
             key: max_tokens_per_mm_item
-            for key, max_tokens_per_mm_item in
-            self.get_max_tokens_per_item_by_modality(model_config).items()
+            for key, max_tokens_per_mm_item in self.get_max_tokens_per_item_by_modality(
+                model_config
+            ).items()
             if mm_limits[key] > 0
         }
 
@@ -309,8 +320,9 @@ class MultiModalRegistry:
 
         return {
             key: mm_limits[key] * max_tokens_per_mm_item
-            for key, max_tokens_per_mm_item in
-            self.get_max_tokens_per_item_by_modality(model_config).items()
+            for key, max_tokens_per_mm_item in self.get_max_tokens_per_item_by_modality(
+                model_config
+            ).items()
         }
 
     def get_max_multimodal_tokens(self, model_config: "ModelConfig") -> int:
@@ -336,7 +348,9 @@ class MultiModalRegistry:
         if model_config in self._limits_by_model:
             logger.warning(
                 "`mm_limits` has already been set for model=%s, and will "
-                "be overwritten by the new values.", model_config.model)
+                "be overwritten by the new values.",
+                model_config.model,
+            )
 
         multimodal_config = model_config.multimodal_config
         if multimodal_config is None:
@@ -349,7 +363,9 @@ class MultiModalRegistry:
                 logger.warning(
                     "Detected extra keys in `--limit-mm-per-prompt` which "
                     "are not registered as multi-modal plugins: %s. "
-                    "They will be ignored.", extra_keys)
+                    "They will be ignored.",
+                    extra_keys,
+                )
 
             # NOTE: Currently the default is set to 1 for each plugin
             # TODO: Automatically determine the limits based on budget
@@ -374,9 +390,9 @@ class MultiModalRegistry:
         """
         if self.has_processor(model_config):
             tokenizer = cached_tokenizer_from_config(model_config)
-            processor = self.create_processor(model_config,
-                                              tokenizer,
-                                              disable_cache=True)
+            processor = self.create_processor(
+                model_config, tokenizer, disable_cache=True
+            )
             profiler = MultiModalProfiler(processor)
             return profiler.get_mm_limits()
 
@@ -405,7 +421,9 @@ class MultiModalRegistry:
                 logger.warning(
                     "Model class %s already has a multi-modal processor "
                     "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    model_cls,
+                    self,
+                )
 
             self._processor_factories[model_cls] = _ProcessorFactories(
                 info=info,

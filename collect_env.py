@@ -277,11 +277,12 @@ def get_vllm_version():
     if __version__ == "dev":
         return "N/A (dev)"
 
-    if len(__version_tuple__) == 4: # dev build
-        git_sha = __version_tuple__[-1][1:] # type: ignore
+    if len(__version_tuple__) == 4:  # dev build
+        git_sha = __version_tuple__[-1][1:]  # type: ignore
         return f"{__version__} (git sha: {git_sha}"
 
     return __version__
+
 
 def summarize_vllm_build_flags():
     # This could be a static method if the flags are constant, or dynamic if you need to check environment variables, etc.
@@ -517,13 +518,12 @@ def is_xnnpack_available():
     else:
         return "N/A"
 
+
 def get_env_vars():
     env_vars = ''
-    secret_terms=('secret', 'token', 'api', 'access', 'password')
-    report_prefix = ("TORCH", "NCCL", "PYTORCH",
-                     "CUDA", "CUBLAS", "CUDNN",
-                     "OMP_", "MKL_",
-                     "NVIDIA")
+    secret_terms = ('secret', 'token', 'api', 'access', 'password')
+    report_prefix = ("TORCH", "NCCL", "PYTORCH", "CUDA", "CUBLAS", "CUDNN",
+                     "OMP_", "MKL_", "NVIDIA")
     for k, v in os.environ.items():
         if any(term in k.lower() for term in secret_terms):
             continue
@@ -533,6 +533,7 @@ def get_env_vars():
             env_vars = env_vars + "{}={}".format(k, v) + "\n"
 
     return env_vars
+
 
 def get_env_info():
     run_lambda = run

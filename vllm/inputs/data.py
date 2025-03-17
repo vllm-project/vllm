@@ -9,8 +9,11 @@ import torch
 from typing_extensions import NotRequired, TypedDict, TypeVar, assert_never
 
 if TYPE_CHECKING:
-    from vllm.multimodal import (MultiModalDataDict, MultiModalKwargs,
-                                 MultiModalPlaceholderDict)
+    from vllm.multimodal import (
+        MultiModalDataDict,
+        MultiModalKwargs,
+        MultiModalPlaceholderDict,
+    )
     from vllm.multimodal.inputs import MultiModalInputs
 
 
@@ -80,14 +83,12 @@ where the decoder-prompt is not specified explicitly, or
 more than one prompt, i.e. :class:`ExplicitEncoderDecoderPrompt`
 """
 
-_T1_co = TypeVar("_T1_co",
-                 bound=SingletonPrompt,
-                 default=SingletonPrompt,
-                 covariant=True)
-_T2_co = TypeVar("_T2_co",
-                 bound=SingletonPrompt,
-                 default=SingletonPrompt,
-                 covariant=True)
+_T1_co = TypeVar(
+    "_T1_co", bound=SingletonPrompt, default=SingletonPrompt, covariant=True
+)
+_T2_co = TypeVar(
+    "_T2_co", bound=SingletonPrompt, default=SingletonPrompt, covariant=True
+)
 
 
 # TODO: Make fields ReadOnly once mypy supports it
@@ -224,6 +225,7 @@ class EncoderDecoderInputs(TypedDict):
 
     This specifies the required data for encoder-decoder models.
     """
+
     encoder: Union[TokenInputs, "MultiModalInputs"]
     """The inputs for the encoder portion."""
 
@@ -243,6 +245,7 @@ class SingletonInputsAdapter:
     """
     Unified interface to access the components of :class:`SingletonInputs`.
     """
+
     inputs: SingletonInputs
 
     @cached_property
@@ -362,19 +365,21 @@ def build_explicit_enc_dec_prompt(
     return ExplicitEncoderDecoderPrompt(
         encoder_prompt=encoder_prompt,
         decoder_prompt=decoder_prompt,
-        mm_processor_kwargs=mm_processor_kwargs)
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
 
 
 def zip_enc_dec_prompts(
     enc_prompts: Iterable[_T1],
     dec_prompts: Iterable[Optional[_T2]],
-    mm_processor_kwargs: Optional[Union[Iterable[dict[str, Any]],
-                                        dict[str, Any]]] = None,
+    mm_processor_kwargs: Optional[
+        Union[Iterable[dict[str, Any]], dict[str, Any]]
+    ] = None,
 ) -> list[ExplicitEncoderDecoderPrompt[_T1, _T2]]:
     """
     Zip encoder and decoder prompts together into a list of
     :class:`ExplicitEncoderDecoderPrompt` instances.
-    
+
     ``mm_processor_kwargs`` may also be provided; if a dict is passed, the same
     dictionary will be used for every encoder/decoder prompt. If an iterable is
     provided, it will be zipped with the encoder/decoder prompts.
@@ -384,22 +389,28 @@ def zip_enc_dec_prompts(
     if isinstance(mm_processor_kwargs, dict):
         return [
             build_explicit_enc_dec_prompt(
-                encoder_prompt, decoder_prompt,
-                cast(dict[str, Any], mm_processor_kwargs))
-            for (encoder_prompt,
-                 decoder_prompt) in zip(enc_prompts, dec_prompts)
+                encoder_prompt,
+                decoder_prompt,
+                cast(dict[str, Any], mm_processor_kwargs),
+            )
+            for (encoder_prompt, decoder_prompt) in zip(
+                enc_prompts, dec_prompts
+            )
         ]
     return [
-        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt,
-                                      mm_proc_kwargs)
-        for (encoder_prompt, decoder_prompt, mm_proc_kwargs
-             ) in zip(enc_prompts, dec_prompts, mm_processor_kwargs)
+        build_explicit_enc_dec_prompt(
+            encoder_prompt, decoder_prompt, mm_proc_kwargs
+        )
+        for (encoder_prompt, decoder_prompt, mm_proc_kwargs) in zip(
+            enc_prompts, dec_prompts, mm_processor_kwargs
+        )
     ]
 
 
 def to_enc_dec_tuple_list(
     enc_dec_prompts: Iterable[ExplicitEncoderDecoderPrompt[_T1, _T2]],
 ) -> list[tuple[_T1, Optional[_T2]]]:
-    return [(enc_dec_prompt["encoder_prompt"],
-             enc_dec_prompt["decoder_prompt"])
-            for enc_dec_prompt in enc_dec_prompts]
+    return [
+        (enc_dec_prompt["encoder_prompt"], enc_dec_prompt["decoder_prompt"])
+        for enc_dec_prompt in enc_dec_prompts
+    ]

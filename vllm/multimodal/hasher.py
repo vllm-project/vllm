@@ -23,7 +23,6 @@ A dictionary containing hashes for items in each modality.
 
 
 class MultiModalHasher:
-
     @classmethod
     def serialize_item(cls, obj: object) -> bytes:
         # Simple cases
@@ -43,8 +42,9 @@ class MultiModalHasher:
             return obj.tobytes()
 
         logger.warning(
-            "No serialization method found for %s. "
-            "Falling back to pickle.", type(obj))
+            "No serialization method found for %s. Falling back to pickle.",
+            type(obj),
+        )
 
         return pickle.dumps(obj)
 
@@ -79,7 +79,8 @@ class MultiModalHasher:
 
     @classmethod
     def hash_prompt_mm_data(
-            cls, prompt: "TokensPrompt") -> Optional["MultiModalHashDict"]:
+        cls, prompt: "TokensPrompt"
+    ) -> Optional["MultiModalHashDict"]:
         """Hash multimodal data in the user input prompt if they exist."""
 
         if "multi_modal_data" not in prompt:

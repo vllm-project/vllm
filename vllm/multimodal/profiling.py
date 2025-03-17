@@ -13,8 +13,7 @@ import vllm.envs as envs
 from vllm.inputs import DummyData
 from vllm.logger import init_logger
 
-from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
-                     MultiModalInputs)
+from .inputs import MultiModalDataDict, MultiModalEncDecInputs, MultiModalInputs
 from .processing import BaseMultiModalProcessor, BaseProcessingInfo
 
 logger = init_logger(__name__)
@@ -26,6 +25,7 @@ class ProcessorInputs:
     Represents the keyword arguments to
     :meth:`vllm.multimodal.processing.BaseMultiModalProcessor.apply`.
     """
+
     prompt_text: str
     mm_data: MultiModalDataDict
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
@@ -63,7 +63,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         length: int,
         num_audios: int,
     ) -> list[npt.NDArray]:
-        audio = np.zeros((length, ))
+        audio = np.zeros((length,))
         return [audio] * num_audios
 
     def _get_dummy_images(
@@ -124,7 +124,8 @@ class MultiModalProfiler(Generic[_I]):
                 raise ValueError(
                     f"You set {modality}={limit} (or defaulted to 1) in "
                     f"`--limit-mm-per-prompt`, but this model only supports "
-                    f"at most {supported_limit} {modality} items.")
+                    f"at most {supported_limit} {modality} items."
+                )
 
         return mm_limits
 
@@ -135,7 +136,8 @@ class MultiModalProfiler(Generic[_I]):
     ) -> MultiModalInputs:
         factory = self.dummy_inputs
         processor_inputs = factory.get_dummy_processor_inputs(
-            seq_len, mm_counts)
+            seq_len, mm_counts
+        )
 
         return self.processor.apply(
             prompt=processor_inputs.prompt_text,
@@ -151,14 +153,16 @@ class MultiModalProfiler(Generic[_I]):
 
         info = self.processing_info
         mm_max_tokens_per_item = info.get_mm_max_tokens_per_item(
-            seq_len, mm_counts)
+            seq_len, mm_counts
+        )
 
         if mm_counts.keys() != mm_max_tokens_per_item.keys():
             raise AssertionError(
                 "The keys returned by `get_supported_mm_limits` "
                 f"({set(mm_counts.keys())}) should be the same as those "
                 "returned by `get_mm_max_tokens_per_item` "
-                f"({set(mm_max_tokens_per_item.keys())})")
+                f"({set(mm_max_tokens_per_item.keys())})"
+            )
 
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
         placeholders_by_modality = mm_inputs["mm_placeholders"]
@@ -176,7 +180,8 @@ class MultiModalProfiler(Generic[_I]):
                 f"The processed dummy data has a total of "
                 f"{total_placeholders_by_modality} placeholder tokens, which "
                 f"is not the expected {expected_placeholders_by_modality} "
-                "tokens.")
+                "tokens."
+            )
         return mm_inputs, total_placeholders_by_modality
 
     def get_encoder_dummy_data(
@@ -210,8 +215,9 @@ class MultiModalProfiler(Generic[_I]):
         # Avoid circular import
         from vllm.sequence import SequenceData
 
-        (mm_inputs, total_placeholders_by_modality
-         ) = self.get_and_validate_mm_inputs(seq_len)
+        (mm_inputs, total_placeholders_by_modality) = (
+            self.get_and_validate_mm_inputs(seq_len)
+        )
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)
@@ -228,8 +234,11 @@ class MultiModalProfiler(Generic[_I]):
                 "multi-modal inputs to fail during inference, even when "
                 "the input text is short. To avoid this, you should "
                 "increase `max_model_len`, reduce `max_num_seqs`, "
-                "and/or reduce `mm_counts`.", seq_len, total_len,
-                total_placeholders_by_modality)
+                "and/or reduce `mm_counts`.",
+                seq_len,
+                total_len,
+                total_placeholders_by_modality,
+            )
 
             return DummyData(
                 seq_data=SequenceData.from_prompt_token_counts((0, seq_len)),

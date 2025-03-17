@@ -52,13 +52,16 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
     frames = np.stack(frames)
     frames = sample_frames_from_video(frames, num_frames)
     if len(frames) < num_frames:
-        raise ValueError(f"Could not read enough frames from video file {path}"
-                         f" (expected {num_frames} frames, got {len(frames)})")
+        raise ValueError(
+            f"Could not read enough frames from video file {path}"
+            f" (expected {num_frames} frames, got {len(frames)})"
+        )
     return frames
 
 
-def video_to_pil_images_list(path: str,
-                             num_frames: int = -1) -> list[Image.Image]:
+def video_to_pil_images_list(
+    path: str, num_frames: int = -1
+) -> list[Image.Image]:
     frames = video_to_ndarrays(path, num_frames)
     return [
         Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))

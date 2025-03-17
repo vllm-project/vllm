@@ -4,8 +4,15 @@ import functools
 from collections import UserDict
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional,
-                    Protocol, Union)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    NamedTuple,
+    Optional,
+    Protocol,
+    Union,
+)
 
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
@@ -13,18 +20,26 @@ from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               cached_tokenizer_from_config)
-from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
-                        resolve_mm_processor_kwargs)
+from vllm.transformers_utils.tokenizer import (
+    AnyTokenizer,
+    cached_tokenizer_from_config,
+)
+from vllm.utils import (
+    ClassRegistry,
+    get_allowed_kwarg_only_overrides,
+    resolve_mm_processor_kwargs,
+)
 
 from .data import ProcessorInputs, SingletonInputs
 from .parse import is_encoder_decoder_inputs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
-                                 MultiModalRegistry)
+    from vllm.multimodal import (
+        MultiModalDataDict,
+        MultiModalPlaceholderDict,
+        MultiModalRegistry,
+    )
     from vllm.sequence import SequenceData
 
 logger = init_logger(__name__)
@@ -59,9 +74,11 @@ class InputContext:
         """
         hf_config = self.model_config.hf_config
         if not isinstance(hf_config, typ):
-            raise TypeError("Invalid type of HuggingFace config. "
-                            f"Expected type: {typ}, but "
-                            f"found type: {type(hf_config)}")
+            raise TypeError(
+                "Invalid type of HuggingFace config. "
+                f"Expected type: {typ}, but "
+                f"found type: {type(hf_config)}"
+            )
 
         return hf_config
 
@@ -167,8 +184,10 @@ class InputProcessingContext(InputContext):
         try:
             return hf_processor(**data, **merged_kwargs, return_tensors="pt")
         except Exception as exc:
-            msg = (f"Failed to apply {type(hf_processor).__name__} "
-                   f"on data={data} with kwargs={merged_kwargs}")
+            msg = (
+                f"Failed to apply {type(hf_processor).__name__} "
+                f"on data={data} with kwargs={merged_kwargs}"
+            )
 
             raise RuntimeError(msg) from exc
 
@@ -185,7 +204,6 @@ class DummyData(NamedTuple):
 
 
 class DummyDataFactory(Protocol):
-
     def __call__(
         self,
         ctx: InputContext,
@@ -216,8 +234,10 @@ class _MultiModalCounts(UserDict[str, int]):
         try:
             return super().__getitem__(key)
         except KeyError as exc:
-            msg = (f"There is no multi-modal plugin with the key: {key}. "
-                   f"Available keys: {set(self.keys())}")
+            msg = (
+                f"There is no multi-modal plugin with the key: {key}. "
+                f"Available keys: {set(self.keys())}"
+            )
             raise KeyError(msg) from exc
 
 
@@ -232,12 +252,15 @@ class InputRegistry:
     """
 
     def __init__(self) -> None:
-        self._dummy_factories_by_model_type = \
-            ClassRegistry[nn.Module, DummyDataFactory]()
-        self._dummy_encoder_factories_by_model_type = \
-            ClassRegistry[nn.Module, DummyDataFactory]()
-        self._input_processors_by_model_type = \
-            ClassRegistry[nn.Module, InputProcessor]()
+        self._dummy_factories_by_model_type = ClassRegistry[
+            nn.Module, DummyDataFactory
+        ]()
+        self._dummy_encoder_factories_by_model_type = ClassRegistry[
+            nn.Module, DummyDataFactory
+        ]()
+        self._input_processors_by_model_type = ClassRegistry[
+            nn.Module, InputProcessor
+        ]()
 
     def _default_dummy_data_factory(
         self,
@@ -267,12 +290,15 @@ class InputRegistry:
         """
 
         def wrapper(model_cls: N) -> N:
-            if self._dummy_factories_by_model_type.contains(model_cls,
-                                                            strict=True):
+            if self._dummy_factories_by_model_type.contains(
+                model_cls, strict=True
+            ):
                 logger.warning(
                     "Model class %s already has dummy data "
                     "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    model_cls,
+                    self,
+                )
 
             self._dummy_factories_by_model_type[model_cls] = factory
 
@@ -281,8 +307,9 @@ class InputRegistry:
         return wrapper
 
     def _get_dummy_data_factory(self, model_cls: type[nn.Module]):
-        return self._dummy_factories_by_model_type \
-            .get(model_cls, self._default_dummy_data_factory)
+        return self._dummy_factories_by_model_type.get(
+            model_cls, self._default_dummy_data_factory
+        )
 
     def register_dummy_encoder_data(self, factory: DummyDataFactory):
         """
@@ -293,11 +320,14 @@ class InputRegistry:
 
         def wrapper(model_cls: N) -> N:
             if self._dummy_encoder_factories_by_model_type.contains(
-                    model_cls, strict=True):
+                model_cls, strict=True
+            ):
                 logger.warning(
                     "Model class %s already has dummy encoder data "
                     "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    model_cls,
+                    self,
+                )
 
             self._dummy_encoder_factories_by_model_type[model_cls] = factory
 
@@ -306,8 +336,9 @@ class InputRegistry:
         return wrapper
 
     def _get_dummy_encoder_data_factory(self, model_cls: type[nn.Module]):
-        return self._dummy_encoder_factories_by_model_type \
-            .get(model_cls, self._default_dummy_data_factory)
+        return self._dummy_encoder_factories_by_model_type.get(
+            model_cls, self._default_dummy_data_factory
+        )
 
     def dummy_data_for_profiling(
         self,
@@ -332,13 +363,15 @@ class InputRegistry:
 
         if mm_registry.has_processor(model_config):
             tokenizer = cached_tokenizer_from_config(model_config)
-            processor = mm_registry.create_processor(model_config,
-                                                     tokenizer,
-                                                     disable_cache=True)
+            processor = mm_registry.create_processor(
+                model_config, tokenizer, disable_cache=True
+            )
             profiler = MultiModalProfiler(processor)
-            dummy_data_factory = (profiler.get_encoder_dummy_data
-                                  if is_encoder_data else
-                                  profiler.get_decoder_dummy_data)
+            dummy_data_factory = (
+                profiler.get_encoder_dummy_data
+                if is_encoder_data
+                else profiler.get_decoder_dummy_data
+            )
             dummy_data = dummy_data_factory(seq_len)
         else:
             model_cls, _ = get_model_architecture(model_config)
@@ -354,9 +387,12 @@ class InputRegistry:
                 allow_var_kwargs=True,
             )
 
-            dummy_data = dummy_factory(InputContext(model_config), seq_len,
-                                       _MultiModalCounts(mm_counts),
-                                       **mm_processor_kwargs)
+            dummy_data = dummy_factory(
+                InputContext(model_config),
+                seq_len,
+                _MultiModalCounts(mm_counts),
+                **mm_processor_kwargs,
+            )
 
         # Having more tokens is over-conservative but otherwise fine
         num_tokens = dummy_data.seq_data.prompt_token_ids
@@ -364,20 +400,24 @@ class InputRegistry:
             if is_encoder_data:
                 logger.warning_once(
                     f"Expected at least {seq_len} dummy encoder tokens for "
-                    f"profiling, but found {len(num_tokens)} tokens instead.")
+                    f"profiling, but found {len(num_tokens)} tokens instead."
+                )
             else:
                 raise AssertionError(
                     f"Expected at least {seq_len} dummy tokens for profiling, "
-                    f"but found {len(num_tokens)} tokens instead.")
+                    f"but found {len(num_tokens)} tokens instead."
+                )
 
-        if (dummy_data.multi_modal_data is not None and
-                not isinstance(dummy_data.multi_modal_data, MultiModalKwargs)):
+        if dummy_data.multi_modal_data is not None and not isinstance(
+            dummy_data.multi_modal_data, MultiModalKwargs
+        ):
             for k, v in dummy_data.multi_modal_data.items():
                 num_items = len(v) if isinstance(v, list) else 1
                 num_expected = mm_counts[k]
                 assert num_items >= num_expected, (
                     f"Expected at least {num_expected} dummy '{k}' instances "
-                    f"for profiling, but found {num_items} instances instead.")
+                    f"for profiling, but found {num_items} instances instead."
+                )
 
         return dummy_data
 
@@ -400,12 +440,15 @@ class InputRegistry:
         """
 
         def wrapper(model_cls: N) -> N:
-            if self._input_processors_by_model_type.contains(model_cls,
-                                                             strict=True):
+            if self._input_processors_by_model_type.contains(
+                model_cls, strict=True
+            ):
                 logger.warning(
                     "Model class %s already has input processor "
                     "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    model_cls,
+                    self,
+                )
 
             self._input_processors_by_model_type[model_cls] = processor
 
@@ -414,8 +457,9 @@ class InputRegistry:
         return wrapper
 
     def _get_model_input_processor(self, model_cls: type[nn.Module]):
-        return self._input_processors_by_model_type \
-            .get(model_cls, self._default_input_processor)
+        return self._input_processors_by_model_type.get(
+            model_cls, self._default_input_processor
+        )
 
     def _ensure_mm_kwargs(
         self,
@@ -432,8 +476,9 @@ class InputRegistry:
         else:
             assert_never(inputs["type"])  # type: ignore[arg-type]
 
-    def process_input(self, model_config: "ModelConfig",
-                      inputs: ProcessorInputs) -> ProcessorInputs:
+    def process_input(
+        self, model_config: "ModelConfig", inputs: ProcessorInputs
+    ) -> ProcessorInputs:
         """
         Apply an input processor to an instance of model inputs.
 
@@ -463,10 +508,12 @@ class InputRegistry:
         )
 
         if is_encoder_decoder_inputs(processed_inputs):
-            self._ensure_mm_kwargs(processed_inputs["encoder"],
-                                   mm_processor_kwargs)
-            self._ensure_mm_kwargs(processed_inputs["decoder"],
-                                   mm_processor_kwargs)
+            self._ensure_mm_kwargs(
+                processed_inputs["encoder"], mm_processor_kwargs
+            )
+            self._ensure_mm_kwargs(
+                processed_inputs["decoder"], mm_processor_kwargs
+            )
         else:
             self._ensure_mm_kwargs(processed_inputs, mm_processor_kwargs)
 

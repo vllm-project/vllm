@@ -40,7 +40,8 @@ class AudioPlugin(MultiModalPlugin):
 
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:
         raise NotImplementedError(
-            "There is no default maximum multimodal tokens")
+            "There is no default maximum multimodal tokens"
+        )
 
 
 def resample_audio(
@@ -53,7 +54,6 @@ def resample_audio(
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
-
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
         return librosa.load(BytesIO(data), sr=None)
 
@@ -74,4 +74,4 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
             soundfile.write(buffer, audio, sr, format="WAV")
             data = buffer.getvalue()
 
-        return base64.b64encode(data).decode('utf-8')
+        return base64.b64encode(data).decode("utf-8")

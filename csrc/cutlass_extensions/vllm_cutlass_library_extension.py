@@ -26,7 +26,7 @@ VLLMDataTypeNames: dict[Union[VLLMDataType, DataType], str] = {
     **{
         VLLMDataType.u4b8: "u4b8",
         VLLMDataType.u8b128: "u8b128",
-    }
+    },
 }
 
 VLLMDataTypeTag: dict[Union[VLLMDataType, DataType], str] = {
@@ -34,7 +34,7 @@ VLLMDataTypeTag: dict[Union[VLLMDataType, DataType], str] = {
     **{
         VLLMDataType.u4b8: "cutlass::vllm_uint4b8_t",
         VLLMDataType.u8b128: "cutlass::vllm_uint8b128_t",
-    }
+    },
 }
 
 VLLMDataTypeSize: dict[Union[VLLMDataType, DataType], int] = {
@@ -42,7 +42,7 @@ VLLMDataTypeSize: dict[Union[VLLMDataType, DataType], int] = {
     **{
         VLLMDataType.u4b8: 4,
         VLLMDataType.u8b128: 8,
-    }
+    },
 }
 
 VLLMDataTypeVLLMScalarTypeTag: dict[Union[VLLMDataType, DataType], str] = {
@@ -66,15 +66,13 @@ VLLMDataTypeTorchDataTypeTag: dict[Union[VLLMDataType, DataType], str] = {
     DataType.f32: "at::ScalarType::Float",
 }
 
-VLLMKernelScheduleTag: dict[Union[
-    MixedInputKernelScheduleType, KernelScheduleType], str] = {
-        **KernelScheduleTag,  # type: ignore
-        **{
-            MixedInputKernelScheduleType.TmaWarpSpecialized:
-            "cutlass::gemm::KernelTmaWarpSpecialized",
-            MixedInputKernelScheduleType.TmaWarpSpecializedPingpong:
-            "cutlass::gemm::KernelTmaWarpSpecializedPingpong",
-            MixedInputKernelScheduleType.TmaWarpSpecializedCooperative:
-            "cutlass::gemm::KernelTmaWarpSpecializedCooperative",
-        }
-    }
+VLLMKernelScheduleTag: dict[
+    Union[MixedInputKernelScheduleType, KernelScheduleType], str
+] = {
+    **KernelScheduleTag,  # type: ignore
+    **{
+        MixedInputKernelScheduleType.TmaWarpSpecialized: "cutlass::gemm::KernelTmaWarpSpecialized",
+        MixedInputKernelScheduleType.TmaWarpSpecializedPingpong: "cutlass::gemm::KernelTmaWarpSpecializedPingpong",
+        MixedInputKernelScheduleType.TmaWarpSpecializedCooperative: "cutlass::gemm::KernelTmaWarpSpecializedCooperative",
+    },
+}

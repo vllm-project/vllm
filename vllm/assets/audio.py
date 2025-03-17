@@ -25,13 +25,15 @@ class AudioAsset:
 
     @property
     def audio_and_sample_rate(self) -> tuple[npt.NDArray, float]:
-        audio_path = get_vllm_public_assets(filename=f"{self.name}.ogg",
-                                            s3_prefix=ASSET_DIR)
+        audio_path = get_vllm_public_assets(
+            filename=f"{self.name}.ogg", s3_prefix=ASSET_DIR
+        )
         return librosa.load(audio_path, sr=None)
 
     def get_local_path(self) -> Path:
-        return get_vllm_public_assets(filename=f"{self.name}.ogg",
-                                      s3_prefix=ASSET_DIR)
+        return get_vllm_public_assets(
+            filename=f"{self.name}.ogg", s3_prefix=ASSET_DIR
+        )
 
     @property
     def url(self) -> str:

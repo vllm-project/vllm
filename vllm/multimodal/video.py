@@ -46,7 +46,8 @@ class VideoPlugin(ImagePlugin):
         return cached_get_video_processor(
             model_config.model,
             trust_remote_code=model_config.trust_remote_code,
-            **mm_processor_kwargs)
+            **mm_processor_kwargs,
+        )
 
     def _default_input_mapper(
         self,
@@ -65,8 +66,10 @@ class VideoPlugin(ImagePlugin):
                 mm_processor_kwargs,
             )
             if video_processor is None:
-                raise RuntimeError("No HuggingFace processor is available "
-                                   "to process the video object")
+                raise RuntimeError(
+                    "No HuggingFace processor is available "
+                    "to process the video object"
+                )
             try:
                 # NOTE: Similar to image; it may be a good idea to filter and
                 # pass mm_processor_kwargs here too, but for now we don't to
@@ -88,10 +91,12 @@ class VideoPlugin(ImagePlugin):
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
     num_frames, _, _, channels = frames.shape
     new_height, new_width = size
-    resized_frames = np.empty((num_frames, new_height, new_width, channels),
-                              dtype=frames.dtype)
+    resized_frames = np.empty(
+        (num_frames, new_height, new_width, channels), dtype=frames.dtype
+    )
     # lazy import cv2 to avoid bothering users who only use text models
     import cv2
+
     for i, frame in enumerate(frames):
         resized_frame = cv2.resize(frame, (new_width, new_height))
         resized_frames[i] = resized_frame
@@ -106,8 +111,9 @@ def rescale_video_size(frames: npt.NDArray, size_factor: float) -> npt.NDArray:
     return resize_video(frames, (new_height, new_width))
 
 
-def sample_frames_from_video(frames: npt.NDArray,
-                             num_frames: int) -> npt.NDArray:
+def sample_frames_from_video(
+    frames: npt.NDArray, num_frames: int
+) -> npt.NDArray:
     total_frames = frames.shape[0]
     if num_frames == -1:
         return frames
@@ -118,7 +124,6 @@ def sample_frames_from_video(frames: npt.NDArray,
 
 
 class VideoMediaIO(MediaIO[npt.NDArray]):
-
     def __init__(
         self,
         image_io: ImageMediaIO,
@@ -136,10 +141,9 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
 
         num_frames = self.num_frames
         if total_frame_num > num_frames:
-            uniform_sampled_frames = np.linspace(0,
-                                                 total_frame_num - 1,
-                                                 num_frames,
-                                                 dtype=int)
+            uniform_sampled_frames = np.linspace(
+                0, total_frame_num - 1, num_frames, dtype=int
+            )
             frame_idx = uniform_sampled_frames.tolist()
         else:
             frame_idx = list(range(0, total_frame_num))
@@ -153,10 +157,12 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
                 "image/jpeg",
             )
 
-            return np.stack([
-                np.array(load_frame(frame_data))
-                for frame_data in data.split(",")
-            ])
+            return np.stack(
+                [
+                    np.array(load_frame(frame_data))
+                    for frame_data in data.split(",")
+                ]
+            )
 
         return self.load_bytes(base64.b64decode(data))
 
@@ -181,7 +187,8 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
             )
 
             return ",".join(
-                encode_frame(Image.fromarray(frame)) for frame in video)
+                encode_frame(Image.fromarray(frame)) for frame in video
+            )
 
         msg = "Only JPEG format is supported for now."
         raise NotImplementedError(msg)

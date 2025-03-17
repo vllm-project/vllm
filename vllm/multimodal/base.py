@@ -4,27 +4,43 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
-from typing import (TYPE_CHECKING, Any, Callable, Generic, NamedTuple,
-                    Optional, TypeVar, Union)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    NamedTuple,
+    Optional,
+    TypeVar,
+    Union,
+)
 
 from torch import nn
 
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
-                        resolve_mm_processor_kwargs)
+from vllm.utils import (
+    ClassRegistry,
+    get_allowed_kwarg_only_overrides,
+    resolve_mm_processor_kwargs,
+)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.sequence import SequenceGroupMetadata
 
-from .inputs import (ModalityData, MultiModalDataDict, MultiModalKwargs,
-                     PlaceholderRange)
+from .inputs import (
+    ModalityData,
+    MultiModalDataDict,
+    MultiModalKwargs,
+    PlaceholderRange,
+)
 
 logger = init_logger(__name__)
 
-MultiModalInputMapper = Callable[[InputContext, ModalityData[object]],
-                                 MultiModalKwargs]
+MultiModalInputMapper = Callable[
+    [InputContext, ModalityData[object]], MultiModalKwargs
+]
 """
 Return a dictionary to be passed as keyword arguments to
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
@@ -104,8 +120,9 @@ class MultiModalPlugin(ABC):
                     self,
                 )
 
-            self._input_mappers[model_cls] = (mapper
-                                              or self._default_input_mapper)
+            self._input_mappers[model_cls] = (
+                mapper or self._default_input_mapper
+            )
 
             return model_cls
 
@@ -135,8 +152,10 @@ class MultiModalPlugin(ABC):
         mapper = self._input_mappers.get(model_cls)
 
         if mapper is None:
-            raise KeyError(f"No input mapper in {self} is registered for "
-                           f"model class {model_cls.__name__}.")
+            raise KeyError(
+                f"No input mapper in {self} is registered for "
+                f"model class {model_cls.__name__}."
+            )
 
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
@@ -168,8 +187,10 @@ class MultiModalPlugin(ABC):
 
     def _validate_max_multimodal_tokens(self, max_mm_tokens: int):
         if max_mm_tokens < 1:
-            raise ValueError("You should set the number of tokens to a "
-                             f"positive integer. Found: {max_mm_tokens}")
+            raise ValueError(
+                "You should set the number of tokens to a "
+                f"positive integer. Found: {max_mm_tokens}"
+            )
 
     def register_max_multimodal_tokens(
         self,
@@ -196,7 +217,8 @@ class MultiModalPlugin(ABC):
                 self._validate_max_multimodal_tokens(max_mm_tokens)
 
             self._max_mm_tokens[model_cls] = (
-                max_mm_tokens or self._default_max_multimodal_tokens)
+                max_mm_tokens or self._default_max_multimodal_tokens
+            )
 
             return model_cls
 
@@ -231,8 +253,9 @@ class MultiModalPlugin(ABC):
                 requires_kw_only=False,
                 allow_var_kwargs=True,
             )
-            max_mm_tokens = max_mm_tokens(InputContext(model_config),
-                                          **mm_processor_kwargs)
+            max_mm_tokens = max_mm_tokens(
+                InputContext(model_config), **mm_processor_kwargs
+            )
 
         self._validate_max_multimodal_tokens(max_mm_tokens)
 
@@ -279,8 +302,9 @@ class MultiModalPlaceholderMap:
     @classmethod
     def from_seq_group(
         cls, seq_group: "SequenceGroupMetadata", positions: range
-    ) -> tuple[Optional[MultiModalDataDict], dict[str,
-                                                  "MultiModalPlaceholderMap"]]:
+    ) -> tuple[
+        Optional[MultiModalDataDict], dict[str, "MultiModalPlaceholderMap"]
+    ]:
         """
         Returns the multi-modal items that intersect with the portion of a
         prompt (``seq_group``) represented by ``positions``, as well as a
@@ -346,7 +370,8 @@ class MultiModalPlaceholderMap:
 
         mm_data = {**seq_mm_data}
         placeholder_maps = defaultdict[str, MultiModalPlaceholderMap](
-            MultiModalPlaceholderMap)
+            MultiModalPlaceholderMap
+        )
 
         for modality, placeholders in seq_mm_placeholders.items():
             mm_items = mm_data.pop(modality)
@@ -354,12 +379,13 @@ class MultiModalPlaceholderMap:
                 mm_items = [mm_items]
 
             if positions:
-                intersecting_items = placeholder_maps[modality] \
-                    .append_items_from_seq_group(
-                        positions,
-                        mm_items,
-                        placeholders,
-                    )
+                intersecting_items = placeholder_maps[
+                    modality
+                ].append_items_from_seq_group(
+                    positions,
+                    mm_items,
+                    placeholders,
+                )
 
                 if intersecting_items:
                     mm_data[modality] = intersecting_items
@@ -382,8 +408,9 @@ class MultiModalPlaceholderMap:
             raise ValueError(
                 "Multi-modal placeholders and items must have the same length."
             )
-        for placeholder_dict, mm_item in zip(multi_modal_placeholders,
-                                             multi_modal_items):
+        for placeholder_dict, mm_item in zip(
+            multi_modal_placeholders, multi_modal_items
+        ):
             placeholder = range(
                 placeholder_dict["offset"],
                 placeholder_dict["offset"] + placeholder_dict["length"],
@@ -424,11 +451,13 @@ class MultiModalPlaceholderMap:
 
         self.src_ranges.extend(
             range(self.src_len + r.start, self.src_len + r.stop)
-            for r in other.src_ranges)
+            for r in other.src_ranges
+        )
         self.src_len += other.src_len
         self.dest_ranges.extend(
             range(self.dest_len + r.start, self.dest_len + r.stop)
-            for r in other.dest_ranges)
+            for r in other.dest_ranges
+        )
         self.dest_len += other.dest_len
 
     def index_map(self) -> "IndexMap":
@@ -443,14 +472,15 @@ class MultiModalPlaceholderMap:
         if len(src_indices) != len(dest_indices):
             raise ValueError(
                 f"The number of source ({len(src_indices)}) and destination "
-                f"indices ({len(dest_indices)}) must be the same.")
+                f"indices ({len(dest_indices)}) must be the same."
+            )
 
-        return MultiModalPlaceholderMap.IndexMap(src=src_indices,
-                                                 dest=dest_indices)
+        return MultiModalPlaceholderMap.IndexMap(
+            src=src_indices, dest=dest_indices
+        )
 
 
 class MediaIO(ABC, Generic[_T]):
-
     @abstractmethod
     def load_bytes(self, data: bytes) -> _T:
         raise NotImplementedError

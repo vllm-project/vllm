@@ -31,7 +31,6 @@ if TYPE_CHECKING:
 
 
 class MediaConnector:
-
     def __init__(
         self,
         connection: HTTPConnection = global_http_connection,
@@ -48,11 +47,13 @@ class MediaConnector:
             if not allowed_local_media_path_.exists():
                 raise ValueError(
                     "Invalid `--allowed-local-media-path`: The path "
-                    f"{allowed_local_media_path_} does not exist.")
+                    f"{allowed_local_media_path_} does not exist."
+                )
             if not allowed_local_media_path_.is_dir():
                 raise ValueError(
                     "Invalid `--allowed-local-media-path`: The path "
-                    f"{allowed_local_media_path_} must be a directory.")
+                    f"{allowed_local_media_path_} must be a directory."
+                )
         else:
             allowed_local_media_path_ = None
 
@@ -79,14 +80,16 @@ class MediaConnector:
     ) -> _M:
         allowed_local_media_path = self.allowed_local_media_path
         if allowed_local_media_path is None:
-            raise RuntimeError("Cannot load local files without "
-                               "`--allowed-local-media-path`.")
+            raise RuntimeError(
+                "Cannot load local files without `--allowed-local-media-path`."
+            )
 
         filepath = Path(url_spec.path)
         if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
                 f"The file path {filepath} must be a subpath "
-                f"of `--allowed-local-media-path` {allowed_local_media_path}.")
+                f"of `--allowed-local-media-path` {allowed_local_media_path}."
+            )
 
         return media_io.load_file(filepath)
 
@@ -333,10 +336,14 @@ def repeat_and_pad_placeholder_tokens(
         new_prompt = None
     else:
         placeholder_token_str = tokenizer.decode(placeholder_token_id)
-        pad_token_str_left = (None if pad_token_left is None else
-                              tokenizer.decode(pad_token_left))
-        pad_token_str_right = (None if pad_token_right is None else
-                               tokenizer.decode(pad_token_right))
+        pad_token_str_left = (
+            None if pad_token_left is None else tokenizer.decode(pad_token_left)
+        )
+        pad_token_str_right = (
+            None
+            if pad_token_right is None
+            else tokenizer.decode(pad_token_right)
+        )
 
         placeholder_token_count = prompt.count(placeholder_token_str)
         # This is an arbitrary number to distinguish between the two cases
@@ -344,16 +351,20 @@ def repeat_and_pad_placeholder_tokens(
             logger.warning(
                 "Please follow the prompt format that is "
                 "documented on HuggingFace which does not involve "
-                "repeating %s tokens.", placeholder_token_str)
+                "repeating %s tokens.",
+                placeholder_token_str,
+            )
         if placeholder_token_count < len(repeat_count):
             logger.warning(
                 "The number of multi-modal placeholder tokens in the prompt "
                 "is less than the number of multi-modal inputs. Extra "
-                "placeholder tokens will be treated as plain text")
+                "placeholder tokens will be treated as plain text"
+            )
             repeat_count = repeat_count[:placeholder_token_count]
 
-        prompt_parts = prompt.split(placeholder_token_str,
-                                    maxsplit=len(repeat_count))
+        prompt_parts = prompt.split(
+            placeholder_token_str, maxsplit=len(repeat_count)
+        )
         new_prompt = ""
         for i, repeat_count_item in enumerate(repeat_count):
             replacement_str = "".join(
@@ -362,7 +373,8 @@ def repeat_and_pad_placeholder_tokens(
                     repeat_count=repeat_count_item,
                     pad_token_left=pad_token_str_left,
                     pad_token_right=pad_token_str_right,
-                ))
+                )
+            )
             # The image tokens are removed to be consistent with HuggingFace
             new_prompt += prompt_parts[i] + replacement_str
         new_prompt += prompt_parts[-1]
@@ -382,16 +394,18 @@ def repeat_and_pad_placeholder_tokens(
             offset = len(new_token_ids)
             if pad_token_left is not None:
                 offset += 1
-            placeholder_ranges.append({
-                "offset": offset,
-                "length": curr_repeat_count,
-            })
+            placeholder_ranges.append(
+                {
+                    "offset": offset,
+                    "length": curr_repeat_count,
+                }
+            )
             new_token_ids.extend(replacement_ids)
             placeholder_token_idx += 1
 
             # No need to further scan the list since we replaced all tokens
             if placeholder_token_idx >= len(repeat_count):
-                new_token_ids.extend(prompt_token_ids[i + 1:])
+                new_token_ids.extend(prompt_token_ids[i + 1 :])
                 break
         else:
             new_token_ids.append(token)
@@ -400,14 +414,15 @@ def repeat_and_pad_placeholder_tokens(
 
 
 def consecutive_placeholder_ranges(
-        num_items: int,
-        item_size: int,
-        initial_offset: int = 0) -> list[PlaceholderRange]:
+    num_items: int, item_size: int, initial_offset: int = 0
+) -> list[PlaceholderRange]:
     """Returns a list of consecutive PlaceholderRanges of a fixed size"""
 
     return [
-        PlaceholderRange(offset=initial_offset + i * item_size,
-                         length=item_size) for i in range(num_items)
+        PlaceholderRange(
+            offset=initial_offset + i * item_size, length=item_size
+        )
+        for i in range(num_items)
     ]
 
 
@@ -416,23 +431,23 @@ def merge_and_sort_multimodal_metadata(
     mm_hashes: Optional["MultiModalHashDict"],
 ) -> tuple[list[str], list[PlaceholderRange], Optional[list[str]]]:
     """Given a MultiModalPlaceholderDict, merge all PlaceholderRange
-    objects from all available modalities into a single list of 
-    PlaceholderRange, sorted by their offset (starting index in the input 
+    objects from all available modalities into a single list of
+    PlaceholderRange, sorted by their offset (starting index in the input
     sequence) in the ascending order.
 
-    Optionally if a MultiModalHashDict is given, same operation will be 
+    Optionally if a MultiModalHashDict is given, same operation will be
     applied to the object and the sorted list of hashes will be returned.
 
     Raises:
         ValueError: If the input prompt has interleaved placeholders from
-            different modalities (e.g, "<image><audio><image> Describe the 
+            different modalities (e.g, "<image><audio><image> Describe the
             content.")
-    
+
     Returns:
         list[str]: Sorted list of involved modalities.
-        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from 
+        list[PlaceholderRange]: Sorted list of all PlaceholdeRanges from
             mm_positions.
-        Optional[list[str]]: Sorted list of all hashes from mm_hashes if 
+        Optional[list[str]]: Sorted list of all hashes from mm_hashes if
             given, None otherwise.
     """
 
@@ -446,24 +461,31 @@ def merge_and_sort_multimodal_metadata(
         if mm_hashes is None:
             return modalities, list(mm_positions[modalities[0]]), None
         else:
-            return modalities, list(mm_positions[modalities[0]]), list(
-                mm_hashes[modalities[0]])
+            return (
+                modalities,
+                list(mm_positions[modalities[0]]),
+                list(mm_hashes[modalities[0]]),
+            )
 
-    placeholder_lists_with_modality = [(modality, mm_positions[modality])
-                                       for modality in modalities]
+    placeholder_lists_with_modality = [
+        (modality, mm_positions[modality]) for modality in modalities
+    ]
 
     if mm_hashes is None:
-        sorted_placeholder_lists = sorted(placeholder_lists_with_modality,
-                                          key=lambda x: x[1][0]['offset'])
+        sorted_placeholder_lists = sorted(
+            placeholder_lists_with_modality, key=lambda x: x[1][0]["offset"]
+        )
         sorted_hash_lists = None
     else:
         hashes_lists = [
-            mm_hashes[modality] for modality in modalities
+            mm_hashes[modality]
+            for modality in modalities
             if modality in mm_hashes
         ]
-        sorted_pairs = sorted(zip(placeholder_lists_with_modality,
-                                  hashes_lists),
-                              key=lambda x: x[0][1][0]['offset'])
+        sorted_pairs = sorted(
+            zip(placeholder_lists_with_modality, hashes_lists),
+            key=lambda x: x[0][1][0]["offset"],
+        )
         sorted_placeholder_tuple, sorted_hash_tuple = zip(*sorted_pairs)
         sorted_placeholder_lists = list(sorted_placeholder_tuple)
         sorted_hash_lists = list(sorted_hash_tuple)
@@ -474,11 +496,15 @@ def merge_and_sort_multimodal_metadata(
     # interleaving of placeholders from different modalities.
     merged_placeholders: list[PlaceholderRange] = []
     for modality, placeholder_list in sorted_placeholder_lists:
-        if merged_placeholders and placeholder_list[0][
-                'offset'] < merged_placeholders[-1]['offset']:
+        if (
+            merged_placeholders
+            and placeholder_list[0]["offset"]
+            < merged_placeholders[-1]["offset"]
+        ):
             raise ValueError(
                 "Interleaved mixed-modality inference is currently not "
-                "supported.")
+                "supported."
+            )
         merged_placeholders.extend(placeholder_list)
 
     if sorted_hash_lists is not None:
@@ -492,16 +518,17 @@ def merge_and_sort_multimodal_metadata(
 
 
 def group_mm_inputs_by_modality(
-        mm_inputs: list["MultiModalKwargs"]) -> list[list["MultiModalKwargs"]]:
-    """Group consecutive MultiModalKwargs from mm_inputs with the same modality 
-    together into the same list for batching purpose. For MultiModalKwargs with 
+    mm_inputs: list["MultiModalKwargs"],
+) -> list[list["MultiModalKwargs"]]:
+    """Group consecutive MultiModalKwargs from mm_inputs with the same modality
+    together into the same list for batching purpose. For MultiModalKwargs with
     multiple modalities, put them into their own list.
 
     Args:
         mm_inputs: List of MultiModalKwargs.
 
     Returns:
-        list[list[MultiModalKwargs]]: List of list of MultiModalKwargs, each 
+        list[list[MultiModalKwargs]]: List of list of MultiModalKwargs, each
         inner list contains consecutive MultiModalKwargs with same modality, or
         one with multimodal modalities.
     """
