@@ -130,8 +130,9 @@ class CustomAllreduce:
         # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
         assert current_platform.is_cuda_alike()
-        full_nvlink = current_platform.is_full_nvlink(physical_device_ids)
-        if world_size > 2 and not full_nvlink:
+        full_connected = current_platform.is_fully_connected_nvlink_or_xgmi(
+            physical_device_ids)
+        if world_size > 2 and not full_connected:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"
                 " more than two PCIe-only GPUs. To silence this warning, "
@@ -168,9 +169,9 @@ class CustomAllreduce:
         self.max_size = max_size
         self.rank = rank
         self.world_size = world_size
-        self.full_nvlink = full_nvlink
+        self.full_connected = full_connected
         self._ptr = ops.init_custom_ar(self.meta_ptrs, self.rank_data, rank,
-                                       self.full_nvlink)
+                                       self.full_connected)
         ops.register_buffer(self._ptr, self.buffer_ptrs)
 
     @contextmanager
@@ -219,7 +220,7 @@ class CustomAllreduce:
             return False
         # for 4 or more non NVLink-capable GPUs, custom allreduce provides
         # little performance improvement over NCCL.
-        if self.world_size == 2 or self.full_nvlink:
+        if self.world_size == 2 or self.full_connected:
             return inp_size < self.max_size
         return False
 

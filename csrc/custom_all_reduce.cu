@@ -12,7 +12,7 @@ static_assert(sizeof(void*) == sizeof(fptr_t));
 
 fptr_t init_custom_ar(const std::vector<fptr_t>& fake_ipc_ptrs,
                       torch::Tensor& rank_data, int64_t rank,
-                      bool full_nvlink) {
+                      bool full_connected) {
   int world_size = fake_ipc_ptrs.size();
   if (world_size > 8)
     throw std::invalid_argument("world size > 8 is not supported");
@@ -27,7 +27,7 @@ fptr_t init_custom_ar(const std::vector<fptr_t>& fake_ipc_ptrs,
   }
   return (fptr_t) new vllm::CustomAllreduce(ipc_ptrs, rank_data.data_ptr(),
                                             rank_data.numel(), rank, world_size,
-                                            full_nvlink);
+                                            full_connected);
 }
 
 /**
@@ -151,6 +151,8 @@ std::tuple<fptr_t, torch::Tensor> allocate_shared_buffer_and_handle(
   cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;
   auto stream = c10::cuda::getCurrentCUDAStream().stream();
   AT_CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
+
+  // Allocate buffer
 #if defined(USE_ROCM)
   // data buffers need to be "uncached" for signal on MI200
   AT_CUDA_CHECK(
@@ -158,11 +160,12 @@ std::tuple<fptr_t, torch::Tensor> allocate_shared_buffer_and_handle(
 #else
   AT_CUDA_CHECK(cudaMalloc((void**)&buffer, size));
 #endif
-
   AT_CUDA_CHECK(cudaMemsetAsync(buffer, 0, size, stream));
   AT_CUDA_CHECK(cudaStreamSynchronize(stream));
   AT_CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
 
+  // Create IPC memhandle for the allocated buffer.
+  // Will use it in open_mem_handle.
   auto options =
       torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
   auto handle =

@@ -142,7 +142,8 @@ class RocmPlatform(Platform):
 
     @staticmethod
     @with_amdsmi_context
-    def is_full_nvlink(physical_device_ids: List[int]) -> bool:
+    def is_fully_connected_nvlink_or_xgmi(
+            physical_device_ids: List[int]) -> bool:
         """
         Query if the set of gpus are fully connected by xgmi (1 hop)
         """
