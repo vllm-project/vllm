@@ -58,17 +58,14 @@ class RejectionSampler(nn.Module):
         output_token_ids: torch.Tensor,
         vocab_size: int,
     ) -> list[list[int]]:
-        output_token_ids = output_token_ids.tolist()
-        # Preallocate outputs.
-        outputs: list[list[int]] = [[] for _ in output_token_ids]
-        for i, token_ids in enumerate(output_token_ids):
-            for token_id in token_ids:
-                if token_id == PLACEHOLDER_TOKEN_ID:
-                    break
-                # Make sure the token id is in the vocabulary.
-                if not (0 <= token_id < vocab_size):
-                    break
-                outputs[i].append(token_id)
+        output_token_ids_np = output_token_ids.cpu().numpy()
+        # Create mask for valid tokens.
+        valid_mask = ((output_token_ids_np != PLACEHOLDER_TOKEN_ID) &
+                      (output_token_ids_np < vocab_size))
+        outputs = [
+            row[valid_mask[i]].tolist()
+            for i, row in enumerate(output_token_ids_np)
+        ]
         return outputs
 
 
