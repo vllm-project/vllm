@@ -6,7 +6,8 @@ import torch
 import torch.nn.functional as F
 
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
+from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
+                                              RejectionSampler)
 
 DEVICE = "cpu"
 
@@ -89,9 +90,11 @@ def test_early_mismatch(sampler):
                                       device=logits.device)
 
     output = sampler(spec_tokens, None, bonus_token_tensor, logits, metadata)
-    expected = torch.tensor([[1, 5, INVALID_TOKEN_ID, INVALID_TOKEN_ID]],
-                            dtype=torch.int,
-                            device=logits.device)
+    expected = torch.tensor(
+        [[1, 5, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]],
+        dtype=torch.int,
+        device=logits.device,
+    )
     assert torch.equal(output, expected)
 
 
@@ -107,7 +110,7 @@ def test_multiple_sequences(sampler):
         [output_tokens[0][-1], output_tokens[1][-1]], device=logits.device)
 
     output = sampler(spec_tokens, None, bonus_token_tensor, logits, metadata)
-    expected = torch.tensor([[1, 2, 5], [3, 4, INVALID_TOKEN_ID]],
+    expected = torch.tensor([[1, 2, 5], [3, 4, PLACEHOLDER_TOKEN_ID]],
                             dtype=torch.int,
                             device=logits.device)
     assert torch.equal(output, expected)
@@ -155,10 +158,12 @@ def test_multiple_mismatches(sampler):
         [output_tokens[0][-1], output_tokens[1][-1]], device=logits.device)
 
     output = sampler(spec_tokens, None, bonus_token_tensor, logits, metadata)
-    expected = torch.tensor([[1, 2, 7, INVALID_TOKEN_ID],
-                             [4, 8, INVALID_TOKEN_ID, INVALID_TOKEN_ID]],
-                            dtype=torch.int,
-                            device=logits.device)
+    expected = torch.tensor(
+        [[1, 2, 7, PLACEHOLDER_TOKEN_ID],
+         [4, 8, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]],
+        dtype=torch.int,
+        device=logits.device,
+    )
     assert torch.equal(output, expected)
 
 
@@ -166,9 +171,9 @@ def test_multiple_mismatches(sampler):
     "spec_tokens,output_tokens,expected",
     [
         ([[1, 2]], [[1, 2, 3]], [[1, 2, 3]]),  # Perfect match with bonus
-        ([[1]], [[2, 3]], [[2, INVALID_TOKEN_ID]]),  # First mismatch
+        ([[1]], [[2, 3]], [[2, PLACEHOLDER_TOKEN_ID]]),  # First mismatch
         ([[1, 2], [3, 4]], [[1, 5, 6], [3, 4, 7]],
-         [[1, 5, INVALID_TOKEN_ID], [3, 4, 7]]),  # Mixed matches
+         [[1, 5, PLACEHOLDER_TOKEN_ID], [3, 4, 7]]),  # Mixed matches
     ])
 def test_parametrized_cases(sampler, spec_tokens, output_tokens, expected):
     """Parametrized test for various matching scenarios"""
