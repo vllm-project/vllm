@@ -1947,8 +1947,6 @@ class SpeculativeConfig:
             raise ValueError("Expect the batch size threshold of disabling "
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
-        if (enable_chunked_prefill and speculative_model == "eagle"):
-            raise ValueError("Chunked prefill and EAGLE are not compatible.")
         # TODO: The user should be able to specify revision/max model len
         # for the draft model. It is not currently supported.
         draft_revision = None
@@ -2022,6 +2020,17 @@ class SpeculativeConfig:
                     raise ValueError(
                         f"{num_speculative_tokens=} must be divisible by "
                         f"{n_predict=}")
+
+            if (draft_hf_config.model_type == 'eagle'
+                    and enable_chunked_prefill
+                    and target_model_config.enforce_eager
+                    and not speculative_disable_mqa_scorer):
+                # TODO: add support for mqa scorer
+                raise ValueError(
+                    "EAGLE + chunked prefill only supports batch " \
+                    "expansion scorer atm. if cuda graph is used, " \
+                    "batch expansion scorer is the current fallback."
+                )
 
             speculative_draft_tensor_parallel_size = \
                 SpeculativeConfig._verify_and_get_draft_model_tensor_parallel_size(
