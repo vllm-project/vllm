@@ -240,6 +240,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "",
         max_model_len=2048,
         max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
         use_tokenizer_eos=True,
         vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
         num_logprobs=10,

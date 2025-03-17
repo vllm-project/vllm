@@ -8,7 +8,7 @@ from typing import Any, Callable, NamedTuple, Optional, Union
 import torch
 from PIL.Image import Image
 from pytest import MarkDecorator
-from transformers import AutoModel, BatchEncoding
+from transformers import AutoModelForCausalLM, BatchEncoding
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.config import TaskOption
@@ -109,7 +109,7 @@ class VLMTestInfo(NamedTuple):
     hf_model_kwargs: Optional[dict[str, Any]] = None
     # Indicates we should explicitly pass the EOS from the tokenizer
     use_tokenizer_eos: bool = False
-    auto_cls: type[_BaseAutoModelClass] = AutoModel
+    auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM
     # Callable to pass to the HF runner to run on inputs; for now, we also pass
     # the data type to input post processing, because almost all of the uses of
     # postprocess_inputs are to fix the data types of BatchEncoding values.
