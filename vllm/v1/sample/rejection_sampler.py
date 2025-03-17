@@ -50,10 +50,37 @@ class RejectionSampler(nn.Module):
         draft_probs: Optional[torch.Tensor],
         # [num_tokens, vocab_size]
         target_logits: torch.Tensor,
-        # [batch_size]
+        # [batch_size, 1]
         bonus_token_ids: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
+        '''
+        Args:
+            metadata:
+                Metadata for spec decoding.
+            draft_probs (Optional[torch.Tensor]):
+                Probability distribution for the draft tokens. Shape is
+                [num_tokens, vocab_size]. Can be None if probabilities are
+                not provided, which is the case for ngram spec decode.
+            target_logits (torch.Tensor):
+                Target model's logits probability distribution.
+                Shape is [num_tokens, vocab_size]. Here, probabilities from
+                different requests are flattened into a single tensor because
+                this is the shape of the output logits.
+            bonus_token_ids_tensor (torch.Tensor):
+                A tensor containing bonus tokens. Shape is [batch_size, 1]. 
+                Bonus tokens are added to the end of the sequence if all 
+                proposed tokens are accepted. We generate the bonus tokens 
+                outside of the rejection sampler with the default sampling 
+                strategy. It allows for more flexibility in the sampling 
+                process such as top_p, top_k sampling.
+            sampling_metadata (SamplingMetadata):
+                Additional metadata needed for sampling, such as temperature,
+                top-k/top-p parameters, or other relevant information.
+        Returns:
+            output_token_ids (torch.Tensor):
+                A tensor containing the final output token IDs.
+        '''
         assert 0 < metadata.max_spec_len <= MAX_SPEC_LEN
         # [num_tokens, vocab_size]
         target_probs = compute_probs(
