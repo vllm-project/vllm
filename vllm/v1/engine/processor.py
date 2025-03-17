@@ -184,7 +184,7 @@ class Processor:
         # Only applicable to multimodal models with legacy input processor.
         processed_inputs = self.input_processor(preprocessed_inputs)
 
-        self._validate_model_inputs(processed_inputs)
+        self._validate_model_inputs(processed_inputs, lora_request)
 
         if is_encoder_decoder_inputs(processed_inputs):
             decoder_inputs = SingletonInputsAdapter(
@@ -200,8 +200,12 @@ class Processor:
             raise NotImplementedError
 
         assert isinstance(params, SamplingParams)
-        # TODO: can we avoid cloning here in multiproc case
+        # TODO: can we avoid cloning here in multiproc case?
         sampling_params = params.clone()
+        # If unset max tokens, then generate up to the max_model_len.
+        if sampling_params.max_tokens is None:
+            sampling_params.max_tokens = (self.model_config.max_model_len -
+                                          len(decoder_inputs.prompt_token_ids))
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
         sampling_params.update_from_tokenizer(
@@ -296,7 +300,9 @@ class Processor:
             lora_request=lora_request,
         )
 
-    def _validate_model_inputs(self, inputs: ProcessorInputs):
+    def _validate_model_inputs(self,
+                               inputs: ProcessorInputs,
+                               lora_request: Optional[LoRARequest] = None):
         if is_encoder_decoder_inputs(inputs):
             # For encoder-decoder multimodal models, the max_prompt_len
             # restricts the decoder prompt length
@@ -309,6 +315,13 @@ class Processor:
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
+
+        max_input_id = max(prompt_ids)
+        max_allowed = self.tokenizer.get_lora_tokenizer(
+            lora_request).max_token_id
+        if max_input_id > max_allowed:
+            raise ValueError(
+                "Token id {} is out of vocabulary".format(max_input_id))
 
         if len(prompt_ids) >= self.model_config.max_model_len:
             raise ValueError(

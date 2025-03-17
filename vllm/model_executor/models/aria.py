@@ -60,7 +60,7 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, quant_config, prefix)
+        super().__init__(config, quant_config=quant_config, prefix=prefix)
         # Unlike Idefics3VisionTransformer which uses LayerNorm after the
         # final layer, Aria omits this normalization, so we replace it with an
         # Identity layer
@@ -512,7 +512,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.config = config
         self.vision_tower = AriaVisionTransformer(
             config.vision_config,
-            quant_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.vision_tower",
         )
         self.multi_modal_projector = AriaProjector(config)

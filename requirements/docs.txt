@@ -9,6 +9,7 @@ msgspec
 cloudpickle
 
 # packages to install to build the documentation
+cachetools
 pydantic >= 2.8
 -f https://download.pytorch.org/whl/cpu
 torch
