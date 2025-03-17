@@ -753,7 +753,7 @@ def spawn_new_process_for_each_test(
 
 
 def create_new_process_for_each_test(
-    method: Optional[str] = None
+    method: Optional[Literal["spawn", "fork"]] = None
 ) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
     """creates a new process for each test function.
 
