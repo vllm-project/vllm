@@ -172,7 +172,7 @@ def rejection_sample(
     uniform_probs = generate_uniform_probs(
         num_tokens,
         num_draft_tokens,
-        sampling_metadata,
+        sampling_metadata.generators,
         device,
     )
 
@@ -213,6 +213,22 @@ def compute_probs(
     cu_num_draft_tokens: torch.Tensor,  # [batch_size]
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
+    """Compute probability distribution from logits based on sampling metadata.
+
+    This function applies temperature scaling to the logits and converts 
+    them to probabilities using softmax. For greedy decoding
+
+    Args:
+        logits: Input logits tensor to be converted to probabilities
+        cu_num_draft_tokens: Cumulative number of of draft tokens.
+        sampling_metadata: Metadata containing sampling parameters such 
+                as temperature and whether greedy sampling is used
+
+    Returns:
+        torch.Tensor: Probability distribution (softmax of scaled logits) 
+                if non-greedy sampling is used, otherwise returns the 
+                original logits.
+    """
     if sampling_metadata.all_greedy:
         return logits
 
@@ -239,9 +255,34 @@ def compute_probs(
 def generate_uniform_probs(
     num_tokens: int,
     num_draft_tokens: list[int],
-    sampling_metadata: SamplingMetadata,
+    generators: dict[int, torch.Generator],
     device: torch.device,
 ) -> torch.Tensor:
+    """
+    Generates a batch of uniform random samples, with optional seeding 
+    if available.
+
+    This method creates a tensor of shape `(num_tokens, )` filled
+    with uniform random values in the range [0, 1). If `generators` is provided,
+    the requests with their own seeds will use the provided `torch.Generator`
+    for reproducibility. The samples for the other requests will be generated
+    without a seed.
+
+    Args:
+        num_tokens : int
+            Total number of tokens.
+        num_draft_tokens : List[List[int]]
+            Number of draft tokens per request.
+        generators : Optional[Dict[int, torch.Generator]]
+            A dictionary mapping indices in the batch to 
+            `torch.Generator` objects.
+        device : torch.device
+            The device on which to allocate the tensor.
+    Returns:
+        uniform_rand : torch.Tensor
+            A tensor of shape `(num_tokens, )` containing uniform 
+            random values in the range [0, 1).
+    """
     uniform_probs = torch.rand(
         (num_tokens, ),
         dtype=torch.float32,
@@ -252,7 +293,7 @@ def generate_uniform_probs(
         if n == 0:
             continue
         end_idx = start_idx + n
-        generator = sampling_metadata.generators.get(req_idx)
+        generator = generators.get(req_idx)
         if generator is not None:
             uniform_probs[start_idx:end_idx].uniform_(generator=generator)
         start_idx = end_idx
