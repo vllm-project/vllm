@@ -13,7 +13,7 @@ DEVICE = "cpu"
 
 
 @pytest.fixture
-def sampler():
+def rejection_sampler():
     return RejectionSampler()
 
 
@@ -62,7 +62,7 @@ def create_sampling_metadata(
 
 
 ########################### Tests for Greedy Sampling ###################
-def test_perfect_match(sampler):
+def test_perfect_match(rejection_sampler):
     """Test when output tokens perfectly match speculated tokens"""
     spec_tokens = [[1, 2, 3]]
     output_tokens = [[1, 2, 3, 4]]  # 4 is the bonus token
@@ -72,14 +72,15 @@ def test_perfect_match(sampler):
     bonus_token_tensor = torch.tensor([output_tokens[0][-1]],
                                       device=logits.device)
 
-    output = sampler(spec_tokens, None, bonus_token_tensor, logits, metadata)
+    output = rejection_sampler(spec_tokens, None, bonus_token_tensor, logits,
+                               metadata)
     expected = torch.tensor([[1, 2, 3, 4]],
                             dtype=torch.int,
                             device=logits.device)
     assert torch.equal(output, expected)
 
 
-def test_early_mismatch(sampler):
+def test_early_mismatch(rejection_sampler):
     """Test when there's an early mismatch in tokens"""
     spec_tokens = [[1, 2, 3]]
     output_tokens = [[1, 5, 3, 4]]  # Mismatch at position 1
@@ -89,7 +90,8 @@ def test_early_mismatch(sampler):
     bonus_token_tensor = torch.tensor([output_tokens[0][-1]],
                                       device=logits.device)
 
-    output = sampler(spec_tokens, None, bonus_token_tensor, logits, metadata)
+    output = rejection_sampler(spec_tokens, None, bonus_token_tensor, logits,
+                               metadata)
     expected = torch.tensor(
         [[1, 5, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]],
         dtype=torch.int,
@@ -98,7 +100,7 @@ def test_early_mismatch(sampler):
     assert torch.equal(output, expected)
 
 
-def test_multiple_sequences(sampler):
+def test_multiple_sequences(rejection_sampler):
     """Test handling multiple sequences of speculated tokens"""
     spec_tokens = [[1, 2], [3]]
     output_tokens = [[1, 2, 5], [3,
@@ -109,14 +111,15 @@ def test_multiple_sequences(sampler):
     bonus_token_tensor = torch.tensor(
         [output_tokens[0][-1], output_tokens[1][-1]], device=logits.device)
 
-    output = sampler(spec_tokens, None, bonus_token_tensor, logits, metadata)
+    output = rejection_sampler(spec_tokens, None, bonus_token_tensor, logits,
+                               metadata)
     expected = torch.tensor([[1, 2, 5], [3, 4, PLACEHOLDER_TOKEN_ID]],
                             dtype=torch.int,
                             device=logits.device)
     assert torch.equal(output, expected)
 
 
-def test_single_token_sequence(sampler):
+def test_single_token_sequence(rejection_sampler):
     """Test handling sequences with single token"""
     spec_tokens = [[1]]
     output_tokens = [[1, 2]]  # Single token with bonus token 2
@@ -126,12 +129,13 @@ def test_single_token_sequence(sampler):
     bonus_token_tensor = torch.tensor([output_tokens[0][-1]],
                                       device=logits.device)
 
-    output = sampler(spec_tokens, None, bonus_token_tensor, logits, metadata)
+    output = rejection_sampler(spec_tokens, None, bonus_token_tensor, logits,
+                               metadata)
     expected = torch.tensor([[1, 2]], dtype=torch.int, device=logits.device)
     assert torch.equal(output, expected)
 
 
-def test_empty_sequence(sampler):
+def test_empty_sequence(rejection_sampler):
     """Test handling empty sequence of speculated tokens"""
     spec_tokens: list[list[int]] = [[]]
     output_tokens = [[5]]  # Just the bonus token
@@ -141,12 +145,13 @@ def test_empty_sequence(sampler):
     bonus_token_tensor = torch.tensor([output_tokens[0][-1]],
                                       device=logits.device)
 
-    output = sampler(spec_tokens, None, bonus_token_tensor, logits, metadata)
+    output = rejection_sampler(spec_tokens, None, bonus_token_tensor, logits,
+                               metadata)
     expected = torch.tensor([[5]], dtype=torch.int, device=logits.device)
     assert torch.equal(output, expected)
 
 
-def test_multiple_mismatches(sampler):
+def test_multiple_mismatches(rejection_sampler):
     """Test handling multiple sequences with mismatches"""
     spec_tokens = [[1, 2, 3], [4, 5, 6]]
     output_tokens = [[1, 2, 7, 6], [4, 8, 6,
@@ -157,7 +162,8 @@ def test_multiple_mismatches(sampler):
     bonus_token_tensor = torch.tensor(
         [output_tokens[0][-1], output_tokens[1][-1]], device=logits.device)
 
-    output = sampler(spec_tokens, None, bonus_token_tensor, logits, metadata)
+    output = rejection_sampler(spec_tokens, None, bonus_token_tensor, logits,
+                               metadata)
     expected = torch.tensor(
         [[1, 2, 7, PLACEHOLDER_TOKEN_ID],
          [4, 8, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]],
@@ -175,14 +181,16 @@ def test_multiple_mismatches(sampler):
         ([[1, 2], [3, 4]], [[1, 5, 6], [3, 4, 7]],
          [[1, 5, PLACEHOLDER_TOKEN_ID], [3, 4, 7]]),  # Mixed matches
     ])
-def test_parametrized_cases(sampler, spec_tokens, output_tokens, expected):
+def test_parametrized_cases(rejection_sampler, spec_tokens, output_tokens,
+                            expected):
     """Parametrized test for various matching scenarios"""
     metadata = create_sampling_metadata(all_greedy=True)
     logits = create_logits_tensor(output_tokens)
     bonus_token_tensor = torch.tensor([tokens[-1] for tokens in output_tokens],
                                       device=logits.device)
 
-    output = sampler(spec_tokens, None, bonus_token_tensor, logits, metadata)
+    output = rejection_sampler(spec_tokens, None, bonus_token_tensor, logits,
+                               metadata)
     expected_tensor = torch.tensor(expected,
                                    dtype=torch.int,
                                    device=logits.device)
@@ -195,7 +203,7 @@ def test_parametrized_cases(sampler, spec_tokens, output_tokens, expected):
 @pytest.mark.parametrize("batch_size", [1, 4, 8])
 @pytest.mark.parametrize("frac_seeded", [0.0, 0.5])
 @pytest.mark.parametrize("n_rep", [20])
-def test_deterministic_when_seeded(sampler, k: int, vocab_size: int,
+def test_deterministic_when_seeded(rejection_sampler, k: int, vocab_size: int,
                                    batch_size: int, frac_seeded: float,
                                    n_rep: int):
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
@@ -222,8 +230,9 @@ def test_deterministic_when_seeded(sampler, k: int, vocab_size: int,
 
         sampling_metadata = create_sampling_metadata(all_greedy=False,
                                                      generators=seeded_seqs)
-        rep_result = sampler(draft_token_ids.tolist(), draft_probs,
-                             bonus_token_ids, target_probs, sampling_metadata)
+        rep_result = rejection_sampler(draft_token_ids.tolist(), draft_probs,
+                                       bonus_token_ids, target_probs,
+                                       sampling_metadata)
 
         results.append(rep_result)
 
