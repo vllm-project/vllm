@@ -1053,7 +1053,7 @@ def vllm_topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
 
 
 def dispatch_topk_func() -> Callable[..., torch.Tensor]:
-    if current_platform.is_rocm_aiter_moe_enabled():
+    if envs.VLLM_ROCM_USE_AITER_MOE:
         return rocm_aiter_topk_softmax
     return vllm_topk_softmax
 
