@@ -8,14 +8,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 
 
-def topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
-                 token_expert_indices: torch.Tensor,
-                 gating_output: torch.Tensor, renormalize: bool) -> None:
-    import aiter as rocm_aiter
-    rocm_aiter.topk_softmax(topk_weights, topk_indices, token_expert_indices,
-                            gating_output, renormalize)
-
-
 def fused_experts(
         *,
         hidden_states: torch.Tensor,
