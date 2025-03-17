@@ -68,6 +68,7 @@ class KVCacheManager:
         # data for reempted ones.
         self.num_cached_block: dict[str, int] = {}
         self.prefix_cache_stats = PrefixCacheStats()
+        self.num_evicted_tokens = 0
 
     @property
     def usage(self) -> float:
@@ -87,6 +88,16 @@ class KVCacheManager:
         stats = self.prefix_cache_stats
         self.prefix_cache_stats = PrefixCacheStats()
         return stats
+
+    def get_and_reset_evicted_tokens(self) -> int:
+        """Get and reset the number of evicted tokens.
+
+        Returns:
+            The number of tokens evicted since the last reset.
+        """
+        evicted_tokens = self.num_evicted_tokens
+        self.num_evicted_tokens = 0
+        return evicted_tokens
 
     def get_computed_blocks(
             self, request: Request) -> tuple[list[KVCacheBlock], int]:
@@ -123,6 +134,9 @@ class KVCacheManager:
                 if cached_block := self.block_pool.get_cached_block(
                         block_hash):
                     computed_blocks.append(cached_block)
+                    # Track actual token count from block hash
+                    if block_hash and block_hash.token_ids:
+                        self.num_evicted_tokens += len(block_hash.token_ids)
                 else:
                     break
 
