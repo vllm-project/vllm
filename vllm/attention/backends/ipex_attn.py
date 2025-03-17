@@ -256,6 +256,8 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     softmax_scale=self.scale,
                     zero_tensors=False,
                     is_causal=True,
+                    window_size_left=-1,
+                    window_size_right=-1,
                     return_softmax=False,
                     gen_=None,
                     logits_soft_cap=self.logits_soft_cap,
