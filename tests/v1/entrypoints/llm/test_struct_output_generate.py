@@ -18,6 +18,9 @@ MODELS_TO_TEST = [
     "Qwen/Qwen2.5-1.5B-Instruct", "mistralai/Ministral-8B-Instruct-2410"
 ]
 
+# Undo after https://github.com/vllm-project/vllm/pull/14868
+pytest.skip(allow_module_level=True)
+
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("guided_decoding_backend",
