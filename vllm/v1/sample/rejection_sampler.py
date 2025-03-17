@@ -81,7 +81,7 @@ class RejectionSampler(nn.Module):
             output_token_ids (torch.Tensor):
                 A tensor containing the final output token IDs.
         '''
-        assert 0 < metadata.max_spec_len <= MAX_SPEC_LEN
+        assert metadata.max_spec_len <= MAX_SPEC_LEN
         # [num_tokens, vocab_size]
         target_probs = compute_probs(
             target_logits,
@@ -129,10 +129,15 @@ def rejection_sample(
     draft_probs: Optional[torch.Tensor],
     # [num_tokens, vocab_size]
     target_probs: torch.Tensor,
-    # [batch_size]
+    # [batch_size, 1]
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
+    assert draft_token_ids.ndim == 1
+    assert draft_probs is None or draft_probs.ndim == 2
+    assert cu_num_draft_tokens.ndim == 1
+    assert target_probs.ndim == 2
+
     batch_size = len(num_draft_tokens)
     num_tokens = draft_token_ids.shape[0]
     vocab_size = target_probs.shape[-1]
@@ -141,6 +146,7 @@ def rejection_sample(
     assert draft_probs is None or draft_probs.is_contiguous()
     assert target_probs.is_contiguous()
     assert bonus_token_ids.is_contiguous()
+    assert target_probs.shape == (num_tokens, vocab_size)
 
     # Create output buffer.
     output_token_ids = torch.empty(
@@ -232,6 +238,8 @@ def compute_probs(
                 if non-greedy sampling is used, otherwise returns the 
                 original logits.
     """
+    assert logits.ndim == 2
+    assert cu_num_draft_tokens.ndim == 1
     if sampling_metadata.all_greedy:
         return logits
 
