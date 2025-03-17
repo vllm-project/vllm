@@ -366,7 +366,8 @@ class MPClient(EngineCoreClient):
     ) -> None:
 
         # Default case - single core engine.
-        core_engine = new_core_engine(0)
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        core_engine = new_core_engine(dp_rank)
         core_engines.append(core_engine)
         self.core_engine = core_engine
 

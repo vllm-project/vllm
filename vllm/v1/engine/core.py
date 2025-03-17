@@ -485,6 +485,9 @@ class DPEngineCoreProc(EngineCoreProc):
         _add_prefix(sys.stdout, process_name, pid)
         _add_prefix(sys.stderr, process_name, pid)
 
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        assert dp_size > 1
+
         dp_rank = vllm_config.parallel_config.data_parallel_rank
 
         from vllm.platforms import current_platform
@@ -495,9 +498,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 str(device_id_to_physical_device_id(i))
                 for i in range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
 
-        dp_size = vllm_config.parallel_config.data_parallel_size
-        self.dp_group = None if dp_size <= 1 else (
-            vllm_config.parallel_config.stateless_init_dp_group())
+        self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
         # Initialize the engine after setting up environment.
         super().__init__(input_path, output_path, vllm_config, executor_class,
