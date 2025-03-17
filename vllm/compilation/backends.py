@@ -345,7 +345,7 @@ class VllmBackend:
             # Config should automatically wrap all inductor passes
             assert isinstance(inductor_config[PASS_KEY], InductorPass)
             self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
-        inductor_config[PASS_KEY] = self.post_grad_pass_manager
+        
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
@@ -395,6 +395,17 @@ class VllmBackend:
             self.compilation_config.cache_dir = cache_dir
 
         cache_dir = self.compilation_config.cache_dir
+        # Add fxgraph to cache path to avoid conflict with other
+        # @support_torch_compile caches
+        import hashlib
+        graph_code = graph.graph.python_code(root_module="self").src
+        # Add parameter shapes to graph_code for unique hashing
+        for input_arg in example_inputs:
+            if isinstance(input_arg, torch.nn.parameter.Parameter):
+                graph_code += f"\n{str(input_arg.shape)}"
+        graph_hash = hashlib.md5(graph_code.encode()).hexdigest()
+        cache_dir = os.path.join(cache_dir, f"fxgraph_{graph_hash}")
+
         os.makedirs(cache_dir, exist_ok=True)
         rank = vllm_config.parallel_config.rank
         dp_rank = vllm_config.parallel_config.data_parallel_rank
