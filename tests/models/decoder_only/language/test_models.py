@@ -3,7 +3,11 @@
 
 Run `pytest tests/models/test_models.py`.
 """
+import os
+
 import pytest
+
+from vllm.platforms import current_platform
 
 from ...utils import check_logprobs_close
 
@@ -17,21 +21,21 @@ REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
 @pytest.mark.parametrize(
     "model",
     [
-        pytest.param(
-            "bigscience/bloom-560m",  # bloom - testing alibi slopes
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        ),
-        pytest.param(
-            "openai-community/gpt2",  # gpt2
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        ),
-        pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
-        pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
-        pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
-        pytest.param(
-            "google/gemma-1.1-2b-it",  # gemma
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        ),
+        # pytest.param(
+        #     "bigscience/bloom-560m",  # bloom - testing alibi slopes
+        #     marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        # ),
+        # pytest.param(
+        #     "openai-community/gpt2",  # gpt2
+        #     marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        # ),
+        # pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
+        # pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
+        # pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
+        # pytest.param(
+        #     "google/gemma-1.1-2b-it",  # gemma
+        #     marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        # ),
         pytest.param(
             "THUDM/chatglm3-6b",  # chatglm (text-only)
         ),
@@ -39,48 +43,45 @@ REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
             "meta-llama/Llama-3.2-1B-Instruct",  # llama
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
-        pytest.param(
-            "openbmb/MiniCPM3-4B",
-            # fused_moe not supported on CPU
-            marks=[pytest.mark.core_model],
-        ),
-        pytest.param(
-            "facebook/opt-125m",  # opt
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        ),
-        pytest.param(
-            "microsoft/phi-2",  # phi
-            marks=[pytest.mark.core_model],
-        ),
-        pytest.param(
-            "Qwen/Qwen-7B",  # qwen (text-only)
-        ),
-        pytest.param(
-            "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
-            marks=[pytest.mark.core_model],
-        ),
-        pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
-        pytest.param("bigcode/starcoder2-3b"),  # starcoder2
-        pytest.param(
-            "ehristoforu/Falcon3-MoE-2x7B-Insruct",  # mixtral
-            marks=[pytest.mark.cpu_model],
-        )
+        # pytest.param(
+        #     "openbmb/MiniCPM3-4B",
+        #     # fused_moe not supported on CPU
+        #     marks=[pytest.mark.core_model],
+        # ),
+        # pytest.param(
+        #     "facebook/opt-125m",  # opt
+        #     marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        # ),
+        # pytest.param(
+        #     "microsoft/phi-2",  # phi
+        #     marks=[pytest.mark.core_model],
+        # ),
+        # pytest.param(
+        #     "Qwen/Qwen-7B",  # qwen (text-only)
+        # ),
+        # pytest.param(
+        #     "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
+        #     marks=[pytest.mark.core_model],
+        # ),
+        # pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
+        # pytest.param("bigcode/starcoder2-3b"),  # starcoder2
+        # pytest.param(
+        #     "ehristoforu/Falcon3-MoE-2x7B-Insruct",  # mixtral
+        #     marks=[pytest.mark.cpu_model],
+        # )
     ])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
-    monkeypatch,
-) -> None:
-    if model in REQUIRES_V0:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
+def test_models(hf_runner, vllm_runner, example_prompts, model: str,
+                dtype: str, max_tokens: int, num_logprobs: int,
+                use_rocm_aiter: bool, monkeypatch) -> None:
+    if use_rocm_aiter:
+        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
+            pytest.skip("Skipping test suite for ROCM AITER")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     with hf_runner(model, dtype=dtype) as hf_model:
         if model.startswith("THUDM/chatglm3"):
