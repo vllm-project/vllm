@@ -1166,7 +1166,7 @@ class LLMEngine:
                 stats_snapshot = self._get_stats(scheduler_outputs, outputs,
                                                  finished_before, skip)
                 inband_stats = self._get_inband_engine_stats(stats_snapshot)
-                seq_group.set_final_engine_stats_snapshot(inband_stats)
+                seq_group.set_inband_engine_stats(inband_stats)
             request_output = RequestOutputFactory.create(
                 seq_group,
                 self.seq_id_to_seq_group,
@@ -1213,7 +1213,7 @@ class LLMEngine:
                 stats_snapshot = self._get_stats(scheduler_outputs, outputs,
                                                  finished_before, skip)
                 inband_stats = self._get_inband_engine_stats(stats_snapshot)
-                seq_group.set_final_engine_stats_snapshot(inband_stats)
+                seq_group.set_inband_engine_stats(inband_stats)
                 seq_group.set_last_token_time(now)
             request_output = RequestOutputFactory.create(
                 seq_group,

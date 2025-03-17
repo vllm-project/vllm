@@ -848,8 +848,7 @@ class SequenceGroup:
         """Sets the finished time for Request level timings."""
         self.metrics.finished_time = time
 
-    def set_final_engine_stats_snapshot(self,
-                                        stats: InbandEngineStats) -> None:
+    def set_inband_engine_stats(self, stats: InbandEngineStats) -> None:
         self.inband_engine_stats = stats
 
     def get_max_num_running_seqs(self) -> int:
