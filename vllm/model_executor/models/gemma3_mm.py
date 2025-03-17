@@ -25,7 +25,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
-                         SupportsMultiModal, SupportsPP)
+                         SupportsMultiModal, SupportsPP, SupportsV0Only)
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
@@ -374,7 +374,7 @@ class Gemma3MultiModalProjector(nn.Module):
                                         info=Gemma3ProcessingInfo,
                                         dummy_inputs=Gemma3DummyInputsBuilder)
 class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
-                                     SupportsLoRA):
+                                     SupportsLoRA, SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
