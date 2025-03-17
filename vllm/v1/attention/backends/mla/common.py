@@ -350,6 +350,10 @@ class MLACommonMetadataBuilder(Generic[M]):
         model_config = runner.model_config
         cache_config = runner.cache_config
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+        # the max q len that should be considered a "decode", i.e. using the
+        # more memory bandwidth efficient (less compute efficient)
+        # _forward_decode path
+        self.max_decode_q_len = 1
 
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
@@ -392,11 +396,13 @@ class MLACommonMetadataBuilder(Generic[M]):
 
         for i, req_id in enumerate(input_batch.req_ids):
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            # for now treat 1 scheduled token as "decode" even if its not,
-            # we should update this to something like < 8 in the future but
-            # currently the TritonMLA._forward_decode only supports
-            # num_tokens = 1
-            if num_tokens == 1:
+            # treat anything less than `self.max_decode_q_len` as a "decode",
+            # i.e. memory-bound and should use the `_forward_decode` path.
+            # Only consider requests that have previously computed tokens to
+            # avoid picking up small prompts that are better served by the
+            # `_forward_prefill` path
+            if num_tokens <= self.max_decode_q_len and \
+                input_batch.num_computed_tokens_cpu_tensor[i] > 0:
                 decodes.append(i)
                 num_decode_tokens += num_tokens
             else:

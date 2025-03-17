@@ -64,6 +64,9 @@ class FlashInferMLAMetadataBuilder(
     def __init__(self, runner):
         super().__init__(runner)
 
+        # TODO: Tune this parameter
+        self.max_decode_q_len = 16
+
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
@@ -130,10 +133,8 @@ class FlashInferMLAMetadataBuilder(
         query_start_loc_host = self.runner.query_start_loc_cpu[:num_decodes +
                                                                1]
         paged_kv_indptr_host = self._paged_kv_indptr_host[:num_decodes]
-        paged_kv_indices_host = input_batch.block_table.block_table[:
-                                                                    num_decodes,
-                                                                    ...].flatten(
-                                                                    )
+        paged_kv_indices_host = input_batch.block_table.\
+            block_table[:num_decodes, ...].flatten()
 
         seq_lens_host = self.runner.seq_lens_cpu[:num_decodes]
 
