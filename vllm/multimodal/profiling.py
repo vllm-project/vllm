@@ -218,8 +218,10 @@ class MultiModalProfiler(Generic[_I]):
 
         # V0 does not support chunked prefill.
         if total_len > seq_len and not envs.VLLM_USE_V1:
+            # `max_num_batched_tokens` is defined by `SchedulerConfig`
             logger.warning(
-                "The context length (%d) of the model is too short "
+                "The sequence length used for profiling ("
+                "max_num_batched_tokens / max_num_seqs = %d) is too short "
                 "to hold the multi-modal embeddings in the worst case "
                 "(%d tokens in total, out of which %s are reserved for "
                 "multi-modal embeddings). This may cause certain "
