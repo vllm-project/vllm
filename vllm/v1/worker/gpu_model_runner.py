@@ -1358,12 +1358,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 draft_token_ids, self.device)
 
             num_tokens = sum(len(ids) for ids in draft_token_ids)
-            num_tokens_with_bonus = num_tokens + num_reqs
             # draft_probs = torch.randn(
             #     num_tokens, logits.shape[-1], device=self.device,
             #     dtype=logits.dtype)
             draft_probs = None
-            target_logits = torch.randn(num_tokens_with_bonus,
+            target_logits = torch.randn(num_tokens,
                                         logits.shape[-1],
                                         device=self.device,
                                         dtype=logits.dtype)
