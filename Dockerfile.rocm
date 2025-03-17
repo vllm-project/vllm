@@ -110,17 +110,11 @@ ARG COMMON_WORKDIR
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
 COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
 
-RUN git clone --recursive https://github.com/ROCm/aiter.git
-RUN cd /app/aiter && GPU_ARCHS=gfx942 python3 setup.py develop && pip show aiter
-
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 ENV TOKENIZERS_PARALLELISM=false
 
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
-
-# Enable Aiter. Make sure this only exists on the aiter branch.
-# ENV VLLM_USE_AITER=1
 
 CMD ["/bin/bash"]
 
