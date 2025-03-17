@@ -2,7 +2,7 @@
 
 import pytest
 import torch.nn.functional as F
-from transformers import AutoModelForVision2Seq
+from transformers import AutoModelForImageTextToText
 
 from vllm.platforms import current_platform
 
@@ -70,7 +70,7 @@ def _run_test(
         vllm_outputs = vllm_model.encode(input_texts, images=input_images)
 
     with hf_runner(model, dtype=dtype,
-                   auto_cls=AutoModelForVision2Seq) as hf_model:
+                   auto_cls=AutoModelForImageTextToText) as hf_model:
         # Patch the issue where generation_config.json is missing
         hf_model.processor.patch_size = \
             hf_model.model.config.vision_config.patch_size
