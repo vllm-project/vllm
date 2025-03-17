@@ -17,7 +17,7 @@ from vllm.utils import identity
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
                           _VideoAssets)
-from ....utils import (fork_new_process_for_each_test, large_gpu_mark,
+from ....utils import (create_new_process_for_each_test, large_gpu_mark,
                        multi_gpu_marks)
 from ...utils import check_outputs_equal
 from .vlm_utils import custom_inputs, model_utils, runners
@@ -592,7 +592,7 @@ VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.IMAGE,
-        fork_new_process_for_each_test=False,
+        create_new_process_for_each_test=False,
     ))
 def test_single_image_models(tmp_path: PosixPath, model_type: str,
                              test_case: ExpandableVLMTestArgs,
@@ -617,7 +617,7 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.MULTI_IMAGE,
-        fork_new_process_for_each_test=False,
+        create_new_process_for_each_test=False,
     ))
 def test_multi_image_models(tmp_path: PosixPath, model_type: str,
                             test_case: ExpandableVLMTestArgs,
@@ -642,7 +642,7 @@ def test_multi_image_models(tmp_path: PosixPath, model_type: str,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.EMBEDDING,
-        fork_new_process_for_each_test=False,
+        create_new_process_for_each_test=False,
     ))
 def test_image_embedding_models(model_type: str,
                                 test_case: ExpandableVLMTestArgs,
@@ -666,7 +666,7 @@ def test_image_embedding_models(model_type: str,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.VIDEO,
-        fork_new_process_for_each_test=False,
+        create_new_process_for_each_test=False,
     ))
 def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
                       hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
@@ -688,7 +688,7 @@ def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.CUSTOM_INPUTS,
-        fork_new_process_for_each_test=False,
+        create_new_process_for_each_test=False,
     ))
 def test_custom_inputs_models(
     model_type: str,
@@ -714,9 +714,9 @@ def test_custom_inputs_models(
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.IMAGE,
-        fork_new_process_for_each_test=True,
+        create_new_process_for_each_test=True,
     ))
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    test_case: ExpandableVLMTestArgs,
                                    hf_runner: type[HfRunner],
@@ -740,9 +740,9 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.MULTI_IMAGE,
-        fork_new_process_for_each_test=True,
+        create_new_process_for_each_test=True,
     ))
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                   test_case: ExpandableVLMTestArgs,
                                   hf_runner: type[HfRunner],
@@ -766,9 +766,9 @@ def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.EMBEDDING,
-        fork_new_process_for_each_test=True,
+        create_new_process_for_each_test=True,
     ))
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_image_embedding_models_heavy(model_type: str,
                                       test_case: ExpandableVLMTestArgs,
                                       hf_runner: type[HfRunner],
@@ -791,7 +791,7 @@ def test_image_embedding_models_heavy(model_type: str,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.VIDEO,
-        fork_new_process_for_each_test=True,
+        create_new_process_for_each_test=True,
     ))
 def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
@@ -814,9 +814,9 @@ def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.CUSTOM_INPUTS,
-        fork_new_process_for_each_test=True,
+        create_new_process_for_each_test=True,
     ))
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_custom_inputs_models_heavy(
     model_type: str,
     test_case: ExpandableVLMTestArgs,
