@@ -105,7 +105,7 @@ class Proxy:
         try:
             async with aiohttp.ClientSession(
                     timeout=AIOHTTP_TIMEOUT) as client:
-                logger.info("Verifing %s ...", instance)
+                logger.info("Verifying %s ...", instance)
                 async with client.get(url) as response:
                     if response.status == 200:
                         data = await response.json()
