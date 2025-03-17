@@ -10,32 +10,39 @@ from torch.library import impl
 from torch_xla.experimental.custom_kernel import (XLA_LIB, jax_import_guard,
                                                   make_kernel_from_pallas)
 
-def _bgmv_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref, lora_ref, out_ref,
+def _bgmv_kernel(bT: int, bL: int, idx_ref, inp_ref, lora_ref, out_ref,
                  acc_ref, mask_ref):
-    @pl.when(pl.program_id(2) == 0)
+    
+    t = pl.program_id(0)
+    
+    d = pl.program_id(2)
+    ds = pl.num_programs(2)
+    
+    lora_idx = pl.program_id(3)
+    n_lora_idxs = pl.num_programs(3)
+    
+    @pl.when((d == 0) & (lora_idx == 0))
     def _():
         acc_ref[...] = jnp.zeros_like(acc_ref[...], dtype=jnp.float32)
 
-    t = pl.program_id(0)
+    valid = False
+    for j in range(bT):
+        valid |= idx_ref[j + bT * t] == lora_idx
     
-    for i in range(max_num_loras):
+    @pl.when(valid)
+    def _():
         mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
-        valid = False
         for j in range(bT):
-            valid |= idx_ref[j + bT * t] == i
-            
-            @pl.when(idx_ref[j + bT * t] == i)
+            @pl.when(idx_ref[j + bT * t] == lora_idx)
             def _():
                 mask_ref[j, :] = jnp.ones((bL, ), dtype=jnp.float32)
 
-        @pl.when(valid)
-        def _():
-            acc_ref[...] += jax.lax.dot_general(
-                inp_ref[...],
-                lora_ref[i, ...], (((1, ), (1, )), ((), ())),
-                preferred_element_type=jnp.float32) * mask_ref[...]
+        acc_ref[...] += jax.lax.dot_general(
+            inp_ref[...],
+            lora_ref[0, ...], (((1, ), (1, )), ((), ())),
+            preferred_element_type=jnp.float32) * mask_ref[...]
 
-    @pl.when(pl.program_id(2) == pl.num_programs(2) - 1)
+    @pl.when((d == ds - 1) & (lora_idx == n_lora_idxs - 1))
     def _():
         out_ref[...] = acc_ref[...].astype(out_ref.dtype)
 
@@ -54,26 +61,26 @@ def _bgmv(
     N, L, _ = loras.shape
 
     return pl.pallas_call(
-        kernel=functools.partial(_bgmv_kernel, TOKEN_BLOCK, LORA_BLOCK, N),
+        kernel=functools.partial(_bgmv_kernel, TOKEN_BLOCK, LORA_BLOCK),
         out_shape=jax.ShapeDtypeStruct((T, L), dtype=inputs.dtype),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=1,
             grid=(T // TOKEN_BLOCK, L // LORA_BLOCK,
-                  D // DIM_BLOCK),
+                  D // DIM_BLOCK, N),
             in_specs=[
                 pl.BlockSpec((TOKEN_BLOCK, DIM_BLOCK),
-                             lambda i, j, k, block_idx: (i, k)),
-                pl.BlockSpec((N, LORA_BLOCK, DIM_BLOCK),
-                             lambda i, j, k, block_idx: (0, j, k)),
+                             lambda t, l, d, n, block_idx: (t, d)),
+                pl.BlockSpec((1, LORA_BLOCK, DIM_BLOCK),
+                             lambda t, l, d, n, block_idx: (n, l, d)),
             ],
             out_specs=pl.BlockSpec((TOKEN_BLOCK, LORA_BLOCK),
-                                   lambda i, j, k, block_idx: (i, j)),
+                                   lambda t, l, d, n, block_idx: (t, l)),
             scratch_shapes=[
                 pltpu.VMEM((TOKEN_BLOCK, LORA_BLOCK), jnp.float32),
                 pltpu.VMEM((TOKEN_BLOCK, LORA_BLOCK), jnp.float32)
             ]),
         compiler_params=pltpu.TPUCompilerParams(
-            dimension_semantics=("parallel", "parallel", "arbitrary")),
+            dimension_semantics=("parallel", "parallel", "arbitrary", "arbitrary")),
         name="bgmv")(idxs, inputs, loras)
 
 
