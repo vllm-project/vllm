@@ -91,7 +91,8 @@ def echo(self, msg: str, err_msg: Optional[str] = None) -> str:
 
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
-def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
+def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
+                            multiprocessing_mode: bool):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
@@ -176,7 +177,7 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
 
 @pytest.mark.asyncio(loop_scope="function")
-async def test_engine_core_client_asyncio(monkeypatch):
+async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")

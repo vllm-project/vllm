@@ -350,6 +350,10 @@ def _compare_tp(
     else:
         pp_env = None
 
+    tp_env = {
+        "VLLM_USE_V1": vllm_major_version,
+    }
+
     pp_args = [
         *common_args,
         "--pipeline-parallel-size",
@@ -374,14 +378,20 @@ def _compare_tp(
     ]
 
     try:
-        compare_two_settings(model_id, pp_args, tp_args, pp_env, method=method)
+        compare_two_settings(model_id,
+                             pp_args,
+                             tp_args,
+                             pp_env,
+                             tp_env,
+                             method=method)
     except Exception:
-        if pp_env is None:
-            raise
-        else:
-            # Ray Compiled Graph tests are flaky,
+        testing_ray_compiled_graph = pp_env is not None
+        if testing_ray_compiled_graph and vllm_major_version == "0":
+            # Ray Compiled Graph tests are flaky for V0,
             # so we don't want to fail the test
             logger.exception("Ray Compiled Graph tests failed")
+        else:
+            raise
 
 
 @pytest.mark.parametrize(

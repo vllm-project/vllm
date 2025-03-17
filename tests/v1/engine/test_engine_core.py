@@ -46,7 +46,7 @@ def make_request() -> EngineCoreRequest:
 
 
 @create_new_process_for_each_test()
-def test_engine_core(monkeypatch):
+def test_engine_core(monkeypatch: pytest.MonkeyPatch):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
@@ -160,10 +160,10 @@ def test_engine_core(monkeypatch):
 
 
 @create_new_process_for_each_test()
-def test_engine_core_advanced_sampling(monkeypatch):
+def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
     """
-    A basic end-to-end test to verify that the engine functions correctly 
-    when additional sampling parameters, such as top_p, min_tokens, and 
+    A basic end-to-end test to verify that the engine functions correctly
+    when additional sampling parameters, such as top_p, min_tokens, and
     presence_penalty, are set.
     """
     with monkeypatch.context() as m:
@@ -210,7 +210,7 @@ def test_engine_core_advanced_sampling(monkeypatch):
 
 
 @create_new_process_for_each_test()
-def test_engine_core_concurrent_batches(monkeypatch):
+def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
     """
     Test that the engine can handle multiple concurrent batches.
     """

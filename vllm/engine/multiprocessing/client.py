@@ -27,6 +27,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
                                          VLLM_RPC_SUCCESS_STR, RPCAbortRequest,
                                          RPCAdapterLoadedResponse, RPCError,
+                                         RPCIsSleepingRequest,
+                                         RPCIsSleepingResponse,
                                          RPCLoadAdapterRequest,
                                          RPCProcessRequest,
                                          RPCResetPrefixCacheRequest,
@@ -246,7 +248,9 @@ class MQLLMEngineClient(EngineClient):
                         if queue is not None:
                             queue.put_nowait(exception)
                 # Put each output into the appropriate queue.
-                elif isinstance(request_outputs, RPCAdapterLoadedResponse):
+                elif isinstance(
+                        request_outputs,
+                    (RPCAdapterLoadedResponse, RPCIsSleepingResponse)):
                     self._add_output(request_outputs)
                 else:
                     for request_output in request_outputs:
@@ -256,7 +260,8 @@ class MQLLMEngineClient(EngineClient):
             logger.debug("Shutting down MQLLMEngineClient output handler.")
 
     def _add_output(self, request_output: Union[RequestOutput,
-                                                RPCAdapterLoadedResponse]):
+                                                RPCAdapterLoadedResponse,
+                                                RPCIsSleepingResponse]):
         queue = self.output_queues.get(request_output.request_id)
         if queue is not None:
             queue.put_nowait(request_output)
@@ -695,6 +700,24 @@ class MQLLMEngineClient(EngineClient):
         """Wake up the engine"""
         return await self._send_one_way_rpc_request(
             request=RPCWakeUpRequest.WAKE_UP, socket=self.input_socket)
+
+    async def is_sleeping(self) -> bool:
+        """Check whether the engine is sleeping"""
+        request = RPCIsSleepingRequest()
+
+        queue: asyncio.Queue[Union[BaseException,
+                                   RPCIsSleepingResponse]] = asyncio.Queue()
+        self.output_queues[request.request_id] = queue
+
+        request_bytes = pickle.dumps(request)
+        await self.input_socket.send_multipart((request_bytes, ), copy=False)
+
+        request_output = await queue.get()
+        self.output_queues.pop(request.request_id)
+
+        if isinstance(request_output, BaseException):
+            raise request_output
+        return request_output.is_sleeping
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
