@@ -58,7 +58,7 @@ def rocm_aiter_tgemm_mm(x: torch.Tensor, weight: torch.Tensor,
 
 
 def dipsatch_unquantized_linear_func() -> Callable[..., torch.Tensor]:
-    if current_platform.rocm_aiter_linear_enabled():
+    if current_platform.is_rocm_aiter_linear_enabled():
         return rocm_aiter_tgemm_mm
     return F.linear
 

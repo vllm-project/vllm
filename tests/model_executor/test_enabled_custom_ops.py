@@ -100,6 +100,8 @@ def test_unquantized_linear_dispatch(use_rocm_aiter: str,
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR", use_rocm_aiter_linear)
     linear_func = dipsatch_unquantized_linear_func()
+    print(f"use_rocm_aiter: {use_rocm_aiter}, " +
+          f"use_rocm_aiter_linear: {use_rocm_aiter_linear}")
     if current_platform.is_rocm() and int(use_rocm_aiter) and int(
             use_rocm_aiter_linear):
         assert linear_func == rocm_aiter_tgemm_mm
