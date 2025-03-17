@@ -428,8 +428,7 @@ def estimate_rejection_sampling_pdf(
                                       vocab_size).repeat(num_samples, k, 1)
 
     # Repeat target probs num_tokens times.
-    target_logits = target_logits.reshape(1, vocab_size).repeat(
-        num_tokens, vocab_size)
+    target_logits = target_logits.reshape(1, vocab_size).repeat(num_tokens, 1)
 
     # Randomly sample draft token ids from draft probs.
     draft_token_ids = torch.multinomial(draft_probs[:, 0, :],
