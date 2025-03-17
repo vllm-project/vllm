@@ -66,7 +66,7 @@ class RejectionSampler(nn.Module):
                 if token_id == PLACEHOLDER_TOKEN_ID:
                     break
                 # Make sure the token id is in the vocabulary.
-                if token_id >= vocab_size:
+                if not (0 <= token_id < vocab_size):
                     break
                 outputs[i].append(token_id)
         return outputs
@@ -172,12 +172,13 @@ def compute_probs(
         return logits
 
     num_tokens = logits.shape[0]
+    batch_size = cu_num_draft_tokens.shape[0]
     expanded_temperature = torch.empty(
-        (num_tokens, ),
+        (num_tokens, 1),
         dtype=torch.float32,
         device=logits.device,
     )
-    expand_kernel[(num_tokens, )](
+    expand_kernel[(batch_size, )](
         expanded_temperature,
         sampling_metadata.temperature,
         cu_num_draft_tokens,
@@ -186,8 +187,7 @@ def compute_probs(
         MAX_NUM_TOKENS=MAX_SPEC_LEN,
         num_warps=1,
     )
-    scaled_logits = logits / expanded_temperature.unsqueeze(-1)
-    output_prob = compiled_softmax(scaled_logits)
+    output_prob = compiled_softmax(logits, expanded_temperature)
     return output_prob
 
 
