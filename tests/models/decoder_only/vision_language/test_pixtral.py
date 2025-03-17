@@ -28,7 +28,11 @@ from ...utils import check_logprobs_close
 if TYPE_CHECKING:
     from _typeshed import StrPath
 
-MODELS = ["mistralai/Pixtral-12B-2409"]
+PIXTRAL_ID = "mistralai/Pixtral-12B-2409"
+MISTRAL_SMALL_3_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+
+MODELS = [PIXTRAL_ID, MISTRAL_SMALL_3_ID]
+
 IMG_URLS = [
     "https://picsum.photos/id/237/400/300",
     "https://picsum.photos/id/231/200/300",
@@ -125,8 +129,14 @@ MAX_MODEL_LEN = [8192, 65536]
 FIXTURES_PATH = VLLM_PATH / "tests/models/fixtures"
 assert FIXTURES_PATH.exists()
 
-FIXTURE_LOGPROBS_CHAT = FIXTURES_PATH / "pixtral_chat.json"
-FIXTURE_LOGPROBS_ENGINE = FIXTURES_PATH / "pixtral_chat_engine.json"
+FIXTURE_LOGPROBS_CHAT = {
+    PIXTRAL_ID: FIXTURES_PATH / "pixtral_chat.json",
+    MISTRAL_SMALL_3_ID: FIXTURES_PATH / "mistral_small_3_chat.json",
+}
+FIXTURE_LOGPROBS_ENGINE = {
+    PIXTRAL_ID: FIXTURES_PATH / "pixtral_chat_engine.json",
+    MISTRAL_SMALL_3_ID: FIXTURES_PATH / "mistral_small_3_engine.json",
+}
 
 OutputsLogprobs = list[tuple[list[int], str, Optional[SampleLogprobs]]]
 
@@ -166,7 +176,7 @@ def test_chat(
     model: str,
     dtype: str,
 ) -> None:
-    EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(FIXTURE_LOGPROBS_CHAT)
+    EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(FIXTURE_LOGPROBS_CHAT[model])
     with vllm_runner(
             model,
             dtype=dtype,
@@ -193,7 +203,7 @@ def test_chat(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_model_engine(vllm_runner, model: str, dtype: str) -> None:
-    EXPECTED_ENGINE_LOGPROBS = load_outputs_w_logprobs(FIXTURE_LOGPROBS_ENGINE)
+    EXPECTED_ENGINE_LOGPROBS = load_outputs_w_logprobs(FIXTURE_LOGPROBS_ENGINE[model])
     args = EngineArgs(
         model=model,
         tokenizer_mode="mistral",
