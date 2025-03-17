@@ -71,6 +71,38 @@ def run_e5_v(query: Query):
     )
 
 
+def run_colqwen2vlm(query: Query):
+    if query["modality"] == "text":
+        text = query["text"]
+        prompt = f"<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
+        image = None
+    elif query["modality"] == "image":
+        text = "Describe the image."
+        prompt = (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+            f"{text}<|im_end|>\n"
+            "<|im_start|>assistant\n")
+        image = query["image"]
+    else:
+        modality = query['modality']
+        raise ValueError(f"Unsupported query modality: '{modality}'")
+
+    llm = LLM(
+        model="vidore/colqwen2-v1.0-merged",
+        # model="vidore/colqwen2-1.0-hf-internal",
+        task="embed",
+        trust_remote_code=True,
+        # dtype=torch.bfloat16,
+    )
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        image=image,
+    )
+
+
 def run_vlm2vec(query: Query):
     if query["modality"] == "text":
         text = query["text"]
@@ -150,6 +182,7 @@ def main(args: Namespace):
 model_example_map = {
     "e5_v": run_e5_v,
     "vlm2vec": run_vlm2vec,
+    "colqwen2vlm": run_colqwen2vlm,
 }
 
 if __name__ == "__main__":
