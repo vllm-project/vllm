@@ -77,7 +77,7 @@ class PixtralImagePixelInputs(TypedDict):
     Shape: `(batch_size, num_images, num_embeds)`
     """
 
-    num_patches: Union[torch.Tensor, list[torch.Tensor]]
+    num_embeds: Union[torch.Tensor, list[torch.Tensor]]
     """Shape: `(batch_size, num_images)`"""
 
 
@@ -153,7 +153,7 @@ class PixtralProcessorAdapter:
         images_processed = list[torch.Tensor]()
         images_tokens = list[torch.Tensor]()
         images_embed_is_patch = list[torch.Tensor]()
-        images_num_patches = list[int]()
+        images_num_embeds = list[int]()
 
         for image in images:
             image_inputs = self.image_processor(ImageChunk(image=image))
@@ -163,13 +163,13 @@ class PixtralProcessorAdapter:
             images_processed.append(image_processed)
             images_tokens.append(image_tokens)
             images_embed_is_patch.append(image_tokens == image_token_id)
-            images_num_patches.append(len(image_tokens))
+            images_num_embeds.append(len(image_tokens))
 
         return {
             "input_ids": torch.cat(images_tokens)[None].expand(len(text), -1),
             "images": images_processed,
             "embed_is_patch": images_embed_is_patch,
-            "num_patches": torch.tensor(images_num_patches),
+            "num_embeds": torch.tensor(images_num_embeds),
         }
 
 
@@ -273,7 +273,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         return dict(
             images=MultiModalFieldConfig.batched("image"),
             embed_is_patch=MultiModalFieldConfig.batched("image"),
-            num_patches=MultiModalFieldConfig.batched("image"),
+            num_embeds=MultiModalFieldConfig.batched("image"),
         )
 
     def _get_prompt_updates(
@@ -403,16 +403,16 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise ValueError("Incorrect type of embed_is_patch. "
                              f"Got type: {type(embed_is_patch)}")
 
-        num_patches = kwargs.pop("num_patches")
-        if not isinstance(num_patches, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of num_patches. "
-                             f"Got type: {type(num_patches)}")
+        num_embeds = kwargs.pop("num_embeds")
+        if not isinstance(num_embeds, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of num_embeds. "
+                             f"Got type: {type(num_embeds)}")
 
         return PixtralImagePixelInputs(
             type="pixel_values",
             images=flatten_bn(images),
             embed_is_patch=embed_is_patch,
-            num_patches=num_patches,
+            num_embeds=num_embeds,
         )
 
     def _process_image_input(
@@ -445,7 +445,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     def _get_mm_embeds(
             self,
             features: torch.Tensor,  # Shape: (num_patch, d)
-            num_patches: torch.Tensor,  # Shape: (num_images,)
+            num_embeds: torch.Tensor,  # Shape: (num_images,)
             embed_is_patch: torch.Tensor,  # Shape: (num_images, num_embeds)
     ) -> tuple[torch.Tensor, ...]:
         """Scatter the patch features into a contiguous tensor that corresponds
@@ -459,15 +459,15 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         # put the logic here.
         # FIXME: Move this logic to `_process_image_input` when v0 is
         # deprecated. Merge this function with `Molmo._get_mm_embeds`.
-        num_patches_per_image: list[int] = num_patches.tolist()
+        num_embeds_per_image: list[int] = num_embeds.tolist()
 
         embeds_flat = features.new_full(
-            (sum(num_patches_per_image), *features.shape[1:]),
+            (sum(num_embeds_per_image), features.shape[-1]),
             fill_value=torch.nan,
         )
-        embeds_flat[embed_is_patch.view(-1)] = features
+        embeds_flat[embed_is_patch.view(-1)] = features.flatten(0, -2)
 
-        return embeds_flat.split(num_patches_per_image)
+        return embeds_flat.split(num_embeds_per_image)
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
@@ -483,7 +483,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         return flatten_2d_lists(
             self._get_mm_embeds(*args) for args in zip(
                 image_features,
-                image_input["num_patches"],
+                image_input["num_embeds"],
                 image_input["embed_is_patch"],
             ))
 
