@@ -68,13 +68,6 @@ def test_models(
     with vllm_runner(model, dtype=dtype, max_num_seqs=16) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
-        # This test is for verifying whether the model's extra_repr
-        # can be printed correctly.
-        def print_model(model):
-            print(model)
-
-        vllm_model.apply_model(print_model)
-
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
         vllm_output_ids, vllm_output_str = vllm_outputs[i]

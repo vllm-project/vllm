@@ -36,6 +36,16 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ::::
 
+::::{tab-item} IBM Z (S390X)
+:sync: s390x
+
+:::{include} cpu/s390x.inc.md
+:start-after: "# Installation"
+:end-before: "## Requirements"
+:::
+
+::::
+
 :::::
 
 ## Requirements
@@ -69,6 +79,16 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 :sync: apple
 
 :::{include} cpu/apple.inc.md
+:start-after: "## Requirements"
+:end-before: "## Set up using Python"
+:::
+
+::::
+
+::::{tab-item} IBM Z (S390X)
+:sync: s390x
+
+:::{include} cpu/s390x.inc.md
 :start-after: "## Requirements"
 :end-before: "## Set up using Python"
 :::
@@ -123,6 +143,16 @@ Currently, there are no pre-built CPU wheels.
 
 ::::
 
+::::{tab-item} IBM Z (s390x)
+:sync: s390x
+
+:::{include} cpu/s390x.inc.md
+:start-after: "### Build wheel from source"
+:end-before: "## Set up using Docker"
+:::
+
+::::
+
 :::::
 
 ## Set up using Docker
@@ -147,6 +177,10 @@ $ docker run -it \
 For ARM or Apple silicon, use `Dockerfile.arm`
 ::::
 
+::::{tip}
+For IBM Z (s390x), use `Dockerfile.s390x` and in `docker run` use flag `--dtype float`
+::::
+
 ## Supported features
 
 vLLM CPU backend supports the following vLLM features:
@@ -155,12 +189,13 @@ vLLM CPU backend supports the following vLLM features:
 - Model Quantization (`INT8 W8A8, AWQ, GPTQ`)
 - Chunked-prefill
 - Prefix-caching
-- FP8-E5M2 KV-Caching (TODO)
+- FP8-E5M2 KV cache
 
 ## Related runtime environment variables
 
 - `VLLM_CPU_KVCACHE_SPACE`: specify the KV Cache size (e.g, `VLLM_CPU_KVCACHE_SPACE=40` means 40 GB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users.
 - `VLLM_CPU_OMP_THREADS_BIND`: specify the CPU cores dedicated to the OpenMP threads. For example, `VLLM_CPU_OMP_THREADS_BIND=0-31` means there will be 32 OpenMP threads bound on 0-31 CPU cores. `VLLM_CPU_OMP_THREADS_BIND=0-31|32-63` means there will be 2 tensor parallel processes, 32 OpenMP threads of rank0 are bound on 0-31 CPU cores, and the OpenMP threads of rank1 are bound on 32-63 CPU cores.
+- `VLLM_CPU_MOE_PREPACK`: whether to use prepack for MoE layer. This will be passed to `ipex.llm.modules.GatedMLPMOE`. Default is `1` (True). On unsupported CPUs, you might need to set this to `0` (False).
 
 ## Performance tips
 

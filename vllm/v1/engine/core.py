@@ -19,9 +19,11 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import get_exception_traceback, zmq_socket_ctx
+from vllm.utils import (get_exception_traceback, resolve_obj_by_qualname,
+                        zmq_socket_ctx)
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
-from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
+from vllm.v1.core.scheduler import Scheduler as V1Scheduler
+from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
@@ -65,6 +67,22 @@ class EngineCore:
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
+        if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
+            Scheduler = resolve_obj_by_qualname(
+                vllm_config.scheduler_config.scheduler_cls)
+        else:
+            Scheduler = vllm_config.scheduler_config.scheduler_cls
+
+        # This warning can be removed once the V1 Scheduler interface is
+        # finalized and we can maintain support for scheduler classes that
+        # implement it
+        if Scheduler is not V1Scheduler:
+            logger.warning(
+                "Using configured V1 scheduler class %s. "
+                "This scheduler interface is not public and "
+                "compatibility may not be maintained.",
+                vllm_config.scheduler_config.scheduler_cls)
+
         self.scheduler = Scheduler(
             scheduler_config=vllm_config.scheduler_config,
             model_config=vllm_config.model_config,
@@ -137,7 +155,7 @@ class EngineCore:
         req = Request.from_engine_core_request(request)
         if req.use_structured_output:
             # Start grammar compilation asynchronously
-            self.structured_output_manager.populate_cache(req)
+            self.structured_output_manager.grammar_init(req)
 
         self.scheduler.add_request(req)
 
@@ -234,6 +252,9 @@ class EngineCore:
 
     def wake_up(self):
         self.model_executor.wake_up()
+
+    def is_sleeping(self) -> bool:
+        return self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
         self.model_executor.collective_rpc("execute_dummy_batch")
