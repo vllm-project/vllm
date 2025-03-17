@@ -763,7 +763,7 @@ See [this page](#generative-models) for more information on how to use generativ
   * `google/gemma-3-4b-it`, `google/gemma-3-27b-it`, etc.
   * ✅︎
   * ✅︎
-  * ⚠️
+  *
 - * `GLM4VForCausalLM`<sup>^</sup>
   * GLM-4V
   * T + I
@@ -951,6 +951,8 @@ V1 currently uses a simplified attention pattern:
 - Does not support `"do_pan_and_scan": True`
 
 This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
+
+For these reasons, `Gemma3ForConditionalGeneration` is supported only on V0 at the moment.
 :::
 
 :::{note}
