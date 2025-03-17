@@ -9,6 +9,7 @@ from pathlib import PosixPath
 
 import pytest
 from packaging.version import Version
+from transformers import AutoModelForImageTextToText, AutoModelForVision2Seq
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
@@ -100,6 +101,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         convert_assets_to_embeddings=model_utils.get_llava_embeddings,
         max_model_len=4096,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.multi_image_multi_aspect_ratio_inputs(
@@ -119,6 +121,7 @@ VLM_TEST_SETTINGS = {
             "stop_sign": "caption es",
             "cherry_blossom": "What is in the picture?",
         }),
+        auto_cls=AutoModelForImageTextToText,
         postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
@@ -140,6 +143,7 @@ VLM_TEST_SETTINGS = {
         video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>", # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
@@ -156,6 +160,7 @@ VLM_TEST_SETTINGS = {
         video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>", # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
@@ -168,6 +173,7 @@ VLM_TEST_SETTINGS = {
     #     img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
     #     max_model_len=4096,
     #     max_num_seqs=2,
+    #     auto_cls=AutoModelForImageTextToText,
     #     single_image_prompts=IMAGE_ASSETS.prompts({
     #         "stop_sign": "<vlm_image>Please describe the image shortly.",
     #         "cherry_blossom": "<vlm_image>Please infer the season with reason.",  # noqa: E501
@@ -184,6 +190,7 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.IMAGE,
         prompt_formatter=lambda img_prompt: f"Question: {img_prompt} Answer:",
         img_idx_to_prompt=lambda idx: "",
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.blip2_vllm_to_hf_output,
     ),
     "chameleon": VLMTestInfo(
@@ -192,6 +199,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
         postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
@@ -248,6 +256,7 @@ VLM_TEST_SETTINGS = {
         multi_image_prompt="<start_of_image><start_of_image>Describe the two images in detail.",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
         dtype="bfloat16",
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
@@ -297,6 +306,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "<image>",
         max_model_len=8192,
         max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
         hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
     ),
     "intern_vl": VLMTestInfo(
@@ -325,6 +335,7 @@ VLM_TEST_SETTINGS = {
         test_type=(VLMTestType.IMAGE, VLMTestType.CUSTOM_INPUTS),
         prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
         max_model_len=10240,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.multi_image_multi_aspect_ratio_inputs(
@@ -342,6 +353,7 @@ VLM_TEST_SETTINGS = {
         postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values_videos"
         ),
+        auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.multi_video_multi_aspect_ratio_inputs(
@@ -357,6 +369,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda vid_prompt: f"USER: {vid_prompt} ASSISTANT:",
         num_video_frames=16,
         max_model_len=4096,
+        auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
     ),
     "mantis": VLMTestInfo(
@@ -368,6 +381,7 @@ VLM_TEST_SETTINGS = {
             "pixel_values"
         ),
         get_stop_token_ids=lambda tok: [128009],
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
         patch_hf_runner=model_utils.mantis_patch_hf_runner,
         marks=[
@@ -448,6 +462,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "[IMG]",
         max_model_len=8192,
         max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
         marks=[large_gpu_mark(min_gb=48)],
     ),
     "qwen_vl": VLMTestInfo(
@@ -465,6 +480,7 @@ VLM_TEST_SETTINGS = {
         models=["facebook/chameleon-7b"],
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
+        auto_cls=AutoModelForImageTextToText,
         postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
@@ -478,6 +494,7 @@ VLM_TEST_SETTINGS = {
         models=["llava-hf/llava-1.5-7b-hf"],
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         marks=multi_gpu_marks(num_gpus=2),
         **COMMON_BROADCAST_SETTINGS # type: ignore
@@ -486,6 +503,7 @@ VLM_TEST_SETTINGS = {
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
         prompt_formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]",
         max_model_len=10240,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         marks=multi_gpu_marks(num_gpus=2),
         **COMMON_BROADCAST_SETTINGS # type: ignore
@@ -513,6 +531,7 @@ VLM_TEST_SETTINGS = {
         postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
+        auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.multi_image_multi_aspect_ratio_inputs(
