@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Generic, Optional, Protocol, TypeVar
 
 import torch.nn as nn
 
-from vllm.envs import VLLM_MM_INPUT_CACHE_SIZE
+from vllm.envs import VLLM_MM_INPUT_CACHE_GIB
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
@@ -119,7 +119,7 @@ class MultiModalRegistry:
 
         self._limits_by_model = _MultiModalLimits()
 
-        self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_SIZE)
+        self._processing_cache = ProcessingCache(VLLM_MM_INPUT_CACHE_GIB)
 
     def register_plugin(self, plugin: MultiModalPlugin) -> None:
         """
