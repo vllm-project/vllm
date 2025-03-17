@@ -4,7 +4,6 @@ import pytest
 
 import vllm
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -56,8 +55,7 @@ def v1(run_with_both_engines_lora):
 
 
 @pytest.mark.skip_v1
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_ilama_lora(ilama_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
@@ -78,8 +76,7 @@ def test_ilama_lora(ilama_lora_files):
 
 @pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_ilama_lora_tp4(ilama_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
@@ -101,8 +98,7 @@ def test_ilama_lora_tp4(ilama_lora_files):
 
 @pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,

@@ -45,8 +45,7 @@ def make_request() -> EngineCoreRequest:
     )
 
 
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_engine_core(monkeypatch):
 
     with monkeypatch.context() as m:
@@ -160,8 +159,7 @@ def test_engine_core(monkeypatch):
         assert len(engine_core.scheduler.running) == 0
 
 
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_engine_core_advanced_sampling(monkeypatch):
     """
     A basic end-to-end test to verify that the engine functions correctly 
@@ -211,8 +209,7 @@ def test_engine_core_advanced_sampling(monkeypatch):
         _check_engine_state()
 
 
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_engine_core_concurrent_batches(monkeypatch):
     """
     Test that the engine can handle multiple concurrent batches.

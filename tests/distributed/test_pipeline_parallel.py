@@ -15,7 +15,6 @@ import pytest
 
 from vllm.config import TaskOption
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import compare_two_settings, create_new_process_for_each_test
@@ -393,8 +392,7 @@ def _compare_tp(
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
     ],
 )
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_tp_language_generation(
     model_id: str,
     parallel_setup: ParallelSetup,
@@ -423,8 +421,7 @@ def test_tp_language_generation(
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
     ],
 )
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_tp_language_embedding(
     model_id: str,
     parallel_setup: ParallelSetup,
@@ -453,8 +450,7 @@ def test_tp_language_embedding(
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
     ],
 )
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_tp_multimodal_generation(
     model_id: str,
     parallel_setup: ParallelSetup,

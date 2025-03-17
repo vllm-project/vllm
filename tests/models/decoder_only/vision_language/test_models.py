@@ -716,8 +716,7 @@ def test_custom_inputs_models(
         test_type=VLMTestType.IMAGE,
         create_new_process_for_each_test=True,
     ))
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    test_case: ExpandableVLMTestArgs,
                                    hf_runner: type[HfRunner],
@@ -743,8 +742,7 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
         test_type=VLMTestType.MULTI_IMAGE,
         create_new_process_for_each_test=True,
     ))
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                   test_case: ExpandableVLMTestArgs,
                                   hf_runner: type[HfRunner],
@@ -770,8 +768,7 @@ def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
         test_type=VLMTestType.EMBEDDING,
         create_new_process_for_each_test=True,
     ))
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_image_embedding_models_heavy(model_type: str,
                                       test_case: ExpandableVLMTestArgs,
                                       hf_runner: type[HfRunner],
@@ -819,8 +816,7 @@ def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
         test_type=VLMTestType.CUSTOM_INPUTS,
         create_new_process_for_each_test=True,
     ))
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_custom_inputs_models_heavy(
     model_type: str,
     test_case: ExpandableVLMTestArgs,

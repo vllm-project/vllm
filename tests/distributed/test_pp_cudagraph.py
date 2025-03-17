@@ -4,8 +4,6 @@ import os
 
 import pytest
 
-from vllm.platforms import current_platform
-
 from ..utils import compare_two_settings, create_new_process_for_each_test
 
 
@@ -16,8 +14,7 @@ from ..utils import compare_two_settings, create_new_process_for_each_test
     "FLASH_ATTN",
     "FLASHINFER",
 ])
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_pp_cudagraph(PP_SIZE, MODEL_NAME, ATTN_BACKEND):
     cudagraph_args = [
         # use half precision for speed and memory savings in CI environment

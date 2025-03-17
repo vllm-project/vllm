@@ -45,8 +45,7 @@ def test_registry_imports(model_arch):
         assert supports_multimodal(model_cls)
 
 
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("model_arch,is_mm,init_cuda,is_ce", [
     ("LlamaForCausalLM", False, False, False),
     ("MllamaForConditionalGeneration", True, False, False),
@@ -71,8 +70,7 @@ def test_registry_model_property(model_arch, is_mm, init_cuda, is_ce):
                 stacklevel=2)
 
 
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("model_arch,is_pp,init_cuda", [
     ("MLPSpeculatorPreTrainedModel", False, False),
     ("DeepseekV2ForCausalLM", True, False),

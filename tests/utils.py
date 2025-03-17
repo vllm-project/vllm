@@ -746,7 +746,7 @@ def spawn_new_process_for_each_test(
 
 
 def create_new_process_for_each_test(
-    method: str = "fork"
+    method: Optional[str] = None
 ) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
     """creates a new process for each test function.
 
@@ -756,6 +756,8 @@ def create_new_process_for_each_test(
     Returns:
         A decorator function that will run the test in a new process.
     """
+    if method is None:
+        method = "spawn" if current_platform.is_rocm() else "fork"
 
     assert method in ["spawn",
                       "fork"], "Method must be either 'spawn' or 'fork'"
@@ -825,8 +827,7 @@ def multi_gpu_test(*, num_gpus: int):
     marks = multi_gpu_marks(num_gpus=num_gpus)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        func = create_new_process_for_each_test(
-            "spawn" if current_platform.is_rocm() else "fork")(f)
+        func = create_new_process_for_each_test()(f)
         for mark in reversed(marks):
             func = mark(func)
 

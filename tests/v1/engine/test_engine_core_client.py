@@ -89,8 +89,7 @@ def echo(self, msg: str, err_msg: Optional[str] = None) -> str:
     return msg
 
 
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
 def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 

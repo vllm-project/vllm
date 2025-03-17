@@ -7,7 +7,6 @@ import pytest
 
 from vllm.config import TaskOption
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 
 from ..utils import compare_two_settings, create_new_process_for_each_test
 
@@ -210,8 +209,7 @@ def _compare_tp(
         for params in settings.iter_params(model_name)
     ],
 )
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 def test_ep(
     model_name: str,
     parallel_setup: ParallelSetup,

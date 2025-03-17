@@ -9,7 +9,6 @@ import pytest
 
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
-from vllm.platforms import current_platform
 
 from ....utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -120,8 +119,7 @@ def run_test(
         assert output.outputs[0].text == expected
 
 
-@create_new_process_for_each_test(
-    "spawn" if current_platform.is_rocm() else "fork")
+@create_new_process_for_each_test()
 @pytest.mark.core_model
 @pytest.mark.parametrize(
     "model", ["openai/whisper-small", "openai/whisper-large-v3-turbo"])
