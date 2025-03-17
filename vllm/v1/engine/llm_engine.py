@@ -46,6 +46,13 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
+        if not envs.VLLM_USE_V1:
+            raise ValueError(
+                "Using V1 LLMEngine, but envs.VLLM_USE_V1=False. "
+                "This should not happen. As a workaround, try using "
+                "LLMEngine.from_vllm_config(...) or explicitly set "
+                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -87,6 +94,26 @@ class LLMEngine:
         if not multiprocess_mode:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
+
+    @classmethod
+    def from_vllm_config(
+        cls,
+        vllm_config: VllmConfig,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        disable_log_stats: bool = False,
+    ) -> "LLMEngine":
+        if stat_loggers is not None:
+            raise NotImplementedError(
+                "Passing StatLoggers to V1 is not yet supported. "
+                "Set VLLM_USE_V1=0 and file and issue on Github.")
+
+        return cls(vllm_config=vllm_config,
+                   executor_class=Executor.get_class(vllm_config),
+                   log_stats=(not disable_log_stats),
+                   usage_context=usage_context,
+                   stat_loggers=stat_loggers,
+                   multiprocess_mode=envs.VLLM_ENABLE_V1_MULTIPROCESSING)
 
     @classmethod
     def from_engine_args(
@@ -137,8 +164,8 @@ class LLMEngine:
     def abort_request(self, request_ids: list[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
+        request_ids = self.output_processor.abort_requests(request_ids)
         self.engine_core.abort_requests(request_ids)
-        self.output_processor.abort_requests(request_ids)
 
     def add_request(
         self,
@@ -207,6 +234,9 @@ class LLMEngine:
 
     def wake_up(self):
         self.engine_core.wake_up()
+
+    def is_sleeping(self) -> bool:
+        return self.engine_core.is_sleeping()
 
     def get_tokenizer_group(
         self,

@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+from __future__ import annotations
+
 import random
+from typing import Any
 
 import pytest
 
@@ -50,8 +53,12 @@ def model_name():
     return "meta-llama/Meta-Llama-3-8B-Instruct"
 
 
-def test_ngram_correctness(monkeypatch, test_prompts, sampling_config,
-                           model_name):
+def test_ngram_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    test_prompts: list[list[dict[str, Any]]],
+    sampling_config: SamplingParams,
+    model_name: str,
+):
     '''
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.

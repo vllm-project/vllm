@@ -3,12 +3,11 @@
 
 ray>=2.9
 cmake>=3.26
-ninja
 packaging
 setuptools-scm>=8
 setuptools>=75.8.0
 wheel
-jinja2
+jinja2>=3.1.6
 datasets # for benchmark scripts
 
 torch==2.6.0+xpu
