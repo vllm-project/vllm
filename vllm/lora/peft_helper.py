@@ -6,7 +6,7 @@ import json
 import math
 import os
 from dataclasses import MISSING, dataclass, field, fields
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Optional, Tuple, Union
 
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
@@ -16,9 +16,9 @@ logger = init_logger(__name__)
 
 @dataclass
 class PEFTHelper:
-    """ 
+    """
     A helper class for PEFT configurations, specifically designed for LoRA.
-    This class handles configuration validation, compatibility checks for 
+    This class handles configuration validation, compatibility checks for
     various LoRA implementations.
     """
 
@@ -40,16 +40,27 @@ class PEFTHelper:
     vllm_max_position_embeddings: Optional[int] = field(default=False)
     vllm_long_context_scaling_factor: Optional[float] = field(default=None)
 
-    def _validate_features(self) -> List[str]:
+    def _validate_features(self) -> Tuple[List[str], List[str]]:
         """
         Check if there are any unsupported LoRA features.
+
+        Returns:
+            A tuple containing a list of error and warning messages.
+            For example:
+
+            (["vLLM does not yet support DoRA."],
+             ["vLLM only supports modules_to_save being None."])
         """
         error_msg = []
+        warning_msg = []
         if self.modules_to_save:
-            error_msg.append("vLLM only supports modules_to_save being None.")
+            # `modules_to_save` only matters during training, so we don't need
+            # to error out if it is set on an adapter.
+            warning_msg.append(
+                "vLLM only supports modules_to_save being None.")
         if self.use_dora:
             error_msg.append("vLLM does not yet support DoRA.")
-        return error_msg
+        return error_msg, warning_msg
 
     def __post_init__(self):
         if self.use_rslora:
@@ -100,10 +111,10 @@ class PEFTHelper:
 
     def validate_legal(self, lora_config: LoRAConfig) -> None:
         """
-        Validates the LoRA configuration settings against application 
+        Validates the LoRA configuration settings against application
         constraints and requirements.
         """
-        error_msg = self._validate_features()
+        error_msg, warning_msg = self._validate_features()
         if self.r > lora_config.max_lora_rank:
             error_msg.append(
                 f"LoRA rank {self.r} is greater than max_lora_rank"
@@ -113,3 +124,8 @@ class PEFTHelper:
                 "Adapter bias cannot be used without bias_enabled.")
         if error_msg:
             raise ValueError(f"{' '.join(error_msg)}")
+        if warning_msg:
+            logger.warning(
+                "vLLM LoRA configuration has some unsupported features: %s",
+                " ".join(warning_msg),
+            )
