@@ -17,6 +17,8 @@ source /etc/environment
 docker run --privileged --net host --shm-size=16G -it \
     -e "HF_TOKEN=$HF_TOKEN" --name tpu-test \
     vllm-tpu /bin/bash -c "python3 -m pip install git+https://github.com/thuml/depyf.git \
+    && python3 -m pip install tpu-info \
+    && tpu-info \
     && python3 -m pip install pytest \
     && python3 -m pip install lm_eval[api]==0.4.4 \
     && echo TEST_1 \
