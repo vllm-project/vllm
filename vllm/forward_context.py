@@ -54,7 +54,7 @@ def get_forward_context() -> ForwardContext:
     return _forward_context
 
 
-def try_get_forward_context() -> ForwardContext:
+def try_get_forward_context() -> Optional[ForwardContext]:
     return _forward_context
 
 
