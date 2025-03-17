@@ -221,11 +221,13 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             and attn_metadata.block_list is None:
             key = key.unflatten(0, (block_indices.size(0), -1))
             value = value.unflatten(0, (block_indices.size(0), -1))
-
         if kv_cache is not None and isinstance(kv_cache, tuple):
             key_cache, value_cache = HPUPagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
+            # Reshape the input keys and values and store them in the cache.
+            # If kv_cache is not provided, the new key and value tensors are
+            # not cached. This happens during the initial memory profiling run.
             key_cache = self.k_cache(key, key_cache, block_indices,
                                      block_offsets)
             value_cache = self.v_cache(value, value_cache, block_indices,
