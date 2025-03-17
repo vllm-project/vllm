@@ -8,6 +8,10 @@ from vllm.model_executor.layers.activation import (GeluAndMul,
                                                    ReLUSquaredActivation,
                                                    SiluAndMul)
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    cutlass_scaled_mm, dispatch_w8a8_blockscale_func,
+    rocm_aiter_gemm_w8a8_blockscale, w8a8_block_fp8_matmul)
+from vllm.platforms import current_platform
 
 
 # Registered subclass for test
@@ -87,3 +91,24 @@ def test_enabled_ops_invalid(env: str):
             custom_ops=env.split(",")))
         with set_current_vllm_config(vllm_config):
             RMSNorm(1024).enabled()
+
+
+@pytest.mark.parametrize("use_cutlass", [True, False])
+@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
+@pytest.mark.parametrize("use_rocm_aiter_gemm_w8a8_blockscale", ["0", "1"])
+def test_w8a8_blockscale_dispatch(use_cutlass: bool, use_rocm_aiter: str,
+                                  use_rocm_aiter_gemm_w8a8_blockscale: str,
+                                  monkeypatch):
+
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_GEMM_W8A8_BLOCKSCALE",
+                       use_rocm_aiter_gemm_w8a8_blockscale)
+    block_scale_func = dispatch_w8a8_blockscale_func(use_cutlass)
+
+    if use_cutlass:
+        assert block_scale_func == cutlass_scaled_mm
+    elif current_platform.is_rocm() and int(use_rocm_aiter) and int(
+            use_rocm_aiter_gemm_w8a8_blockscale):
+        assert block_scale_func == rocm_aiter_gemm_w8a8_blockscale
+    else:
+        assert block_scale_func == w8a8_block_fp8_matmul
