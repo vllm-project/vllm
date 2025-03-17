@@ -35,6 +35,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import (PAD_SLOT_ID, PerLayerParameters,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
+                                           get_fp8_dtype_for_flashinfer,
                                            infer_global_hyperparameters,
                                            is_block_tables_empty)
 from vllm.attention.ops.paged_attn import PagedAttention
@@ -96,15 +97,6 @@ class FlashInferBackend(AttentionBackend):
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
         return [64, 128, 256]
-
-    @staticmethod
-    def get_fp8_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            return torch.float8_e4m3fn
-        elif kv_cache_dtype == "fp8_e5m2":
-            return torch.float8_e5m2
-        else:
-            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
 
 class FlashInferState(AttentionState):
@@ -209,7 +201,7 @@ class FlashInferState(AttentionState):
             self._graph_indices_buffer, _last_page_len_buffer, "NHD",
             use_tensor_cores)
         if self.runner.kv_cache_dtype.startswith("fp8"):
-            kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+            kv_cache_dtype = get_fp8_dtype_for_flashinfer(
                 self.runner.kv_cache_dtype)
         else:
             kv_cache_dtype = get_kv_cache_torch_dtype(
@@ -788,7 +780,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             block_table_bound_tensor = None
 
         if self.runner.kv_cache_dtype.startswith("fp8"):
-            kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+            kv_cache_dtype = get_fp8_dtype_for_flashinfer(
                 self.runner.kv_cache_dtype)
         else:
             kv_cache_dtype = get_kv_cache_torch_dtype(

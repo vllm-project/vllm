@@ -439,8 +439,9 @@ class MLACommonMetadataBuilder(Generic[M]):
 
         return modified_batch
 
-    def _build_decode(self, input_positions: torch.Tensor,
-                      block_table: torch.Tensor, seq_lens: torch.Tensor):
+    def _build_decode(self, num_decodes: int, num_decode_tokens: int,
+                      input_positions: torch.Tensor, block_table: torch.Tensor,
+                      seq_lens: torch.Tensor):
         return MLACommonDecodeMetadata(
             input_positions=input_positions,
             block_table=block_table,
@@ -548,6 +549,8 @@ class MLACommonMetadataBuilder(Generic[M]):
         decode_metadata = None
         if self._num_decodes > 0:
             decode_metadata = self._build_decode(
+                num_decodes=self._num_decodes,
+                num_decode_tokens=self._num_decode_tokens,
                 input_positions=input_positions[:self._num_decode_tokens],
                 block_table=block_table[:self._num_decodes, ...],
                 seq_lens=seq_lens[:self._num_decodes],

@@ -58,8 +58,8 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
 
-    def _build_decode(self, input_positions: torch.Tensor,
-                      block_table: torch.Tensor,
+    def _build_decode(self, num_decodes: int, num_decode_tokens: int,
+                      input_positions: torch.Tensor, block_table: torch.Tensor,
                       seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = \
             get_mla_metadata(

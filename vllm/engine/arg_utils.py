@@ -1564,11 +1564,19 @@ class EngineArgs:
 
         # No FlashInfer or XFormers so far.
         V1_BACKENDS = [
-            "FLASH_ATTN_VLLM_V1", "FLASH_ATTN", "PALLAS", "PALLAS_VLLM_V1",
-            "TRITON_MLA", "FLASHMLA"
+            "FLASH_ATTN_VLLM_V1",
+            "FLASH_ATTN",
+            "PALLAS",
+            "PALLAS_VLLM_V1",
         ]
+        V1_MLA_BACKENDS = [
+            "TRITON_MLA",
+            "FLASHMLA",
+            "FLASHINFER",
+        ]
+        v1_backends = V1_MLA_BACKENDS if model_config.use_mla else V1_BACKENDS
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
-                and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
+                and envs.VLLM_ATTENTION_BACKEND not in v1_backends):
             name = f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}"
             _raise_or_fallback(feature_name=name, recommend_to_remove=True)
             return False

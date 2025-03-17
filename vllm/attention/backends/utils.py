@@ -15,7 +15,7 @@ from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
@@ -63,6 +63,8 @@ def get_per_layer_parameters(vllm_config: VllmConfig, impl_type: type) \
     layers = vllm_config.compilation_config.static_forward_context
     per_layer_params: Dict[str, PerLayerParameters] = {}
 
+    print(layers)
+
     for key, layer in layers.items():
         assert isinstance(layer, Attention)
 
@@ -106,6 +108,26 @@ def infer_global_hyperparameters(vllm_config: VllmConfig, impl_type: type)\
             "`window_left`, `logits_soft_cap`, `sm_scale`.")
 
     return global_params
+
+
+# TODO: maybe move to a flashinfer specific utils
+def get_fp8_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
+    if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+        return torch.float8_e4m3fn
+    elif kv_cache_dtype == "fp8_e5m2":
+        return torch.float8_e5m2
+    else:
+        raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+
+
+def get_mla_dims(model_config: ModelConfig):
+    # TODO(lucas): see if this makes
+    hf_text_config = model_config.hf_text_config
+    assert hasattr(hf_text_config, "qk_rope_head_dim")
+    assert hasattr(hf_text_config, "kv_lora_rank")
+    qk_rope_head_dim = hf_text_config.qk_rope_head_dim
+    kv_lora_rank = hf_text_config.kv_lora_rank
+    return kv_lora_rank, qk_rope_head_dim
 
 
 def is_block_tables_empty(block_tables: Union[None, Dict]):

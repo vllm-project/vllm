@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type
 
 import torch
+from packaging.version import Version
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.mla.common import (MLACommonBackend,
@@ -13,15 +14,18 @@ from vllm.attention.backends.mla.common import (MLACommonBackend,
                                                 MLACommonMetadataBuilder,
                                                 MLACommonState)
 from vllm.attention.backends.utils import (PerLayerParameters,
+                                           get_fp8_dtype_for_flashinfer,
+                                           get_mla_dims,
                                            infer_global_hyperparameters,
                                            is_block_tables_empty)
-from vllm.config import ModelConfig, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.utils import get_kv_cache_torch_dtype
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
                                           ModelInputForGPUWithSamplingMetadata)
 try:
+    import flashinfer
     from flashinfer.mla import BatchMLAPagedAttentionWrapper
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 512 * 1024 * 1024
 except ImportError:
@@ -29,16 +33,6 @@ except ImportError:
     if not TYPE_CHECKING:
         BatchMLAPagedAttentionWrapper = None
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
-
-
-def _get_mla_dims(model_config: ModelConfig):
-    # TODO(lucas): see if this makes
-    hf_text_config = model_config.hf_text_config
-    assert hasattr(hf_text_config, "qk_rope_head_dim")
-    assert hasattr(hf_text_config, "kv_lora_rank")
-    qk_rope_head_dim = hf_text_config.qk_rope_head_dim
-    kv_lora_rank = hf_text_config.kv_lora_rank
-    return kv_lora_rank, qk_rope_head_dim
 
 
 class FlashInferMLABackend(MLACommonBackend):
@@ -62,15 +56,6 @@ class FlashInferMLABackend(MLACommonBackend):
     @staticmethod
     def get_state_cls() -> Type["FlashInferMLAState"]:
         return FlashInferMLAState
-
-    @staticmethod
-    def get_fp8_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            return torch.float8_e4m3fn
-        elif kv_cache_dtype == "fp8_e5m2":
-            return torch.float8_e5m2
-        else:
-            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
 
 @dataclass
@@ -132,7 +117,7 @@ class FlashInferMLAState(MLACommonState[FlashInferMLAMetadata]):
 
         self.vllm_config = get_current_vllm_config()
 
-        self.kv_lora_rank, self.qk_rope_head_dim = _get_mla_dims(
+        self.kv_lora_rank, self.qk_rope_head_dim = get_mla_dims(
             self.runner.model_config)
         self.num_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
@@ -201,7 +186,7 @@ class FlashInferMLAState(MLACommonState[FlashInferMLAMetadata]):
             backend="fa2",
         )
         if self.runner.kv_cache_dtype.startswith("fp8"):
-            kv_cache_dtype = FlashInferMLABackend.get_fp8_dtype_for_flashinfer(
+            kv_cache_dtype = get_fp8_dtype_for_flashinfer(
                 self.runner.kv_cache_dtype)
         else:
             kv_cache_dtype = get_kv_cache_torch_dtype(
@@ -232,7 +217,7 @@ class FlashInferMLAState(MLACommonState[FlashInferMLAMetadata]):
         metadata.sm_scale = global_params.sm_scale
         metadata.device = self.runner.device
         metadata.decode_wrapper = self._graph_decode_wrapper
-        self._plan(metadata)
+        self._decode_wrapper_plan(metadata)
         return metadata
 
     def asdict_zerocopy(self,
@@ -245,7 +230,7 @@ class FlashInferMLAState(MLACommonState[FlashInferMLAMetadata]):
         skip_fields.add('decode_wrapper')
         return super().asdict_zerocopy(skip_fields)
 
-    def _plan(self, metadata: FlashInferMLAMetadata):
+    def _decode_wrapper_plan(self, metadata: FlashInferMLAMetadata):
         if metadata.num_decode_tokens > 0:
             assert metadata.paged_kv_indices_host is not None
             assert metadata.paged_kv_indptr_host is not None
@@ -260,7 +245,7 @@ class FlashInferMLAState(MLACommonState[FlashInferMLAMetadata]):
                 kv_indices=metadata.paged_kv_indices_host,
                 kv_len_arr=metadata.seq_lens_tensor_host[metadata.
                                                          num_prefills:],
-                num_heads=metadata.num_heads,
+                num_heads=self.num_heads,
                 head_dim_ckv=self.kv_lora_rank,
                 head_dim_kpe=self.qk_rope_head_dim,
                 page_size=self.page_size,
@@ -285,7 +270,7 @@ class FlashInferMLAState(MLACommonState[FlashInferMLAMetadata]):
             state = (self.runner.graph_runners[model_input.virtual_engine]
                      [batch_size].attn_state)
         model_input.attn_metadata.decode_wrapper = state._get_decode_wrapper()
-        self._plan(model_input.attn_metadata)
+        self._decode_wrapper_plan(model_input.attn_metadata)
 
 
 class FlashInferMLAMetadataBuilder(
@@ -296,7 +281,6 @@ class FlashInferMLAMetadataBuilder(
 
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
-        print("Creating FlashInferMLAMetadataBuilder")
         self.vllm_config = get_current_vllm_config()
 
     def prepare(self):
@@ -401,15 +385,6 @@ class FlashInferMLAMetadataBuilder(
                             fill_value=query_start_loc_host[-1].item(),
                             dtype=torch.int32,
                             device="cpu")))
-            # print(cuda_graph_pad_size, seq_lens_tensor_host.shape[0])
-            # # seq_lens_tensor_host =  torch.cat(
-            # #     (seq_lens_tensor_host,
-            # #      torch.zeros((cuda_graph_pad_size, ),
-            # #                 dtype=torch.int32,
-            # #                 device="cpu")))
-            # print("seq_lens_tensor_host1", seq_lens_tensor_host)
-            # #seq_lens_tensor_host -= 1
-            # print("seq_lens_tensor_host2", seq_lens_tensor_host)
 
         if len(self.paged_kv_indptr) > 0:
             # extend to the maximum number of blocks as returned by the
@@ -427,14 +402,12 @@ class FlashInferMLAMetadataBuilder(
             paged_kv_indptr_tensor = None
 
         if self.runner.kv_cache_dtype.startswith("fp8"):
-            kv_cache_dtype = FlashInferMLABackend.get_fp8_dtype_for_flashinfer(
+            kv_cache_dtype = get_fp8_dtype_for_flashinfer(
                 self.runner.kv_cache_dtype)
         else:
             kv_cache_dtype = get_kv_cache_torch_dtype(
                 self.runner.kv_cache_dtype, self.runner.model_config.dtype)
 
-        metadata.num_heads = self.runner.model_config.get_num_attention_heads(
-            self.runner.parallel_config)
         metadata.paged_kv_indices_host = paged_kv_indices_tensor
         metadata.paged_kv_indptr_host = paged_kv_indptr_tensor
         metadata.query_start_loc_host = query_start_loc_host
@@ -476,6 +449,11 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
                          blocksparse_params, logits_soft_cap, attn_type,
                          **mla_args)
 
+        if Version(flashinfer.__version__) < Version("0.2.3"):
+            raise NotImplementedError(
+                "FlashInferMLAImpl does not support FlashInfer version < 0.2.3"
+            )
+
         unsupported_features = [
             alibi_slopes,
             blocksparse_params,
@@ -487,7 +465,7 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
 
         if any(unsupported_features):
             raise NotImplementedError(
-                "TritonMLAImpl does not support one of the following: "
+                "FlashInferMLAImpl does not support one of the following: "
                 "alibi_slopes, sliding_window, blocksparse_params, "
                 "logits_soft_cap")
 
@@ -506,7 +484,7 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
         if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 Triton MLA not yet supported")
+            raise NotImplementedError("FP8 FlashInfer MLA not yet supported")
 
         decode_meta = attn_metadata.decode_metadata
         assert decode_meta is not None
