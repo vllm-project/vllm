@@ -229,12 +229,12 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
                 "CPUMLAImpl with FP8 KV cache not yet supported")
 
     def _forward_prefill(
-        self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: CPUMLAMetadata,
+            self,
+            q: torch.Tensor,
+            kv_c_normed: torch.Tensor,
+            k_pe: torch.Tensor,
+            kv_c_and_k_pe_cache: torch.Tensor,
+            attn_metadata: CPUMLAMetadata,  # type: ignore[override]
     ) -> torch.Tensor:
 
         prefill_metadata = attn_metadata.prefill_metadata
@@ -278,11 +278,11 @@ class CPUMLAImpl(MLACommonImpl[CPUMLAMetadata]):
         return self.o_proj(output)[0]
 
     def _forward_decode(
-        self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: CPUMLAMetadata,
+            self,
+            q_nope: torch.Tensor,
+            q_pe: torch.Tensor,
+            kv_c_and_k_pe_cache: torch.Tensor,
+            attn_metadata: CPUMLAMetadata,  # type: ignore[override]
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
 
