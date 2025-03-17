@@ -111,6 +111,26 @@ VIDEO_ASSETS = _VideoAssets()
 """Singleton instance of :class:`_VideoAssets`."""
 
 
+@pytest.fixture(scope="function", autouse=True)
+def cleanup_VLLM_USE_V1(monkeypatch):
+    """
+    The V1 oracle sets "VLLM_USE_V1" during loading. This means
+    that each invocation of a test change the env variable.
+
+    If we touch "VLLM_USE_V1" with monkeypatch, then any changes
+    made during the test run by vLLM will be cleaned up.
+
+    This fixture is used by every test.
+    """
+
+    # If VLLM_USE_V1 is not set, set then delete. This will
+    # cause monkeypatch to clean up VLLM_USE_V1 upon exit
+    # if VLLM modifies the value of envs.VLLM_USE_V1.
+    if "VLLM_USE_V1" not in os.environ:
+        monkeypatch.setenv("VLLM_USE_V1", "")
+        monkeypatch.delenv("VLLM_USE_V1")
+
+
 @pytest.fixture(params=[True, False])
 def run_with_both_engines(request, monkeypatch):
     # Automatically runs tests twice, once with V1 and once without
@@ -661,6 +681,17 @@ def hf_runner():
 
 
 class VllmRunner:
+    """
+    The default value of some arguments have been modified from
+    :class:`~vllm.LLM` as follows:
+    - `trust_remote_code`: Set to `True` instead of `False` for convenience.
+    - `seed`: Set to `0` instead of `None` for test reproducibility.
+    - `max_model_len`: Set to `1024` instead of `None` to reduce memory usage.
+    - `block_size`: Set to `16` instead of `None` to reduce memory usage.
+    - `enable_chunked_prefill`: Set to `False` instead of `None` for
+      test reproducibility.
+    - `enforce_eager`: Set to `False` instead of `None` to test CUDA graph.
+    """
 
     def __init__(
         self,
@@ -668,6 +699,8 @@ class VllmRunner:
         task: TaskOption = "auto",
         tokenizer_name: Optional[str] = None,
         tokenizer_mode: str = "auto",
+        trust_remote_code: bool = True,
+        seed: Optional[int] = 0,
         # Use smaller max model length, otherwise bigger model cannot run due
         # to kv cache size limit.
         max_model_len: int = 1024,
@@ -675,7 +708,7 @@ class VllmRunner:
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
         block_size: int = 16,
-        enable_chunked_prefill: bool = False,
+        enable_chunked_prefill: Optional[bool] = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
         **kwargs,
@@ -685,8 +718,9 @@ class VllmRunner:
             task=task,
             tokenizer=tokenizer_name,
             tokenizer_mode=tokenizer_mode,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             dtype=dtype,
+            seed=seed,
             swap_space=swap_space,
             enforce_eager=enforce_eager,
             disable_log_stats=disable_log_stats,

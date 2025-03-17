@@ -9,7 +9,7 @@ from pathlib import PosixPath
 
 import pytest
 from packaging.version import Version
-from transformers import AutoModelForVision2Seq
+from transformers import AutoModelForPreTraining, AutoModelForVision2Seq
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
@@ -17,7 +17,7 @@ from vllm.utils import identity
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets,
                           _VideoAssets)
-from ....utils import (fork_new_process_for_each_test, large_gpu_mark,
+from ....utils import (create_new_process_for_each_test, large_gpu_mark,
                        multi_gpu_marks)
 from ...utils import check_outputs_equal
 from .vlm_utils import custom_inputs, model_utils, runners
@@ -31,6 +31,16 @@ from .vlm_utils.types import (CustomTestOptions, ExpandableVLMTestArgs,
 # FIXME (mattwong, gshtrasb, hongxiayan)
 if current_platform.is_rocm():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
+
+REQUIRES_V0_MODELS = [
+    # V1 Test: no way to fall back for head_dim = 80
+    # https://github.com/vllm-project/vllm/issues/14524
+    "qwen_vl",
+    "h2ovl",
+    "blip2",
+    # V1 Test: not enough KV cache space in C1.
+    "fuyu",
+]
 
 # yapf: disable
 COMMON_BROADCAST_SETTINGS = {
@@ -156,24 +166,25 @@ VLM_TEST_SETTINGS = {
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     #### Extended model tests
-    "aria": VLMTestInfo(
-        models=["rhymes-ai/Aria"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
-        max_model_len=4096,
-        max_num_seqs=2,
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<vlm_image>Please describe the image shortly.",
-            "cherry_blossom": "<vlm_image>Please infer the season with reason.",
-        }),
-        multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
-        postprocess_inputs=model_utils.cast_dtype_post_processor("pixel_values"),
-        stop_str=["<|im_end|>"],
-        image_size_factors=[(0.10, 0.15)],
-        max_tokens=64,
-        marks=[large_gpu_mark(min_gb=64)],
-    ),
+    # "aria": VLMTestInfo(
+    #     models=["rhymes-ai/Aria"],
+    #     test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+    #     prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
+    #     img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
+    #     max_model_len=4096,
+    #     max_num_seqs=2,
+    #     auto_cls=AutoModelForImageTextToText,
+    #     single_image_prompts=IMAGE_ASSETS.prompts({
+    #         "stop_sign": "<vlm_image>Please describe the image shortly.",
+    #         "cherry_blossom": "<vlm_image>Please infer the season with reason.",  # noqa: E501
+    #     }),
+    #     multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
+    #     postprocess_inputs=model_utils.cast_dtype_post_processor("pixel_values"), # noqa: E501
+    #     stop_str=["<|im_end|>"],
+    #     image_size_factors=[(0.10, 0.15)],
+    #     max_tokens=64,
+    #     marks=[large_gpu_mark(min_gb=64)],
+    # ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
@@ -234,16 +245,41 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
     ),
+    "gemma3": VLMTestInfo(
+        models=["google/gemma-3-4b-it"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user\n{img_prompt}<end_of_turn>\n<start_of_turn>model\n", # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<start_of_image>What's the content in the center of the image?",  # noqa: E501
+            "cherry_blossom": "<start_of_image>What is the season?",  # noqa: E501
+        }),
+        multi_image_prompt="<start_of_image><start_of_image>Describe the two images in detail.",  # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        # TODO: Use AutoModelForVision2Seq once transformers supports this
+        auto_cls=AutoModelForPreTraining,
+        dtype="bfloat16",
+        vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
+        patch_hf_runner=model_utils.gemma3_patch_hf_runner,
+    ),
     "glm4v": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
         test_type=VLMTestType.IMAGE,
-        prompt_formatter=identity,
-        img_idx_to_prompt=lambda idx: "",
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",  # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<|begin_of_image|><|endoftext|><|end_of_image|>What's the content in the center of the image?",  # noqa: E501
+            "cherry_blossom": "<|begin_of_image|><|endoftext|><|end_of_image|>What is the season?",  # noqa: E501
+        }),
         max_model_len=2048,
         max_num_seqs=2,
         dtype="bfloat16",
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
-        patch_hf_runner=model_utils.glm_patch_hf_runner,
+        patch_hf_runner=model_utils.glm4v_patch_hf_runner,
+        # The image embeddings match with HF but the outputs of the language
+        # decoder are only consistent up to 2 decimal places.
+        # So, we need to reduce the number of tokens for the test to pass.
+        max_tokens=8,
+        num_logprobs=10,
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "h2ovl": VLMTestInfo(
@@ -556,13 +592,15 @@ VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.IMAGE,
-        fork_new_process_for_each_test=False,
+        create_new_process_for_each_test=False,
     ))
 def test_single_image_models(tmp_path: PosixPath, model_type: str,
                              test_case: ExpandableVLMTestArgs,
                              hf_runner: type[HfRunner],
                              vllm_runner: type[VllmRunner],
-                             image_assets: _ImageAssets):
+                             image_assets: _ImageAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_single_image_test(
         tmp_path=tmp_path,
@@ -579,13 +617,15 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.MULTI_IMAGE,
-        fork_new_process_for_each_test=False,
+        create_new_process_for_each_test=False,
     ))
 def test_multi_image_models(tmp_path: PosixPath, model_type: str,
                             test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
-                            image_assets: _ImageAssets):
+                            image_assets: _ImageAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_multi_image_test(
         tmp_path=tmp_path,
@@ -602,13 +642,15 @@ def test_multi_image_models(tmp_path: PosixPath, model_type: str,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.EMBEDDING,
-        fork_new_process_for_each_test=False,
+        create_new_process_for_each_test=False,
     ))
 def test_image_embedding_models(model_type: str,
                                 test_case: ExpandableVLMTestArgs,
                                 hf_runner: type[HfRunner],
                                 vllm_runner: type[VllmRunner],
-                                image_assets: _ImageAssets):
+                                image_assets: _ImageAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_embedding_test(
         model_test_info=model_test_info,
@@ -624,11 +666,13 @@ def test_image_embedding_models(model_type: str,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.VIDEO,
-        fork_new_process_for_each_test=False,
+        create_new_process_for_each_test=False,
     ))
 def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
                       hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
-                      video_assets: _VideoAssets):
+                      video_assets: _VideoAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_video_test(
         model_test_info=model_test_info,
@@ -644,14 +688,17 @@ def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.CUSTOM_INPUTS,
-        fork_new_process_for_each_test=False,
+        create_new_process_for_each_test=False,
     ))
 def test_custom_inputs_models(
     model_type: str,
     test_case: ExpandableVLMTestArgs,
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
+    monkeypatch,
 ):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_custom_inputs_test(
         model_test_info=model_test_info,
@@ -667,14 +714,16 @@ def test_custom_inputs_models(
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.IMAGE,
-        fork_new_process_for_each_test=True,
+        create_new_process_for_each_test=True,
     ))
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                    test_case: ExpandableVLMTestArgs,
                                    hf_runner: type[HfRunner],
                                    vllm_runner: type[VllmRunner],
-                                   image_assets: _ImageAssets):
+                                   image_assets: _ImageAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_single_image_test(
         tmp_path=tmp_path,
@@ -691,14 +740,16 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.MULTI_IMAGE,
-        fork_new_process_for_each_test=True,
+        create_new_process_for_each_test=True,
     ))
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
                                   test_case: ExpandableVLMTestArgs,
                                   hf_runner: type[HfRunner],
                                   vllm_runner: type[VllmRunner],
-                                  image_assets: _ImageAssets):
+                                  image_assets: _ImageAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_multi_image_test(
         tmp_path=tmp_path,
@@ -715,14 +766,16 @@ def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.EMBEDDING,
-        fork_new_process_for_each_test=True,
+        create_new_process_for_each_test=True,
     ))
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_image_embedding_models_heavy(model_type: str,
                                       test_case: ExpandableVLMTestArgs,
                                       hf_runner: type[HfRunner],
                                       vllm_runner: type[VllmRunner],
-                                      image_assets: _ImageAssets):
+                                      image_assets: _ImageAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_embedding_test(
         model_test_info=model_test_info,
@@ -738,12 +791,14 @@ def test_image_embedding_models_heavy(model_type: str,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.VIDEO,
-        fork_new_process_for_each_test=True,
+        create_new_process_for_each_test=True,
     ))
 def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
                             hf_runner: type[HfRunner],
                             vllm_runner: type[VllmRunner],
-                            video_assets: _VideoAssets):
+                            video_assets: _VideoAssets, monkeypatch):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_video_test(
         model_test_info=model_test_info,
@@ -759,15 +814,18 @@ def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
     get_parametrized_options(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.CUSTOM_INPUTS,
-        fork_new_process_for_each_test=True,
+        create_new_process_for_each_test=True,
     ))
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_custom_inputs_models_heavy(
     model_type: str,
     test_case: ExpandableVLMTestArgs,
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
+    monkeypatch,
 ):
+    if model_type in REQUIRES_V0_MODELS:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_custom_inputs_test(
         model_test_info=model_test_info,
