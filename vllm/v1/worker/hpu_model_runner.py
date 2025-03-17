@@ -52,107 +52,6 @@ logger = init_logger(__name__)
 _TYPE_CACHE = {}
 
 
-class CacheAccessValidator:
-
-    def __init__(self, num_blocks, block_size, pad_block_id):
-        self.num_blocks = num_blocks
-        self.block_size = block_size
-        self.pad_block_id = pad_block_id
-        self.producers = [None] * (num_blocks * block_size)
-        self.consumers = [None] * (num_blocks * block_size)
-        self.req_metadata = {}
-
-    def validate_prefill(self, slot_mapping, request_ids):
-        # write to kv cache from slot mapping, no reads
-        for i in range(len(request_ids)):
-            self.write_slots(slot_mapping[i], request_ids[i])
-
-    def validate_prefix_prefill(self, slot_mapping, block_list, request_ids):
-        for i in range(len(request_ids)):
-            self.write_slots(slot_mapping[i], request_ids[i])
-            self.read_blocks(block_list[i], request_ids[i])
-
-    def validate_decode(self, slot_mapping, block_list, block_usage,
-                        request_ids):
-        for i in range(len(request_ids)):
-            self.write_slots(slot_mapping[i], request_ids[i])
-            self.read_blocks(block_list[i], request_ids[i], block_usage[i])
-
-    def _get_block_range(self, block_id, block_usage=None):
-        start = block_id * self.block_size
-        end = start + (self.block_size if block_usage is None else block_usage)
-        assert start < end
-        return start, end
-
-    def write_slots(self, slot_ids, producer):
-        for slot_id in slot_ids:
-            self.write_slot(slot_id, producer)
-
-    def write_slot(self, slot_id, producer):
-        if slot_id // self.block_size == self.pad_block_id:
-            return
-        try:
-            # TODO(kzawora): remove or self.producers[slot_id] == producer
-            assert self.producers[slot_id] is None or self.producers[
-                slot_id] == producer, (
-                    f"Producer {producer} attempted to overwrite slot {slot_id}"
-                    f" taken by {self.producers[slot_id]}")
-            assert self.consumers[slot_id] == producer or self.consumers[
-                slot_id] is None, (
-                    f"Producer {producer} attempted to overwrite slot {slot_id}"
-                    f" consumed by {self.consumers[slot_id]}")
-        except AssertionError:
-            import pdb
-            pdb.set_trace()
-        if self.producers[slot_id] == producer:
-            print(
-                f"Producer {producer} is overwriting own context at {slot_id}")
-
-        if producer not in self.req_metadata:
-            self.req_metadata[producer] = {}
-            self.req_metadata[producer]["producing"] = [slot_id]
-            self.req_metadata[producer]["consuming"] = []
-        else:
-            self.req_metadata[producer]["producing"].append(slot_id)
-        self.producers[slot_id] = producer
-
-    def read_blocks(self, block_ids, consumer, block_usage=None):
-        for i, block_id in enumerate(block_ids):
-            self.read_block(block_id, consumer,
-                            None if block_usage is None else block_usage[i])
-
-    def read_block(self, block_id, consumer, block_usage=None):
-        if block_id == self.pad_block_id:
-            return
-        start, end = self._get_block_range(block_id, block_usage)
-        try:
-            assert all([
-                i == consumer and i is not None
-                for i in self.producers[start:end]
-            ]), (f"Consumer {consumer} attempted to consume block {block_id} "
-                 f"produced by {self.producers[start]}")
-        except AssertionError:
-            import pdb
-            pdb.set_trace()
-        if consumer not in self.req_metadata:
-            raise AssertionError(
-                "this should never happen! we can't become consumer without "
-                "being producer first")
-        else:
-            for i in range(start, end):
-                self.req_metadata[consumer]["consuming"].append(i)
-                self.consumers[i] = consumer
-
-    def evict_request(self, req_id):
-        logger.info('scrubbing request %s, scrub-a-dub-dub...', req_id)
-        del self.req_metadata[req_id]
-        for i in range(len(self.producers)):
-            if self.producers[i] == req_id:
-                self.producers[i] = None
-            if self.consumers[i] == req_id:
-                self.consumers[i] = None
-
-
 class PhaseType(Enum):
     PREFILL = 'prefill'
     PREFIX_PREFILL = 'prefix_prefill'
@@ -203,6 +102,79 @@ class DecodeInputData:
     position_ids: Optional[torch.Tensor] = None
     attn_metadata: Optional[HPUAttentionMetadataV1] = None
     logits_indices: Optional[torch.Tensor] = None
+
+
+def bool_helper(value):
+    value = value.lower()
+    return value in ("y", "yes", "t", "true", "on", "1")
+
+
+@dataclass
+class HpuEnvFlags:
+    skip_warmup: bool
+    enable_bucketing: bool
+    use_contiguous_pa: bool
+    __env_var_cfg_type = collections.namedtuple('__env_var_cfg_type',
+                                                ['name', 'default', 'handler'])
+
+    @classmethod
+    def get_env_var_cfg_map(cls):
+        return {
+            "skip_warmup":
+            cls.__env_var_cfg_type('VLLM_SKIP_WARMUP', 'true',
+                                   cls.handle_boolean_env_var),
+            "enable_bucketing":
+            cls.__env_var_cfg_type('VLLM_ENABLE_BUCKETING', 'true',
+                                   cls.handle_boolean_env_var),
+            "use_contiguous_pa":
+            cls.__env_var_cfg_type('VLLM_CONTIGUOUS_PA', 'false',
+                                   cls.handle_boolean_env_var),
+        }
+
+    @classmethod
+    def build(cls, vllm_config: VllmConfig, update_env=True):
+        cfg_map = cls.get_env_var_cfg_map()
+        env_vars = {
+            key: handler(env_var, default, vllm_config, update_env)
+            for key, (env_var, default, handler) in cfg_map.items()
+        }
+        return cls(**env_vars)
+
+    @staticmethod
+    def env_var_post_init(env_var, val, vllm_config):
+        match env_var:
+            case 'VLLM_SKIP_WARMUP':
+                if not val:
+                    logger.warning(
+                        "HPU warmup is currently not supported in V1. "
+                        "Forcing warmup off.")
+                    val = True
+            case 'VLLM_CONTIGUOUS_PA':
+                can_use_contiguous_pa = not vllm_config.cache_config.\
+                    enable_prefix_caching
+                if val and not can_use_contiguous_pa:
+                    logger.warning(
+                        "Contiguous PA is not supported with prefix caching. "
+                        "Forcing contiguous PA off.")
+                    val = False
+                if val:
+                    logger.warning("Contiguous PA is not recommended in V1.")
+            case _:
+                pass
+        return val
+
+    @classmethod
+    def handle_boolean_env_var(cls,
+                               env_var,
+                               default,
+                               vllm_config,
+                               update_env=True):
+        x = bool_helper(os.environ.get(env_var, default))
+        x = cls.env_var_post_init(env_var, x, vllm_config)
+        if update_env:
+            os.environ[env_var] = str(x).lower()
+        logger.info('HpuEnvFlags %s: %s', env_var, x)
+        return x
 
 
 def flatten(in_list):
@@ -676,6 +648,15 @@ class HPUModelRunner:
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+
+        # NOTE(kzawora) update_env is a hack to work around VLLMKVCache in
+        # hpu-extension which selects fetch_from_cache implementation based
+        # on env vars... this should be fixed in the future
+        self.env_flags = HpuEnvFlags.build(vllm_config, update_env=True)
+        self.enable_bucketing = self.env_flags.enable_bucketing
+        self.use_contiguous_pa = self.env_flags.use_contiguous_pa
+        self.skip_warmup = self.env_flags.skip_warmup
+
         model_config = self.model_config
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
@@ -737,18 +718,11 @@ class HPUModelRunner:
             range(self.max_model_len),
             device="cpu",
         ).to(torch.int32).reshape(1, -1)
-
         self.max_num_seqs = self.scheduler_config.max_num_seqs
         self.max_prefill_batch_size = 1  # TODO(kzawora): add knob for that
         self.padding_aware_scheduling = True  # TODO(kzawora): add knob for that
         self.padding_ratio_threshold = 0.9  # TODO(kzawora): add knob for that
-        os.environ[
-            'VLLM_CONTIGUOUS_PA'] = 'false'  # NOTE(kzawora): this is a workaround # noqa
-        self.use_contiguous_pa = os.environ.get('VLLM_CONTIGUOUS_PA',
-                                                'true').lower() == 'true'
         self.seen_configs: set = set()
-        self.enable_bucketing = os.environ.get(
-            'VLLM_DISABLE_BUCKETING', 'false').lower() not in ['true', '1']
         if self.enable_bucketing:
             logger.info("Bucketing is ON.")
             self.bucketing_ctx = HPUBucketingContext(
@@ -757,10 +731,6 @@ class HPUModelRunner:
             self.graphed_buckets: Set[Any] = set()
         else:
             logger.info("Bucketing is OFF.")
-        self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP',
-                                          'false').lower() == 'true'
-        # These values are assumed to be zero in several places.
-        # Use caution when updating them!
         self._PAD_SLOT_ID = -1
         self._PAD_BLOCK_ID = -1
         self._tokenizer = init_tokenizer_from_configs(
@@ -768,8 +738,6 @@ class HPUModelRunner:
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
             lora_config=vllm_config.lora_config).tokenizer
-        self.validate_accesses = False
-        self.cache_access_validator: Optional[CacheAccessValidator] = None
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
@@ -1319,11 +1287,6 @@ class HPUModelRunner:
                     num_prefill_tokens=sum(batch_num_scheduled_tokens),
                     slot_mapping=slot_mapping_device,
                     block_list=block_list_device)
-                if self.validate_accesses and \
-                    self.cache_access_validator is not None:
-                    self.cache_access_validator.validate_prefix_prefill(
-                        slot_mapping.tolist(), prefix_block_tables.tolist(),
-                        batch_req_ids)
             else:
                 attn_metadata = HPUAttentionMetadataV1.make_prefill_metadata(
                     seq_lens_tensor=seq_lens_tensor_device,
@@ -1331,10 +1294,6 @@ class HPUModelRunner:
                     num_prefill_tokens=sum(batch_num_scheduled_tokens),
                     slot_mapping=slot_mapping_device,
                 )
-                if (self.validate_accesses
-                        and self.cache_access_validator is not None):
-                    self.cache_access_validator.validate_prefill(
-                        slot_mapping.tolist(), batch_req_ids)
             # ATTN_METADATA.
             prefill_attn_metadata.append(attn_metadata)
             batch_idx += num_prefills
@@ -1454,19 +1413,6 @@ class HPUModelRunner:
         num_decode_tokens_device = _async_h2d_tensor_copy(
             num_decode_tokens, self.device)
         slot_mapping_device = _async_h2d_tensor_copy(slot_mapping, self.device)
-        if self.validate_accesses and self.cache_access_validator is not None:
-            last_block_usage = [
-                slot[0] % self.block_size + 1 for slot in slot_mapping
-            ]
-            block_groups = [[i] * len(bt)
-                            for i, bt in enumerate(block_tables_list)]
-            block_usage = [
-                [self.block_size] * (len(bt) - 1) + [lbu]
-                for bt, lbu in zip(block_tables_list, last_block_usage) if bt
-            ]
-            req_ids = self.input_batch.req_ids[:num_decodes]
-            self.cache_access_validator.validate_decode(
-                slot_mapping.tolist(), block_tables_list, block_usage, req_ids)
         return DecodeInputData(
             num_decodes=num_decodes,
             token_ids=token_ids_device,
@@ -1773,10 +1719,6 @@ class HPUModelRunner:
         for req_id in all_req_ids:
             prompt_logprobs_dict[req_id] = None
         all_req_ids = pd_info.decode_req_ids + pd_info.prompt_req_ids
-        if self.validate_accesses and self.cache_access_validator is not None:
-            for i in range(num_reqs):
-                if sampled_token_ids_list[i] == self._tokenizer.eos_token_id:
-                    self.cache_access_validator.evict_request(all_req_ids[i])
 
         model_runner_output = ModelRunnerOutput(
             req_ids=all_req_ids,
@@ -2054,7 +1996,6 @@ class HPUModelRunner:
         if self.skip_warmup:
             logger.info("Skipping warmup...")
             return
-        #self.profiler.start('internal', 'warmup')
         max_blocks = kv_caches[0][0].size(0)
         self.bucketing_ctx.generate_prompt_buckets()
         self.bucketing_ctx.generate_decode_buckets(max_blocks)
@@ -2166,7 +2107,6 @@ class HPUModelRunner:
             f"Warmup finished in {elapsed_time:.0f} secs, "
             f"allocated {format_bytes(end_mem - start_mem)} of device memory")
         logger.info(msg)
-        #self.profiler.end()
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -2268,8 +2208,5 @@ class HPUModelRunner:
             self.bucketing_ctx.num_hpu_blocks = num_blocks
         self._PAD_BLOCK_ID = num_blocks
         self._PAD_SLOT_ID = num_blocks * self.block_size
-        if self.validate_accesses:
-            self.cache_access_validator = CacheAccessValidator(
-                num_blocks, self.block_size, self._PAD_BLOCK_ID)
 
         htorch.hpu.synchronize()

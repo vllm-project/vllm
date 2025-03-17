@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A GPU worker class."""
+import contextlib
 import gc
 import os
 from contextlib import contextmanager
@@ -11,18 +12,17 @@ import torch.nn as nn
 from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 
 import vllm.envs as envs
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType,
-                        get_dtype_size, is_fake_hpu)
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, is_fake_hpu
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
-from vllm.v1.worker.hpu_model_runner import HPUModelRunner
+from vllm.v1.worker.hpu_model_runner import HPUModelRunner, bool_helper
 
 logger = init_logger(__name__)
 
@@ -84,6 +84,9 @@ class HPUWorker:
                     torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
+        self.gc_track_recompiles = bool(
+            "PT_HPU_METRICS_GC_DETAILS" in os.environ
+            and bool_helper(os.getenv("PT_HPU_METRICS_GC_DETAILS")))
 
     def init_device(self):
         # Initialize the distributed environment.
@@ -214,8 +217,10 @@ class HPUWorker:
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
-        #with track_graph_compile('HPUWorker.execute_model'):
-        output = self.model_runner.execute_model(scheduler_output)
+        with track_graph_compile('HPUWorker.execute_model') \
+            if self.gc_track_recompiles \
+            else contextlib.nullcontext():
+            output = self.model_runner.execute_model(scheduler_output)
         # TODO(woosuk): Send the output to the engine process.
         return output if self.rank == 0 else None
 
@@ -239,27 +244,6 @@ def init_worker_distributed_environment(
     assert dummy_tensor_hpu.item() == parallel_config.world_size
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
-
-
-def _get_cache_block_size(
-    cache_config: CacheConfig,
-    model_config: ModelConfig,
-    parallel_config: ParallelConfig,
-) -> int:
-    head_size = model_config.get_head_size()
-    num_heads = model_config.get_num_kv_heads(parallel_config)
-    num_attention_layers = model_config.get_num_layers_by_block_type(
-        parallel_config, LayerBlockType.attention)
-
-    key_cache_block = cache_config.block_size * num_heads * head_size
-    value_cache_block = key_cache_block
-    total = num_attention_layers * (key_cache_block + value_cache_block)
-    if cache_config.cache_dtype == "auto":
-        dtype = model_config.dtype
-    else:
-        dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-    dtype_size = get_dtype_size(dtype)
-    return dtype_size * total
 
 
 @contextmanager
