@@ -40,7 +40,9 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
     @staticmethod
     def get_moe_method(
-        quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
+        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        activation: str,
+        expert_map: Optional[torch.Tensor],
     ) -> "CompressedTensorsMoEMethod":
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
@@ -50,7 +52,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             return CompressedTensorsWNA16MoEMethod(quant_config)
-        elif quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant):
+        elif (quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
+              and activation == "silu" and expert_map is None):
             return CompressedTensorsW8A8Fp8MoECutlassMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config)
@@ -411,83 +414,45 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         activation: str = "silu",
     ) -> torch.Tensor:
 
-        if (global_num_experts == layer.w13_weight.shape[0]
-                and expert_map is None and activation == "silu"):
+        assert activation == "silu"
+        assert global_num_experts == layer.w13_weight.shape[0]
+        assert expert_map is None
 
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias)
 
-            from vllm.model_executor.layers.fused_moe import cutlass_moe
-            x_q, x_scale = ops.scaled_fp8_quant(x,
-                                                layer.w13_input_scale,
-                                                use_per_token_if_dynamic=False)
-            return cutlass_moe(
-                x_q,
-                x_scale,
-                layer.w13_weight.transpose(1, 2),
-                layer.w2_weight.transpose(1, 2),
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                topk_weights,
-                topk_ids,
-                x.shape[0],
-                layer.w2_weight.shape[2],
-                x.shape[1],
-                layer.w13_weight.shape[0],
-                self.ab_strides1,
-                self.c_strides1,
-                self.ab_strides2,
-                self.c_strides2,
-                intermediate_scale=layer.w2_input_scale,
-            ).to(x.dtype)
-
-        else:
-            if expert_map is not None:
-                logger.info_once("Expert map support has not been implemented "
-                                 "in CUTLASS MoE kernel yet. Falling back to "
-                                 "Triton kernel.")
-            elif activation != "silu":
-                logger.info_once(
-                    "CUTLASS MoE kernel currently does not "
-                    "support %s. Falling back to Triton kernel.", activation)
-
-            from vllm.model_executor.layers.fused_moe import fused_experts
-
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
-
-            return fused_experts(x,
-                                 layer.w13_weight,
-                                 layer.w2_weight,
-                                 topk_weights=topk_weights,
-                                 topk_ids=topk_ids,
-                                 inplace=True,
-                                 activation=activation,
-                                 use_fp8_w8a8=True,
-                                 global_num_experts=global_num_experts,
-                                 expert_map=expert_map,
-                                 w1_scale=layer.w13_weight_scale,
-                                 w2_scale=layer.w2_weight_scale,
-                                 a1_scale=layer.w13_input_scale,
-                                 a2_scale=layer.w2_input_scale)
+        from vllm.model_executor.layers.fused_moe import cutlass_moe
+        x_q, x_scale = ops.scaled_fp8_quant(x,
+                                            layer.w13_input_scale,
+                                            use_per_token_if_dynamic=False)
+        return cutlass_moe(
+            x_q,
+            x_scale,
+            layer.w13_weight.transpose(1, 2),
+            layer.w2_weight.transpose(1, 2),
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            topk_weights,
+            topk_ids,
+            x.shape[0],
+            layer.w2_weight.shape[2],
+            x.shape[1],
+            layer.w13_weight.shape[0],
+            self.ab_strides1,
+            self.c_strides1,
+            self.ab_strides2,
+            self.c_strides2,
+            intermediate_scale=layer.w2_input_scale,
+        ).to(x.dtype)
 
 
 class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):

@@ -96,7 +96,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return CompressedTensorsMoEMethod.get_moe_method(self)
+            return CompressedTensorsMoEMethod.get_moe_method(
+                self, layer.activation, layer.expert_map)
         return None
 
     @classmethod
