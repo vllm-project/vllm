@@ -283,17 +283,19 @@ class Olmo2Model(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """
         :param input_ids: A tensor of shape `(batch_size, seq_len)`.
         """
         if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
             # Get embeddings of input.
             # shape: (batch_size, seq_len, d_model)
-            inputs_embeds = self.embed_tokens(input_ids)
+            else:
+                hidden_states = self.embed_tokens(input_ids)
 
-            # embed positions
-            hidden_states = inputs_embeds
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -346,11 +348,13 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
         )
         return hidden_states
 
