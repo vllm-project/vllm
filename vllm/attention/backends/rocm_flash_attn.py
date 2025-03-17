@@ -15,11 +15,14 @@ from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
+from vllm.attention.ops.rocm_aiter_paged_attn import AITERPagedAttention
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+
+USE_AITER_PAGED_ATTN = envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
 
 logger = init_logger(__name__)
 
@@ -27,6 +30,29 @@ _PARTITION_SIZE_ROCM = 256
 _GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
 _ON_NAVI = "gfx1" in _GPU_ARCH
 _ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
+
+
+class AttentionOps:
+    """
+    Initializes the appropriate PagedAttention module from `attention/ops`, 
+    which is a component of the attention mechanism used 
+    by `ROCmFlashAttentionImpl`.
+
+    The choice of attention module depends on whether 
+    AITER paged attention is enabled:
+    - If enabled, `ROCmFlashAttentionImpl` uses `AITERPagedAttention`.
+    - Otherwise, it defaults to using the original `PagedAttention`.
+    """
+
+    def __init__(self):
+        if USE_AITER_PAGED_ATTN:
+            self._attn_module = AITERPagedAttention()
+        else:
+            self._attn_module = PagedAttention()
+
+    @property
+    def attn_module(self) -> PagedAttention:
+        return self._attn_module
 
 
 class ROCmFlashAttentionBackend(AttentionBackend):
@@ -540,6 +566,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 self.attn_func = _sdpa_attention
                 logger.debug("Using naive (SDPA) attention in ROCmBackend")
 
+            self.attn_module = AttentionOps().attn_module
+            self.aiter_kv_scales_initialized = False
+
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
         """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
         tokens, n_kv_heads, head_dim = x.shape
@@ -616,6 +645,30 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         else:
             assert value is None
 
+        attn_module = self.attn_module
+        # Reshaping kv tensors is required for AITER paged attention kernel
+        # because it works on a different tensor shape,
+        # when the size of one element is one byte (int8/fp8 dtypes).
+        # This reshaping is only required on the first forward call
+        # and the kv cache must not be empty.
+        if (USE_AITER_PAGED_ATTN and kv_cache.dtype.itemsize == 1
+                and not self.aiter_kv_scales_initialized
+                and kv_cache.shape != torch.Size([0])):
+            num_blocks = kv_cache.shape[1]
+            block_size = kv_cache.shape[2] // (self.num_kv_heads *
+                                               self.head_size)
+            k_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
+                                  dtype=torch.float32,
+                                  device=kv_cache.device)
+            v_scale = torch.empty((self.num_kv_heads, num_blocks * block_size),
+                                  dtype=torch.float32,
+                                  device=kv_cache.device)
+            self.aiter_kv_scales_initialized = True
+            k_scale.fill_(layer._k_scale.item())
+            v_scale.fill_(layer._v_scale.item())
+            layer._k_scale = k_scale
+            layer._v_scale = v_scale
+
         # Only update KV cache for decoder self-attention
         # and encoder-decoder cross-attention
         if self.attn_type not in [
@@ -629,7 +682,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 # cache. If kv_cache is not provided, the new key and value
                 # tensors are not cached. This happens during the initial
                 # memory profiling run.
-                PagedAttention.write_to_paged_cache(
+                attn_module.write_to_paged_cache(
                     key,
                     value,
                     key_cache,
@@ -765,23 +818,23 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 # prefix-enabled attention -
                 # not applicable for encoder-only models
                 if self.attn_type != AttentionType.ENCODER_ONLY:
-                    output[:
-                           num_prefill_tokens] = PagedAttention.forward_prefix(
-                               query,
-                               key,
-                               value,
-                               self.kv_cache_dtype,
-                               key_cache,
-                               value_cache,
-                               prefill_meta.block_tables,
-                               prefill_meta.query_start_loc,
-                               prefill_meta.seq_lens_tensor,
-                               prefill_meta.max_query_len,
-                               self.alibi_slopes,
-                               self.sliding_window[0],
-                               layer._k_scale,
-                               layer._v_scale,
-                           )
+                    attn_module = attn_module
+                    output[:num_prefill_tokens] = attn_module.forward_prefix(
+                        query,
+                        key,
+                        value,
+                        self.kv_cache_dtype,
+                        key_cache,
+                        value_cache,
+                        prefill_meta.block_tables,
+                        prefill_meta.query_start_loc,
+                        prefill_meta.seq_lens_tensor,
+                        prefill_meta.max_query_len,
+                        self.alibi_slopes,
+                        self.sliding_window[0],
+                        layer._k_scale,
+                        layer._v_scale,
+                    )
         # Skip decode phase for encoder-only models
         if (decode_meta := attn_metadata.decode_metadata) and (
                 self.attn_type != AttentionType.ENCODER_ONLY):
@@ -841,7 +894,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     layer._v_scale,
                 )
             else:
-                output[num_prefill_tokens:] = PagedAttention.forward_decode(
+                output[num_prefill_tokens:] = attn_module.forward_decode(
                     decode_query,
                     key_cache,
                     value_cache,
@@ -909,4 +962,5 @@ def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
-            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
+            and not USE_AITER_PAGED_ATTN)
