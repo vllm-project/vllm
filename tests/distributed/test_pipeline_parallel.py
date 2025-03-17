@@ -17,7 +17,7 @@ from vllm.config import TaskOption
 from vllm.logger import init_logger
 
 from ..models.registry import HF_EXAMPLE_MODELS
-from ..utils import compare_two_settings, fork_new_process_for_each_test
+from ..utils import compare_two_settings, create_new_process_for_each_test
 
 logger = init_logger("test_pipeline_parallel")
 
@@ -350,6 +350,10 @@ def _compare_tp(
     else:
         pp_env = None
 
+    tp_env = {
+        "VLLM_USE_V1": vllm_major_version,
+    }
+
     pp_args = [
         *common_args,
         "--pipeline-parallel-size",
@@ -374,14 +378,20 @@ def _compare_tp(
     ]
 
     try:
-        compare_two_settings(model_id, pp_args, tp_args, pp_env, method=method)
+        compare_two_settings(model_id,
+                             pp_args,
+                             tp_args,
+                             pp_env,
+                             tp_env,
+                             method=method)
     except Exception:
-        if pp_env is None:
-            raise
-        else:
-            # Ray Compiled Graph tests are flaky,
+        testing_ray_compiled_graph = pp_env is not None
+        if testing_ray_compiled_graph and vllm_major_version == "0":
+            # Ray Compiled Graph tests are flaky for V0,
             # so we don't want to fail the test
             logger.exception("Ray Compiled Graph tests failed")
+        else:
+            raise
 
 
 @pytest.mark.parametrize(
@@ -392,7 +402,7 @@ def _compare_tp(
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
     ],
 )
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_tp_language_generation(
     model_id: str,
     parallel_setup: ParallelSetup,
@@ -421,7 +431,7 @@ def test_tp_language_generation(
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
     ],
 )
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_tp_language_embedding(
     model_id: str,
     parallel_setup: ParallelSetup,
@@ -450,7 +460,7 @@ def test_tp_language_embedding(
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
     ],
 )
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_tp_multimodal_generation(
     model_id: str,
     parallel_setup: ParallelSetup,
