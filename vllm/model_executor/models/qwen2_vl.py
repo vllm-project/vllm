@@ -336,39 +336,43 @@ class Qwen2VisionAttention(nn.Module):
         key = k.movedim(1, 2)
         value = v.movedim(1, 2)
         head_dim = query.shape[-1]
-        if len(cu_seqlens) == 2 and cu_seqlens.tolist() == [0, seq_length]:
-            attention_mask = None
-        else:
-            attention_mask = torch.full(
-                [1, seq_length, seq_length], torch.finfo(q.dtype).min, device=q.device, dtype=q.dtype
-            )
-            for i in range(1, len(cu_seqlens)):
-                attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
-                            cu_seqlens[i - 1]:cu_seqlens[i]] = 0
-        from ipex_llm.transformers.models.common import attention_softmax
+        # if len(cu_seqlens) == 2 and cu_seqlens.tolist() == [0, seq_length]:
+        #     attention_mask = None
+        # else:
+        #     attention_mask = torch.full(
+        #         [1, seq_length, seq_length], torch.finfo(q.dtype).min, device=q.device, dtype=q.dtype
+        #     )
+        #     for i in range(1, len(cu_seqlens)):
+        #         attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
+        #                     cu_seqlens[i - 1]:cu_seqlens[i]] = 0
+        #from ipex_llm.transformers.models.common import attention_softmax
         from ipex_llm.transformers.models.utils import use_sdp_non_causal
         import math
-        if use_sdp_non_causal(head_dim, q.device, q.dtype):
-            import xe_addons
-            scale = 1 / math.sqrt(head_dim)
-            if attention_mask is not None:
-                attention_mask = attention_mask.unsqueeze(0)
-            attn_output = xe_addons.sdp_non_causal(query, key.contiguous(), value.contiguous(), attention_mask, scale)
-            attn_output = attn_output.squeeze(0).transpose(0, 1)
-        else:
-            seq_lens = []
-            for i in range(1, len(cu_seqlens)):
-                seq_lens.append(cu_seqlens[i]-cu_seqlens[i-1]) 
-            att_masks = [None] * len(seq_lens)
+        seq_lens = []
+        for i in range(1, len(cu_seqlens)):
+            seq_lens.append(cu_seqlens[i]-cu_seqlens[i-1]) 
+        att_masks = [None] * len(seq_lens)
 
-            num_tokens = q.shape[0] * q.shape[1]
-            attn_output = torch.empty(
-                    (num_tokens, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head),
-                    dtype=query.dtype, device=query.device)
-            start = 0
-            for seq_len, mask in zip(seq_lens,
-                                    att_masks):
-                end = start + seq_len
+        num_tokens = q.shape[0] * q.shape[1]
+        attn_output = torch.empty(
+                (num_tokens, self.num_attention_heads_per_partition, self.hidden_size_per_attention_head),
+                dtype=query.dtype, device=query.device)
+        start = 0
+        for seq_len, mask in zip(seq_lens,
+                                att_masks):
+            end = start + seq_len
+            if use_sdp_non_causal(head_dim, q.device, q.dtype):
+                import xe_addons
+                scale = 1 / math.sqrt(head_dim)
+                if mask is not None:
+                    mask = mask.unsqueeze(0)
+                sub_out = xe_addons.sdp_non_causal(
+                    query[:, :, start:end, :].contiguous(),
+                    key[:, :, start:end, :].contiguous(),
+                    value[:, :, start:end, :].contiguous(),
+                    mask,
+                    scale).squeeze(0).movedim(0, 1)
+            else:
                 sub_out = torch.nn.functional.scaled_dot_product_attention(
                     query[:, :, start:end, :],
                     key[:, :, start:end, :],
@@ -378,8 +382,8 @@ class Qwen2VisionAttention(nn.Module):
                     is_causal=False,
                     scale= self.hidden_size_per_attention_head**-0.5).squeeze(0).movedim(
                         0, 1)
-                attn_output[start:end, :, :] = sub_out
-                start = end
+            attn_output[start:end, :, :] = sub_out
+            start = end
         output = attn_output.reshape(-1, batch_size, self.hidden_size_per_attention_head * self.num_attention_heads_per_partition)
 
         output, _ = self.proj(output)
