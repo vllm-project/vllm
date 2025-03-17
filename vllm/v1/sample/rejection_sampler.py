@@ -529,7 +529,9 @@ def sample_recovered_tokens_kernel(
                 other=float("-inf"))
     recovered_id = tl.argmax(prob / q, axis=-1)
     tl.store(output_token_ids_ptr + start_idx + pos, recovered_id)
+
     if IS_NGRAM:
+        # Restore the original probability.
         tl.store(
             target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,
             orig_prob)
