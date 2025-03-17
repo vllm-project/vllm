@@ -16,7 +16,7 @@ from vllm.utils import (FlexibleArgumentParser, MemorySnapshot,
                         deprecate_kwargs, get_open_port, memory_profiling,
                         merge_async_iterators, supports_kw, swap_dict_values)
 
-from .utils import error_on_warning, fork_new_process_for_each_test
+from .utils import create_new_process_for_each_test, error_on_warning
 
 
 @pytest.mark.asyncio
@@ -276,7 +276,7 @@ def test_supports_kw(callable,kw_name,requires_kw_only,
     ) == is_supported
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_memory_profiling():
     # Fake out some model loading + inference memory usage to test profiling
     # Memory used by other processes will show up as cuda usage outside of torch

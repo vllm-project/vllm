@@ -5,10 +5,10 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 
-from ..utils import fork_new_process_for_each_test
+from ..utils import create_new_process_for_each_test
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_plugin(
     monkeypatch: pytest.MonkeyPatch,
     dummy_opt_path: str,
@@ -24,7 +24,7 @@ def test_plugin(
         assert (error_msg in str(excinfo.value))
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_oot_registration_text_generation(
     monkeypatch: pytest.MonkeyPatch,
     dummy_opt_path: str,
@@ -44,7 +44,7 @@ def test_oot_registration_text_generation(
             assert rest == ""
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_oot_registration_embedding(
     monkeypatch: pytest.MonkeyPatch,
     dummy_gemma2_embedding_path: str,
@@ -62,7 +62,7 @@ def test_oot_registration_embedding(
 image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_oot_registration_multimodal(
     monkeypatch: pytest.MonkeyPatch,
     dummy_llava_path: str,

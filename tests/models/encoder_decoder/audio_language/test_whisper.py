@@ -10,7 +10,7 @@ import pytest
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 
-from ....utils import fork_new_process_for_each_test, multi_gpu_test
+from ....utils import create_new_process_for_each_test, multi_gpu_test
 
 PROMPTS = [
     {
@@ -119,7 +119,7 @@ def run_test(
         assert output.outputs[0].text == expected
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 @pytest.mark.core_model
 @pytest.mark.parametrize(
     "model", ["openai/whisper-small", "openai/whisper-large-v3-turbo"])
