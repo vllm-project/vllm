@@ -102,7 +102,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
-        if current_platform.is_rocm and envs.VLLM_ROCM_USE_AITER_MOE:
+        if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER_MOE:
             # reshaping weights is required for aiter moe kernel.
             from aiter.ops.shuffle import shuffle_weight
 
