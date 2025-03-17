@@ -5,7 +5,7 @@ tasks:
 - name: "gsm8k_cot_llama"
   metrics:
   - name: "exact_match,strict-match"
-    value: 0.694
+    value: 0.664
   - name: "exact_match,flexible-extract"
     value: 0.676
 limit: 250
