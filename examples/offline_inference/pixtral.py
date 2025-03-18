@@ -6,14 +6,14 @@ import argparse
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
 
-# This script is an offline demo for running Pixtral.
+# This script is an offline demo for running Mistral-Small-3
 #
 # If you want to run a server/client setup, please follow this code:
 #
 # - Server:
 #
 # ```bash
-# vllm serve mistralai/Pixtral-12B-2409 --tokenizer-mode mistral --limit-mm-per-prompt 'image=4' --max-model-len 16384
+# vllm serve mistralai/Mistral-Small-3.1-24B-Instruct-2503 --tokenizer-mode mistral --limit-mm-per-prompt 'image=4' --max-model-len 16384
 # ```
 #
 # - Client:
@@ -23,7 +23,7 @@ from vllm.sampling_params import SamplingParams
 # --header 'Content-Type: application/json' \
 # --header 'Authorization: Bearer token' \
 # --data '{
-#     "model": "mistralai/Pixtral-12B-2409",
+#     "model": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
 #     "messages": [
 #       {
 #         "role": "user",
@@ -44,7 +44,7 @@ from vllm.sampling_params import SamplingParams
 
 
 def run_simple_demo(args: argparse.Namespace):
-    model_name = "mistralai/Pixtral-12B-2409"
+    model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
     sampling_params = SamplingParams(max_tokens=8192)
 
     # Lower max_model_len and/or max_num_seqs on low-VRAM GPUs.
@@ -83,7 +83,7 @@ def run_simple_demo(args: argparse.Namespace):
 
 
 def run_advanced_demo(args: argparse.Namespace):
-    model_name = "mistralai/Pixtral-12B-2409"
+    model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
     max_img_per_msg = 5
     max_tokens_per_img = 4096
 
