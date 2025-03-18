@@ -526,6 +526,8 @@ def sample_recovered_tokens_kernel(
         orig_prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size +
                             draft_token_id)
         # Temporarily zero out the probability of the draft token.
+        # This is essentially the same as target_prob - draft_prob, except that
+        # n-gram does not have draft_prob. We regard it as 1.
         tl.store(
             target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id,
             0)
