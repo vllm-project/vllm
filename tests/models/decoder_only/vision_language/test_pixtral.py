@@ -131,10 +131,6 @@ FIXTURE_LOGPROBS_CHAT = {
     PIXTRAL_ID: FIXTURES_PATH / "pixtral_chat.json",
     MISTRAL_SMALL_3_1_ID: FIXTURES_PATH / "mistral_small_3_chat.json",
 }
-FIXTURE_LOGPROBS_ENGINE = {
-    PIXTRAL_ID: FIXTURES_PATH / "pixtral_chat_engine.json",
-    MISTRAL_SMALL_3_1_ID: FIXTURES_PATH / "mistral_small_3_engine.json",
-}
 
 OutputsLogprobs = list[tuple[list[int], str, Optional[SampleLogprobs]]]
 
