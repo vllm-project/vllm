@@ -148,3 +148,36 @@ def resolve_visual_encoder_outputs(
     if post_layer_norm is not None and uses_last_layer:
         hs_pool[-1] = post_layer_norm(encoder_outputs)
     return torch.cat(hs_pool, dim=-1)
+
+
+def scatter_patch_features(
+    features: torch.Tensor,
+    num_embeds: torch.Tensor,
+    embed_is_patch: torch.Tensor,
+    *,
+    fill_value: float = torch.nan,
+) -> tuple[torch.Tensor, ...]:
+    """
+    Scatter the patch features into a contiguous tensor that corresponds
+    to the embedding tokens defined by the multimodal processor.
+    
+    The rest of the values in the tensor are set to `fill_value`.
+
+    Args:
+        features: The patch features, concatenated across each image.
+          Shape: `(num_patch, feature_depth)`
+        num_embeds: The number of image embeddings for each image.
+          Shape: `(num_images,)`
+        embed_is_patch: A boolean mask indicating which image embeddings
+          correspond to patch tokens for each image.
+          Shape: `(num_images, num_embeds)`
+    """
+    num_embeds_per_image: list[int] = num_embeds.tolist()
+
+    embeds_flat = features.new_full(
+        (sum(num_embeds_per_image), features.shape[-1]),
+        fill_value=fill_value,
+    )
+    embeds_flat[embed_is_patch.view(-1)] = features.flatten(0, -2)
+
+    return embeds_flat.split(num_embeds_per_image)

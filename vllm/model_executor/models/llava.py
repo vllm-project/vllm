@@ -44,7 +44,7 @@ from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import get_vision_encoder_info
+from .vision import get_vision_encoder_info, scatter_patch_features
 
 
 class LlavaImagePixelInputs(TypedDict):
@@ -716,33 +716,6 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         image_embeds = torch.split(image_embeds, feature_sizes)
         return image_embeds
 
-    def _get_mm_embeds(
-            self,
-            features: torch.Tensor,  # Shape: (num_patch, d)
-            num_embeds: torch.Tensor,  # Shape: (num_images,)
-            embed_is_patch: torch.Tensor,  # Shape: (num_images, num_embeds)
-    ) -> tuple[torch.Tensor, ...]:
-        """Scatter the patch features into a contiguous tensor that corresponds
-        to the embedding tokens defined by the multimodal processor.
-
-        Mostly copied from `Molmo._get_mm_embeds`. See following fixme comment.
-        """
-        # Insert columns of nan values according to `embed_is_patch`. This work
-        # ideally should be done in `_process_image_input`, but
-        # `_process_image_input` is used in both V0 and V1 path. It's safer to
-        # put the logic here.
-        # FIXME: Move this logic to `_process_image_input` when v0 is
-        # deprecated. Merge this function with `Molmo._get_mm_embeds`.
-        num_embeds_per_image: list[int] = num_embeds.tolist()
-
-        embeds_flat = features.new_full(
-            (sum(num_embeds_per_image), features.shape[-1]),
-            fill_value=torch.nan,
-        )
-        embeds_flat[embed_is_patch.view(-1)] = features.flatten(0, -2)
-
-        return embeds_flat.split(num_embeds_per_image)
-
     def get_multimodal_embeddings(
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -757,7 +730,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             return vision_embeddings
 
         return flatten_2d_lists(
-            self._get_mm_embeds(*args) for args in zip(
+            scatter_patch_features(*args) for args in zip(
                 vision_embeddings,
                 image_input["num_embeds"],
                 image_input["embed_is_patch"],
