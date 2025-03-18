@@ -35,11 +35,6 @@ from vllm.platforms import current_platform
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
-USE_ROCM_AITER_FP8_BLOCK_SCALED_MOE = current_platform.is_rocm() and \
-    envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
-USE_ROCM_ATIER_MOE = current_platform.is_rocm() and \
-    envs.VLLM_ROCM_USE_AITER_MOE
-
 logger = init_logger(__name__)
 
 
@@ -534,6 +529,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        is_rocm_aiter_moe_enabled = current_platform.is_rocm() and \
+            envs.VLLM_ROCM_USE_AITER_MOE
+        is_rocm_aiter_block_scaled_moe_enabled = is_rocm_aiter_moe_enabled and \
+            envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
+
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
@@ -559,7 +559,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
-            if USE_ROCM_AITER_FP8_BLOCK_SCALED_MOE:
+            if is_rocm_aiter_block_scaled_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 from aiter.ops.shuffle import shuffle_weight
 
@@ -596,7 +596,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                   requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                  requires_grad=False)
-            if USE_ROCM_ATIER_MOE:
+            if is_rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 from aiter.ops.shuffle import shuffle_weight
 
@@ -682,7 +682,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
 
-            if USE_ROCM_ATIER_MOE:
+            if is_rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 from aiter.ops.shuffle import shuffle_weight
 
