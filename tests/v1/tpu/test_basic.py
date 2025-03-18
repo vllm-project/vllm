@@ -15,9 +15,10 @@ if TYPE_CHECKING:
     from tests.conftest import VllmRunner
 
 MODELS = [
+    "Qwen/Qwen2.5-1.5B-Instruct",
+    # TODO: Enable this models with v6e
     # "Qwen/Qwen2-7B-Instruct",
-    "meta-llama/Llama-3.1-8B",
-    # TODO: Add models here as necessary
+    # "meta-llama/Llama-3.1-8B",
 ]
 
 TENSOR_PARALLEL_SIZES = [1]
