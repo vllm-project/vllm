@@ -542,7 +542,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # by default this is disabled.
     "VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE":
     lambda:
-    (os.getenv("VLLM_ROCM_USE_AITER_MOE", "False").lower() in
+    (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
      ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE",
                                  "false").lower() in ("true", "1")),
 
