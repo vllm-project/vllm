@@ -105,10 +105,15 @@ void rms_norm_dynamic_per_token_quant_dispatch(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  const float min_scaling_factor =
-      out.dtype() == torch::kInt8
-          ? std::numeric_limits<float>::epsilon()
-          : 1.0f / (std::numeric_limits<c10::Float8_e4m3fn>::max() * 512.f);
+  float min_scaling_factor;
+  if (out.dtype() == torch::kInt8)
+    min_scaling_factor = std::numeric_limits<float>::epsilon();
+  else if (out.dtype() == c10::ScalarType::Float8_e4m3fnuz)
+    min_scaling_factor =
+        1.0f / (fp8_e4m3_adjusted_max_v<c10::Float8_e4m3fnuz> * 512.f);
+  else
+    min_scaling_factor =
+        1.0f / (fp8_e4m3_adjusted_max_v<c10::Float8_e4m3fn> * 512.f);
 
   if (residual.has_value()) {
     VLLM_DISPATCH_QUANT_TYPES(

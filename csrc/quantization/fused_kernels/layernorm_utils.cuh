@@ -13,6 +13,24 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
+template <typename T>
+struct quant_type_adjusted_max {
+  static constexpr T val() { return std::numeric_limits<T>::max(); }
+};
+
+// Using the default max value from pytorch (240.0 0x7F) will cause accuracy
+// issues when running dynamic quantization. Here use 224.0 0x7E for rocm.
+template <>
+struct quant_type_adjusted_max<c10::Float8_e4m3fnuz> {
+  static constexpr c10::Float8_e4m3fnuz val() {
+    return c10::Float8_e4m3fnuz(0x7E, c10::Float8_e4m3fnuz::from_bits());
+  }
+};
+
+template <typename T>
+MAYBE_HOST_DEVICE static constexpr T quant_type_adjusted_max_v =
+    quant_type_adjusted_max<T>::val();
+
 namespace vllm {
 
 // has_residual must be true, if residual is not a nullptr
@@ -55,7 +73,7 @@ __device__ void compute_dynamic_per_token_scales(
     scalar_t const* __restrict__ residual = nullptr) {
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
   ;
-  constexpr scalar_out_t qmax{std::numeric_limits<scalar_out_t>::max()};
+  constexpr scalar_out_t qmax{quant_type_adjusted_max_v<scalar_out_t>};
 
   float block_absmax_val_maybe = 0.0f;
   for (int32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
@@ -200,7 +218,7 @@ __device__ void compute_dynamic_per_token_scales(
         reinterpret_cast<vec4_t<scalar_t> const*>(&residual[token_offset]);
   }
 
-  constexpr scalar_out_t qmax{std::numeric_limits<scalar_out_t>::max()};
+  constexpr scalar_out_t qmax{quant_type_adjusted_max_v<scalar_out_t>};
 
   int32_t const num_vec_elems = hidden_size >> 2;
   float block_absmax_val_maybe = 0.0f;
