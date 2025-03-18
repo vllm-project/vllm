@@ -2,7 +2,6 @@
 
 import base64
 from functools import partial
-from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -127,7 +126,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         self.num_frames = num_frames
 
     def load_bytes(self, data: bytes) -> npt.NDArray:
-        decoder = VideoDecoder(BytesIO(data))
+        decoder = VideoDecoder(data)
         total_frame_num = len(decoder)
 
         num_frames = self.num_frames
