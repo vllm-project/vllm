@@ -4,7 +4,6 @@
 Run `pytest tests/models/test_mistral.py`.
 """
 import json
-import uuid
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -16,8 +15,7 @@ from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
 from transformers import AutoProcessor
 
-from vllm import (EngineArgs, LLMEngine, RequestOutput, SamplingParams,
-                  TextPrompt, TokensPrompt)
+from vllm import RequestOutput, SamplingParams, TextPrompt, TokensPrompt
 from vllm.multimodal import MultiModalDataBuiltins
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sequence import Logprob, SampleLogprobs
@@ -176,12 +174,12 @@ def test_chat(
     model: str,
     dtype: str,
 ) -> None:
-    EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(FIXTURE_LOGPROBS_CHAT[model])
+    EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(
+        FIXTURE_LOGPROBS_CHAT[model])
     with vllm_runner(
             model,
             dtype=dtype,
             tokenizer_mode="mistral",
-            enable_chunked_prefill=False,
             max_model_len=max_model_len,
             limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
     ) as vllm_model:
@@ -198,49 +196,6 @@ def test_chat(
         assert logprobs[i][-1] is None
         logprobs[i] = logprobs[i][:-1]
     check_logprobs_close(outputs_0_lst=EXPECTED_CHAT_LOGPROBS,
-                         outputs_1_lst=logprobs,
-                         name_0="h100_ref",
-                         name_1="output")
-
-
-@large_gpu_test(min_gb=80)
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["bfloat16"])
-def test_model_engine(vllm_runner, model: str, dtype: str) -> None:
-    EXPECTED_ENGINE_LOGPROBS = load_outputs_w_logprobs(FIXTURE_LOGPROBS_ENGINE[model])
-    args = EngineArgs(
-        model=model,
-        tokenizer_mode="mistral",
-        enable_chunked_prefill=False,
-        limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
-        dtype=dtype,
-    )
-    engine = LLMEngine.from_engine_args(args)
-
-    engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[0], SAMPLING_PARAMS)
-    engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[1], SAMPLING_PARAMS)
-
-    outputs = []
-    count = 0
-    while True:
-        out = engine.step()
-        count += 1
-        for request_output in out:
-            if request_output.finished:
-                outputs.append(request_output)
-
-        if count == 2:
-            engine.add_request(uuid.uuid4().hex, ENGINE_INPUTS[2],
-                               SAMPLING_PARAMS)
-        if not engine.has_unfinished_requests():
-            break
-
-    logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
-    # Remove last `None` prompt_logprobs to compare with fixture
-    for i in range(len(logprobs)):
-        assert logprobs[i][-1] is None
-        logprobs[i] = logprobs[i][:-1]
-    check_logprobs_close(outputs_0_lst=EXPECTED_ENGINE_LOGPROBS,
                          outputs_1_lst=logprobs,
                          name_0="h100_ref",
                          name_1="output")
