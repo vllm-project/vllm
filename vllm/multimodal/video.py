@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+import importlib.util
 from functools import partial
 from io import BytesIO
 from pathlib import Path
@@ -13,7 +14,7 @@ from PIL import Image
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_get_video_processor
-from vllm.utils import PlaceholderModule, is_list_of
+from vllm.utils import is_list_of
 
 from .base import MediaIO, ModalityData
 from .image import ImageMediaIO, ImagePlugin
@@ -21,11 +22,6 @@ from .inputs import MultiModalKwargs, VideoItem
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-
-try:
-    import decord
-except ImportError:
-    decord = PlaceholderModule("decord")  # type: ignore[assignment]
 
 logger = init_logger(__name__)
 
@@ -117,6 +113,73 @@ def sample_frames_from_video(frames: npt.NDArray,
     return sampled_frames
 
 
+class OpenCVVideoBackend:
+
+    def get_cv2_video_api(self):
+        import cv2.videoio_registry as vr
+
+        api_pref = None
+        for backend in vr.getStreamBufferedBackends():
+            if not vr.hasBackend(backend):
+                continue
+            if not vr.isBackendBuiltIn(backend):
+                _, abi, api = vr.getStreamBufferedBackendPluginVersion(backend)
+                if (abi < 1 or (abi == 1 and api < 2)):
+                    continue
+            api_pref = backend
+            break
+        return api_pref
+
+    @classmethod
+    def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
+        import cv2
+
+        backend = cls.get_cv2_video_api()
+        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        if not cap.isOpened():
+            raise ValueError("Could not open video file")
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frames = []
+        for i in range(total_frames):
+            ret, frame = cap.read()
+            if ret:
+                frames.append(frame)
+        cap.release()
+
+        frames = np.stack(frames)
+        frames = sample_frames_from_video(frames, num_frames)
+        if len(frames) < num_frames:
+            raise ValueError(
+                f"Could not read enough frames from video stream "
+                f"(expected {num_frames} frames, got {len(frames)})")
+        return frames
+
+
+class DecordVideoBackend:
+
+    @classmethod
+    def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
+        import decord
+
+        vr = decord.VideoReader(BytesIO(data), num_threads=1)
+        total_frame_num = len(vr)
+
+        if num_frames == -1:
+            return vr.get_batch(list(range(total_frame_num))).asnumpy()
+
+        if total_frame_num > num_frames:
+            uniform_sampled_frames = np.linspace(0,
+                                                 total_frame_num - 1,
+                                                 num_frames,
+                                                 dtype=int)
+            frame_idx = uniform_sampled_frames.tolist()
+        else:
+            frame_idx = list(range(0, total_frame_num))
+
+        return vr.get_batch(frame_idx).asnumpy()
+
+
 class VideoMediaIO(MediaIO[npt.NDArray]):
 
     def __init__(
@@ -130,21 +193,12 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         self.image_io = image_io
         self.num_frames = num_frames
 
+        decord_available = importlib.util.find_spec("decord") is not None
+        self.video_loader = (DecordVideoBackend
+                             if decord_available else OpenCVVideoBackend)
+
     def load_bytes(self, data: bytes) -> npt.NDArray:
-        vr = decord.VideoReader(BytesIO(data), num_threads=1)
-        total_frame_num = len(vr)
-
-        num_frames = self.num_frames
-        if total_frame_num > num_frames:
-            uniform_sampled_frames = np.linspace(0,
-                                                 total_frame_num - 1,
-                                                 num_frames,
-                                                 dtype=int)
-            frame_idx = uniform_sampled_frames.tolist()
-        else:
-            frame_idx = list(range(0, total_frame_num))
-
-        return vr.get_batch(frame_idx).asnumpy()
+        return self.video_loader.load_bytes(data, self.num_frames)
 
     def load_base64(self, media_type: str, data: str) -> npt.NDArray:
         if media_type.lower() == "video/jpeg":
