@@ -290,6 +290,9 @@ def expand_batch_to_tokens(
     """Expand [batch_size] tensor to [num_tokens] tensor based on the number of
     tokens per batch in cu_num_tokens.
 
+    For example, if x = [a, b, c] and cu_num_tokens = [2, 5, 6], then
+    num_tokens = 6, and expanded_x = [a, a, b, b, b, c].
+
     Args:
         x: [batch_size] tensor to expand.
         cu_num_tokens: [batch_size] tensor containing the cumulative number of
