@@ -47,9 +47,9 @@ def bgmv(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
 
 @torch.compile(fullgraph=True, dynamic=False, backend="openxla")
 def shrink_and_expand(inputs: torch.Tensor, loras_a: torch.Tensor, loras_b: torch.Tensor, idxs: torch.IntTensor):
-    return torch.ops.xla.fused_bgmv_shrink_expand(
-        inputs,
-        loras_a,
+    # TODO: Fuse kernels
+    return bgmv(
+        bgmv(inputs, loras_a, idxs),
         loras_b,
         idxs
     )

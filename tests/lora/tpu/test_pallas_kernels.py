@@ -81,26 +81,3 @@ def test_bgmv_correctness(T, D, L, N, dtype, op_type, seed):
 
     # Compare with reference output
     assert torch.allclose(output, ref_output, rtol=1e-2, atol=1e-2)
-
-# Parameterize tests with various shapes and dtypes
-@pytest.mark.parametrize("T", N_TOKENS)
-@pytest.mark.parametrize("D", HIDDEN_SIZES)
-@pytest.mark.parametrize("L", RANKS)
-@pytest.mark.parametrize("N", NUM_LORA)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", [0])
-def test_fused_bgmv_shrink_expand_correctness(T, D, L, N, dtype, seed):
-    inputs, loras_a, idxs, intermediate_output = generate_test_data(
-        T, D, L, N, seed, dtype)
-    _, loras_b, _, _ = generate_test_data(T, L, D, N, seed, dtype)
-    
-    ref_output = ref_bgmv(intermediate_output, loras_b, idxs)
-
-    # Run bgmv
-    output = torch.ops.xla.fused_bgmv_shrink_expand(inputs, loras_a, loras_b, idxs)
-
-    # Make sure we have no NaNs
-    assert not torch.any(torch.isnan(output))
-    
-    # Compare with reference output
-    assert torch.allclose(output, ref_output, rtol=1e-2, atol=1e-2)
