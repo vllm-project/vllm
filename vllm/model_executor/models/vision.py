@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import ABC, abstractmethod
-from typing import Final, Generic, Optional, Protocol, TypeVar, Union
+from typing import Final, Generic, Optional, Protocol, TypeVar, Union, cast
 
 import torch
 from transformers import PretrainedConfig
@@ -9,8 +9,11 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.attention.selector import (backend_name_to_enum,
                                      get_global_forced_attn_backend)
+from vllm.jsontree import JSONTree, json_map_leaves
 from vllm.logger import init_logger
 from vllm.platforms import _Backend, current_platform
+
+from .interfaces import MultiModalEmbeddings
 
 logger = init_logger(__name__)
 
@@ -154,14 +157,13 @@ def scatter_patch_features(
     features: torch.Tensor,
     num_embeds: torch.Tensor,
     embed_is_patch: torch.Tensor,
-    *,
-    fill_value: float = torch.nan,
 ) -> tuple[torch.Tensor, ...]:
     """
     Scatter the patch features into a contiguous tensor that corresponds
     to the embedding tokens defined by the multimodal processor.
     
-    The rest of the values in the tensor are set to `fill_value`.
+    The rest of the values in the tensor are set to NaN so that they
+    can be filtered out by :func`select_patch_features`.
 
     Args:
         features: The patch features, concatenated across each image.
@@ -176,8 +178,21 @@ def scatter_patch_features(
 
     embeds_flat = features.new_full(
         (sum(num_embeds_per_image), features.shape[-1]),
-        fill_value=fill_value,
+        fill_value=torch.nan,
     )
     embeds_flat[embed_is_patch.view(-1)] = features.flatten(0, -2)
 
     return embeds_flat.split(num_embeds_per_image)
+
+
+def select_patch_features(
+        multimodal_embeddings: MultiModalEmbeddings) -> MultiModalEmbeddings:
+    """
+    Given the outputs of :func:`scatter_patch_features`, return only
+    the values that correspond to patch features.
+    """
+    selected_features = json_map_leaves(
+        lambda x: x[~x.isnan()].view(-1, *x.shape[1:]),
+        cast(JSONTree[torch.Tensor], multimodal_embeddings),
+    )
+    return cast(MultiModalEmbeddings, selected_features)

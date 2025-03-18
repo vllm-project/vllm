@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, Set, Tuple, TypedDict, Union, cast
+from typing import Any, Literal, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 from torch import nn
@@ -10,14 +10,13 @@ from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.jsontree import JSONTree, json_map_leaves
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
+from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 # yapf: disable
@@ -38,7 +37,7 @@ from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import scatter_patch_features
+from .vision import scatter_patch_features, select_patch_features
 
 logger = init_logger(__name__)
 
@@ -670,15 +669,10 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
-            # Extract the patch tokens
-            patch_embeddings = json_map_leaves(
-                lambda x: x[~x.isnan()].view(-1, *x.shape[1:]),
-                cast(JSONTree[torch.Tensor], multimodal_embeddings),
-            )
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
-                cast(NestedTensors, patch_embeddings),
+                select_patch_features(multimodal_embeddings),
                 self.config.image_token_index,
             )
         return inputs_embeds
