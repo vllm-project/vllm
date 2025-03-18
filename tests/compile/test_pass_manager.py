@@ -29,8 +29,8 @@ callable_uuid = CallableInductorPass(simple_callable,
 def test_pass_manager(works: bool, callable):
     config = CompilationConfig().pass_config
 
-    pass_manager = PostGradPassManager()  # pass manager without arguments
-    pass_manager.configure(config)  # default passes
+    pass_manager = PostGradPassManager()
+    pass_manager.configure(config)
 
     # Try to add the callable to the pass manager
     if works:
