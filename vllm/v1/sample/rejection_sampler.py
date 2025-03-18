@@ -224,19 +224,20 @@ def compute_probs(
 ) -> torch.Tensor:
     """Compute probability distribution from logits based on sampling metadata.
 
-    This function applies temperature scaling to the logits and converts 
-    them to probabilities using softmax. For greedy decoding
+    This function applies temperature scaling to the logits and converts
+    them to probabilities using softmax. For greedy decoding, it returns
+    the original logits.
 
     Args:
-        logits: Input logits tensor to be converted to probabilities
-        cu_num_draft_tokens: Cumulative number of of draft tokens.
-        sampling_metadata: Metadata containing sampling parameters such 
-                as temperature and whether greedy sampling is used
+        logits: Input logits tensor to be converted to probabilities.
+        cu_num_draft_tokens: Cumulative number of draft tokens.
+        sampling_metadata: Metadata containing sampling parameters such as
+            temperature and whether greedy sampling is used.
 
     Returns:
-        torch.Tensor: Probability distribution (softmax of scaled logits) 
-                if non-greedy sampling is used, otherwise returns the 
-                original logits.
+        torch.Tensor: Probability distribution (softmax of scaled logits)
+            if non-greedy sampling is used, otherwise returns the
+            original logits.
     """
     assert logits.ndim == 2
     assert cu_num_draft_tokens.ndim == 1
