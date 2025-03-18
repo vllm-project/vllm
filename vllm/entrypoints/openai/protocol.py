@@ -548,7 +548,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if top_logprobs < 0:
                 raise ValueError("`top_logprobs` must be a positive value.")
 
-            if not data.get("logprobs"):
+            if top_logprobs > 0 and not data.get("logprobs"):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
