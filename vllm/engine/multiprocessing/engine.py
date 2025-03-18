@@ -29,6 +29,8 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
 # yapf: enable
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.transformers_utils.config import (
+    maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
 from vllm.worker.model_runner_base import InputProcessingError
 
@@ -42,12 +44,12 @@ class MQLLMEngine:
     """A multiprocessing wrapper for :class:`LLMEngine`.
 
     This class is used to wrap the :class:`LLMEngine` class to enable use
-    in concurrnet manner. It runs a background loop and uses zeromq to 
+    in concurrnet manner. It runs a background loop and uses zeromq to
     receive new requests and stream outputs incrementally via ipc.
-    
+
     The :class:`LLMEngine` generate or encode process is kicked off when a new
     RPCProcessRequest is received by the input_socket.
-    
+
     The self.engine_loop checks the input_socket for new requests,
     adds them to the LLMEngine if there are any, calls the internal
     :class:`LLMEngine.step()`, and sends the RequestOutputs back over
@@ -428,6 +430,9 @@ def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
                   ipc_path: str, disable_log_stats: bool,
                   disable_log_requests: bool, engine_alive):
     try:
+        # Ensure we can serialize transformer config before spawning
+        maybe_register_config_serialize_by_value()
+
         engine = MQLLMEngine.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=usage_context,

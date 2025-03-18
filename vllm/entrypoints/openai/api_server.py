@@ -82,6 +82,8 @@ from vllm.entrypoints.openai.serving_transcription import (
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import (
+    maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
                         is_valid_ipv6_address, set_ulimit)
@@ -220,6 +222,9 @@ async def build_async_engine_client_from_engine_args(
         # the current process might have CUDA context,
         # so we need to spawn a new process
         context = multiprocessing.get_context("spawn")
+
+        # Ensure we can serialize transformer config before spawning
+        maybe_register_config_serialize_by_value()
 
         # The Process can raise an exception during startup, which may
         # not actually result in an exitcode being reported. As a result
