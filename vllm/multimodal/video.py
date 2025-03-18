@@ -134,18 +134,17 @@ class OpenCVVideoBackend:
     def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
         import cv2
 
-        backend = cls.get_cv2_video_api()
+        backend = cls().get_cv2_video_api()
         cap = cv2.VideoCapture(BytesIO(data), backend, [])
         if not cap.isOpened():
             raise ValueError("Could not open video file")
 
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         frames = []
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         for i in range(total_frames):
             ret, frame = cap.read()
             if ret:
                 frames.append(frame)
-        cap.release()
 
         frames = np.stack(frames)
         frames = sample_frames_from_video(frames, num_frames)
