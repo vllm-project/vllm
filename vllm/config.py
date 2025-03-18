@@ -140,7 +140,8 @@ class ModelConfig:
             the default version.
         max_model_len: Maximum length of a sequence (including prompt and
             output). If None, will be derived from the model.
-        max_output_len: Maximum number of output tokens that can be requested in a single API call.
+        max_output_len: Maximum number of output tokens that can be requested in
+        a request.
         spec_target_max_model_len: Specify the the maximum length for spec
             decoding draft models.
         quantization: Quantization method that was used to quantize the model
