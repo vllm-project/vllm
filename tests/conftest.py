@@ -335,11 +335,18 @@ class HfRunner:
                 trust_remote_code=True,
             )
         else:
-            self.model = auto_cls.from_pretrained(
+            model = auto_cls.from_pretrained(
                 model_name,
                 trust_remote_code=True,
                 **model_kwargs,
-            ).to(self.device)
+            )
+
+            if (getattr(model, "quantization_method", None) is None
+                    and len({p.device
+                             for p in model.parameters()}) < 2):
+                model = model.to(self.device)
+
+            self.model = model
 
         if not skip_tokenizer_init:
             self.tokenizer = AutoTokenizer.from_pretrained(

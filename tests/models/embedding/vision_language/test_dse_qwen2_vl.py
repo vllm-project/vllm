@@ -4,6 +4,7 @@ from typing import Callable
 
 import pytest
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from transformers import Qwen2VLForConditionalGeneration
 
@@ -113,6 +114,8 @@ def _run_test(
     with hf_runner(model,
                    dtype=dtype,
                    auto_cls=Qwen2VLForConditionalGeneration) as hf_model:
+
+        prompts = []
         for text, image, embed_text in zip(input_texts, input_images,
                                            embed_texts):
             # dse requires non-standard input processing
@@ -121,26 +124,33 @@ def _run_test(
             prompt = apply_chat_template_and_add_eos(
                 messages, hf_model.processor.apply_chat_template)
 
-            inputs = hf_model.get_inputs(
-                prompts=[[prompt]],
-                images=[[image]],
-            )
+            prompts.append(prompt)
 
-            with torch.no_grad():
+        all_inputs = hf_model.get_inputs(
+            prompts=prompts,
+            images=input_images,
+        )
+
+        with torch.no_grad():
+            all_outputs = []
+            for inputs in all_inputs:
                 inputs = hf_model.model.prepare_inputs_for_generation(
                     **inputs,
                     cache_position=torch.arange(1),  # 1 for batch size
                     use_cache=False,
                 )
-
                 outputs = hf_model.model(
-                    **hf_model.wrap_device(inputs[0]),
+                    **hf_model.wrap_device(inputs),
                     return_dict=True,
                     output_hidden_states=True,
                 )
-                pooled_output = torch.nn.functional.normalize(
-                    outputs.hidden_states[-1][0, -1], p=2, dim=-1)
-            hf_outputs.append(pooled_output.tolist())
+                pooled_output = F.normalize(outputs.hidden_states[-1][0, -1],
+                                            p=2,
+                                            dim=-1)
+
+                all_outputs.append(pooled_output.tolist())
+
+            hf_outputs = all_outputs
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,

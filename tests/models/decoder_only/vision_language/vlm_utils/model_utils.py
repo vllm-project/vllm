@@ -501,12 +501,16 @@ def minicpmv_25_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         *args,
         input_ids=None,
         pixel_values=None,
+        image_sizes=None,
+        image_bound=None,
         tgt_sizes=None,
         **kwargs,
     ):
         model_inputs = {
             "input_ids": input_ids,
             "pixel_values": pixel_values,
+            "image_sizes": image_sizes,
+            "image_bound": image_bound,
             "tgt_sizes": tgt_sizes,
         }
         for k in list(model_inputs.keys()):
