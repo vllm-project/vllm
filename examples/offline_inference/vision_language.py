@@ -324,7 +324,6 @@ def run_llava(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model="llava-hf/llava-1.5-7b-hf",
         max_model_len=4096,
-        max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
