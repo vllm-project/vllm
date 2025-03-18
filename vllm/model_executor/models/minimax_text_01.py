@@ -45,6 +45,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import HasInnerState, IsHybrid
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from .utils import PPMissingLayer, is_pp_missing_parameter
+from vllm.model_executor.layers.utils import make_layers
 
 
 def replace_weight_name(name: str,
@@ -798,8 +799,6 @@ class MiniMaxText01Model(nn.Module):
         self.num_layers = config.num_hidden_layers
 
         self._layer_barrier = False
-        # world_size = get_tensor_model_parallel_world_size()
-        # local_size = torch.cuda.device_count()
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
@@ -809,52 +808,49 @@ class MiniMaxText01Model(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
 
-        self.layers = nn.ModuleList([])
-        linear_layer_index = 0
-
-        self.start_layer, self.end_layer = get_pp_indices(
-            config.num_hidden_layers,
-            get_pp_group().rank_in_group,
-            get_pp_group().world_size)
-        for i in range(self.start_layer):
-            self.layers.append(PPMissingLayer())
-
-        linear_layer_nums = 0
-        flash_layer_nums = 0
-        for i in range(self.start_layer, self.end_layer):
+        def layer_fn(prefix):
+            layer_idx = int(prefix.split('.')[-1])
             layer_config = config
-            layer_config.attention_type = self.decoder_attention_types[i]
-            layer_config.layer_idx = i
-            decoder_kwargs = {}
-            decoder_kwargs["quant_config"] = quant_config
-            decoder_kwargs["layer_id"] = i
-            if self.decoder_attention_types[i] == 0:
-                linear_layer_nums += 1
-            else:
-                flash_layer_nums += 1
+            layer_config.attention_type = self.decoder_attention_types[layer_idx]
+            layer_config.layer_idx = layer_idx
+            
+            decoder_kwargs = {
+                "quant_config": quant_config,
+                "layer_id": layer_idx,
+                "cache_config": cache_config
+            }
+            
             if layer_config.attention_type == 0:
-                decoder_kwargs["linear_layer_id"] = linear_layer_index
-                linear_layer_index += 1
+                decoder_kwargs["linear_layer_id"] = sum(
+                    1 for i in range(layer_idx) 
+                    if self.decoder_attention_types[i] == 0
+                )
             else:
                 decoder_kwargs["linear_layer_id"] = None
-
+                
             if hasattr(config, "num_local_experts") and isinstance(
                     config.num_local_experts, list):
-                decoder_kwargs["expert_num"] = config.num_local_experts[i]
+                decoder_kwargs["expert_num"] = config.num_local_experts[layer_idx]
             elif hasattr(config, "num_local_experts") and isinstance(
                     config.num_local_experts, int):
                 decoder_kwargs["expert_num"] = config.num_local_experts
             else:
                 decoder_kwargs["expert_num"] = 1
-            decoder_kwargs["cache_config"] = cache_config
+                
+            return MiniMaxText01DecoderLayer(
+                layer_config, **decoder_kwargs, prefix=prefix
+            )
+        
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            layer_fn,
+            prefix=f"{prefix}.layers"
+        )
 
-            self.layers.append(
-                MiniMaxText01DecoderLayer(layer_config,
-                                          **decoder_kwargs,
-                                          prefix=f"prefix.layers.{i}"))
-
+        # 计算缓存形状
+        linear_layer_nums = sum(1 for i in range(config.num_hidden_layers) 
+                               if self.decoder_attention_types[i] == 0)
         max_slots_number = scheduler_config.max_num_seqs
-        # we use the last slot for padding
         self.cache_shape = (linear_layer_nums, max_slots_number,
                             config.num_attention_heads //
                             get_tensor_model_parallel_world_size(),
@@ -864,53 +860,55 @@ class MiniMaxText01Model(nn.Module):
         del _dummy
 
         self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
-                                                 cache_shape=self.cache_shape)
+                                                cache_shape=self.cache_shape)
 
-        rope_theta = getattr(layer_config, "rope_theta", 10000)
+        rope_theta = getattr(config, "rope_theta", 10000)
         head_dim = getattr(
-            layer_config, "head_dim",
-            layer_config.hidden_size // layer_config.num_attention_heads)
-        if hasattr(layer_config, "max_model_len") and isinstance(
-                layer_config.max_model_len, int):
-            max_position_embeddings = min(layer_config.max_position_embeddings,
-                                          layer_config.max_model_len)
+            config, "head_dim",
+            config.hidden_size // config.num_attention_heads)
+        if hasattr(config, "max_model_len") and isinstance(
+                config.max_model_len, int):
+            max_position_embeddings = min(config.max_position_embeddings,
+                                          config.max_model_len)
         self.rotary_emb = MiniMaxText01RotaryEmbedding(
             head_dim,
-            rotary_dim=layer_config.rotary_dim if hasattr(
-                layer_config, "rotary_dim") else head_dim,
+            rotary_dim=config.rotary_dim if hasattr(
+                config, "rotary_dim") else head_dim,
             max_position=max_position_embeddings,
             base=int(rope_theta),
             is_neox_style=True,
-            cache_dtype=torch.float32,  # ensure float32 for cache
+            cache_dtype=torch.float32,
         )
-
-        for i in range(self.end_layer, config.num_hidden_layers):
-            self.layers.append(PPMissingLayer())
 
         norm_kwargs = {}
         if hasattr(config, "rms_norm_eps"):
             norm_kwargs["eps"] = config.rms_norm_eps
-        self.norm = RMSNorm(config.hidden_size, **norm_kwargs)
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, **norm_kwargs)
+        else:
+            self.norm = PPMissingLayer()
         self.embed_scale = 1.0
         return
 
     def _clear_prefill_cache(self, attn_metadata,
                              minimax_cache_tensors: torch.Tensor, **kwargs):
-        """
-        clear the minimax cache before new prefill requests computing
-        """
         seq_to_slot_maps = {}
         seq_id_map = sum(list(kwargs["request_ids_to_seq_ids"].values()), [])
         for _, seq_to_slot_map in (
                 self.minimax_cache.cache_indices_mapping.items()):
             seq_to_slot_maps.update(seq_to_slot_map)
+        
+        slots_to_clear = []
         for _prefill_id in range(attn_metadata.num_prefills):
             seq_id = seq_id_map[_prefill_id]
-            # no computed context means this is a new prefill request
-            if attn_metadata.context_lens_tensor[
-                    _prefill_id] == 0 and seq_id in seq_to_slot_maps:
-                cache_slot_id = seq_to_slot_maps[seq_id]
-                minimax_cache_tensors[:, cache_slot_id, ...].zero_()
+            if attn_metadata.context_lens_tensor[_prefill_id] == 0 and seq_id in seq_to_slot_maps:
+                slots_to_clear.append(seq_to_slot_maps[seq_id])
+        
+        if slots_to_clear:
+            slots_tensor = torch.tensor(slots_to_clear, 
+                                       device=minimax_cache_tensors.device, 
+                                       dtype=torch.long)
+            minimax_cache_tensors[:, slots_tensor, ...] = 0
 
     def forward(self,
                 input_ids: Optional[torch.Tensor],
@@ -1192,14 +1190,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
         def load_linear_attn_weight(name: str, loaded_weight: torch.Tensor,
                                     self) -> None:
-            # linear_mha_params_mapping = [
-            #     ("qkv_proj", "qkv_proj", 0),
-            #     ("output_gate", "output_gate", 0),
-            #     (
-            #         "out_proj", "out_proj", 1
-            #     ),
-            # # shard no use, cause out-proj and output-gate are not fuse.
-            # ]
             if is_pp_missing_parameter(name, self):
                 return
             param = params_dict[name]
@@ -1275,7 +1265,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         for name, loaded_weight in weights:
             weight_at_layer = which_layer(name)
             if weight_at_layer and weight_at_layer >= len(
-                    self.config.attn_type_list):  ### debug_use
+                    self.config.attn_type_list):
                 continue
 
             if is_layer_norm_weight(name):
