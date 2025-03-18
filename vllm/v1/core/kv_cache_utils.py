@@ -484,7 +484,7 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
             f"`max_model_len` when initializing the engine.")
 
 
-def create_kv_cache_group_spec(
+def create_kv_cache_group_specs(
         kv_cache_spec: dict[str, KVCacheSpec],
         grouped_layer_names: list[list[str]]) -> list[KVCacheGroupSpec]:
     """
@@ -580,8 +580,8 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
             layer_name: KVCacheTensor(size=per_layer_size)
             for layer_name in kv_cache_spec
         },
-        kv_cache_groups=create_kv_cache_group_spec(kv_cache_spec,
-                                                   grouped_layer_names),
+        kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
+                                                    grouped_layer_names),
     )
     return kv_cache_config
 
