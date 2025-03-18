@@ -193,6 +193,10 @@ def test_chat(
             outputs.extend(output)
 
     logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
+    # Remove last `None` prompt_logprobs to compare with fixture
+    for i in range(len(logprobs)):
+        assert logprobs[i][-1] is None
+        logprobs[i] = logprobs[i][:-1]
     check_logprobs_close(outputs_0_lst=EXPECTED_CHAT_LOGPROBS,
                          outputs_1_lst=logprobs,
                          name_0="h100_ref",
@@ -232,6 +236,10 @@ def test_model_engine(vllm_runner, model: str, dtype: str) -> None:
             break
 
     logprobs = vllm_runner._final_steps_generate_w_logprobs(outputs)
+    # Remove last `None` prompt_logprobs to compare with fixture
+    for i in range(len(logprobs)):
+        assert logprobs[i][-1] is None
+        logprobs[i] = logprobs[i][:-1]
     check_logprobs_close(outputs_0_lst=EXPECTED_ENGINE_LOGPROBS,
                          outputs_1_lst=logprobs,
                          name_0="h100_ref",
@@ -242,11 +250,11 @@ def test_model_engine(vllm_runner, model: str, dtype: str) -> None:
 @pytest.mark.parametrize(
     "prompt,expected_ranges",
     [(_create_engine_inputs_hf(IMG_URLS[:1]), [{
-        "offset": 10,
+        "offset": 11,
         "length": 494
     }]),
      (_create_engine_inputs_hf(IMG_URLS[1:4]), [{
-         "offset": 10,
+         "offset": 11,
          "length": 266
      }, {
          "offset": 276,
