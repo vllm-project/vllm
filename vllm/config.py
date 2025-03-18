@@ -904,6 +904,7 @@ class ModelConfig:
         else:
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_hidden_layers", 0)
+        # the layout order is: DP x PP x TP
         pp_rank = (parallel_config.rank // parallel_config.tensor_parallel_size
                    ) % parallel_config.pipeline_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
