@@ -7,8 +7,8 @@ from typing import Any, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheSpec,
-                                        KVCacheTensor, ManagerKVLayer)
+from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheGroupSpec,
+                                        KVCacheSpec, KVCacheTensor)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -484,34 +484,35 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
             f"`max_model_len` when initializing the engine.")
 
 
-def create_virtual_layer(
+def create_kv_cache_group_spec(
         kv_cache_spec: dict[str, KVCacheSpec],
-        virtual_layer_map: list[list[str]]) -> list[ManagerKVLayer]:
+        grouped_layer_names: list[list[str]]) -> list[KVCacheGroupSpec]:
     """
-     Create ManagerKVLayer object for each virtual layer.
-     The layers represented by the same virtual layer should share the same 
+     Create KVCacheGroupSpec object for each kv cache group layer.
+     The layers in the same group should share the same 
      KVCacheSpec.
 
      Args:
          kv_cache_spec:
              A mapping from each layer name to its corresponding KVCacheSpec.
-         virtual_layer_map:
-             A list of virtual layers, where each element is a list of layer 
-             names that represented by the same virtual layer and should share 
-             the same KVCacheSpec.
+         grouped_layer_names:
+             A list of kv cache groups, where each element is a list of layer 
+             names that belong to the same group and should share the same 
+             KVCacheSpec.
      Returns:
-         A list of ManagerKVLayer objects, one for each virtual layer.
+         A list of KVCacheGroupSpec objects, one for each group.
      """
-    manager_layers = []
-    for layer_names in virtual_layer_map:
-        layer_spec = kv_cache_spec[layer_names[0]]
+    kv_cache_groups = []
+    for layer_names_one_group in grouped_layer_names:
+        layer_spec = kv_cache_spec[layer_names_one_group[0]]
         assert all(
             kv_cache_spec[layer_name] == layer_spec
-            for layer_name in layer_names[1:]
-        ), ("All layers represented by one virtual layer must share the same "
-            "KVCacheSpec.")
-        manager_layers.append(ManagerKVLayer(layer_names, layer_spec))
-    return manager_layers
+            for layer_name in layer_names_one_group[1:]), (
+                "All layers in the same KV cache group must share the same "
+                "KVCacheSpec.")
+        kv_cache_groups.append(
+            KVCacheGroupSpec(layer_names_one_group, layer_spec))
+    return kv_cache_groups
 
 
 def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
@@ -569,8 +570,9 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
                 max_model_len_str, max_concurrency)
 
     per_layer_size = page_size * num_blocks
-    # All layers can be represented by the same virtual layer.
-    virtual_layer_map = [list(kv_cache_spec.keys())]
+    # All layers have the same KV cache spec, so we create one kv cache group
+    # for all layers.
+    grouped_layer_names = [list(kv_cache_spec.keys())]
 
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -578,7 +580,8 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
             layer_name: KVCacheTensor(size=per_layer_size)
             for layer_name in kv_cache_spec
         },
-        manager_layers=create_virtual_layer(kv_cache_spec, virtual_layer_map),
+        kv_cache_groups=create_kv_cache_group_spec(kv_cache_spec,
+                                                   grouped_layer_names),
     )
     return kv_cache_config
 
@@ -609,11 +612,11 @@ def get_kv_cache_config(vllm_config: VllmConfig,
     raise NotImplementedError
 
 
-def make_kv_cache_configs_consistent(kv_cache_configs: list[KVCacheConfig]):
+def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
     """
     Make the KV cache configurations for each worker consistent, so that all 
     workers can be controlled by the same KVCacheManager.
-    This function verifies that the virtual layers of each worker are the same,
+    This function verifies that the layer group of each worker are the same,
     and changes the num_blocks of each worker to the smallest among all workers.
     
     Args:
@@ -621,25 +624,25 @@ def make_kv_cache_configs_consistent(kv_cache_configs: list[KVCacheConfig]):
             in-place modified to make them consistent.
     """
 
-    # Sort the virtual layers by the type_id of the KV cache spec.
-    # This can avoid the inconsistency caused by the order of virtual layers.
+    # Sort the kv cache groups by the type_id of their KV cache spec.
+    # This can avoid the inconsistency caused by the order of groups.
     for kv_cache_config in kv_cache_configs:
-        kv_cache_config.manager_layers.sort(
+        kv_cache_config.kv_cache_groups.sort(
             key=lambda x: x.kv_cache_spec.type_id)
 
-    # Verify that the virtual layers of each rank are the same.
+    # Verify that the groups of each rank are the same.
     for kv_cache_config in kv_cache_configs[1:]:
-        for virtual_layer1, virtual_layer2 in zip(
-                kv_cache_configs[0].manager_layers,
-                kv_cache_config.manager_layers):
-            assert virtual_layer1.kv_cache_spec == virtual_layer2.kv_cache_spec
+        for group_rank_0, group_rank_i in zip(
+                kv_cache_configs[0].kv_cache_groups,
+                kv_cache_config.kv_cache_groups):
+            assert group_rank_0.kv_cache_spec == group_rank_i.kv_cache_spec
 
     # Change the num_blocks of each rank to the smallest among all ranks. We
     # do not need to shrink the tensor size because it is valid to only use the
     # first `num_blocks` blocks of the tensor.
-    num_blocks = min(kv_cache_config.num_blocks
-                     for kv_cache_config in kv_cache_configs)
+    min_num_blocks = min(kv_cache_config.num_blocks
+                         for kv_cache_config in kv_cache_configs)
     for kv_cache_config in kv_cache_configs:
-        kv_cache_config.num_blocks = num_blocks
+        kv_cache_config.num_blocks = min_num_blocks
 
     return kv_cache_configs

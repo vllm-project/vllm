@@ -21,7 +21,7 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import get_exception_traceback, zmq_socket_ctx
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
-                                         make_kv_cache_configs_consistent)
+                                         unify_kv_cache_configs)
 from vllm.v1.core.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
@@ -103,6 +103,7 @@ class EngineCore:
         # memory can be allocated for kv cache.
         available_gpu_memory = self.model_executor.determine_available_memory()
 
+        assert len(kv_cache_specs) == len(available_gpu_memory)
         # Get the kv cache tensor size
         kv_cache_configs = [
             get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
@@ -114,10 +115,14 @@ class EngineCore:
         # Since we use a shared centralized controller, we need the
         # `kv_cache_config` to be consistent across all workers to make sure
         # all the memory operators can be applied to all workers.
-        make_kv_cache_configs_consistent(kv_cache_configs)
+        unify_kv_cache_configs(kv_cache_configs)
 
         # All workers have the same kv_cache_config except layer names, so use
         # an arbitrary one to get the number of blocks.
+        assert all([
+            cfg.num_blocks == kv_cache_configs[0].num_blocks
+            for cfg in kv_cache_configs
+        ])
         num_gpu_blocks = kv_cache_configs[0].num_blocks
         num_cpu_blocks = 0
 

@@ -10,9 +10,9 @@ from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens,
-                                         make_kv_cache_configs_consistent)
+                                         unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheTensor, VirtualLayer)
+                                        KVCacheGroupSpec, KVCacheTensor)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -320,7 +320,7 @@ def test_metrics():
     assert not metrics.query_queue
 
 
-def test_make_kv_cache_configs_consistent():
+def test_unify_kv_cache_configs():
 
     def new_kv_cache_spec(block_size=16,
                           num_kv_heads=2,
@@ -338,9 +338,10 @@ def test_make_kv_cache_configs_consistent():
                 "layer1": KVCacheTensor(100),
                 "layer2": KVCacheTensor(100),
             },
-            virtual_layers=[
-                VirtualLayer(["layer1"], new_kv_cache_spec()),
-                VirtualLayer(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+                KVCacheGroupSpec(["layer2"],
+                                 new_kv_cache_spec(num_kv_heads=4)),
             ],
         ),
         KVCacheConfig(
@@ -349,13 +350,14 @@ def test_make_kv_cache_configs_consistent():
                 "layer1": KVCacheTensor(100),
                 "layer2": KVCacheTensor(100),
             },
-            virtual_layers=[
-                VirtualLayer(["layer1"], new_kv_cache_spec()),
-                VirtualLayer(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+                KVCacheGroupSpec(["layer2"],
+                                 new_kv_cache_spec(num_kv_heads=4)),
             ],
         ),
     ]
-    make_kv_cache_configs_consistent(same_kv_cache_config)
+    unify_kv_cache_configs(same_kv_cache_config)
     assert same_kv_cache_config[0].num_blocks == 10
     assert same_kv_cache_config[1].num_blocks == 10
 
@@ -366,9 +368,10 @@ def test_make_kv_cache_configs_consistent():
                 "layer1": KVCacheTensor(100),
                 "layer2": KVCacheTensor(100),
             },
-            virtual_layers=[
-                VirtualLayer(["layer1"], new_kv_cache_spec()),
-                VirtualLayer(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+                KVCacheGroupSpec(["layer2"],
+                                 new_kv_cache_spec(num_kv_heads=4)),
             ],
         ),
         KVCacheConfig(
@@ -377,14 +380,15 @@ def test_make_kv_cache_configs_consistent():
                 "layer1": KVCacheTensor(100),
                 "layer2": KVCacheTensor(100),
             },
-            virtual_layers=[
-                VirtualLayer(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
-                VirtualLayer(["layer1"], new_kv_cache_spec()),
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer2"],
+                                 new_kv_cache_spec(num_kv_heads=4)),
+                KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
             ],
         ),
     ]
 
-    make_kv_cache_configs_consistent(need_sort_kv_cache_config)
+    unify_kv_cache_configs(need_sort_kv_cache_config)
     assert need_sort_kv_cache_config[0].num_blocks == 10
     assert need_sort_kv_cache_config[1].num_blocks == 10
 
@@ -395,9 +399,10 @@ def test_make_kv_cache_configs_consistent():
                 "layer1": KVCacheTensor(100),
                 "layer2": KVCacheTensor(100),
             },
-            virtual_layers=[
-                VirtualLayer(["layer1"], new_kv_cache_spec()),
-                VirtualLayer(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+                KVCacheGroupSpec(["layer2"],
+                                 new_kv_cache_spec(num_kv_heads=4)),
             ],
         ),
         KVCacheConfig(
@@ -406,11 +411,12 @@ def test_make_kv_cache_configs_consistent():
                 "layer1": KVCacheTensor(100),
                 "layer2": KVCacheTensor(100),
             },
-            virtual_layers=[
-                VirtualLayer(["layer1"], new_kv_cache_spec()),
-                VirtualLayer(["layer2"], new_kv_cache_spec(num_kv_heads=8)),
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+                KVCacheGroupSpec(["layer2"],
+                                 new_kv_cache_spec(num_kv_heads=8)),
             ],
         ),
     ]
     with pytest.raises(AssertionError):
-        make_kv_cache_configs_consistent(diff_kv_cache_config)
+        unify_kv_cache_configs(diff_kv_cache_config)
