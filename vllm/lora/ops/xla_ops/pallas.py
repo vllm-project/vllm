@@ -17,13 +17,13 @@ def _bgmv_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref, lora_re
         acc_ref[...] = jnp.zeros_like(acc_ref[...], dtype=jnp.float32)
 
     t = pl.program_id(0)
-    
+
     for i in range(max_num_loras):
         mask_ref[...] = jnp.zeros_like(mask_ref[...], dtype=jnp.float32)
         valid = False
         for j in range(bT):
             valid |= idx_ref[j + bT * t] == i
-            
+
             @pl.when(idx_ref[j + bT * t] == i)
             def _():
                 mask_ref[j, :] = jnp.ones((bL, ), dtype=jnp.float32)
@@ -99,14 +99,17 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
 
     jax_import_guard()
 
-    TOKEN_BLOCK=16
+    TOKEN_BLOCK = 16
     if L > D: # Expand
-        LORA_BLOCK=1024
-        DIM_BLOCK=256
+        LORA_BLOCK = 1024
+        DIM_BLOCK = 256
     else: # Shrink
-        LORA_BLOCK=256
-        DIM_BLOCK=1024
+        LORA_BLOCK = 256
+        DIM_BLOCK = 1024
 
+    TOKEN_BLOCK = min(max(TOKEN_BLOCK, pl.next_power_of_2(T)), 128)
+    LORA_BLOCK = max(LORA_BLOCK, pl.next_power_of_2(L))
+    DIM_BLOCK = max(DIM_BLOCK, pl.next_power_of_2(D))
 
     kernel = make_kernel_from_pallas(
         functools.partial(
