@@ -1471,6 +1471,7 @@ class EngineArgs:
         # Need at least Ampere for now (FA support required).
         from vllm.platforms import current_platform
         if (current_platform.is_cuda()
+                and current_platform.get_device_capability()
                 and current_platform.get_device_capability().major < 8):
             _raise_or_fallback(feature_name="Compute Capability < 8.0",
                                recommend_to_remove=False)
