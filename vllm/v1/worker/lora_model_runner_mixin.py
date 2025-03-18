@@ -62,9 +62,10 @@ class LoRAModelRunnerMixin:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
 
-        # Set is_prefill to True, so we always use the SGMV kernels.
-        # For cuda platforms, we have specialized triton kernels, and
-        # the cuda path ignores `is_prefill`.
+        # Set is_prefill to True, so we always use the SGMV kernels on
+        # non-cuda platforms.
+        # On cuda platforms we use the same kernels for prefill and
+        # decode and this flag is generally ignored.
         lora_mapping = LoRAMapping(token_lora_mapping,
                                    prompt_lora_mapping,
                                    is_prefill=True)
