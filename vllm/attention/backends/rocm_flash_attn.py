@@ -22,8 +22,6 @@ from vllm.platforms import current_platform
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
-USE_AITER_PAGED_ATTN = envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
-
 logger = init_logger(__name__)
 
 _PARTITION_SIZE_ROCM = 256
@@ -32,7 +30,7 @@ _ON_NAVI = "gfx1" in _GPU_ARCH
 _ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
 
-class AttentionOps:
+class PagedAttentionOps:
     """
     Initializes the appropriate PagedAttention module from `attention/ops`, 
     which is a component of the attention mechanism used 
@@ -45,14 +43,14 @@ class AttentionOps:
     """
 
     def __init__(self):
-        if USE_AITER_PAGED_ATTN:
-            self._attn_module = AITERPagedAttention()
+        if envs.VLLM_ROCM_USE_AITER_PAGED_ATTN:
+            self._paged_attn_module = AITERPagedAttention()
         else:
-            self._attn_module = PagedAttention()
+            self._paged_attn_module = PagedAttention()
 
     @property
-    def attn_module(self) -> PagedAttention:
-        return self._attn_module
+    def paged_attn_module(self) -> PagedAttention:
+        return self._paged_attn_module
 
 
 class ROCmFlashAttentionBackend(AttentionBackend):
@@ -566,8 +564,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 self.attn_func = _sdpa_attention
                 logger.debug("Using naive (SDPA) attention in ROCmBackend")
 
-            self.attn_module = AttentionOps().attn_module
-            self.aiter_kv_scales_initialized = False
+        self.paged_attn_module = PagedAttentionOps().paged_attn_module
+        self.aiter_kv_scales_initialized = False
 
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
         """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
@@ -645,13 +643,15 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         else:
             assert value is None
 
-        attn_module = self.attn_module
+        paged_attn = self.paged_attn_module
+
         # Reshaping kv tensors is required for AITER paged attention kernel
         # because it works on a different tensor shape,
         # when the size of one element is one byte (int8/fp8 dtypes).
         # This reshaping is only required on the first forward call
         # and the kv cache must not be empty.
-        if (USE_AITER_PAGED_ATTN and kv_cache.dtype.itemsize == 1
+        if (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
+                and kv_cache.dtype.itemsize == 1
                 and not self.aiter_kv_scales_initialized
                 and kv_cache.shape != torch.Size([0])):
             num_blocks = kv_cache.shape[1]
@@ -682,7 +682,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 # cache. If kv_cache is not provided, the new key and value
                 # tensors are not cached. This happens during the initial
                 # memory profiling run.
-                attn_module.write_to_paged_cache(
+                paged_attn.write_to_paged_cache(
                     key,
                     value,
                     key_cache,
@@ -818,8 +818,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 # prefix-enabled attention -
                 # not applicable for encoder-only models
                 if self.attn_type != AttentionType.ENCODER_ONLY:
-                    attn_module = attn_module
-                    output[:num_prefill_tokens] = attn_module.forward_prefix(
+                    output[:num_prefill_tokens] = paged_attn.forward_prefix(
                         query,
                         key,
                         value,
@@ -894,7 +893,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     layer._v_scale,
                 )
             else:
-                output[num_prefill_tokens:] = attn_module.forward_decode(
+                output[num_prefill_tokens:] = paged_attn.forward_decode(
                     decode_query,
                     key_cache,
                     value_cache,
@@ -963,4 +962,4 @@ def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
-            and not USE_AITER_PAGED_ATTN)
+            and not envs.VLLM_ROCM_USE_AITER_PAGED_ATTN)
