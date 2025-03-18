@@ -42,6 +42,7 @@ logger = init_logger(__name__)
 # FIXME(woosuk): Find a more reliable way to prevent possible bugs.
 _PAD_SLOT_ID = 1_000_000_000
 INVALID_TOKEN_ID = -1
+NUM_SLOT_INFO = 3
 
 
 class TPUModelRunner:
@@ -132,11 +133,12 @@ class TPUModelRunner:
                                          dtype=torch.int32,
                                          device="cpu")
         self.positions_np = self.positions_cpu.numpy()
-
-        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
-                                            dtype=torch.int64,
-                                            device="cpu")
-        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
+        
+        self.slot_slices_cpu = torch.full((self.max_num_tokens, NUM_SLOT_INFO),
+                                          -1,
+                                          dtype=torch.int64,
+                                          device="cpu")
+        self.slot_slices_np = self.slot_mapping_cpu.numpy()
 
         self.block_table_cpu = torch.zeros(
             (self.max_num_tokens, self.max_num_blocks_per_req),
@@ -393,9 +395,9 @@ class TPUModelRunner:
         block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
         block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
         block_offsets = positions_np % self.block_size
-        np.add(block_numbers * self.block_size,
-               block_offsets,
-               out=self.slot_mapping_np[:total_num_scheduled_tokens])
+        slot_slices = _get_slot_slices(block_numbers, block_offsets)
+        self.slot_slices_cpu[:num_slot_slices] = slot_slices
+
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -419,10 +421,9 @@ class TPUModelRunner:
         self.position_ids = self.positions_cpu[:
                                                padded_total_num_scheduled_tokens].to(
                                                    self.device)
-        self.slot_mapping_cpu[total_num_scheduled_tokens:] = _PAD_SLOT_ID
-        slot_mapping = self.slot_mapping_cpu[:
-                                             padded_total_num_scheduled_tokens].to(
-                                                 self.device)
+        # TODO(xw32): create a num_slot_slices
+        num_slot_slices = slot_slices.shape[0]
+        slot_slices = self.slot_slices_cpu[:padded_total_num_scheduled_tokens].to(self.device)
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
@@ -431,15 +432,14 @@ class TPUModelRunner:
             self.device)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
 
-        print(f'xw32 line431 {slot_mapping=}')
         attn_metadata = PallasMetadata(
-            slot_mapping=slot_mapping,
             block_tables=block_tables,
             context_lens=seq_lens,
             query_start_loc=query_start_loc,
             num_seqs=torch.tensor([num_reqs],
                                   dtype=torch.int32,
                                   device=self.device),
+            slot_slices=slot_slices,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -696,9 +696,6 @@ class TPUModelRunner:
         position_ids = torch.zeros(num_tokens,
                                    dtype=torch.int32,
                                    device=self.device)
-        slot_mapping = torch.zeros(num_tokens,
-                                   dtype=torch.int64,
-                                   device=self.device)
         block_tables = torch.zeros(
             (self.max_num_reqs, self.block_table_cpu.shape[1]),
             dtype=torch.int32,
@@ -714,12 +711,16 @@ class TPUModelRunner:
         num_seqs = torch.tensor([actual_num_reqs],
                                 dtype=torch.int32,
                                 device=self.device)
+        num_slot_info = 3
+        slot_slices = torch.zeros((num_tokens, num_slot_info),
+                                   dtype=torch.int64,
+                                   device=self.device)
         attn_metadata = PallasMetadata(
-            slot_mapping=slot_mapping,
             block_tables=block_tables,
             context_lens=context_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
+            slot_slices=slot_slices
         )
 
         if self.is_multimodal_model:
@@ -727,7 +728,7 @@ class TPUModelRunner:
         else:
             torch._dynamo.mark_dynamic(input_ids, 0)
         torch._dynamo.mark_dynamic(position_ids, 0)
-        torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
+        torch._dynamo.mark_dynamic(attn_metadata.slot_slices, 0)
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
@@ -879,3 +880,12 @@ def _get_padded_token_len(x: int) -> int:
 def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
     res = 64 if x <= 64 else 1 << (x - 1).bit_length()
     return min(res, upper_limit)
+
+def _get_slot_slices(block_numbers, block_offsets, num_scheduled_tokens_per_req, page_size):
+    res = []
+    for num_scheduled_tokens in num_scheduled_tokens_per_req:
+        num_pages = cdiv(num_scheduled_tokens, page_size)
+        for i in range(num_pages):
+
+
+

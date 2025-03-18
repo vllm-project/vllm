@@ -63,11 +63,12 @@ class PallasMetadata:
     #                                   |-- query_len ---|
 
     # Used in the PallasAttentionBackendImpl
-    slot_mapping: torch.Tensor
+    # slot_mapping: torch.Tensor
     block_tables: torch.Tensor
     context_lens: torch.Tensor
     query_start_loc: torch.Tensor
     num_seqs: int
+    slot_slices: torch.Tensor | None
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
