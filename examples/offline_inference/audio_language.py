@@ -93,7 +93,6 @@ def run_phi4mm(question: str, audio_count: int) -> ModelRequestData:
         max_num_seqs=2,
         enable_lora=True,
         max_lora_rank=320,
-        lora_extra_vocab_size=0,
         limit_mm_per_prompt={"audio": audio_count},
     )
 
