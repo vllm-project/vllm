@@ -202,6 +202,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 seq_len = min(seq_data.get_len(), context_len + seq_group_metadata.token_chunk_size)
 
                 if is_prompt:
+                    if context_len == seq_len and self.cache_config.enable_prefix_caching:
+                        context_len = 0
                     tokens = seq_data.get_token_ids()[context_len: seq_len]
                 else:
                     # Last token
@@ -212,6 +214,8 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                     # For chunked prefill, the block tables may not be None
                     if seq_group_metadata.block_tables is not None:
                         block_table = seq_group_metadata.block_tables[seq_id]
+                        if context_len == 0:
+                            block_table = []
                     else:
                         block_table = []
                 else:
