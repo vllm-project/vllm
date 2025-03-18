@@ -139,7 +139,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         else:
             frame_idx = list(range(0, total_frame_num))
 
-        return decoder.get_frames_at(frame_idx).data
+        return decoder.get_frames_at(frame_idx).data.numpy()
 
     def load_base64(self, media_type: str, data: str) -> npt.NDArray:
         if media_type.lower() == "video/jpeg":
