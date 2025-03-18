@@ -6,6 +6,7 @@ Run `pytest tests/models/test_mistral.py`.
 import json
 import os
 from dataclasses import asdict
+from functools import wraps
 from typing import TYPE_CHECKING, Any, Optional
 
 import pytest
@@ -166,6 +167,7 @@ def set_env_var(key: str, value: str):
 
     def decorator(func):
 
+        @wraps(func)
         def wrapper(*args, **kwargs):
             original_value = os.environ.get(key)
             os.environ[key] = value
