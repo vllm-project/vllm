@@ -783,8 +783,12 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             use_int8_w8a16=use_int8_w8a16,
             **config,
         )
-
     else:
+        config = config.copy()
+        BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
+        if block_shape is not None:
+            BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0],
+                                                 block_shape[1]))
         fused_moe_kernel[grid](
             A,
             B,
@@ -823,6 +827,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
             compute_type=compute_type,
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
+            BLOCK_SIZE_K=BLOCK_SIZE_K,
             **config,
         )
 
