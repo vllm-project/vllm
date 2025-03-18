@@ -108,7 +108,6 @@ class TeleFLMAttention(nn.Module):
             cache_config: Optional[CacheConfig] = None,
             prefix: str = "") -> None:
         super().__init__()
-        layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
