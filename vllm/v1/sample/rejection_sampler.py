@@ -256,23 +256,21 @@ def compute_probs(
     # TODO(woosuk): Consider using in-place op to reduce memory usage.
     logits = logits / temperature.unsqueeze(-1)
 
-    # Get expanded top_p and top_k tensors.
-    if sampling_metadata.top_p is not None:
-        top_p = expand_batch_to_tokens(
-            sampling_metadata.top_p,
-            cu_num_draft_tokens,
-            num_tokens,
-        )
-    else:
-        top_p = None
+    # Get expanded top_k and top_p tensors.
+    top_k = None
     if sampling_metadata.top_k is not None:
         top_k = expand_batch_to_tokens(
             sampling_metadata.top_k,
             cu_num_draft_tokens,
             num_tokens,
         )
-    else:
-        top_k = None
+    top_p = None
+    if sampling_metadata.top_p is not None:
+        top_p = expand_batch_to_tokens(
+            sampling_metadata.top_p,
+            cu_num_draft_tokens,
+            num_tokens,
+        )
 
     # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
     # which is slow for large vocab sizes. This may cause performance issues.
