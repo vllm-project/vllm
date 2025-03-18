@@ -821,6 +821,11 @@ class ModelConfig:
                 if qk_rope_head_dim and qk_nope_head_dim:
                     return qk_rope_head_dim + qk_nope_head_dim
 
+        if hasattr(self.hf_text_config,
+                   "model_type") and (self.hf_text_config.model_type
+                                      == "zamba2"):
+            return self.hf_text_config.attention_head_dim
+
         if self.is_attention_free:
             return 0
 
@@ -943,6 +948,15 @@ class ModelConfig:
                                  "layers_block_type in the hf_config, "
                                  "cannot determine the num of "
                                  f"{block_type.value} layers")
+
+            if hasattr(self.hf_text_config,
+                       "model_type") and (self.hf_text_config.model_type
+                                          == "zamba2"):
+                if attn_block_type:
+                    return sum(t == "hybrid"
+                               for t in layers_block_type_value[start:end])
+                else:
+                    return self.get_num_layers(parallel_config)
 
             return sum(t == block_type.value
                        for t in layers_block_type_value[start:end])
