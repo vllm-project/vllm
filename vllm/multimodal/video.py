@@ -9,11 +9,12 @@ from typing import TYPE_CHECKING, Any, Optional
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
+from torchcodec.decoders import VideoDecoder
 
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_get_video_processor
-from vllm.utils import PlaceholderModule, is_list_of
+from vllm.utils import is_list_of
 
 from .base import MediaIO, ModalityData
 from .image import ImageMediaIO, ImagePlugin
@@ -21,11 +22,6 @@ from .inputs import MultiModalKwargs, VideoItem
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-
-try:
-    import decord
-except ImportError:
-    decord = PlaceholderModule("decord")  # type: ignore[assignment]
 
 logger = init_logger(__name__)
 
@@ -131,8 +127,8 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         self.num_frames = num_frames
 
     def load_bytes(self, data: bytes) -> npt.NDArray:
-        vr = decord.VideoReader(BytesIO(data), num_threads=1)
-        total_frame_num = len(vr)
+        decoder = VideoDecoder(BytesIO(data))
+        total_frame_num = len(decoder)
 
         num_frames = self.num_frames
         if total_frame_num > num_frames:
@@ -144,7 +140,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         else:
             frame_idx = list(range(0, total_frame_num))
 
-        return vr.get_batch(frame_idx).asnumpy()
+        return decoder.get_frames_at(frame_idx).data
 
     def load_base64(self, media_type: str, data: str) -> npt.NDArray:
         if media_type.lower() == "video/jpeg":
