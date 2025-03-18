@@ -183,7 +183,7 @@ class EngineCore:
         # This case may occur when the only unfinished requests are
         # structured output requests where the grammar has not finished
         # compiling yet, so there's nothing to run.
-        if scheduler_output.total_num_scheduled_tokens == 0:
+        if scheduler_output.total_num_scheduled_tokens == 0 and len(scheduler_output.finished_req_ids) == 0:
             return EngineCoreOutputs(
                 outputs=[],
                 scheduler_stats=self.scheduler.make_stats(),
