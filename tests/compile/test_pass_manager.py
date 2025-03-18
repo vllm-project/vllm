@@ -4,7 +4,6 @@ import pickle
 
 import pytest
 import torch
-from torch._inductor.codecache import BypassFxGraphCache
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.compilation.pass_manager import PostGradPassManager
@@ -15,15 +14,15 @@ def simple_callable(graph: torch.fx.Graph):
     pass
 
 
-callable_decorated = CallableInductorPass(simple_callable,
-                                          InductorPass.hash_source(__file__))
+callable_uuid = CallableInductorPass(simple_callable,
+                                     InductorPass.hash_source(__file__))
 
 
 @pytest.mark.parametrize(
     "works, callable",
     [
         (False, simple_callable),
-        (True, callable_decorated),
+        (True, callable_uuid),
         (True, CallableInductorPass(simple_callable)),
     ],
 )
