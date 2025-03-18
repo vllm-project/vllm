@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import re
+import sys
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import (Callable, Generator, ItemsView, Iterable, Mapping,
@@ -11,14 +11,17 @@ from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
+import torch
+from cachetools import LRUCache
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
 from vllm.inputs import InputProcessingContext
+from vllm.jsontree import json_map_leaves, json_reduce_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
-from vllm.utils import LRUCache, flatten_2d_lists, full_groupby
+from vllm.utils import GiB_bytes, flatten_2d_lists, full_groupby
 
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -74,7 +77,9 @@ class PromptIndexTargets:
             else:
                 if isinstance(prefix, str):
                     # Make both `list[int]`
-                    prefix = encode_tokens(tokenizer, prefix)
+                    prefix = encode_tokens(tokenizer,
+                                           prefix,
+                                           add_special_tokens=False)
 
             match_idx = len(prefix)
             return match_idx if prompt[:match_idx] == prefix else None
@@ -315,7 +320,7 @@ def _cached_encode(
     tokenizer: AnyTokenizer,
     text: str,
     *,
-    add_special_tokens: bool = False,
+    add_special_tokens: Optional[bool] = None,
 ) -> list[int]:
     return encode_tokens(tokenizer,
                          text,
@@ -327,7 +332,7 @@ def _cached_decode(
     tokenizer: AnyTokenizer,
     token_ids: tuple[int, ...],
     *,
-    skip_special_tokens: bool = False,
+    skip_special_tokens: Optional[bool] = None,
 ) -> str:
     return decode_tokens(tokenizer,
                          list(token_ids),
@@ -392,7 +397,9 @@ class _BoundPromptSequence:
     def token_ids(self) -> list[int]:
         if self._token_ids is None:
             assert self._text is not None
-            self._token_ids = _cached_encode(self.tokenizer, self._text)
+            self._token_ids = _cached_encode(self.tokenizer,
+                                             self._text,
+                                             add_special_tokens=False)
 
         return self._token_ids
 
@@ -812,25 +819,50 @@ def find_mm_placeholders(
     return dict(full_groupby_modality(it))
 
 
+_V = TypeVar("_V", bound="Union[MultiModalKwargs, MultiModalKwargsItem]")
+
+
 class ProcessingCache:
 
-    def __init__(self, capacity: int) -> None:
+    @staticmethod
+    def get_lru_cache(
+        capacity_gb: int,
+        value_type: type[_V],
+    ) -> LRUCache[str, _V]:
+
+        def get_size(leaf: object) -> int:
+            if isinstance(leaf, torch.Tensor):
+                return leaf.nbytes  # sys.getsizeof doesn't work for tensors
+
+            return sys.getsizeof(leaf)
+
+        return LRUCache[str, _V](
+            GiB_bytes * capacity_gb,
+            getsizeof=lambda x: json_reduce_leaves(
+                lambda a, b: a + b,
+                json_map_leaves(get_size, x),
+            ),
+        )
+
+    def __init__(self, capacity_gb: int) -> None:
         super().__init__()
 
         # DEBUG: Set to None to disable
         self.debug_cache_hit_ratio_steps: Optional[int] = None
+        self.debug_cache_hits = 0
+        self.debug_cache_total = 0
 
-        self._cache = LRUCache[str, MultiModalKwargsItem](capacity)
+        self._cache = self.get_lru_cache(capacity_gb, MultiModalKwargsItem)
 
     def _maybe_log_cache_stats(self) -> None:
         steps = self.debug_cache_hit_ratio_steps
         if not steps:
             return
 
-        cache_stats = self._cache.stat()
-        if cache_stats.total % steps == 0:
+        total = self.debug_cache_total
+        if total > 0 and total % steps == 0:
             logger.debug("ProcessingCache: hit_ratio = %.2f",
-                         cache_stats.hit_ratio)
+                         self.debug_cache_hits / total)
 
     def get(
         self,
@@ -853,6 +885,13 @@ class ProcessingCache:
         cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                  **{modality: input_item},
                                                  **input_kwargs)
+
+        if self.debug_cache_hit_ratio_steps:
+            if cache_key in self._cache:
+                self.debug_cache_hits += 1
+
+            self.debug_cache_total += 1
+
         return self._cache.get(cache_key)
 
     def put(
@@ -870,7 +909,7 @@ class ProcessingCache:
         cache_key = MultiModalHasher.hash_kwargs(model_id=model_id,
                                                  **{modality: input_item},
                                                  **input_kwargs)
-        self._cache.put(cache_key, output_kwargs)
+        self._cache[cache_key] = output_kwargs
 
 
 class BaseProcessingInfo:
@@ -1011,7 +1050,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptUpdate]:
+    ) -> Sequence[PromptUpdate]:
         """
         Given the original multi-modal items for this modality
         and HF-processed data, output the updates to perform.
@@ -1311,8 +1350,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _bind_and_group_updates(
         self,
-        prompt_updates: list[PromptUpdate],
-    ) -> dict[str, list[BoundPromptUpdate]]:
+        prompt_updates: Sequence[PromptUpdate],
+    ) -> dict[str, Sequence[BoundPromptUpdate]]:
         tokenizer = self.info.get_tokenizer()
 
         it = (update.bind(tokenizer) for update in prompt_updates)

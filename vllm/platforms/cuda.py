@@ -119,7 +119,7 @@ class CudaPlatformBase(Platform):
                 if envs.VLLM_USE_V1:
                     raise NotImplementedError(
                         "Multi-step scheduling is not supported (and not "
-                        "needed) on VLLM V1. Please launch without "
+                        "needed) on vLLM V1. Please launch without "
                         "--num-scheduler-steps.")
                 else:
                     parallel_config.worker_cls = \
@@ -152,7 +152,7 @@ class CudaPlatformBase(Platform):
             # here
             use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None \
                 or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
-            from vllm.attention.backends.flashmla import is_flashmla_supported
+            from vllm.attention.ops.flashmla import is_flashmla_supported
             if use_flashmla and is_flashmla_supported()[0] \
                 and cache_config.block_size != 64:
                 cache_config.block_size = 64
@@ -292,6 +292,10 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        return cls.has_device_capability(89)
 
 
 # NVML utils

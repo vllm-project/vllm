@@ -989,12 +989,11 @@ if __name__ == "__main__":
                         type=float,
                         default=1.0,
                         help="Ratio of Structured Outputs requests")
-    parser.add_argument(
-        "--structured-output-backend",
-        type=str,
-        choices=["outlines", "lm-format-enforcer", "xgrammar", "json-unique"],
-        default="xgrammar",
-        help="Backend to use for structured outputs")
+    parser.add_argument("--structured-output-backend",
+                        type=str,
+                        choices=["outlines", "lm-format-enforcer", "xgrammar"],
+                        default="xgrammar",
+                        help="Backend to use for structured outputs")
 
     args = parser.parse_args()
     main(args)
