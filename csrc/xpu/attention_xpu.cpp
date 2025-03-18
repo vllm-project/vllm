@@ -2869,6 +2869,7 @@ void gqa_2_kernel(
     void * o_a_s,
     void * o_accs,
     void * output,
+    const void* context_lens, // [num_seqs]
     const int64_t o_a_s_bsz_stride,
     const int64_t o_a_s_head_stride,
     const int64_t o_accs_bsz_stride,
@@ -2904,6 +2905,13 @@ void gqa_2_kernel(
                 const int head_idx = item.get_global_id(1);
                 const int tid = item.get_global_id(2);
 
+                const int* context_lens_ptr = (const int*)context_lens;
+                const int context_length = context_lens_ptr[bsz_idx];
+                constexpr int VS = 32;
+                const int cur_row_block_num = (context_length + VS - 1) / VS;
+                const int cur_sub_rows = cur_row_block_num / GS;
+                const int cur_rem_rows = cur_row_block_num % GS;
+
                 const float * o_a_s_head = (const float *)o_a_s + bsz_idx * o_a_s_bsz_stride
                                                                 + head_idx * o_a_s_head_stride;
                 const IT * o_accs_head = (const IT *)o_accs + bsz_idx * o_accs_bsz_stride
@@ -2911,8 +2919,8 @@ void gqa_2_kernel(
                 IT * output_head = (IT *)output + bsz_idx * output_bsz_stride
                                                 + head_idx * output_head_stride;
 
-                int start_row = std::min(tid * sub_rows + std::min(tid, rem_rows), row_block_num);
-                int end_row = std::min(start_row + sub_rows + (tid < rem_rows), row_block_num);
+                int start_row = std::min(tid * cur_sub_rows + std::min(tid, cur_rem_rows), cur_row_block_num);
+                int end_row = std::min(start_row + cur_sub_rows + (tid < cur_rem_rows), cur_row_block_num);
 
                 float max_attn = -sycl::detail::max_v<float>();
                 float softmax = 0;
@@ -3013,7 +3021,7 @@ void paged_attention_gqa(
     );
 
     func2(
-        o_a_s.data_ptr(), o_accs.data_ptr(), output.data_ptr(),
+        o_a_s.data_ptr(), o_accs.data_ptr(), output.data_ptr(), context_lens.data_ptr(),
         o_a_s.stride(0), o_a_s.stride(1),
         o_accs.stride(0), o_accs.stride(1),
         output.stride(0), output.stride(1),
