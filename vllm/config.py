@@ -1615,6 +1615,11 @@ class SchedulerConfig:
 
     chunked_prefill_enabled: bool = field(init=False)
 
+    # The gap between each bucket for padding.
+    # For example, the bucket padding is (16, 24, 32, 48, ..., 512),
+    # then its bucket_padding_gap is 8.
+    bucket_padding_gap: int = 64
+
     # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
     # or "mod.custom_class".
     scheduler_cls: Union[str, type[object]] = "vllm.core.scheduler.Scheduler"

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import bisect
 import time
 from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
@@ -158,6 +159,23 @@ class TPUModelRunner:
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
+        self.paddings = self._get_paddings()
+
+    def _get_paddings(self) -> list[int]:
+        """Generate a list of padding size, starting from 16, 
+        first increase the size to twice, 
+        then increase the padding size by bucket_padding_gap.
+        """
+        paddings = []
+        num = 16
+        while num <= self.scheduler_config.bucket_padding_gap:
+            paddings.append(num)
+            num *= 2
+        num //= 2
+        while num < self.max_num_tokens:
+            paddings.append(num + self.scheduler_config.bucket_padding_gap)
+            num += self.scheduler_config.bucket_padding_gap
+        return paddings
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
@@ -408,7 +426,7 @@ class TPUModelRunner:
             num_scheduled_tokens_per_req)
 
         # Do the padding and copy the tensors to the TPU.
-        padded_total_num_scheduled_tokens = _get_padded_token_len(
+        padded_total_num_scheduled_tokens = self._get_padded_token_len(
             total_num_scheduled_tokens)
         self.input_ids = self.input_ids_cpu[:
                                             padded_total_num_scheduled_tokens].to(
@@ -759,15 +777,11 @@ class TPUModelRunner:
         logger.info("Compiling the model with different input shapes.")
 
         start = time.perf_counter()
-        num_tokens = 16
-        while True:
+        for num_tokens in self.paddings:
             self._dummy_run(self.kv_caches, num_tokens)
             logger.info("  -- num_tokens: %d", num_tokens)
             xm.mark_step()
             xm.wait_device_ops()
-            if num_tokens >= self.max_num_tokens:
-                break
-            num_tokens *= 2
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
 
@@ -808,6 +822,13 @@ class TPUModelRunner:
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+
+    def _get_padded_token_len(self, x: int) -> int:
+        """Return the first element in paddings list greater or equal to x.
+        """
+        index = bisect.bisect_left(self.paddings, x)
+        assert index < len(self.paddings)
+        return self.paddings[index]
 
 
 class ModelWrapperV1(nn.Module):
@@ -864,12 +885,6 @@ class ModelWrapperV1(nn.Module):
 
 def _get_padded_number(n: int, multiple: int) -> int:
     return ((n + multiple - 1) // multiple) * multiple
-
-
-def _get_padded_token_len(x: int) -> int:
-    if x <= 16:
-        return 16
-    return 1 << (x - 1).bit_length()
 
 
 def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:

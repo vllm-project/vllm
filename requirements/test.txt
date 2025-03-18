@@ -547,9 +547,7 @@ sentence-transformers==3.2.1
 sentencepiece==0.2.0
     # via mistral-common
 setuptools==75.8.0
-    # via
-    #   pytablewriter
-    #   torch
+    # via pytablewriter
 six==1.16.0
     # via
     #   python-dateutil
