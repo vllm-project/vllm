@@ -24,7 +24,7 @@ callable_decorated = CallableInductorPass(simple_callable,
     [
         (False, simple_callable),
         (True, callable_decorated),
-        (True, CallableInductorPass(simple_callable, "simple_callable")),
+        (True, CallableInductorPass(simple_callable)),
     ],
 )
 def test_pass_manager(works: bool, callable):
