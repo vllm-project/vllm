@@ -18,7 +18,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import collect_from_async_generator, random_uuid
+from vllm.utils import collect_from_async_generator, random_uuid, Device
 
 logger = init_logger(__name__)
 
@@ -274,7 +274,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def reset_prefix_cache(self) -> None:
+    async def reset_prefix_cache(self, device: Device) -> None:
         """Reset the prefix cache"""
         ...
 

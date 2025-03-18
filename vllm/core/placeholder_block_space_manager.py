@@ -92,7 +92,7 @@ class PlaceholderBlockSpaceManager(BlockSpaceManager):
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return -1
 
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(self, device: Device) -> bool:
         return True
 
     def get_num_cached_tokens(self, seq: Sequence) -> int:

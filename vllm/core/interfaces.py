@@ -125,8 +125,8 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def reset_prefix_cache(self) -> bool:
-        """Reset prefix cache for all devices."""
+    def reset_prefix_cache(self, device: Device) -> bool:
+        """Reset prefix cache for specified or all devices."""
         pass
 
     @abstractmethod
