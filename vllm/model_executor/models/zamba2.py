@@ -38,7 +38,7 @@ from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid
+from .interfaces import HasInnerState, IsHybrid, SupportsV0Only
 from .utils import maybe_prefix
 
 
@@ -778,7 +778,7 @@ class Zamba2Model(nn.Module):
         return hidden_states
 
 
-class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
+class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
     """Zamba2 model with causal language modeling head.
     
     This class wraps the core Zamba2 model and adds:
