@@ -253,8 +253,13 @@ def compute_probs(
         replace_from=GREEDY_TEMPERATURE,
         replace_to=1,
     )
+    # Because `sampling_metadata.all_greedy` is False, `temperature` is not
+    # None. This is to satisfy the type checker.
+    assert temperature is not None
+
     # TODO(woosuk): Consider using in-place op to reduce memory usage.
     logits = logits / temperature.unsqueeze(-1)
+
     top_p = expand_batch_to_tokens(
         sampling_metadata.top_p,
         cu_num_draft_tokens,
@@ -278,7 +283,7 @@ def expand_batch_to_tokens(
     num_tokens: int,
     replace_from: int = 0,
     replace_to: int = 0,
-) -> torch.Tensor:
+) -> Optional[torch.Tensor]:
     """Expand [batch_size] tensor to [num_tokens] tensor based on the number of
     tokens per batch in cu_num_tokens.
 
