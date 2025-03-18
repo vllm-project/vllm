@@ -151,7 +151,7 @@ def rejection_sample(
     # Create output buffer.
     output_token_ids = torch.empty(
         (batch_size, max_spec_len + 1),
-        dtype=torch.int64,
+        dtype=torch.int32,  # Consistent with SamplerOutput.sampled_token_ids.
         device=device,
     )
     output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
