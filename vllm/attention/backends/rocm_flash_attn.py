@@ -30,27 +30,20 @@ _ON_NAVI = "gfx1" in _GPU_ARCH
 _ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
 
-class PagedAttentionOps:
+def _get_paged_attn_module() -> PagedAttention:
     """
     Initializes the appropriate PagedAttention module from `attention/ops`, 
     which is a component of the attention mechanism used 
-    by `ROCmFlashAttentionImpl`.
+    by `ROCmFlashAttentionImpl` and `ROCmFlashAttentionBackend`.
 
     The choice of attention module depends on whether 
     AITER paged attention is enabled:
     - If enabled, `ROCmFlashAttentionImpl` uses `AITERPagedAttention`.
     - Otherwise, it defaults to using the original `PagedAttention`.
     """
-
-    def __init__(self):
-        if envs.VLLM_ROCM_USE_AITER_PAGED_ATTN:
-            self._paged_attn_module = AITERPagedAttention()
-        else:
-            self._paged_attn_module = PagedAttention()
-
-    @property
-    def paged_attn_module(self) -> PagedAttention:
-        return self._paged_attn_module
+    if envs.VLLM_ROCM_USE_AITER_PAGED_ATTN:
+        return AITERPagedAttention()
+    return PagedAttention()
 
 
 class ROCmFlashAttentionBackend(AttentionBackend):
@@ -82,8 +75,9 @@ class ROCmFlashAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
-                                                 num_kv_heads, head_size)
+        paged_attn = _get_paged_attn_module()
+        return paged_attn.get_kv_cache_shape(num_blocks, block_size,
+                                             num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -91,14 +85,16 @@ class ROCmFlashAttentionBackend(AttentionBackend):
         dst_kv_cache: torch.Tensor,
         src_to_dst: torch.Tensor,
     ) -> None:
-        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
+        paged_attn = _get_paged_attn_module()
+        paged_attn.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
-        PagedAttention.copy_blocks(kv_caches, src_to_dists)
+        paged_attn = _get_paged_attn_module()
+        paged_attn.copy_blocks(kv_caches, src_to_dists)
 
 
 @dataclass
@@ -514,7 +510,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        supported_head_sizes = PagedAttention.get_supported_head_sizes()
+        self.paged_attn_module = _get_paged_attn_module()
+        supported_head_sizes = self.paged_attn_module.get_supported_head_sizes(
+        )
+
         if head_size not in supported_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
@@ -564,7 +563,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 self.attn_func = _sdpa_attention
                 logger.debug("Using naive (SDPA) attention in ROCmBackend")
 
-        self.paged_attn_module = PagedAttentionOps().paged_attn_module
         self.aiter_kv_scales_initialized = False
 
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -674,7 +672,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         if self.attn_type not in [
                 AttentionType.ENCODER, AttentionType.ENCODER_ONLY
         ] and kv_cache.numel() > 0:
-            key_cache, value_cache = PagedAttention.split_kv_cache(
+            key_cache, value_cache = paged_attn.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
             if key is not None and value is not None:
