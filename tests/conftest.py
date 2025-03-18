@@ -313,7 +313,6 @@ class HfRunner:
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
         model_kwargs.setdefault("torch_dtype", torch_dtype)
-        model_kwargs.setdefault("device_map", self.device)
 
         if is_sentence_transformer:
             # Lazy init required for AMD CI
@@ -321,6 +320,7 @@ class HfRunner:
 
             self.model = SentenceTransformer(
                 model_name,
+                device=self.device,
                 model_kwargs=model_kwargs,
                 trust_remote_code=True,
             )
@@ -330,6 +330,7 @@ class HfRunner:
 
             self.model = CrossEncoder(
                 model_name,
+                device=self.device,
                 automodel_args=model_kwargs,
                 trust_remote_code=True,
             )
@@ -338,7 +339,7 @@ class HfRunner:
                 model_name,
                 trust_remote_code=True,
                 **model_kwargs,
-            )
+            ).to(self.device)
 
         if not skip_tokenizer_init:
             self.tokenizer = AutoTokenizer.from_pretrained(
