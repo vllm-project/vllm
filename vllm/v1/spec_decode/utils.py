@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-from vllm.v1.sample.ops.topk_topp_sampler import random_sample  # noqa
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
