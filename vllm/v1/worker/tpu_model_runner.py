@@ -23,8 +23,7 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
-from vllm.v1.attention.backends.pallas import (NUM_KV_PAGES_PER_BLOCK,
-                                               PallasAttentionBackend,
+from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
                                                PallasMetadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -140,10 +139,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                             device="cpu")
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
-        padded_max_num_blocks_per_req = _get_padded_number(
-            self.max_num_blocks_per_req, NUM_KV_PAGES_PER_BLOCK)
         self.block_table_cpu = torch.zeros(
-            (self.max_num_tokens, padded_max_num_blocks_per_req),
+            (self.max_num_tokens, self.max_num_blocks_per_req),
             dtype=self.input_batch.block_table.get_cpu_tensor().dtype,
             device="cpu")
 
@@ -414,6 +411,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Do the padding and copy the tensors to the TPU.
         padded_total_num_scheduled_tokens = _get_padded_token_len(
             total_num_scheduled_tokens)
+        # Zero out to avoid spurious values from prev iteration (last cp chunk)
+        self.input_ids_cpu[
+            total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
         self.input_ids = self.input_ids_cpu[:
                                             padded_total_num_scheduled_tokens].to(
                                                 self.device)
