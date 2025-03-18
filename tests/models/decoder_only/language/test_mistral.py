@@ -5,6 +5,7 @@ Run `pytest tests/models/test_mistral.py`.
 """
 import copy
 import json
+import os
 
 import jsonschema
 import jsonschema.exceptions
@@ -181,7 +182,7 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
                 dtype: str, max_tokens: int, num_logprobs: int,
                 use_rocm_aiter: bool, monkeypatch) -> None:
     if use_rocm_aiter:
-        if monkeypatch.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
+        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
             pytest.skip("Skipping test suite for ROCM AITER")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -214,7 +215,7 @@ def test_mistral_format(vllm_runner, example_prompts, model: str, dtype: str,
                         max_tokens: int, num_logprobs: int,
                         use_rocm_aiter: bool, monkeypatch) -> None:
     if use_rocm_aiter:
-        if monkeypatch.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
+        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
             pytest.skip("Skipping test suite for ROCM AITER")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -253,7 +254,7 @@ def test_mistral_format(vllm_runner, example_prompts, model: str, dtype: str,
 def test_mistral_symbolic_languages(vllm_runner, model: str, dtype: str,
                                     use_rocm_aiter: bool, monkeypatch) -> None:
     if use_rocm_aiter:
-        if monkeypatch.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
+        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
             pytest.skip("Skipping test suite for ROCM AITER")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -279,7 +280,7 @@ def test_mistral_symbolic_languages(vllm_runner, model: str, dtype: str,
 def test_mistral_function_calling(vllm_runner, model: str, dtype: str,
                                   use_rocm_aiter: bool, monkeypatch) -> None:
     if use_rocm_aiter:
-        if monkeypatch.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
+        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
             pytest.skip("Skipping test suite for ROCM AITER")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -318,7 +319,7 @@ def test_mistral_function_calling(vllm_runner, model: str, dtype: str,
 def test_mistral_guided_decoding(vllm_runner, model: str, guided_backend: str,
                                  use_rocm_aiter: bool, monkeypatch) -> None:
     if use_rocm_aiter:
-        if monkeypatch.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
+        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
             pytest.skip("Skipping test suite for ROCM AITER")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
