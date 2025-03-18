@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-V1 LoRA kernels metadata preparation utilities.
+LoRA kernels metadata preparation utilities.
 """
 
 from dataclasses import dataclass
@@ -10,7 +10,7 @@ import torch
 
 
 @dataclass
-class V1KernelMeta:
+class LoRAKernelMeta:
     token_lora_mapping: torch.Tensor
     token_indices_sorted_by_lora_ids: torch.Tensor
     active_lora_ids: torch.Tensor
@@ -19,7 +19,7 @@ class V1KernelMeta:
 
     @staticmethod
     def make(max_loras: int, max_num_tokens: int,
-             device: Union[torch.device, str]) -> "V1KernelMeta":
+             device: Union[torch.device, str]) -> "LoRAKernelMeta":
 
         token_lora_mapping = torch.empty(max_num_tokens,
                                          dtype=torch.int32,
@@ -47,7 +47,7 @@ class V1KernelMeta:
         lora_token_start_loc = torch.zeros(max_loras + 2,
                                            dtype=torch.int32,
                                            device=device)
-        return V1KernelMeta(
+        return LoRAKernelMeta(
             token_lora_mapping=token_lora_mapping,
             token_indices_sorted_by_lora_ids=token_indices_sorted_by_lora_ids,
             active_lora_ids=active_lora_ids,
@@ -105,7 +105,7 @@ class V1KernelMeta:
         This function returns the kernel metadata required for the current
         forward pass execution of the kernel. The function returns all the
         metadata required by the kernel, in order, as a tuple, so it can be
-        unpacked directly during the v1_shrink/v1_expand function call.
+        unpacked directly during the lora_shrink/lora_expand function call.
 
         Args:
             token_nums (int): Number of input tokens in the current forward
