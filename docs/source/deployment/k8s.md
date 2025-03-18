@@ -4,6 +4,9 @@
 
 Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using native Kubernetes.
 
+* [Deployment with CPUs](#cpu)
+* [Deployment with GPUs](#gpu)
+
 Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 * [Helm](frameworks/helm.md)
 * [InftyAI/llmaz](integrations/llmaz.md)
@@ -13,6 +16,8 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 * [substratusai/kubeai](integrations/kubeai.md)
 * [vllm-project/aibrix](https://github.com/vllm-project/aibrix)
 * [vllm-project/production-stack](integrations/production-stack.md)
+
+<a name="cpu" />
 
 ## Deployment with CPUs
 
@@ -107,6 +112,8 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
+
+<a name="gpu" />
 
 ## Deployment with GPUs
 
