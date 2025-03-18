@@ -195,6 +195,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "XverseForCausalLM": _HfExamplesInfo("xverse/XVERSE-7B-Chat",
                                          is_available_online=False,
                                          trust_remote_code=True),
+    "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct",
+                                         min_transformers_version="4.49"),
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),

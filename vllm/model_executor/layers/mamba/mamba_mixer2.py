@@ -245,7 +245,6 @@ class MambaMixer2(CustomOp):
         assert num_heads % self.tp_size == 0, \
             "Tensor parallel world size must divide num heads."
 
-
         assert (n_groups % self.tp_size) == 0 or n_groups == 1, \
             (
                 "If tensor parallel world size does not divide num_heads, "
