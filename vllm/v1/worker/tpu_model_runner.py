@@ -431,6 +431,7 @@ class TPUModelRunner:
             self.device)
         seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
 
+        print(f'xw32 line431 {slot_mapping=}')
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,

@@ -176,7 +176,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
             vmem_limit_bytes=self.vmem_limit_bytes,
             use_kernel=True,
             sm_scale=self.scale)
-
         return output.reshape(num_tokens, hidden_size)
 
 
@@ -196,10 +195,18 @@ def write_to_kv_cache(
         v_cache = [num_blocks, block_size, num_kv_heads * head_size]
 
     """
+    # change kv_cache layout from [num_blocks, block_size, num_kv_heads, head_size] to [num_blocks, block_size, num_kv_heads*head_size]
+    # remove the reshape op on kv.
+    # Create slices as as in https://github.com/pytorch/xla/blob/4584a2134259d1f9074ef690315de1d541211f52/torch_xla/experimental/pallas_kernels/kv_insertion.py#L83
     torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
     torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
 
     key_cache = key_cache.flatten(0, 1)
     value_cache = value_cache.flatten(0, 1)
-    key_cache.index_copy_(0, slot_mapping, key)
-    value_cache.index_copy_(0, slot_mapping, value)
+    # key_cache.index_copy_(0, slot_mapping, key)
+    # value_cache.index_copy_(0, slot_mapping, value)
+    # key_cache.index_copy_(0, slot_mapping, key)
+    # value_cache.index_copy_(0, slot_mapping, value)
+    # TODO(xw32): once the write_to_kv_cache kernel is ready, update the torch_xla wheel and
+    # call it here
+    # torch.ops.xla.kv_insertion(key, value, key_cache, value_cache, slices)
