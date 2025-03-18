@@ -16,6 +16,7 @@ DEFAULT_MODELS = [
     "ibm-granite/granite-3.0-1b-a400m", "ibm-granite/granite-3.0-3b-a800m"
 ]
 DEFAULT_BATCH_SIZES = [1, 4, 8, 16, 32, 64, 128, 256, 512]
+DEFAULT_TP_SIZES = [1]
 
 PER_ACT_TOKEN_OPTS = [False]
 PER_OUT_CH_OPTS = [False]
@@ -268,30 +269,30 @@ def main(args):
     results: list[benchmark.Measurement] = []
 
     for model in args.models:
-        for layer in WEIGHT_SHAPES_MOE[model]:
-            num_experts = layer[0]
-            topk = layer[1]
-            size_k = layer[2]
-            size_n = layer[3]
+        for tp in args.tp_sizes:
+            for layer in WEIGHT_SHAPES_MOE[model]:
+                num_experts = layer[0]
+                topk = layer[1]
+                size_k = layer[2]
+                size_n = layer[3] // tp
 
-            if len(args.limit_k) > 0 and size_k not in args.limit_k:
-                continue
+                if len(args.limit_k) > 0 and size_k not in args.limit_k:
+                    continue
 
-            if len(args.limit_n) > 0 and size_n not in args.limit_n:
-                continue
+                if len(args.limit_n) > 0 and size_n not in args.limit_n:
+                    continue
 
-            for per_act_token in PER_ACT_TOKEN_OPTS:
-                for per_out_ch in PER_OUT_CH_OPTS:
-                    for size_m in DEFAULT_BATCH_SIZES:
-                        mkn = (size_m, size_k, size_n)
-                        bench_run(results, model, num_experts, topk,
-                                  per_act_token, per_out_ch, mkn)
+                for per_act_token in PER_ACT_TOKEN_OPTS:
+                    for per_out_ch in PER_OUT_CH_OPTS:
+                        for size_m in DEFAULT_BATCH_SIZES:
+                            mkn = (size_m, size_k, size_n)
+                            bench_run(results, model, num_experts, topk,
+                                      per_act_token, per_out_ch, mkn)
 
     compare = benchmark.Compare(results)
     compare.print()
 
 
-# TODO add --tp-sizes argument
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description="Benchmark Marlin across specified models/shapes/batches")
@@ -302,6 +303,10 @@ if __name__ == "__main__":
         default=DEFAULT_MODELS,
         choices=WEIGHT_SHAPES_MOE.keys(),
     )
+    parser.add_argument("--tp-sizes",
+                        nargs="+",
+                        type=int,
+                        default=DEFAULT_TP_SIZES)
     parser.add_argument("--batch-sizes",
                         nargs="+",
                         type=int,
