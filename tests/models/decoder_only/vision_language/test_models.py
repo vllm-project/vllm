@@ -122,9 +122,6 @@ VLM_TEST_SETTINGS = {
             "cherry_blossom": "What is in the picture?",
         }),
         auto_cls=AutoModelForImageTextToText,
-        postprocess_inputs=model_utils.cast_dtype_post_processor(
-            "pixel_values"
-        ),
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
         dtype="bfloat16",
         marks=[pytest.mark.skip(reason="vLLM does not support PrefixLM attention mask")],  # noqa: E501
@@ -179,7 +176,6 @@ VLM_TEST_SETTINGS = {
     #         "cherry_blossom": "<vlm_image>Please infer the season with reason.",  # noqa: E501
     #     }),
     #     multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
-    #     postprocess_inputs=model_utils.cast_dtype_post_processor("pixel_values"), # noqa: E501
     #     stop_str=["<|im_end|>"],
     #     image_size_factors=[(0.10, 0.15)],
     #     max_tokens=64,
@@ -200,9 +196,6 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        postprocess_inputs=model_utils.cast_dtype_post_processor(
-            "pixel_values"
-        ),
         # For chameleon, we only compare the sequences
         vllm_output_post_proc = lambda vllm_output, model: vllm_output[:2],
         hf_output_post_proc = lambda hf_output, model: hf_output[:2],
@@ -222,7 +215,6 @@ VLM_TEST_SETTINGS = {
         }),
         multi_image_prompt="image_1:<image>\nimage_2:<image>\nWhich image can we see the car and the tower?",    # noqa: E501
         patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
-        postprocess_inputs=model_utils.cast_dtype_post_processor("images"),
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],  # noqa: E501
         image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
@@ -344,9 +336,6 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
         num_video_frames=16,
         max_model_len=16384,
-        postprocess_inputs=model_utils.cast_dtype_post_processor(
-            "pixel_values_videos"
-        ),
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(
@@ -371,9 +360,6 @@ VLM_TEST_SETTINGS = {
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
         max_model_len=4096,
-        postprocess_inputs=model_utils.cast_dtype_post_processor(
-            "pixel_values"
-        ),
         get_stop_token_ids=lambda tok: [128009],
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
@@ -393,8 +379,8 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
-        postprocess_inputs=model_utils.wrap_inputs_post_processor,
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
+        patch_hf_runner=model_utils.minicpmv_25_patch_hf_runner,
     ),
     "minicpmo_26": VLMTestInfo(
         models=["openbmb/MiniCPM-o-2_6"],
@@ -404,11 +390,8 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
-        postprocess_inputs=model_utils.ignore_inputs_post_processor(
-            "image_sizes"
-        ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
-        patch_hf_runner=model_utils.minicpmo_patch_hf_runner
+        patch_hf_runner=model_utils.minicpmo_26_patch_hf_runner,
     ),
     "minicpmv_26": VLMTestInfo(
         models=["openbmb/MiniCPM-V-2_6"],
@@ -418,10 +401,8 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
-        postprocess_inputs=model_utils.ignore_inputs_post_processor(
-            "image_sizes"
-        ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
+        patch_hf_runner=model_utils.minicpmv_26_patch_hf_runner,
     ),
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],
@@ -430,7 +411,6 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         patch_hf_runner=model_utils.molmo_patch_hf_runner,
-        postprocess_inputs=model_utils.molmo_post_processor,
     ),
     # Tests for phi3v currently live in another file because of a bug in
     # transformers. Once this issue is fixed, we can enable them here instead.
@@ -475,9 +455,6 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         auto_cls=AutoModelForImageTextToText,
-        postprocess_inputs=model_utils.cast_dtype_post_processor(
-            "pixel_values"
-        ),
         vllm_output_post_proc = lambda vllm_output, model: vllm_output[:2],
         hf_output_post_proc = lambda hf_output, model: hf_output[:2],
         comparator=check_outputs_equal,
@@ -522,9 +499,6 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=16384,
         max_num_seqs=2,
-        postprocess_inputs=model_utils.cast_dtype_post_processor(
-            "pixel_values"
-        ),
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
         custom_test_opts=[CustomTestOptions(

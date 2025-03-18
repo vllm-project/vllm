@@ -14,8 +14,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from PIL import Image
-from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
-                          BatchFeature)
+from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
+                          BatchEncoding, BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from tests.models.utils import (TokensTextLogprobs,
@@ -23,7 +23,7 @@ from tests.models.utils import (TokensTextLogprobs,
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TaskOption, TokenizerPoolConfig
+from vllm.config import TaskOption, TokenizerPoolConfig, _get_and_verify_dtype
 from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
@@ -34,8 +34,7 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
-                        identity, is_list_of)
+from vllm.utils import cuda_device_count_stateless, is_list_of
 
 logger = init_logger(__name__)
 
@@ -271,14 +270,18 @@ _R = TypeVar("_R")
 
 class HfRunner:
 
-    def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
+    def get_default_device(self):
         from vllm.platforms import current_platform
+
+        return ("cpu" if current_platform.is_cpu()
+                or current_platform.is_openvino() else "cuda")
+
+    def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
         if x is None or isinstance(x, (bool, )):
             return x
 
         if device is None:
-            device = "cpu" if current_platform.is_cpu(
-            ) or current_platform.is_openvino() else "cuda"
+            device = self.device
 
         if isinstance(x, dict):
             return {k: self.wrap_device(v, device) for k, v in x.items()}
@@ -298,52 +301,44 @@ class HfRunner:
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
-        postprocess_inputs: Callable[..., BatchEncoding] = identity,
     ) -> None:
-        torch_dtype = ("auto"
-                       if dtype == "auto" else STR_DTYPE_TO_TORCH_DTYPE[dtype])
-
         self.model_name = model_name
+
+        self.config = AutoConfig.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+        )
+        self.device = self.get_default_device()
+        self.dtype = torch_dtype = _get_and_verify_dtype(self.config, dtype)
+
+        model_kwargs = model_kwargs if model_kwargs is not None else {}
+        model_kwargs.setdefault("torch_dtype", torch_dtype)
+        model_kwargs.setdefault("device_map", self.device)
 
         if is_sentence_transformer:
             # Lazy init required for AMD CI
             from sentence_transformers import SentenceTransformer
 
-            _model = SentenceTransformer(
+            self.model = SentenceTransformer(
                 model_name,
-                device="cpu",
+                model_kwargs=model_kwargs,
                 trust_remote_code=True,
             )
-            if torch_dtype != "auto":
-                _model = _model.to(torch_dtype)
-
-            self.model = self.wrap_device(_model)
-            self.dtype = next(_model.parameters()).dtype
         elif is_cross_encoder:
             # Lazy init required for AMD CI
             from sentence_transformers import CrossEncoder
 
-            self.model = CrossEncoder(model_name,
-                                      device="cpu",
-                                      trust_remote_code=True)
-
-            _model = self.model.model
-            if torch_dtype != "auto":
-                _model = _model.to(dtype=torch_dtype)
-
-            self.model.model = self.wrap_device(_model)
-            self.dtype = next(_model.parameters()).dtype
-        else:
-            model_kwargs = model_kwargs if model_kwargs is not None else {}
-            _model = auto_cls.from_pretrained(
+            self.model = CrossEncoder(
                 model_name,
-                torch_dtype=torch_dtype,
+                automodel_args=model_kwargs,
+                trust_remote_code=True,
+            )
+        else:
+            self.model = auto_cls.from_pretrained(
+                model_name,
                 trust_remote_code=True,
                 **model_kwargs,
             )
-
-            self.model = self.wrap_device(_model)
-            self.dtype = next(_model.parameters()).dtype
 
         if not skip_tokenizer_init:
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -363,15 +358,13 @@ class HfRunner:
         if skip_tokenizer_init:
             self.tokenizer = self.processor.tokenizer
 
-        self.postprocess_inputs = postprocess_inputs
-
     def get_inputs(
         self,
         prompts: list[str],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
-    ) -> list[BatchEncoding]:
+    ) -> list[Union[BatchFeature, BatchEncoding]]:
         if images is not None:
             assert len(prompts) == len(images)
 
@@ -381,7 +374,7 @@ class HfRunner:
         if audios is not None:
             assert len(prompts) == len(audios)
 
-        all_inputs: list[BatchEncoding] = []
+        all_inputs: list[Union[BatchFeature, BatchEncoding]] = []
         for i, prompt in enumerate(prompts):
             processor_kwargs: dict[str, Any] = {
                 "text": prompt,
@@ -397,7 +390,8 @@ class HfRunner:
                 processor_kwargs["sampling_rate"] = sr
 
             inputs = self.processor(**processor_kwargs)
-            inputs = self.postprocess_inputs(inputs, dtype=self.dtype)
+            if isinstance(inputs, BatchFeature):
+                inputs = inputs.to(dtype=self.dtype)
 
             all_inputs.append(inputs)
 
@@ -430,7 +424,7 @@ class HfRunner:
         outputs: list[tuple[list[list[int]], list[str]]] = []
         for inputs in all_inputs:
             output_ids = self.model.generate(
-                **self.wrap_device(inputs, device=self.model.device.type),
+                **self.wrap_device(inputs),
                 use_cache=True,
                 **kwargs,
             )
@@ -501,7 +495,7 @@ class HfRunner:
         all_logprobs: list[list[torch.Tensor]] = []
         for inputs in all_inputs:
             output = self.model.generate(
-                **self.wrap_device(inputs, device=self.model.device.type),
+                **self.wrap_device(inputs),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
@@ -582,7 +576,7 @@ class HfRunner:
 
         for inputs in all_inputs:
             output = self.model.generate(
-                **self.wrap_device(inputs, device=self.model.device.type),
+                **self.wrap_device(inputs),
                 use_cache=True,
                 do_sample=False,
                 max_new_tokens=max_tokens,
@@ -633,19 +627,15 @@ class HfRunner:
             if images is not None and images[i] is not None:
                 processor_kwargs["images"] = images[i]
 
-            encoder_inputs = self.wrap_device(
-                self.processor(**processor_kwargs),
-                device=self.model.device.type,
-            )
+            encoder_inputs = self.processor(**processor_kwargs)
+            encoder_inputs = self.wrap_device(encoder_inputs)
 
             if decoder_prompt is None:
                 decoder_input_ids = None
             else:
-                decoder_input_ids = self.wrap_device(
-                    self.tokenizer(decoder_prompt,
-                                   return_tensors="pt").input_ids,
-                    device=self.model.device.type,
-                )
+                decoder_inputs = self.tokenizer(decoder_prompt,
+                                                return_tensors="pt")
+                decoder_input_ids = self.wrap_device(decoder_inputs.input_ids)
 
             output = self.model.generate(
                 decoder_input_ids=decoder_input_ids,
