@@ -4,9 +4,7 @@
 Run `pytest tests/models/test_mistral.py`.
 """
 import json
-import os
 from dataclasses import asdict
-from functools import wraps
 from typing import TYPE_CHECKING, Any, Optional
 
 import pytest
@@ -162,28 +160,6 @@ def load_outputs_w_logprobs(filename: "StrPath") -> OutputsLogprobs:
     } for token_logprobs in logprobs]) for tokens, text, logprobs in json_data]
 
 
-def set_env_var(key: str, value: str):
-    """Decorator to set environment variable for a test."""
-
-    def decorator(func):
-
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            original_value = os.environ.get(key)
-            os.environ[key] = value
-            try:
-                return func(*args, **kwargs)
-            finally:
-                if original_value is None:
-                    del os.environ[key]
-                else:
-                    os.environ[key] = original_value
-
-        return wrapper
-
-    return decorator
-
-
 @large_gpu_test(min_gb=80)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_model_len", MAX_MODEL_LEN)
@@ -221,10 +197,7 @@ def test_chat(
                          name_1="output")
 
 
-# This placeholder checking test only works with V0 engine
-# where `multi_modal_placeholders` is returned with `RequestOutput`
 @large_gpu_test(min_gb=48)
-@set_env_var("VLLM_USE_V1", "0")
 @pytest.mark.parametrize(
     "prompt,expected_ranges",
     [(_create_engine_inputs_hf(IMG_URLS[:1]), [{
@@ -241,8 +214,13 @@ def test_chat(
          "offset": 1333,
          "length": 418
      }])])
-def test_multi_modal_placeholders(
-        vllm_runner, prompt, expected_ranges: list[PlaceholderRange]) -> None:
+def test_multi_modal_placeholders(vllm_runner, prompt,
+                                  expected_ranges: list[PlaceholderRange],
+                                  monkeypatch) -> None:
+
+    # This placeholder checking test only works with V0 engine
+    # where `multi_modal_placeholders` is returned with `RequestOutput`
+    monkeypatch.setenv("VLLM_USE_V1", "0")
     with vllm_runner(
             "mistral-community/pixtral-12b",
             max_model_len=8192,
