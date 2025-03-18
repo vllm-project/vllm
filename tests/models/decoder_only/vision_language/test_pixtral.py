@@ -257,10 +257,10 @@ def test_model_engine(vllm_runner, model: str, dtype: str) -> None:
          "offset": 11,
          "length": 266
      }, {
-         "offset": 276,
+         "offset": 277,
          "length": 1056
      }, {
-         "offset": 1332,
+         "offset": 1333,
          "length": 418
      }])])
 def test_multi_modal_placeholders(
