@@ -123,24 +123,24 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
 
     # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU
     # register. This has to happen in pytorch, doing it in Jax will lead to NaNs
-    L1 = L
+    pad_L = 0
     if LORA_BLOCK > L or L % LORA_BLOCK != 0:
-        L1 = (L // LORA_BLOCK + 1) * LORA_BLOCK
+        pad_L = (L // LORA_BLOCK + 1) * LORA_BLOCK - L
 
-    D1 = D
+    pad_D = 0
     if DIM_BLOCK > D or D % DIM_BLOCK != 0:
-        D1 = (D // DIM_BLOCK + 1) * DIM_BLOCK
+        pad_D = (D // DIM_BLOCK + 1) * DIM_BLOCK - D
 
-    T1 = T
+    pad_T = 0
     if TOKEN_BLOCK > T or T % TOKEN_BLOCK != 0:
-        T1 = (T // TOKEN_BLOCK + 1) * TOKEN_BLOCK
+        pad_T = (T // TOKEN_BLOCK + 1) * TOKEN_BLOCK - T
 
-    if D1 != D or L1 != L:
-        loras = torch.nn.functional.pad(loras, (0, D1 - D, 0, L1 - L, 0, 0))
-    if D1 != D or T1 != T:
-        inputs = torch.nn.functional.pad(inputs, (0, D1 - D, 0, T1 - T))
-        if T1 != T:
-            idxs = torch.nn.functional.pad(idxs, ((0, T1 - T)))
+    if pad_D != 0 or pad_L != 0:
+        loras = torch.nn.functional.pad(loras, (0, pad_D, 0, pad_L, 0, 0))
+    if pad_D != 0 or pad_T != 0:
+        inputs = torch.nn.functional.pad(inputs, (0, pad_D, 0, pad_T))
+        if pad_T != T:
+            idxs = torch.nn.functional.pad(idxs, ((0, pad_T)))
 
     return kernel(idxs, inputs, loras)[:T, :L]
 
