@@ -296,10 +296,10 @@ def expand_batch_to_tokens(
             tokens per batch. Each element represents the total number of
             tokens up to and including that batch.
         num_tokens: Total number of tokens.
-        replace_from: Value to replace with `replace_to` for tokens that are not
-            in the batch.
-        replace_to: Value to replace with `replace_from` for tokens that are in
-            the batch.
+        replace_from: int = 0
+            Value to be replaced if it is found in x.
+        replace_to: int = 0
+            Value to replace with when replace_from is found.
     Returns:
         expanded_x: [num_tokens] tensor.
     """
