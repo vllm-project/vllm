@@ -9,15 +9,17 @@ from concurrent.futures._base import TimeoutError
 from typing import Optional, Union, cast
 
 from vllm.sampling_params import SamplingParams
-from vllm.v1.structured_output.grammar import (Grammar, StructuredOutputKey,
-                                               StructuredOutputOptions)
+from vllm.v1.structured_output.backend_types import (StructuredOutputGrammar,
+                                                     StructuredOutputKey,
+                                                     StructuredOutputOptions)
 
 
 @dataclasses.dataclass
 class StructuredOutputRequest:
 
     sampling_params: SamplingParams
-    _grammar: Optional[Union[Future[Grammar], Grammar]] = None
+    _grammar: Optional[Union[Future[StructuredOutputGrammar],
+                             StructuredOutputGrammar]] = None
 
     def _check_grammar_completion(self) -> bool:
         # NOTE: We have to lazy import to gate circular imports
@@ -37,12 +39,16 @@ class StructuredOutputRequest:
         return self._check_grammar_completion()
 
     @property
-    def grammar(self) -> Optional[Grammar]:
+    def grammar(self) -> Optional[StructuredOutputGrammar]:
         completed = self._check_grammar_completion()
-        return cast(Optional[Grammar], self._grammar) if completed else None
+        return cast(Optional[StructuredOutputGrammar],
+                    self._grammar) if completed else None
 
     @grammar.setter
-    def grammar(self, grammar: Union[Grammar, Future[Grammar]]) -> None:
+    def grammar(
+        self, grammar: Union[StructuredOutputGrammar,
+                             Future[StructuredOutputGrammar]]
+    ) -> None:
         self._grammar = grammar
 
     @functools.cached_property
