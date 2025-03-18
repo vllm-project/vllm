@@ -29,7 +29,7 @@ from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
-TeleFLM_PRETRAINED_CONFIG_ARCHIVE_MAP: Dict[str, str]={}
+TeleFLM_PRETRAINED_CONFIG_ARCHIVE_MAP: Dict[str, str] = {}
 
 
 class TeleFLMConfig(PretrainedConfig):
@@ -166,10 +166,10 @@ class TeleFLMConfig(PretrainedConfig):
         self._rope_scaling_validation()
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
-        self.use_mup=use_mup
-        self.mup_scale_factor=mup_scale_factor
-        self.output_mult=output_mult
-        self.input_mult=input_mult
+        self.use_mup = use_mup
+        self.mup_scale_factor = mup_scale_factor
+        self.output_mult = output_mult
+        self.input_mult = input_mult
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -186,15 +186,22 @@ class TeleFLMConfig(PretrainedConfig):
         if self.rope_scaling is None:
             return
 
-        if not isinstance(self.rope_scaling, dict) or len(self.rope_scaling) != 2:
+        if not isinstance(self.rope_scaling, dict) or len(
+                self.rope_scaling) != 2:
             raise ValueError(
-                "`rope_scaling` must be a dictionary with two fields, `type` and `factor`, " f"got {self.rope_scaling}"
+                "`rope_scaling` must be a dictionary with two fields, `type` and `factor`, "
+                f"got {self.rope_scaling}"
             )
         rope_scaling_type = self.rope_scaling.get("type", None)
         rope_scaling_factor = self.rope_scaling.get("factor", None)
-        if rope_scaling_type is None or rope_scaling_type not in ["linear", "dynamic"]:
+        if rope_scaling_type is None or rope_scaling_type not in [
+            "linear", "dynamic"
+        ]:
             raise ValueError(
                 f"`rope_scaling`'s type field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
             )
-        if rope_scaling_factor is None or not isinstance(rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
-            raise ValueError(f"`rope_scaling`'s factor field must be a float > 1, got {rope_scaling_factor}")
+        if rope_scaling_factor is None or not isinstance(
+                rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
+            raise ValueError(
+                f"`rope_scaling`'s factor field must be a float > 1, got {rope_scaling_factor}"
+            )
