@@ -732,8 +732,11 @@ def main(args: argparse.Namespace):
         api_url = f"http://{args.host}:{args.port}{args.endpoint}"
         base_url = f"http://{args.host}:{args.port}"
 
-    tokenizer = get_tokenizer(tokenizer_id,
-                              trust_remote_code=args.trust_remote_code)
+    tokenizer = get_tokenizer(
+        tokenizer_id,
+        trust_remote_code=args.trust_remote_code,
+        tokenizer_mode=args.tokenizer_mode,
+    )
 
     if args.dataset == 'grammar':
         args.structure_type = 'guided_grammar'
@@ -744,7 +747,7 @@ def main(args: argparse.Namespace):
     else:
         args.structure_type = 'guided_json'
 
-    if args.no_structured_output:
+    if not args.structured_output:
         args.structured_output_ratio = 0
     if args.save_results:
         result_file_name = f'{args.structured_output_ratio}guided'
@@ -848,7 +851,7 @@ if __name__ == "__main__":
                             'json', 'json-unique', 'grammar', 'regex',
                             'choice', 'xgrammar_bench'
                         ])
-    parser.add_argument("--json_schema_path",
+    parser.add_argument("--json-schema-path",
                         type=str,
                         default=None,
                         help="Path to json schema.")
@@ -873,6 +876,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tokenizer",
         type=str,
+        help=
+        "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+    )
+    parser.add_argument(
+        "--tokenizer-mode",
+        type=str,
+        default="auto",
         help=
         "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
     )
@@ -981,9 +991,9 @@ if __name__ == "__main__":
         "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
         "and the blog: https://hao-ai-lab.github.io/blogs/distserve")
 
-    parser.add_argument("--no-structured-output",
-                        action='store_true',
-                        default=False,
+    parser.add_argument("--structured-output",
+                        action=argparse.BooleanOptionalAction,
+                        default=True,
                         help="Whether to disable JSON decoding or not.")
     parser.add_argument("--structured-output-ratio",
                         type=float,
