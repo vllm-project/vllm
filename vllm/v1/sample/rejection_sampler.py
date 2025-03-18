@@ -265,6 +265,8 @@ def compute_probs(
         cu_num_draft_tokens,
         num_tokens,
     )
+    # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
+    # which is slow for large vocab sizes. This may cause performance issues.
     logits = apply_top_k_top_p(logits, top_k, top_p)
     output_prob = compiled_softmax(logits)
     return output_prob
