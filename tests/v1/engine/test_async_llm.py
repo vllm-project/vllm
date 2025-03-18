@@ -283,11 +283,6 @@ async def test_customize_loggers(
         )
         after.callback(engine.shutdown)
 
-        if loggers is None:
-            engine.remove_logger(BuiltinLoggerName.PROMETHEUS)
-            engine.remove_logger(BuiltinLoggerName.LOGGING)
-            engine.add_logger(TEST_LOGGER_NAME, get_customized_logger_mock())
-
         await engine.do_log_stats()
         for logger in engine.stat_loggers.values():
             logger.log.assert_called_once()
