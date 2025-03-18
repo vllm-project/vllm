@@ -477,6 +477,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.
   * ✅︎
   * ✅︎
+- * `MiniMaxText01ForCausalLM`
+  * MiniMax-Text
+  * `MiniMaxAI/MiniMax-Text-01`, etc.
+  * 
+  * ✅︎
 :::
 
 :::{note}
