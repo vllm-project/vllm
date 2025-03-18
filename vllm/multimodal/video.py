@@ -126,16 +126,17 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         self.num_frames = num_frames
 
     def load_bytes(self, data: bytes) -> npt.NDArray:
-        decoder = VideoDecoder(data)
-        total_frame_num = len(decoder)
+        decoder = VideoDecoder(data,
+                               dimension_order="NHWC",
+                               seek_mode="approximate")
 
         num_frames = self.num_frames
+        total_frame_num = len(decoder)
         if total_frame_num > num_frames:
-            uniform_sampled_frames = np.linspace(0,
-                                                 total_frame_num - 1,
-                                                 num_frames,
-                                                 dtype=int)
-            frame_idx = uniform_sampled_frames.tolist()
+            frame_idx = np.linspace(0,
+                                    total_frame_num - 1,
+                                    num_frames,
+                                    dtype=int).tolist()
         else:
             frame_idx = list(range(0, total_frame_num))
 
