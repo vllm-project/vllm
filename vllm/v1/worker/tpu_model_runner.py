@@ -411,8 +411,8 @@ class TPUModelRunner:
         padded_total_num_scheduled_tokens = _get_padded_token_len(
             total_num_scheduled_tokens)
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
-        self.input_ids_cpu[total_num_scheduled_tokens:
-                           padded_total_num_scheduled_tokens] = 0
+        self.input_ids_cpu[
+            total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
         self.input_ids = self.input_ids_cpu[:
                                             padded_total_num_scheduled_tokens].to(
                                                 self.device)
