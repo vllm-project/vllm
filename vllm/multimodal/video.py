@@ -142,7 +142,7 @@ class OpenCVVideoBackend(VideoLoader):
         import cv2
 
         backend = cls().get_cv2_video_api()
-        cap = cv2.VideoCapture(BytesIO(data), backend, [cv2.CAP_PROP_FPS])
+        cap = cv2.VideoCapture(BytesIO(data), backend, [])
         if not cap.isOpened():
             raise ValueError("Could not open video stream")
 
