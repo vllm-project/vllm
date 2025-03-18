@@ -205,8 +205,8 @@ class Sampler(nn.Module):
         adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
         # Identify valid tokens using threshold comparison
         valid_token_mask = probability_values >= adjusted_min_p
-        # Apply mask using boolean indexing (xla friendly)
-        logits.masked_fill_(~valid_token_mask, -float("inf"))
+        # Apply mask using boolean indexing
+        logits[~valid_token_mask] = -float('inf')
         return logits
 
     def apply_logits_bias(
