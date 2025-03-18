@@ -5,7 +5,7 @@ import torch
 from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe,
+from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe_fp8,
                                                             fused_experts,
                                                             fused_topk)
 from vllm.platforms import current_platform
@@ -16,15 +16,15 @@ TOP_KS = [6, 8]
 
 def run(a_q: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
         w2_q: torch.Tensor, w1_scale: torch.Tensor, w2_scale: torch.Tensor,
-        topk_weights: torch.Tensor, topk_ids: torch.Tensor, m: int, n: int,
-        k: int, e: int, ab_strides1: torch.Tensor, c_strides1: torch.Tensor,
+        topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+        ab_strides1: torch.Tensor, c_strides1: torch.Tensor,
         ab_strides2: torch.Tensor, c_strides2: torch.Tensor):
     with set_current_vllm_config(
             VllmConfig(parallel_config=ParallelConfig(
                 pipeline_parallel_size=1))):
-        return cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
-                           topk_weights, topk_ids, m, n, k, e, ab_strides1,
-                           c_strides1, ab_strides2, c_strides2)
+        return cutlass_moe_fp8(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
+                               topk_weights, topk_ids, ab_strides1, c_strides1,
+                               ab_strides2, c_strides2)
 
 
 @pytest.mark.parametrize("m", [2, 16, 32, 64, 224, 512, 163840])
@@ -104,10 +104,10 @@ def test_cutlass_moe_no_graph(
         topk_weights, topk_ids = fused_topk(a, score, topk, renormalize=False)
 
         torch_output = torch_moe(a_d, w1_d, w2_d, score, topk, None)
-        cutlass_output = cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale,
-                                     w2_scale, topk_weights, topk_ids, m, n, k,
-                                     e, ab_strides1, c_strides1, ab_strides2,
-                                     c_strides2)
+        cutlass_output = cutlass_moe_fp8(a_q, a_scale, w1_q, w2_q, w1_scale,
+                                         w2_scale, topk_weights, topk_ids,
+                                         ab_strides1, c_strides1, ab_strides2,
+                                         c_strides2)
 
         print(torch_output)
         print(cutlass_output)
@@ -196,9 +196,8 @@ def test_cutlass_moe_cuda_graph(
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
             cutlass_output = run(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
-                                 topk_weights, topk_ids, m, n, k, e,
-                                 ab_strides1, c_strides1, ab_strides2,
-                                 c_strides2)
+                                 topk_weights, topk_ids, ab_strides1,
+                                 c_strides1, ab_strides2, c_strides2)
         torch.cuda.synchronize()
         graph.replay()
         torch.cuda.synchronize()
@@ -273,11 +272,11 @@ def test_cutlass_moe_profile(
                 activities=[torch.profiler.ProfilerActivity.CUDA],
                 record_shapes=True) as prof_cutlass:
             with torch.profiler.record_function("cutlass_output"):
-                cutlass_output = cutlass_moe(a_q, a_scale, w1_q, w2_q,
-                                             w1_scale, w2_scale, topk_weights,
-                                             topk_ids, m, n, k, e, ab_strides1,
-                                             c_strides1, ab_strides2,
-                                             c_strides2)
+                cutlass_output = cutlass_moe_fp8(a_q, a_scale, w1_q, w2_q,
+                                                 w1_scale, w2_scale,
+                                                 topk_weights, topk_ids,
+                                                 ab_strides1, c_strides1,
+                                                 ab_strides2, c_strides2)
         print("profile cutlass:")
         print(
             prof_cutlass.key_averages(group_by_input_shape=True).table(

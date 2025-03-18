@@ -430,11 +430,11 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        from vllm.model_executor.layers.fused_moe import cutlass_moe
+        from vllm.model_executor.layers.fused_moe import cutlass_moe_fp8
         x_q, x_scale = ops.scaled_fp8_quant(x,
                                             layer.w13_input_scale,
                                             use_per_token_if_dynamic=False)
-        return cutlass_moe(
+        return cutlass_moe_fp8(
             x_q,
             x_scale,
             layer.w13_weight.transpose(1, 2),
@@ -443,10 +443,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale,
             topk_weights,
             topk_ids,
-            x.shape[0],
-            layer.w2_weight.shape[2],
-            x.shape[1],
-            layer.w13_weight.shape[0],
             self.ab_strides1,
             self.c_strides1,
             self.ab_strides2,

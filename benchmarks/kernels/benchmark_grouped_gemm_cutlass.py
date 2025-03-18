@@ -6,7 +6,7 @@ from benchmark_shapes import WEIGHT_SHAPES_MOE
 
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe,
+from vllm.model_executor.layers.fused_moe.fused_moe import (cutlass_moe_fp8,
                                                             fused_experts,
                                                             fused_topk)
 from vllm.utils import FlexibleArgumentParser
@@ -17,8 +17,8 @@ DEFAULT_MODELS = [
 ]
 DEFAULT_BATCH_SIZES = [1, 4, 8, 16, 32, 64, 128, 256, 512]
 
-PER_ACT_TOKEN_OPTS = [False]  #[False, True]
-PER_OUT_CH_OPTS = [False]  #[False, True]
+PER_ACT_TOKEN_OPTS = [False]
+PER_OUT_CH_OPTS = [False]
 
 
 def to_fp8(tensor: torch.Tensor):
@@ -110,28 +110,27 @@ def bench_run(results: list[benchmark.Measurement], model: str,
                         w1: torch.Tensor, w2: torch.Tensor,
                         w1_scale: torch.Tensor, w2_scale: torch.Tensor,
                         topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                        m: int, n: int, k: int, num_experts: int,
                         ab_strides1: torch.Tensor, c_strides1: torch.Tensor,
                         ab_strides2: torch.Tensor, c_strides2: torch.Tensor,
                         num_repeats: int):
         for _ in range(num_repeats):
-            cutlass_moe(a, a_scale, w1, w2, w1_scale, w2_scale, topk_weights,
-                        topk_ids, m, n, k, num_experts, ab_strides1,
-                        c_strides1, ab_strides2, c_strides2)
+            cutlass_moe_fp8(a, a_scale, w1, w2, w1_scale, w2_scale,
+                            topk_weights, topk_ids, ab_strides1, c_strides1,
+                            ab_strides2, c_strides2)
 
     def run_cutlass_from_graph(
             a_q: torch.Tensor, a_scale: torch.Tensor, w1_q: torch.Tensor,
             w2_q: torch.Tensor, w1_scale: torch.Tensor, w2_scale: torch.Tensor,
-            topk_weights: torch.Tensor, topk_ids: torch.Tensor, m: int, n: int,
-            k: int, e: int, ab_strides1: torch.Tensor,
-            c_strides1: torch.Tensor, ab_strides2: torch.Tensor,
-            c_strides2: torch.Tensor):
+            topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+            ab_strides1: torch.Tensor, c_strides1: torch.Tensor,
+            ab_strides2: torch.Tensor, c_strides2: torch.Tensor):
         with set_current_vllm_config(
                 VllmConfig(parallel_config=ParallelConfig(
                     pipeline_parallel_size=1))):
-            return cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
-                               topk_weights, topk_ids, m, n, k, e, ab_strides1,
-                               c_strides1, ab_strides2, c_strides2)
+            return cutlass_moe_fp8(a_q, a_scale, w1_q, w2_q, w1_scale,
+                                   w2_scale, topk_weights, topk_ids,
+                                   ab_strides1, c_strides1, ab_strides2,
+                                   c_strides2)
 
     def run_triton_from_graph(a: torch.Tensor, w1: torch.Tensor,
                               w2: torch.Tensor, topk_weights: torch.Tensor,
@@ -159,9 +158,8 @@ def bench_run(results: list[benchmark.Measurement], model: str,
     cutlass_graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(cutlass_graph, stream=cutlass_stream):
         run_cutlass_from_graph(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale,
-                               topk_weights, topk_ids, m, n, k, num_experts,
-                               ab_strides1, c_strides1, ab_strides2,
-                               c_strides2)
+                               topk_weights, topk_ids, ab_strides1, c_strides1,
+                               ab_strides2, c_strides2)
     torch.cuda.synchronize()
 
     triton_stream = torch.cuda.Stream()
@@ -191,10 +189,6 @@ def bench_run(results: list[benchmark.Measurement], model: str,
         "w2_q": w2_q,
         "w1_scale": w1_scale,
         "w2_scale": w2_scale,
-        "m": m,
-        "n": n,
-        "k": k,
-        "num_experts": num_experts,
         "ab_strides1": ab_strides1,
         "c_strides1": c_strides1,
         "ab_strides2": ab_strides2,
@@ -240,13 +234,13 @@ def bench_run(results: list[benchmark.Measurement], model: str,
 
     # Warmup
     run_cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights,
-                    topk_ids, m, n, k, num_experts, ab_strides1, c_strides1,
-                    ab_strides2, c_strides2, num_warmup)
+                    topk_ids, ab_strides1, c_strides1, ab_strides2, c_strides2,
+                    num_warmup)
 
     results.append(
         benchmark.Timer(
             stmt=
-            "run_cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights, topk_ids, m, n, k, num_experts, ab_strides1, c_strides1, ab_strides2, c_strides2, num_runs)",  # noqa: E501
+            "run_cutlass_moe(a_q, a_scale, w1_q, w2_q, w1_scale, w2_scale, topk_weights, topk_ids, ab_strides1, c_strides1, ab_strides2, c_strides2, num_runs)",  # noqa: E501
             globals=globals,
             label=label,
             sub_label=sub_label,
