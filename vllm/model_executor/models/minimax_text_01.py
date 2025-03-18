@@ -102,33 +102,6 @@ class MiniMaxText01RMSNormTP(CustomOp):
         param.data.copy_(loaded_weight[shard])
         return
 
-    @staticmethod
-    def weight2param_match(
-        model: nn.Module,
-        name: str,
-        all_params: Dict[str, torch.Tensor],
-    ) -> bool:
-        return bool(name in all_params and "norm" in name
-                    and not name.endswith(".bias"))
-
-    @staticmethod
-    def weight2param_copy(
-        model: nn.Module,
-        name: str,
-        all_params: Dict[str, torch.Tensor],
-        loaded_weight: torch.Tensor,
-        prefix: str = "norm",
-    ) -> None:
-        name = replace_weight_name(name, prefix=prefix)
-        param = all_params[name]
-        if is_pp_missing_parameter(name, model):
-            return
-        loader = getattr(param, "weight_loader",
-                         MiniMaxText01RMSNormTP.weight_loader)
-        loader = weight_loader_with_alias(name)(loader)
-        loader(param, loaded_weight)
-        return
-
     def _forward(
         self,
         x: torch.Tensor,
@@ -240,65 +213,6 @@ class MiniMaxText01MLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = SiluAndMul()
-        return
-
-    @staticmethod
-    def weight2param_match(
-        model: nn.Module,
-        name: str,
-        all_params: Dict[str, torch.Tensor],
-    ) -> bool:
-        return bool(name in all_params and "shared_mlp" in name
-                    and not name.endswith(".bias"))
-
-    @staticmethod
-    def weight2param_copy(
-        model: nn.Module,
-        name: str,
-        all_params: Dict[str, torch.Tensor],
-        loaded_weight: torch.Tensor,
-        prefix: str = "mlp",
-    ) -> None:
-        if "gate_proj" in name:
-            name = replace_weight_name(name,
-                                       "gate_proj",
-                                       "gate_up_proj",
-                                       count=1,
-                                       prefix="MLP")
-            if is_pp_missing_parameter(name, model):
-                return
-            param = all_params[name]
-            if is_pp_missing_parameter(name, model):
-                return
-            loader = getattr(param, "weight_loader", default_weight_loader)
-            loader = weight_loader_with_alias(name)(loader)
-            loaded_shard_id = 0
-            loader(param, loaded_weight, loaded_shard_id, prefix=prefix)
-        elif "up_proj" in name:
-            name = replace_weight_name(name,
-                                       "up_proj",
-                                       "gate_up_proj",
-                                       count=1,
-                                       prefix="MLP")
-            if is_pp_missing_parameter(name, model):
-                return
-            param = all_params[name]
-            loader = getattr(param, "weight_loader", default_weight_loader)
-            loader = weight_loader_with_alias(name)(loader)
-            loaded_shard_id = 1
-            loader(param, loaded_weight, loaded_shard_id, prefix=prefix)
-        elif "down_proj" in name:
-            name = replace_weight_name(name, prefix="MLP")
-            if is_pp_missing_parameter(name, model):
-                return
-            param = all_params[name]
-            loader = getattr(param, "weight_loader", default_weight_loader)
-            loader = weight_loader_with_alias(name)(loader)
-            loader(param, loaded_weight, prefix="MLP")
-        else:
-            cls_name = MiniMaxText01MLP.__name__
-            print(f"{cls_name}[MLP] load_weight error | name={name}")
-            raise ValueError(f"Unknown weight name {name}")
         return
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -502,55 +416,6 @@ class MiniMaxText01LinearAttention(nn.Module):
                                   n_attention_heads, 1, 1)
         return slopes  # [h, 1, 1]
 
-    @staticmethod
-    def weight2param_match(
-        model: nn.Module,
-        name: str,
-        all_params: Dict[str, torch.Tensor],
-    ) -> bool:
-
-        def is_mha_weight(name: str) -> bool:
-            return "self_attn" in name and not name.endswith(".bias")
-
-        def is_linear_attn_layer(layer_idx: int) -> bool:
-            if layer_idx is None or not hasattr(model.config,
-                                                "attn_type_list"):
-                return False
-            return model.config.attn_type_list[layer_idx] == 0
-
-        def which_layer(name: str) -> int:
-            if "layers" in name:
-                after_layer = name.split("layers")[-1]
-                return int(after_layer.split(".")[1])
-            return None
-
-        return is_mha_weight(name) and is_linear_attn_layer(which_layer(name))
-
-    @staticmethod
-    def weight2param_copy(
-        model: nn.Module,
-        name: str,
-        all_params: Dict[str, torch.Tensor],
-        loaded_weight: torch.Tensor,
-        prefix: str = "linear_attn",
-    ) -> None:
-
-        # linear_mha_params_mapping = [
-        #     ("qkv_proj", "qkv_proj", 0),
-        #     ("output_gate", "output_gate", 0),
-        #     ("out_proj", "out_proj",
-        #      1),  # shard no use, cause out-proj and output-gate are not fuse.
-        # ]
-        name = replace_weight_name(name, prefix=prefix)
-        if is_pp_missing_parameter(name, model):
-            return
-        param = all_params[name]
-        loader = getattr(param, "weight_loader",
-                         MiniMaxText01LinearAttention.weight_direct_load)
-        loader = weight_loader_with_alias(name)(loader)
-        loader(param, loaded_weight)
-        return
-
     def _prefill_and_mix_infer(self, q, k, v, kv_cache, state_indices_tensor,
                                attn_metadata):
         hidden = []
@@ -693,71 +558,6 @@ class MiniMaxText01Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
-        return
-
-    @staticmethod
-    def weight2param_match(
-        model: nn.Module,
-        name: str,
-        all_params: Dict[str, torch.Tensor],
-    ) -> bool:
-
-        def is_mha_weight(name: str) -> bool:
-            return "self_attn" in name and not name.endswith(".bias")
-
-        def is_linear_attn_layer(layer_idx: int) -> bool:
-            if layer_idx is None or not hasattr(model.config,
-                                                "attn_type_list"):
-                return False
-            return model.config.attn_type_list[layer_idx] == 1
-
-        def which_layer(name: str) -> int:
-            if "layers" in name:
-                after_layer = name.split("layers")[-1]
-                return int(after_layer.split(".")[1])
-            return None
-
-        return is_mha_weight(name) and not is_linear_attn_layer(
-            which_layer(name))
-
-    @staticmethod
-    def weight2param_copy(
-        model: nn.Module,
-        name: str,
-        all_params: Dict[str, torch.Tensor],
-        loaded_weight: torch.Tensor,
-        prefix: str = "mha",
-    ) -> None:
-
-        flash_mha_params_mapping = [
-            # (param_name, weight_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        for (name_param, name_weight, shard_id) in flash_mha_params_mapping:
-            if name_weight not in name:
-                continue
-            name = replace_weight_name(name,
-                                       name_weight,
-                                       name_param,
-                                       prefix=prefix)
-            if is_pp_missing_parameter(name, model):
-                continue
-            param = all_params[name]
-            loader = getattr(param, "weight_loader", default_weight_loader)
-            loader = weight_loader_with_alias(name)(loader)
-            loader(param, loaded_weight, shard_id)
-        else:
-            name = replace_weight_name(name, prefix=prefix)
-            if is_pp_missing_parameter(name, model):
-                return
-            param = all_params[name]
-            loader = getattr(param, "weight_loader", default_weight_loader)
-            loader = weight_loader_with_alias(name)(loader)
-            loader(param, loaded_weight)
         return
 
     def forward(self, hidden_states: torch.Tensor, positions: torch.Tensor,
@@ -932,7 +732,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
         else:
             moe_hidden_states = self.block_sparse_moe(
                 copy.deepcopy(layernorm_output))
-            # dump_tensor(moe_hidden_states, "after-moe")
             if self.shared_moe:
 
                 # shared-moe part use all fp32 compute
@@ -940,7 +739,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 moe_hidden_fp32 = moe_hidden_states.to(torch.float32)
                 output_mlp = self.shared_mlp(layernorm_output).to(
                     torch.float32)
-                # dump_tensor(output_mlp, "shared-mlp")
 
                 # actually gate for shared moe
                 coef, _ = self.coefficient(layernorm_output.to(torch.float32))
@@ -957,7 +755,6 @@ class MiniMaxText01DecoderLayer(nn.Module):
 
                 # dtype cast back
                 hidden_states = hidden_states.to(before_moe_dtype)
-                # dump_tensor(hidden_states, "after-shared-moe")
             else:
                 hidden_states = moe_hidden_states
 
@@ -1190,14 +987,10 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
-        # assert (lora_config is None,
-        # "LoRA is not supported in MiniMaxText01ForCausalLM)"
-        # default config
+
         if not hasattr(config, "sliding_window"):
             config.sliding_window = None
 
-        # self.CONCAT_FFN = True if (os.environ.get('CONCAT_FFN', '0') == '1'
-        # else False)
         self.CONCAT_FFN = True
 
         self.unpadded_vocab_size = self.config.vocab_size
