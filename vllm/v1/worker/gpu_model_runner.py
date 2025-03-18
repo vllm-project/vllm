@@ -1473,7 +1473,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                         dtype=dtype,
                                                         device=self.device)
                 else:
-                    raise NotImplementedError
+                    # TODO: add new branches when introducing more types of
+                    # KV cache specs.
+                    raise ValueError("Unknown KV cache spec type.")
 
         bind_kv_cache(
             kv_caches,
