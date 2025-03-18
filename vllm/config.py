@@ -2324,7 +2324,7 @@ class LoRAConfig:
         # Setting the maximum rank to 512 should be able to satisfy the vast
         # majority of applications.
         possible_max_ranks = (8, 16, 32, 64, 128, 256, 320, 512)
-        possible_lora_extra_vocab_size = (0, 256, 512)
+        possible_lora_extra_vocab_size = (256, 512)
         if self.max_lora_rank not in possible_max_ranks:
             raise ValueError(
                 f"max_lora_rank ({self.max_lora_rank}) must be one of "
