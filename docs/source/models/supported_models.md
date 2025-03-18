@@ -477,6 +477,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.
   * ✅︎
   * ✅︎
+- * `Zamba2ForCausalLM`
+  * Zamba2
+  * `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.
+  *
+  *
 :::
 
 :::{note}
@@ -879,7 +884,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
-  * `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b`, etc.
+  * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, `mistral-community/pixtral-12b`, etc.
   *
   * ✅︎
   * ✅︎
