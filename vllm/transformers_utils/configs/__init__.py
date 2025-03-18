@@ -45,6 +45,6 @@ __all__ = [
     "Olmo2Config",
     "SolarConfig",
     "Telechat2Config",
-	"TeleFLMConfig",
+    "TeleFLMConfig",
     "UltravoxConfig",
 ]

@@ -94,7 +94,8 @@ class TeleFLMMLP(nn.Module):
 
 class TeleFLMAttention(nn.Module):
 
-    def __init__(self,
+    def __init__(
+        self,
         config: TeleFLMConfig,
         hidden_size: int,
         num_heads: int,
