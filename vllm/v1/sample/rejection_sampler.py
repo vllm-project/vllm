@@ -253,37 +253,42 @@ def compute_probs(
         replace_from=GREEDY_TEMPERATURE,
         replace_to=1,
     )
-    # Because `sampling_metadata.all_greedy` is False, `temperature` is not
-    # None. This is to satisfy the type checker.
-    assert temperature is not None
-
     # TODO(woosuk): Consider using in-place op to reduce memory usage.
     logits = logits / temperature.unsqueeze(-1)
 
-    top_p = expand_batch_to_tokens(
-        sampling_metadata.top_p,
-        cu_num_draft_tokens,
-        num_tokens,
-    )
-    top_k = expand_batch_to_tokens(
-        sampling_metadata.top_k,
-        cu_num_draft_tokens,
-        num_tokens,
-    )
+    # Get expanded top_p and top_k tensors.
+    if sampling_metadata.top_p is not None:
+        top_p = expand_batch_to_tokens(
+            sampling_metadata.top_p,
+            cu_num_draft_tokens,
+            num_tokens,
+        )
+    else:
+        top_p = None
+    if sampling_metadata.top_k is not None:
+        top_k = expand_batch_to_tokens(
+            sampling_metadata.top_k,
+            cu_num_draft_tokens,
+            num_tokens,
+        )
+    else:
+        top_k = None
+
     # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
     # which is slow for large vocab sizes. This may cause performance issues.
     logits = apply_top_k_top_p(logits, top_k, top_p)
+
     output_prob = compiled_softmax(logits)
     return output_prob
 
 
 def expand_batch_to_tokens(
-    x: Optional[torch.Tensor],  # [batch_size]
+    x: torch.Tensor,  # [batch_size]
     cu_num_tokens: torch.Tensor,  # [batch_size]
     num_tokens: int,
     replace_from: int = 0,
     replace_to: int = 0,
-) -> Optional[torch.Tensor]:
+) -> torch.Tensor:
     """Expand [batch_size] tensor to [num_tokens] tensor based on the number of
     tokens per batch in cu_num_tokens.
 
@@ -300,8 +305,6 @@ def expand_batch_to_tokens(
     Returns:
         expanded_x: [num_tokens] tensor.
     """
-    if x is None:
-        return None
     batch_size = x.shape[0]
     assert cu_num_tokens.shape[0] == batch_size
     expanded_x = torch.empty(
