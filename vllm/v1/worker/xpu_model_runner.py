@@ -13,7 +13,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.ipex_attn import (IPEXAttentionBackend,
                                                   IPEXAttentionMetadata)
-from vllm.v1.engine.mm_input_cache import MMInputCacheClient
+from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -80,13 +80,12 @@ class XPUModelRunner(GPUModelRunner):
         # FIXME: support mrope
         self.uses_mrope = False
 
-        # NOTE: Initialized input mapper is only used for processing dummy
-        # multimodal data into multimodal kwargs for GPU memory profiling.
-        self.mm_input_mapper_profiling = MMInputCacheClient(self.model_config)
-        self.mm_input_mapper_profiling.use_cache = False
-
-        self.max_num_encoder_input_tokens = self.scheduler_config.max_num_encoder_input_tokens  # noqa: E501
-        self.encoder_cache_size = self.scheduler_config.encoder_cache_size
+        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
+        )
+        self.max_num_encoder_input_tokens = encoder_compute_budget
+        self.encoder_cache_size = encoder_cache_size
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
