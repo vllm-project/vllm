@@ -3,6 +3,7 @@
 import argparse
 import dataclasses
 import json
+import threading
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
                     Tuple, Type, Union, cast, get_args)
@@ -1575,6 +1576,11 @@ class EngineArgs:
 
         #############################################################
         # Experimental Features - allow users to opt in.
+
+        # Signal Handlers requires running in main thread.
+        if (threading.current_thread() != threading.main_thread()
+                and _warn_or_fallback("Engine in background thread")):
+            return False
 
         # LoRA is supported on V1, but off by default for now.
         if self.enable_lora and _warn_or_fallback("LORA"):
