@@ -20,12 +20,15 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import MultiModalFieldConfig, NestedTensors
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
+# yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, BoundPromptUpdate,
                                         PlaceholderFeaturesInfo,
-                                        PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails, encode_tokens,
-                                        find_mm_placeholders)
+                                        PromptReplacement, PromptTargetMatch,
+                                        PromptUpdate, PromptUpdateDetails,
+                                        encode_tokens, find_mm_placeholders,
+                                        replace_token_matches)
+# yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import flatten_2d_lists
@@ -320,6 +323,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
                 len(image_repl_feature_tokens)
                 for image_repl_feature_tokens in image_repls_feature_tokens
             ]
+            processed_outputs["num_embeds"] = torch.tensor(num_embeds)
 
             vocab = tokenizer.get_vocab()
             image_token_id = vocab[tokenizer.image_token]
@@ -337,7 +341,6 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
                 for size in image_sizes
             ]
             processed_outputs["num_crops"] = torch.tensor(num_crops)
-            processed_outputs["num_embeds"] = torch.tensor(num_embeds)
 
         return processed_outputs
 
@@ -382,6 +385,47 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
                 replacement=get_replacement_gemma3,
             )
         ]
+
+    def _apply_token_matches(
+        self,
+        prompt: list[int],
+        mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
+        mm_item_counts: Mapping[str, int],
+    ) -> list[int]:
+        token_ids = super()._apply_token_matches(
+            prompt,
+            mm_matches,
+            mm_item_counts,
+        )
+
+        # "\n\n\n" and "\n\n\n\n" are single tokens
+        # Since our replacement can insert "\n\n" next to "\n"
+        # tokens, we have to combine them to be consistent with
+        # the output of the tokenizer
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+        newline_1 = vocab["\n"]
+        newline_2 = vocab["\n\n"]
+        newline_3 = vocab["\n\n\n"]
+        newline_4 = vocab["\n\n\n\n"]
+
+        token_ids = replace_token_matches(
+            token_ids,
+            [newline_1, newline_2],
+            [newline_3],
+        )
+        token_ids = replace_token_matches(
+            token_ids,
+            [newline_2, newline_1],
+            [newline_3],
+        )
+        token_ids = replace_token_matches(
+            token_ids,
+            [newline_2, newline_2],
+            [newline_4],
+        )
+
+        return token_ids
 
     def _find_mm_placeholders(
         self,
