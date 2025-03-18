@@ -34,15 +34,9 @@ def test_pass_manager(works: bool, callable):
     pass_manager.configure(config)  # default passes
 
     # Try to add the callable to the pass manager
-    try:
+    if works:
         pass_manager.add(callable)
-        # If we got here, the add was successful (should be an InductorPass)
-        # Now check pickling behavior based on the works parameter
-        if works:
-            pickle.dumps(pass_manager)
-        else:
-            with pytest.raises(BypassFxGraphCache):
-                pickle.dumps(pass_manager)
-    except AssertionError:
-        # Should only get here for non-InductorPass callables
-        assert not isinstance(callable, InductorPass)
+        pickle.dumps(pass_manager)
+    else:
+        with pytest.raises(AssertionError):
+            pass_manager.add(callable)
