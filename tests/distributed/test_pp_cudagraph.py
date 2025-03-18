@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ..utils import compare_two_settings, fork_new_process_for_each_test
+from ..utils import compare_two_settings, create_new_process_for_each_test
 
 if TYPE_CHECKING:
     from typing_extensions import LiteralString
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     "FLASH_ATTN",
     "FLASHINFER",
 ])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_pp_cudagraph(
     monkeypatch: pytest.MonkeyPatch,
     PP_SIZE: int,
