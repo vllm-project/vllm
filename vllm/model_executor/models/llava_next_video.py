@@ -349,21 +349,18 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                 List[b, Tensor(nb_frames, nb_channels, height, width)]
         }
         """
-        pixel_values = kwargs.pop("pixel_values_videos", None)
+        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
 
-        if pixel_values is None:
+        if pixel_values_videos is None:
             return None
 
-        if not (is_list_of(pixel_values,
-                           (torch.Tensor))  # different shape videos 
-                or isinstance(pixel_values,
-                              torch.Tensor)):  # same shape videos
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        if not isinstance(pixel_values_videos, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of pixel_values_videos. "
+                             f"Got type: {type(pixel_values_videos)}")
 
         return LlavaNextVideoPixelInputs(
             type="pixel_values_videos",
-            data=pixel_values,
+            data=pixel_values_videos,
         )
 
     def _select_image_features(self, image_features: torch.Tensor, *,

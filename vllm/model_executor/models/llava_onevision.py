@@ -574,10 +574,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         if pixel_values_videos is None:
             return None
 
-        if not (is_list_of(pixel_values_videos,
-                           torch.Tensor)  # different shape videos 
-                or isinstance(pixel_values_videos,
-                              torch.Tensor)):  # same shape videos
+        if not isinstance(pixel_values_videos, (torch.Tensor, list)):
             raise ValueError("Incorrect type of pixel_values_videos. "
                              f"Got type: {type(pixel_values_videos)}")
 
