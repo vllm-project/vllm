@@ -267,6 +267,9 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             full_lora_a_embeddings,
             self.lora_b_stacked,
             add_input=True)
+        
+        # lora_output is None if the platform supports inplace updates. 
+        # Otherwise it's a tensor, so we update the output manually
         if not current_platform.can_update_inplace():
             full_output = lora_output
 
