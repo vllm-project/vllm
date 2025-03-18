@@ -3,6 +3,7 @@
 import dataclasses
 import weakref
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Type,
                     TypeVar, Union)
@@ -10,8 +11,9 @@ from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Set, Type,
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import VllmConfig
+from vllm.config import CompilationLevel, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -26,6 +28,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap)
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
+from vllm.utils import supports_dynamo
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -519,8 +522,42 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
             )
             self.model = self.lora_manager.create_lora_manager(self.model)
 
+        if self.vllm_config.compilation_config.level ==\
+            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            backend = self.vllm_config.compilation_config.init_backend(
+                vllm_config=self.vllm_config)
+            self.model = torch.compile(
+                self.model,
+                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend=backend)
+
     def get_model(self) -> nn.Module:
         return self.model
+
+    @torch.no_grad()
+    def warming_up_model(self, kv_cache: List[torch.Tensor]) -> None:
+        compilation_config = self.vllm_config.compilation_config
+        if compilation_config.level in [
+                CompilationLevel.NO_COMPILATION,
+                CompilationLevel.DYNAMO_AS_IS,
+        ]:
+            return
+
+        logger.info("Warming up model for the compilation...")
+        # Note: Only generate graph for the generic shape
+        input_data = self._prepare_dummy_model_inputs()
+        with _set_global_compilation_settings(), set_forward_context(
+                None, self.vllm_config):
+            self.model(**input_data)
+        logger.info("Warming up done.")
+
+    def _prepare_dummy_model_inputs(self) -> Dict[str, Any]:
+        token_num = self.scheduler_config.max_num_batched_tokens
+        data = {
+            "input_ids": torch.zeros(token_num, dtype=torch.long),
+            "positions": torch.zeros(token_num, dtype=torch.long),
+        }
+        return data
 
     def _prepare_model_input_tensors(
         self,
@@ -576,6 +613,22 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_adapters()
+
+
+@contextmanager
+def _set_global_compilation_settings():
+    import torch._inductor.config
+
+    # Note: The CPPGEMM backend requires freezing parameters.
+    freezing_value = torch._inductor.config.freezing
+    torch._inductor.config.freezing = True
+    # Note: workaround for "ValueError: fast mode: can't pickle cyclic objects
+    # including object type dict"
+    force_disable_caches = torch._inductor.config.force_disable_caches
+    torch._inductor.config.force_disable_caches = True
+    yield
+    torch._inductor.config.freezing = freezing_value
+    torch._inductor.config.force_disable_caches = force_disable_caches
 
 
 class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
