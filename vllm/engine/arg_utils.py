@@ -52,6 +52,7 @@ def nullable_str(val: str):
         return None
     return val
 
+
 def str_to_bool(value):
     if isinstance(value, bool):
         return value
@@ -60,7 +61,8 @@ def str_to_bool(value):
     elif value.lower() in {'false', 'no', '0'}:
         return False
     else:
-        raise argparse.ArgumentTypeError('Boolean value expected (true/false, yes/no, 1/0)')
+        raise argparse.ArgumentTypeError(
+            'Boolean value expected (true/false, yes/no, 1/0)')
 
 
 def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
