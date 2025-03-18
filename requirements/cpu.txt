@@ -10,6 +10,9 @@ torch==2.7.0.dev20250304; platform_machine == "s390x"
 torchaudio; platform_machine != "ppc64le" and platform_machine != "s390x"
 torchaudio==2.5.1; platform_machine == "ppc64le"
 
+# required for video decoding, this must be updated alongside torch
+torchcodec==0.2.1
+
 # required for the image processor of phi3v, this must be updated alongside torch
 torchvision; platform_machine != "ppc64le"  and platform_machine != "s390x"
 torchvision==0.20.1; platform_machine == "ppc64le"
