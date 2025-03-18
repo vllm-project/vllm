@@ -3,6 +3,8 @@
 
 Run `pytest tests/models/test_models.py`.
 """
+import os
+
 import pytest
 
 from vllm.platforms import current_platform
@@ -88,7 +90,7 @@ def test_models(
         monkeypatch.setenv("VLLM_USE_V1", "0")
 
     if use_rocm_aiter:
-        if monkeypatch.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
+        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
             pytest.skip("Skipping test suite for ROCM AITER")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
