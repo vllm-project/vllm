@@ -881,11 +881,19 @@ def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
     res = 64 if x <= 64 else 1 << (x - 1).bit_length()
     return min(res, upper_limit)
 
-def _get_slot_slices(block_numbers, block_offsets, num_scheduled_tokens_per_req, page_size):
+def _get_slot_slices(block_numbers, block_offsets, num_scheduled_tokens_per_req: list, page_size: int):
     res = []
-    for num_scheduled_tokens in num_scheduled_tokens_per_req:
+    start_indices = [0] + num_scheduled_tokens_per_req
+    for i, num_scheduled_tokens in enumerate(num_scheduled_tokens_per_req):
         num_pages = cdiv(num_scheduled_tokens, page_size)
+        start_idx = block_offsets[i]
+        end_idx = start_indices[i+1]
         for i in range(num_pages):
+            page_idx = block_numbers[start_idx]
+            size = (end_idx-start_idx) if i == num_pages-1 else page_size
+            res.append(torch.tensor([page_idx, start_idx, size],dtype=torch.int64))
+            start_idx += page_size
+    return torch.tensor(res, dtype=torch.int64)
 
 
 

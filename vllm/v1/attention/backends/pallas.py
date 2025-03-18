@@ -161,8 +161,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         key_cache, value_cache = kv_cache
         if kv_cache[0].numel() > 0:
-            slot_mapping = attn_metadata.slot_mapping
-            write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
+            slot_slices = attn_metadata.slot_slices
+            write_to_kv_cache(key, value, key_cache, value_cache, slot_slices)
 
         output = torch.ops.xla.ragged_paged_attention(
             query,
@@ -185,7 +185,7 @@ def write_to_kv_cache(
     value: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
+    slot_slices: torch.Tensor,
 ) -> None:
     """ Write the key and values to the KV cache.
 
@@ -210,4 +210,4 @@ def write_to_kv_cache(
     # value_cache.index_copy_(0, slot_mapping, value)
     # TODO(xw32): once the write_to_kv_cache kernel is ready, update the torch_xla wheel and
     # call it here
-    # torch.ops.xla.kv_insertion(key, value, key_cache, value_cache, slices)
+    # torch.ops.xla.kv_insertion(key, value, key_cache, value_cache, slot_slices)
