@@ -480,7 +480,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `MiniMaxText01ForCausalLM`
   * MiniMax-Text
   * `MiniMaxAI/MiniMax-Text-01`, etc.
-  * 
+  *
   * ✅︎
 :::
 

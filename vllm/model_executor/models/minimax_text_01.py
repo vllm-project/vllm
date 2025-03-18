@@ -18,7 +18,6 @@ from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size)
-from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -35,6 +34,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.utils import make_layers
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -45,7 +45,6 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import HasInnerState, IsHybrid
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from .utils import PPMissingLayer, is_pp_missing_parameter
-from vllm.model_executor.layers.utils import make_layers
 
 
 def replace_weight_name(name: str,
@@ -67,7 +66,6 @@ def weight_loader_with_alias(alias: str):
                        *args,
                        prefix: str = None,
                        **kwargs):
-            # pf = "[vLLM][load]" + " " if prefix is None else f"[{prefix}] "
             value = func(param, loaded_weight, *args, **kwargs)
             return value
 
@@ -177,8 +175,6 @@ class MiniMaxText01RotaryEmbedding(CustomOp):
         self.cos_sin_cache = self.cos_sin_cache.to(positions.device)
         query_cast = query.to(self.cache_dtype)
         key_cast = key.to(self.cache_dtype)
-        # ops.rotary_embedding()/batched_rotary_embedding()
-        # are in-place operations that update the query and key tensors.
         ops.rotary_embedding(positions, query_cast, key_cast, self.head_size,
                              self.cos_sin_cache, self.is_neox_style)
         query = query_cast.to(query.dtype)
@@ -265,8 +261,7 @@ class MiniMaxText01MoE(nn.Module):
             num_experts=self.num_total_experts,
             top_k=self.top_k,
             hidden_size=self.hidden_size,
-            intermediate_size=self.intermediate_size *
-            self.tp_size,  # FusedMoE 类内会处理 TP
+            intermediate_size=self.intermediate_size * self.tp_size,
             params_dtype=self.params_dtype,
             reduce_results=True,
             renormalize=True,
@@ -811,45 +806,42 @@ class MiniMaxText01Model(nn.Module):
         def layer_fn(prefix):
             layer_idx = int(prefix.split('.')[-1])
             layer_config = config
-            layer_config.attention_type = self.decoder_attention_types[layer_idx]
+            layer_config.attention_type = self.decoder_attention_types[
+                layer_idx]
             layer_config.layer_idx = layer_idx
-            
+
             decoder_kwargs = {
                 "quant_config": quant_config,
                 "layer_id": layer_idx,
                 "cache_config": cache_config
             }
-            
+
             if layer_config.attention_type == 0:
                 decoder_kwargs["linear_layer_id"] = sum(
-                    1 for i in range(layer_idx) 
-                    if self.decoder_attention_types[i] == 0
-                )
+                    1 for i in range(layer_idx)
+                    if self.decoder_attention_types[i] == 0)
             else:
                 decoder_kwargs["linear_layer_id"] = None
-                
+
             if hasattr(config, "num_local_experts") and isinstance(
                     config.num_local_experts, list):
-                decoder_kwargs["expert_num"] = config.num_local_experts[layer_idx]
+                decoder_kwargs["expert_num"] = config.num_local_experts[
+                    layer_idx]
             elif hasattr(config, "num_local_experts") and isinstance(
                     config.num_local_experts, int):
                 decoder_kwargs["expert_num"] = config.num_local_experts
             else:
                 decoder_kwargs["expert_num"] = 1
-                
-            return MiniMaxText01DecoderLayer(
-                layer_config, **decoder_kwargs, prefix=prefix
-            )
-        
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            layer_fn,
-            prefix=f"{prefix}.layers"
-        )
 
-        # 计算缓存形状
-        linear_layer_nums = sum(1 for i in range(config.num_hidden_layers) 
-                               if self.decoder_attention_types[i] == 0)
+            return MiniMaxText01DecoderLayer(layer_config,
+                                             **decoder_kwargs,
+                                             prefix=prefix)
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers, layer_fn, prefix=f"{prefix}.layers")
+
+        linear_layer_nums = sum(1 for i in range(config.num_hidden_layers)
+                                if self.decoder_attention_types[i] == 0)
         max_slots_number = scheduler_config.max_num_seqs
         self.cache_shape = (linear_layer_nums, max_slots_number,
                             config.num_attention_heads //
@@ -860,20 +852,19 @@ class MiniMaxText01Model(nn.Module):
         del _dummy
 
         self.minimax_cache = MinimaxCacheManager(dtype=self._dtype,
-                                                cache_shape=self.cache_shape)
+                                                 cache_shape=self.cache_shape)
 
         rope_theta = getattr(config, "rope_theta", 10000)
-        head_dim = getattr(
-            config, "head_dim",
-            config.hidden_size // config.num_attention_heads)
+        head_dim = getattr(config, "head_dim",
+                           config.hidden_size // config.num_attention_heads)
         if hasattr(config, "max_model_len") and isinstance(
                 config.max_model_len, int):
             max_position_embeddings = min(config.max_position_embeddings,
                                           config.max_model_len)
         self.rotary_emb = MiniMaxText01RotaryEmbedding(
             head_dim,
-            rotary_dim=config.rotary_dim if hasattr(
-                config, "rotary_dim") else head_dim,
+            rotary_dim=config.rotary_dim
+            if hasattr(config, "rotary_dim") else head_dim,
             max_position=max_position_embeddings,
             base=int(rope_theta),
             is_neox_style=True,
@@ -897,17 +888,18 @@ class MiniMaxText01Model(nn.Module):
         for _, seq_to_slot_map in (
                 self.minimax_cache.cache_indices_mapping.items()):
             seq_to_slot_maps.update(seq_to_slot_map)
-        
+
         slots_to_clear = []
         for _prefill_id in range(attn_metadata.num_prefills):
             seq_id = seq_id_map[_prefill_id]
-            if attn_metadata.context_lens_tensor[_prefill_id] == 0 and seq_id in seq_to_slot_maps:
+            if attn_metadata.context_lens_tensor[
+                    _prefill_id] == 0 and seq_id in seq_to_slot_maps:
                 slots_to_clear.append(seq_to_slot_maps[seq_id])
-        
+
         if slots_to_clear:
-            slots_tensor = torch.tensor(slots_to_clear, 
-                                       device=minimax_cache_tensors.device, 
-                                       dtype=torch.long)
+            slots_tensor = torch.tensor(slots_to_clear,
+                                        device=minimax_cache_tensors.device,
+                                        dtype=torch.long)
             minimax_cache_tensors[:, slots_tensor, ...] = 0
 
     def forward(self,
