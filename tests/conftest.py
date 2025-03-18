@@ -300,10 +300,8 @@ class HfRunner:
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
         postprocess_inputs: Callable[..., BatchEncoding] = identity,
     ) -> None:
-        if dtype == "auto":
-            torch_dtype = None
-        else:
-            torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
+        torch_dtype = ("auto"
+                       if dtype == "auto" else STR_DTYPE_TO_TORCH_DTYPE[dtype])
 
         self.model_name = model_name
 
@@ -316,7 +314,7 @@ class HfRunner:
                 device="cpu",
                 trust_remote_code=True,
             )
-            if torch_dtype is not None:
+            if torch_dtype != "auto":
                 _model = _model.to(torch_dtype)
 
             self.model = self.wrap_device(_model)
@@ -330,7 +328,7 @@ class HfRunner:
                                       trust_remote_code=True)
 
             _model = self.model.model
-            if torch_dtype is not None:
+            if torch_dtype != "auto":
                 _model = _model.to(dtype=torch_dtype)
 
             self.model.model = self.wrap_device(_model)
