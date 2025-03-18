@@ -569,15 +569,17 @@ class Scheduler:
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
-            for input_id in cached_encoder_input_ids:
-                mm_positions = request.mm_positions[input_id]
-                start_pos = mm_positions["offset"]
-                num_tokens = mm_positions["length"]
-                if start_pos + num_tokens <= request.num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
-                    self.encoder_cache_manager.free_encoder_input(
-                        request, input_id)
+            # OPTIMIZATION: Avoid list(set) if the set is empty.
+            if cached_encoder_input_ids:
+                for input_id in list(cached_encoder_input_ids):
+                    mm_positions = request.mm_positions[input_id]
+                    start_pos = mm_positions["offset"]
+                    num_tokens = mm_positions["length"]
+                    if start_pos + num_tokens <= request.num_computed_tokens:
+                        # The encoder output is already processed and stored
+                        # in the decoder's KV cache.
+                        self.encoder_cache_manager.free_encoder_input(
+                            request, input_id)
 
             # Add newly generated spec token ids to the request.
             if spec_token_ids is not None:
