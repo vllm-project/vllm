@@ -10,6 +10,7 @@ import torch
 import triton
 import triton.language as tl
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -70,9 +71,11 @@ def rocm_aiter_gemm_w8a8_blockscale(A: torch.Tensor,
 
 def dispatch_w8a8_blockscale_func(
         use_cutlass: bool) -> Callable[..., torch.Tensor]:
+    use_aiter_gemm_w8a8_blockscale = (current_platform.is_rocm() and \
+                                       envs.VLLM_ROCM_USE_AITER_GEMM_W8A8_BLOCKSCALE)
     if use_cutlass:
         return cutlass_scaled_mm
-    if current_platform.is_rocm_aiter_gemm_w8a8_blockscale_enabled():
+    if use_aiter_gemm_w8a8_blockscale:
         return rocm_aiter_gemm_w8a8_blockscale
     return w8a8_block_fp8_matmul
 
