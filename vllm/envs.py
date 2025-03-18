@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
-    VLLM_USE_FLASHINFER_REJECTION_SAMPLER: bool = False
     VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
@@ -56,7 +55,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
-    VLLM_MM_INPUT_CACHE_SIZE: int = 256
+    VLLM_MM_INPUT_CACHE_GIB: int = 8
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -432,11 +431,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
-    # Cache size for multimodal feature/input cache for multimodal models
-    # in unit of number of multimodal data items (e.g. image, video, audio).
-    # Default is 256 multimodal data items.
-    "VLLM_MM_INPUT_CACHE_SIZE":
-    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_SIZE", "256")),
+    # Cache size (in GiB) for multimodal input cache
+    # Default is 8GiB
+    "VLLM_MM_INPUT_CACHE_GIB":
+    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "8")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
