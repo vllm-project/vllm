@@ -82,9 +82,8 @@ struct sm90_fp8_config_N8192 {
                             KernelSchedule, EpilogueSchedule>;
 };
 
-}  // namespace
-
-void cutlass_moe_mm_sm90(
+template <typename InType, typename OutType>
+void run_cutlass_moe_mm_sm90(
     torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
@@ -99,18 +98,17 @@ void cutlass_moe_mm_sm90(
   TORCH_CHECK(b_tensors.dtype() == torch::kFloat8_e4m3fn,
               "B tensors must be of type float8_e4m3fn.");
 
+  TORCH_CHECK(a_tensors.dtype() == torch::kFloat8_e4m3fn);
+  TORCH_CHECK(b_tensors.dtype() == torch::kFloat8_e4m3fn);
+
   using Cutlass3xGemmN8192 = typename sm90_fp8_config_N8192<
-      ElementAB_Type, ElementC_Type,
-      vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
+      InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
   using Cutlass3xGemmK8192 = typename sm90_fp8_config_K8192<
-      ElementAB_Type, ElementC_Type,
-      vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
+      InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
   using Cutlass3xGemmM16 = typename sm90_fp8_config_M16<
-      ElementAB_Type, ElementC_Type,
-      vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
+      InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
   using Cutlass3xGemmDefault = typename sm90_fp8_config_default<
-      ElementAB_Type, ElementC_Type,
-      vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
+      InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
 
   uint32_t const m = a_tensors.size(0);
   uint32_t const n = out_tensors.size(1);
@@ -133,4 +131,34 @@ void cutlass_moe_mm_sm90(
         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
         problem_sizes, a_strides, b_strides, c_strides);
   }
+}
+
+void dispatch_moe_mm_sm90(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides) {
+  if (out_tensors.dtype() == torch::kBFloat16) {
+    run_cutlass_moe_mm_sm90<cutlass::float_e4m3_t, cutlass::bfloat16_t>(
+        out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+        problem_sizes, a_strides, b_strides, c_strides);
+  } else {
+    run_cutlass_moe_mm_sm90<cutlass::float_e4m3_t, cutlass::half_t>(
+        out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+        problem_sizes, a_strides, b_strides, c_strides);
+  }
+}
+
+}  // namespace
+
+void cutlass_moe_mm_sm90(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides) {
+  dispatch_moe_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
+                       expert_offsets, problem_sizes, a_strides, b_strides,
+                       c_strides);
 }

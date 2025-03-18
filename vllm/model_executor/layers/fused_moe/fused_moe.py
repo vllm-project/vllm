@@ -1586,6 +1586,7 @@ def cutlass_moe_fp8(
     ab_strides2: torch.Tensor,
     c_strides2: torch.Tensor,
     intermediate_scale: Optional[torch.Tensor] = None,
+    out_dtype: torch.Type = torch.half,
 ) -> torch.Tensor:
     """
     This function computes a a8w8-quantized Mixture of Experts (MoE) layer
@@ -1618,6 +1619,7 @@ def cutlass_moe_fp8(
     - intermediate_scale (Optional[torch.Tensor]): The optional fp32 scale to
         quantize and dequantize the intermediate result between the gemms.
         Shape: scalar
+    - out_dtype (torch.Tensor): The output tensor type.
 
     Returns:
     - torch.Tensor: The fp16 output tensor after applying the MoE layer.
@@ -1652,6 +1654,7 @@ def cutlass_moe_fp8(
         0], "AB Strides 2 expert number  mismatch"
     assert c_strides2.shape[0] == w2_q.shape[
         0], "C Strides 2 expert number mismatch"
+    assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
 
     num_experts = w1_q.shape[0]
     m = a_q.shape[0]
@@ -1682,14 +1685,14 @@ def cutlass_moe_fp8(
     rep_a_q = a_q.view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
     rep_a_scales = a_scale[a_map] if per_act_token else a_scale
 
-    c1 = torch.empty((m * topk, n * 2), device=device, dtype=torch.half)
-    c2 = torch.empty((m * topk, k), device=device, dtype=torch.half)
+    c1 = torch.empty((m * topk, n * 2), device=device, dtype=out_dtype)
+    c2 = torch.empty((m * topk, k), device=device, dtype=out_dtype)
 
     ops.cutlass_moe_mm(c1, rep_a_q, w1_q, rep_a_scales, w1_scale,
                        expert_offsets[:-1], problem_sizes1, ab_strides1,
                        ab_strides1, c_strides1)
 
-    intermediate = torch.empty((m * topk, n), device=device, dtype=torch.half)
+    intermediate = torch.empty((m * topk, n), device=device, dtype=out_dtype)
     torch.ops._C.silu_and_mul(intermediate, c1)
 
     intemediate_q, intermediate_scales = ops.scaled_fp8_quant(
@@ -1702,4 +1705,4 @@ def cutlass_moe_fp8(
                        ab_strides2, c_strides2)
 
     return (c2[c_map].view(m, topk, k) *
-            topk_weights.view(m, topk, 1).half()).sum(dim=1)
+            topk_weights.view(m, topk, 1).to(out_dtype)).sum(dim=1)

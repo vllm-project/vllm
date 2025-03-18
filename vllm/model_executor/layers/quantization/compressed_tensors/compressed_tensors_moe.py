@@ -448,7 +448,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             self.ab_strides2,
             self.c_strides2,
             intermediate_scale=layer.w2_input_scale,
-        ).to(x.dtype)
+            out_dtype=x.dtype,
+        )
 
 
 class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):

@@ -41,8 +41,6 @@ namespace {
 
 using ProblemShape =
     cutlass::gemm::GroupProblemShape<cute::Shape<int, int, int>>;
-using ElementAB_Type = cutlass::float_e4m3_t;
-using ElementC_Type = cutlass::half_t;
 
 using ElementAccumulator = float;
 using ArchTag = cutlass::arch::Sm90;
@@ -105,7 +103,6 @@ void cutlass_group_gemm_caller(
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides) {
   using ElementAB = typename Gemm::ElementAB;
-  using ElementC = typename Gemm::ElementC;
   using ElementD = typename Gemm::ElementD;
 
   int groups = (int)expert_offsets.size(0);
@@ -138,8 +135,8 @@ void cutlass_group_gemm_caller(
       reinterpret_cast<int64_t>(out_tensors.data_ptr()),
       reinterpret_cast<int64_t>(a_scales.data_ptr()),
       reinterpret_cast<int64_t>(b_scales.data_ptr()), out_tensors.size(1),
-      a_tensors.size(1), per_act_token, per_out_ch, sizeof(ElementAB_Type),
-      sizeof(ElementC_Type), sizeof(ElementAccumulator));
+      a_tensors.size(1), per_act_token, per_out_ch, sizeof(ElementAB),
+      sizeof(ElementD), sizeof(ElementAccumulator));
 
   using GemmKernel = typename Gemm::GemmKernel;
   using StrideA = Stride<int64_t, Int<1>, Int<0>>;
@@ -152,9 +149,9 @@ void cutlass_group_gemm_caller(
   ProblemShape prob_shape{groups, problem_sizes_as_shapes, nullptr};
 
   typename GemmKernel::MainloopArguments mainloop_args{
-      static_cast<const ElementAB_Type**>(a_ptrs.data_ptr()),
+      static_cast<const ElementAB**>(a_ptrs.data_ptr()),
       static_cast<StrideA*>(a_strides.data_ptr()),
-      static_cast<const ElementAB_Type**>(b_ptrs.data_ptr()),
+      static_cast<const ElementAB**>(b_ptrs.data_ptr()),
       static_cast<StrideB*>(b_strides.data_ptr())};
 
   // Currently, we are only able to do broadcast on either all or none a_scales
@@ -165,7 +162,7 @@ void cutlass_group_gemm_caller(
           static_cast<const ElementAccumulator**>(b_scales_ptrs.data_ptr()),
           per_act_token, per_out_ch),
       nullptr, static_cast<StrideC*>(c_strides.data_ptr()),
-      static_cast<ElementC_Type**>(out_ptrs.data_ptr()),
+      static_cast<ElementD**>(out_ptrs.data_ptr()),
       static_cast<StrideC*>(c_strides.data_ptr())};
 
   typename GemmKernel::Arguments args{
