@@ -291,6 +291,7 @@ def main(args):
     compare.print()
 
 
+# TODO add --tp-sizes argument
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description="Benchmark Marlin across specified models/shapes/batches")
