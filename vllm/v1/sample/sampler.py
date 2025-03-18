@@ -47,6 +47,9 @@ class Sampler(nn.Module):
         logits = self.apply_penalties(logits, sampling_metadata)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
+        # Make sure the sampled token ids are int64 as they can be used as
+        # indices for following ops.
+        sampled = sampled.long()
 
         # Gather the logprobs of the topk and sampled token (if requested).
         # Get logprobs and rank tensors (if requested)
@@ -139,19 +142,21 @@ class Sampler(nn.Module):
                      or sampled tokens (if sampled
                      logprobs); 1D token ID tensor
                      with (num tokens) elements
+                     Must be int64.
 
         Returns:
           Top-k int indices tensor, (num tokens) x (num_logprobs + 1)
           Top-k float logprobs tensor, (num tokens) x (num_logprobs + 1)
           Sampled token rank tensor, (num tokens)
         """
+        assert token_ids.dtype == torch.int64
         # Find the topK values.
         topk_logprobs, topk_indices = torch.topk(logprobs,
                                                  num_logprobs,
                                                  dim=-1)
 
         # Get with the logprob of the prompt or sampled token.
-        token_ids = token_ids.unsqueeze(-1).to(torch.long)
+        token_ids = token_ids.unsqueeze(-1)
         token_logprobs = logprobs.gather(-1, token_ids)
 
         # Compute the ranks of the actual token.
