@@ -897,10 +897,23 @@ def initialize_model_parallel(
         get_world_group().device_group)
 
     data_parallel_size = 1
+    has_external_dp = False
     from vllm.config import get_current_vllm_config
     config = get_current_vllm_config()
     if config is not None:
-        data_parallel_size = config.parallel_config.data_parallel_size
+        if config.parallel_config.world_size != world_size:
+            # detect external data parallelism.
+            # dp in vllm means all dp instances need to run together.
+            # if the world size does not match, it means this dp is external,
+            # and the dp instances can run independently, e.g. in rlhf workflow
+            # from https://github.com/volcengine/verl .
+            # in that case, we treat the rest dimensions as if they are
+            # data parallel, and create a dummy dp group that is not used.
+            data_parallel_size = world_size // (pipeline_model_parallel_size *
+                                                tensor_model_parallel_size)
+            has_external_dp = True
+        else:
+            data_parallel_size = config.parallel_config.data_parallel_size
 
     # the layout order is: DP x PP x TP
     # to get group_ranks for each dimension, transpose that dimension to the
@@ -940,6 +953,12 @@ def initialize_model_parallel(
                                       2).reshape(-1,
                                                  data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
+    if has_external_dp:
+        # create a dummy dp group that is not used actually,
+        # since this dp is external.
+        # a dummy dp group means every rank is a group itself.
+        # this way, no communication is needed, no memory is wasted.
+        group_ranks = [[x] for x in range(world_size)]
     _DP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
