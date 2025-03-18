@@ -113,7 +113,14 @@ def sample_frames_from_video(frames: npt.NDArray,
     return sampled_frames
 
 
-class OpenCVVideoBackend:
+class VideoLoader:
+
+    @classmethod
+    def load_bytes(self, data: bytes, num_frames: int = -1) -> npt.NDArray:
+        raise NotImplementedError
+
+
+class OpenCVVideoBackend(VideoLoader):
 
     def get_cv2_video_api(self):
         import cv2.videoio_registry as vr
@@ -135,27 +142,32 @@ class OpenCVVideoBackend:
         import cv2
 
         backend = cls().get_cv2_video_api()
-        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        cap = cv2.VideoCapture(BytesIO(data), backend, [cv2.CAP_PROP_FPS])
         if not cap.isOpened():
-            raise ValueError("Could not open video file")
+            raise ValueError("Could not open video stream")
 
         frames = []
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        for i in range(total_frames):
+        total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        full_read = num_frames == -1 or total_frames_num < num_frames
+        if full_read:
+            frame_idx = list(range(0, total_frames_num))
+        else:
+            uniform_sampled_frames = np.linspace(0,
+                                                 total_frames_num - 1,
+                                                 num_frames,
+                                                 dtype=int)
+            frame_idx = uniform_sampled_frames.tolist()
+
+        for i in frame_idx:
+            if not full_read:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
             ret, frame = cap.read()
             if ret:
                 frames.append(frame)
-
-        frames = np.stack(frames)
-        frames = sample_frames_from_video(frames, num_frames)
-        if len(frames) < num_frames:
-            raise ValueError(
-                f"Could not read enough frames from video stream "
-                f"(expected {num_frames} frames, got {len(frames)})")
-        return frames
+        return np.stack(frames)
 
 
-class DecordVideoBackend:
+class DecordVideoBackend(VideoLoader):
 
     @classmethod
     def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
