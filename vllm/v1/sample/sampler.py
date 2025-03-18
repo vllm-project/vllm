@@ -47,8 +47,10 @@ class Sampler(nn.Module):
         logits = self.apply_penalties(logits, sampling_metadata)
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
-        # Make sure the sampled token ids are int64 as they can be used as
-        # indices for following ops.
+        # Convert sampled token ids to int64 (long) type to ensure compatibility
+        # with subsequent operations that may use these values as indices.
+        # This conversion is necessary because FlashInfer sampling operations
+        # return int32 (while PyTorch argmax and topk return int64).
         sampled = sampled.long()
 
         # Gather the logprobs of the topk and sampled token (if requested).
