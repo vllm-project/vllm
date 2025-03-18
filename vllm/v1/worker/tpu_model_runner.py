@@ -63,6 +63,7 @@ class TPUModelRunner:
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
+        self.compilation_config = vllm_config.compilation_config
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -159,23 +160,9 @@ class TPUModelRunner:
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
-        self.paddings = self._get_paddings()
-
-    def _get_paddings(self) -> list[int]:
-        """Generate a list of padding size, starting from 16, 
-        first increase the size to twice, 
-        then increase the padding size by bucket_padding_gap.
-        """
-        paddings = []
-        num = 16
-        while num <= self.scheduler_config.bucket_padding_gap:
-            paddings.append(num)
-            num *= 2
-        num //= 2
-        while num < self.max_num_tokens:
-            paddings.append(num + self.scheduler_config.bucket_padding_gap)
-            num += self.scheduler_config.bucket_padding_gap
-        return paddings
+        self.paddings = _get_paddings(
+            16, self.max_num_tokens,
+            self.compilation_config.tpu_bucket_padding_gap)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
@@ -426,8 +413,8 @@ class TPUModelRunner:
             num_scheduled_tokens_per_req)
 
         # Do the padding and copy the tensors to the TPU.
-        padded_total_num_scheduled_tokens = self._get_padded_token_len(
-            total_num_scheduled_tokens)
+        padded_total_num_scheduled_tokens = _get_padded_token_len(
+            self.paddings, total_num_scheduled_tokens)
         self.input_ids = self.input_ids_cpu[:
                                             padded_total_num_scheduled_tokens].to(
                                                 self.device)
@@ -823,13 +810,6 @@ class TPUModelRunner:
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
 
-    def _get_padded_token_len(self, x: int) -> int:
-        """Return the first element in paddings list greater or equal to x.
-        """
-        index = bisect.bisect_left(self.paddings, x)
-        assert index < len(self.paddings)
-        return self.paddings[index]
-
 
 class ModelWrapperV1(nn.Module):
 
@@ -890,3 +870,28 @@ def _get_padded_number(n: int, multiple: int) -> int:
 def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
     res = 64 if x <= 64 else 1 << (x - 1).bit_length()
     return min(res, upper_limit)
+
+
+def _get_paddings(min_token_size, max_token_size, padding_gap) -> list[int]:
+    """Generate a list of padding size, starting from 16, 
+    first increase the size to twice, 
+    then increase the padding size by bucket_padding_gap.
+    """
+    paddings = []
+    num = min_token_size
+    while num <= padding_gap:
+        paddings.append(num)
+        num *= 2
+    num //= 2
+    while num < max_token_size:
+        paddings.append(num + padding_gap)
+        num += padding_gap
+    return paddings
+
+
+def _get_padded_token_len(paddings: list[int], x: int) -> int:
+    """Return the first element in paddings list greater or equal to x.
+    """
+    index = bisect.bisect_left(paddings, x)
+    assert index < len(paddings)
+    return paddings[index]

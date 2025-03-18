@@ -1615,11 +1615,6 @@ class SchedulerConfig:
 
     chunked_prefill_enabled: bool = field(init=False)
 
-    # The gap between each bucket for padding.
-    # For example, the bucket padding is (16, 24, 32, 48, ..., 512),
-    # then its bucket_padding_gap is 8.
-    bucket_padding_gap: int = 64
-
     # scheduler class or path. "vllm.core.scheduler.Scheduler" (default)
     # or "mod.custom_class".
     scheduler_cls: Union[str, type[object]] = "vllm.core.scheduler.Scheduler"
@@ -3028,6 +3023,12 @@ class CompilationConfig(BaseModel):
     cudagraph_num_of_warmups: int = 0
     cudagraph_capture_sizes: Optional[list[int]] = None
     cudagraph_copy_inputs: bool = False
+
+    # TODO: combine tpu and cuda padding together.
+    # The gap between each bucket for padding (in tpu).
+    # For example, the bucket padding is (16, 24, 32, 48, ..., 512),
+    # then its bucket_padding_gap is 8.
+    tpu_bucket_padding_gap: int = 64
 
     class PassConfig(BaseModel):
         """

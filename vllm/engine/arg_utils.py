@@ -129,7 +129,7 @@ class EngineArgs:
     long_prefill_token_threshold: Optional[int] = 0
     max_num_seqs: Optional[int] = None
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
-    bucket_padding_gap: Optional[int] = None
+    tpu_bucket_padding_gap: Optional[int] = None
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
@@ -572,12 +572,12 @@ class EngineArgs:
             help=('Max number of log probs to return logprobs is specified in'
                   ' SamplingParams.'))
         parser.add_argument(
-            '--bucket-padding-gap',
+            '--tpu-bucket-padding-gap',
             type=int,
-            default=EngineArgs.bucket_padding_gap,
+            default=EngineArgs.tpu_bucket_padding_gap,
             help='The gap between each bucket for padding. '
             'For example, the bucket padding is (16, 24, 32, 48, ..., 512), '
-            'then its bucket_padding_gap is 8.')
+            'then its tpu_bucket_padding_gap is 8.')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
@@ -1333,8 +1333,7 @@ class EngineArgs:
             scheduler_cls=self.scheduler_cls,
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
-            long_prefill_token_threshold=self.long_prefill_token_threshold,
-            bucket_padding_gap=self.bucket_padding_gap)
+            long_prefill_token_threshold=self.long_prefill_token_threshold)
 
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
