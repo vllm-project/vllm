@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import torch
 
 from vllm.sequence import (ExecuteModelRequest, SequenceData,
                            SequenceGroupMetadata, get_all_seq_ids)
@@ -149,8 +150,15 @@ class MQAScorer(SpeculativeScorer):
 
         hidden_states = None
         if target_sampler_output.hidden_states is not None:
-            hidden_states = target_sampler_output.hidden_states.reshape(
-                bs, (k + 1), -1)
+            hidden_states = target_sampler_output.hidden_states
+            num_tokens = hidden_states.numel() // hidden_states.shape[-1]
+            if num_tokens < bs * (k + 1):
+                pad_size = bs * (k + 1) - num_tokens
+                pad_value = [0] * hidden_states.dim() * 2
+                pad_value[-1] = pad_size
+                hidden_states = torch.nn.functional.pad(
+                    hidden_states, pad_value)
+            hidden_states = hidden_states.reshape(bs, (k + 1), -1)
 
         return SpeculativeScores(probs=all_probs,
                                  token_ids=all_tokens,
