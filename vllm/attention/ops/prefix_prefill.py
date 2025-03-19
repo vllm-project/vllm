@@ -277,9 +277,10 @@ if triton.__version__ >= "2.1.0":
         @triton.autotune(
             configs=[
                 triton.Config({'BLOCK_M': block_m, 'BLOCK_N': block_n, \
-                                "kpack": 2, \
                                 "num_unroll_cache": num_unroll_cache, \
-                                "num_unroll_request": num_unroll_request }, \
+                                "num_unroll_request": num_unroll_request }
+                                + {"kpack": 2}
+                                    if current_platform.is_rocm() else {}, \
                                 num_warps=num_warps) \
                 for block_m in [32, 64, 128] for block_n in [32, 64, 128] \
                 for num_warps in [4, 8] for num_unroll_cache in [1, 2] \
