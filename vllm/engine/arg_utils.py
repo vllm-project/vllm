@@ -1477,10 +1477,10 @@ class EngineArgs:
             return False
 
         # No Fp8 KV cache so far.
-        if self.kv_cache_dtype != "auto":
-            _raise_or_fallback(feature_name="--kv-cache-dtype",
-                               recommend_to_remove=False)
-            return False
+        # if self.kv_cache_dtype != "auto":
+        #     _raise_or_fallback(feature_name="--kv-cache-dtype",
+        #                        recommend_to_remove=False)
+        #     return False
 
         # No Prompt Adapter so far.
         if self.enable_prompt_adapter:

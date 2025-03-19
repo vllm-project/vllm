@@ -223,9 +223,9 @@ class ipex_ops:
         k_scale: float,
         v_scale: float,
     ) -> None:
-        assert kv_cache_dtype == "auto"
+        # assert kv_cache_dtype == "auto"
         ipex.llm.modules.PagedAttention.reshape_and_cache_flash(
-            key, value, key_cache, value_cache, slot_mapping)
+            key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype, k_scale, v_scale)
 
     @staticmethod
     def chunked_prefill(
@@ -246,12 +246,13 @@ class ipex_ops:
         is_casual: bool,
         return_softmax: bool,
         gen_: Optional[torch.Generator],
+        kv_cache_dtype: str,
     ):
         return ipex.llm.modules.PagedAttention.flash_attn_varlen_func(
             output,
             query.contiguous(),
-            key_cache,
-            value_cache,
+            key_cache, # uint8
+            value_cache, # uint8  
             cu_seqlens_q,
             cu_seqlens_k,
             max_seqlen_q,
@@ -260,6 +261,7 @@ class ipex_ops:
             is_casual,
             block_table,
             alibi_slopes,
+            kv_cache_dtype=kv_cache_dtype, # "fp8"
             k_scale=1.0,
             v_scale=1.0,
         )

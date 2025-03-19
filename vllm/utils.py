@@ -150,9 +150,9 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
-    "fp8": torch.uint8,
-    "fp8_e4m3": torch.uint8,
-    "fp8_e5m2": torch.uint8,
+    "fp8": torch.float8_e4m3fn,
+    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8_e5m2": torch.float8_e5m2,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {

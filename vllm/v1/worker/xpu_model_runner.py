@@ -432,7 +432,7 @@ class XPUModelRunner(GPUModelRunner):
                 kv_cache_shape = IPEXAttentionBackend.get_kv_cache_shape(
                     num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
                     layer_spec.head_size)
-                dtype = layer_spec.dtype
+                dtype = layer_spec.kv_cache_dtype
                 kv_caches[layer_name] = torch.zeros(kv_cache_shape,
                                                     dtype=dtype,
                                                     device=self.device)
