@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     VLLM_USE_AITER_MOE: bool = True
     VLLM_USE_AITER_2STAGE_MOE: bool = True
     VLLM_USE_AITER_PAGED_ATTN: bool = False
+    VLLM_USE_AITER_FP8_BLOCK_MOE: bool = True
     VLLM_USE_AITER_LINEAR: bool = True
     VLLM_USE_AITER_NORM: bool = True
     VLLM_USE_AITER_MLA: bool = False
@@ -300,38 +301,42 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
              ("true", "1")),
 
-    # use ater ops unless specifically disabled
+    # use aiter ops unless specifically disabled
     "VLLM_USE_AITER":
     lambda: (os.getenv("VLLM_USE_AITER", "False").lower() in ("true", "1")),
 
-    # use ater moe op if ater ops are enabled
+    # use aiter moe op if ater ops are enabled
     "VLLM_USE_AITER_MOE":
     lambda: (os.getenv("VLLM_USE_AITER_MOE", "True").lower() in ("true", "1")),
 
-    # use ater ck fused moe op if ater ops are enabled
+    # use aiter ck fused moe op if ater ops are enabled
     "VLLM_USE_AITER_2STAGE_MOE":
     lambda: (os.getenv("VLLM_USE_AITER_2STAGE_MOE", "True").lower() in
              ("true", "1")),
 
-    # use ater paged attn op if ater ops are enabled
+    # use aiter ck fused moe op if ater ops are enabled
+    "VLLM_USE_AITER_FP8_BLOCK_MOE":
+    lambda: (os.getenv("VLLM_USE_AITER_FP8_BLOCK_MOE", "True").lower() in
+             ("true", "1")),
+
+    # use aiter paged attn op if ater ops are enabled
     "VLLM_USE_AITER_PAGED_ATTN":
     lambda: (os.getenv("VLLM_USE_AITER_PAGED_ATTN", "False").lower() in
              ("true", "1")),
 
-    # use ater linear op if ater ops are enabled
+    # use aiter linear op if ater ops are enabled
     "VLLM_USE_AITER_LINEAR":
     lambda: (os.getenv("VLLM_USE_AITER_LINEAR", "True").lower() in
              ("true", "1")),
 
-    # use ater rms norm op if ater ops are enabled
+    # use aiter rms norm op if ater ops are enabled
     "VLLM_USE_AITER_NORM":
     lambda: (os.getenv("VLLM_USE_AITER_NORM", "True").lower() in
              ("true", "1")),
 
-    # use ater MLA op if ater ops are enabled
+    # use aiter MLA op if ater ops are enabled
     "VLLM_USE_AITER_MLA":
-    lambda: (os.getenv("VLLM_USE_AITER_MLA", "True").lower() in
-             ("true", "1")),
+    lambda: (os.getenv("VLLM_USE_AITER_MLA", "True").lower() in ("true", "1")),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id

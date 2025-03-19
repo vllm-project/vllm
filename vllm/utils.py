@@ -1773,6 +1773,11 @@ def aiter_2stage_moe_enabled() -> bool:
 
 
 @cache
+def aiter_fp8_block_moe_enabled() -> bool:
+    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_FP8_BLOCK_MOE
+
+
+@cache
 def aiter_paged_attn_enabled() -> bool:
     return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_PAGED_ATTN
 
@@ -1786,9 +1791,11 @@ def aiter_linear_enabled() -> bool:
 def aiter_norm_enabled() -> bool:
     return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_NORM
 
+
 @cache
 def aiter_mla_enabled() -> bool:
     return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_MLA
+
 
 def weak_ref_tensors(
     tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]

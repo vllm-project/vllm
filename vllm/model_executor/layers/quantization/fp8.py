@@ -18,6 +18,8 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -32,12 +34,16 @@ from vllm.model_executor.parameter import (BlockQuantScaleParameter,
                                            PerTensorScaleParameter)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import aiter_2stage_moe_enabled, aiter_moe_enabled
+from vllm.utils import (aiter_2stage_moe_enabled, aiter_fp8_block_moe_enabled,
+                        aiter_moe_enabled)
 
 if aiter_moe_enabled():
     from aiter.fused_moe_bf16_asm import asm_moe
     if aiter_2stage_moe_enabled():
         from aiter.fused_moe_bf16_asm import ck_moe_2stages
+    if aiter_fp8_block_moe_enabled():
+        from aiter.fused_moe_bf16_asm import moe_sorting_ck
+        from aiter import fmoe_fp8_blockscale_g1u1
     from aiter.ops.shuffle import shuffle_weight
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -580,6 +586,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2_weight = layer.w2_weight
                 w2_weight_scale_inv = layer.w2_weight_scale_inv
 
+            if aiter_fp8_block_moe_enabled():
+                w13_weight = shuffle_weight(w13_weight, (16, 16))
+                w2_weight = shuffle_weight(w2_weight, (16, 16))
+
             # torch.compile() cannot use Parameter subclasses.
             layer.w13_weight = Parameter(w13_weight, requires_grad=False)
             layer.w13_weight_scale_inv = Parameter(w13_weight_scale_inv,
@@ -768,6 +778,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         if aiter_moe_enabled():
+            if self.block_quant and aiter_fp8_block_moe_enabled():
+                return fp8_blockscale_moe(
+                    hidden_states=x,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    w1_scale=layer.w13_weight_scale_inv,
+                    w2_scale=layer.w2_weight_scale_inv,
+                    block_shape=self.quant_config.weight_block_size)
+
             if aiter_2stage_moe_enabled():
                 return ck_moe_2stages(a1=x,
                                       w1=layer.w13_weight,
@@ -812,6 +833,58 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a2_scale=layer.w2_input_scale,
             block_shape=self.quant_config.weight_block_size,
         )
+
+
+def fp8_blockscale_moe(
+        hidden_states,
+        w1,  # [expert(local_expert:EP), inter_dim*2, dim] N,K
+        w2,  # [expert(local_expert:EP), dim, inter_dim]
+        topk_weights,
+        topk_ids,
+        w1_scale,
+        w2_scale,
+        block_shape,
+        expert_mask=None):
+    local_E = E = w1.shape[0]
+    if expert_mask is not None:
+        E = expert_mask.numel()
+    topk = topk_ids.shape[1]
+    model_dim = w1.shape[-1]
+    dtype = hidden_states.dtype
+    scale_blk_k = block_shape[1]
+    (
+        sorted_token_ids,
+        sorted_weight_buf,
+        sorted_expert_ids,
+        num_valid_ids,
+        out_asm,
+    ) = moe_sorting_ck(topk_ids,
+                       topk_weights,
+                       E,
+                       model_dim,
+                       dtype,
+                       expert_mask=expert_mask)
+
+    a1, a1_scale = per_token_group_quant_fp8(hidden_states, scale_blk_k)
+
+    fmoe_fp8_blockscale_g1u1(
+        out_asm,
+        a1,
+        w1,
+        w2,
+        sorted_token_ids,
+        sorted_weight_buf,
+        sorted_expert_ids,
+        num_valid_ids,
+        topk,
+        w1_scale.view(local_E, -1),
+        w2_scale.view(local_E, -1),
+        a1_scale.t().contiguous(),
+        block_shape[0],
+        block_shape[1],
+        None,
+    )
+    return out_asm
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
