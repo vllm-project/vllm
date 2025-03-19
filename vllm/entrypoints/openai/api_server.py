@@ -85,7 +85,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
+from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
                         is_valid_ipv6_address, set_ulimit)
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -677,8 +677,12 @@ if envs.VLLM_SERVER_DEV_MODE:
         Reset the prefix cache. Note that we currently do not check if the
         prefix cache is successfully reset in the API server.
         """
-        logger.info("Resetting prefix cache...")
-        await engine_client(raw_request).reset_prefix_cache()
+        device = None
+        device_str = raw_request.query_params.get("device")
+        if device_str is not None:
+            device = Device[device_str.upper()]
+        logger.info("Resetting prefix cache with specific %s...", str(device))
+        await engine_client(raw_request).reset_prefix_cache(device)
         return Response(status_code=200)
 
     @router.post("/sleep")
