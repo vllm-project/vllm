@@ -40,11 +40,11 @@ __global__ void get_group_gemm_starts(
             static_cast<C_TYPE**>(out_ptrs.data_ptr()),                     \
             static_cast<float**>(a_scales_ptrs.data_ptr()),                 \
             static_cast<float**>(b_scales_ptrs.data_ptr()),                 \
-            reinterpret_cast<cutlass::float_e4m3_t*>(a_tensors.data_ptr()), \
-            reinterpret_cast<cutlass::float_e4m3_t*>(b_tensors.data_ptr()), \
-            reinterpret_cast<C_TYPE*>(out_tensors.data_ptr()),              \
-            reinterpret_cast<float*>(a_scales.data_ptr()),                  \
-            reinterpret_cast<float*>(b_scales.data_ptr()),                  \
+            static_cast<cutlass::float_e4m3_t*>(a_tensors.data_ptr()),      \
+            static_cast<cutlass::float_e4m3_t*>(b_tensors.data_ptr()),      \
+            static_cast<C_TYPE*>(out_tensors.data_ptr()),                   \
+            static_cast<float*>(a_scales.data_ptr()),                       \
+            static_cast<float*>(b_scales.data_ptr()),                       \
             out_tensors.size(1), a_tensors.size(1), per_act_token,          \
             per_out_ch);                                                    \
   }
