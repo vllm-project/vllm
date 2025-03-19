@@ -16,16 +16,16 @@ class LoRAKernelMeta:
     active_lora_ids: torch.Tensor
     num_tokens_per_lora: torch.Tensor
     lora_token_start_loc: torch.Tensor
-    # TODO (varun) : Check if we can just pass a python list ??
+
     # The V1 architecture uses the traced torch.compile graphs to execute
     # a forward pass. Things to note about this process,
-    # 1. The tracing infers all pythonic objects into a constant value.
-    # Q: is that true for  lists/tuples as well ?
+    # 1. The tracing infers all python scalar datatype objects into a constant
+    # value.
     # 2. The tracing cannot handle dynamic control flow. (dynamic control flow
     # is an experimental feature in pytorch)
     # 3. The internals of torch.ops functions are not traced.
-    # Due to these limitations, we disguise the "no_lora" flag as a cpu tensor,
-    # and early exit from inside the lora_expand / lora_shrink torch operation.
+    # We disguise the "no_lora" flag as a cpu tensor and leverage point number 3
+    # to early exit from inside the lora_expand / lora_shrink torch operation.
     no_lora_flag_cpu: torch.Tensor
 
     @staticmethod
