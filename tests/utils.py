@@ -914,3 +914,37 @@ def get_client_text_logprob_generations(
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
+
+
+def maybe_test_rocm_aiter(func):
+    if not current_platform.is_rocm():
+        return func
+
+    def test_case(use_rocm_aiter, *args, **kwargs):
+        if use_rocm_aiter and (os.getenv("ROCM_SKIP_AITER_TEST_CASES",
+                                         "False").lower() in ("true", "1")):
+            print("AITER tests are skipped/disabled.")
+            return None
+
+        with pytest.MonkeyPatch.context() as ctx:
+            ctx.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
+            return func(*args, **kwargs)
+
+    error_messages = []
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        for use_rocm_aiter in (True, False):
+            try:
+                test_case(use_rocm_aiter, *args, **kwargs)
+            except Exception:
+                import traceback
+                error_type = (f"With ROCM_AITER="
+                              f"{'ON' if use_rocm_aiter else 'OFF'}")
+                error_trace = traceback.format_exc()
+                error_messages.append(f"{error_type}:\n{error_trace}")
+
+        if error_messages:
+            raise Exception('\n\n' + '=' * 50 + '\n\n'.join(error_messages))
+
+    return wrapper
