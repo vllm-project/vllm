@@ -11,7 +11,7 @@ import ssl
 from collections.abc import Sequence
 from typing import Optional, Union, get_args
 
-from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str, str_to_bool
+from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
 from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
@@ -89,13 +89,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default="info",
         choices=['debug', 'info', 'warning', 'error', 'critical', 'trace'],
         help="Log level for uvicorn.")
-    parser.add_argument("--uvicorn-access-log",
-                        nargs='?',
-                        const=True,
-                        default=True,
-                        type=str_to_bool,
-                        metavar="true/false",
-                        help="Enable access log for uvicorn.")
+    parser.add_argument("--disable-uvicorn-access-log",
+                        action="store_false",
+                        help="Disable uvicorn access log.")
     parser.add_argument("--allow-credentials",
                         action="store_true",
                         help="Allow credentials.")

@@ -53,18 +53,6 @@ def nullable_str(val: str):
     return val
 
 
-def str_to_bool(value):
-    if isinstance(value, bool):
-        return value
-    if value.lower() in {'true', 'yes', '1'}:
-        return True
-    elif value.lower() in {'false', 'no', '0'}:
-        return False
-    else:
-        raise argparse.ArgumentTypeError(
-            'Boolean value expected (true/false, yes/no, 1/0)')
-
-
 def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
     """Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
