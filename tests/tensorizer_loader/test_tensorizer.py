@@ -166,7 +166,7 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
     test_prompts = multilora_inference.create_test_prompts(lora_path)
 
     # Serialize model before deserializing and binding LoRA adapters
-    with vllm_runner(model_ref, ) as vllm_model:
+    with vllm_runner(model_ref) as vllm_model:
         model_path = tmp_path / (model_ref + ".tensors")
 
         vllm_model.apply_model(
@@ -208,7 +208,7 @@ def test_load_without_tensorizer_load_format(vllm_runner):
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
     ## Serialize model
-    with vllm_runner(model_ref, ) as vllm_model:
+    with vllm_runner(model_ref) as vllm_model:
         model_path = tmp_path / (model_ref + ".tensors")
 
         vllm_model.apply_model(

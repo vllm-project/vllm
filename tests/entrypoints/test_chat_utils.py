@@ -34,7 +34,7 @@ def phi3v_model_config():
                        tokenizer=PHI3V_MODEL_ID,
                        tokenizer_mode="auto",
                        trust_remote_code=True,
-                       dtype="bfloat16",
+                       dtype="auto",
                        seed=0,
                        limit_mm_per_prompt={
                            "image": 2,
@@ -58,7 +58,7 @@ def mllama_model_config():
                        tokenizer=MLLAMA_MODEL_ID,
                        tokenizer_mode="auto",
                        trust_remote_code=True,
-                       dtype="bfloat16",
+                       dtype="auto",
                        seed=0,
                        limit_mm_per_prompt={
                            "image": 2,
@@ -669,7 +669,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
                                tokenizer=MLLAMA_MODEL_ID,
                                tokenizer_mode="auto",
                                trust_remote_code=True,
-                               dtype="bfloat16",
+                               dtype="auto",
                                seed=0,
                                limit_mm_per_prompt={
                                    "image": 2,
