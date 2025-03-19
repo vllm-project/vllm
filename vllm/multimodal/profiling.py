@@ -73,7 +73,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         height: int,
         num_images: int,
     ) -> list[Image.Image]:
-        image = Image.new("RGB", (width, height), color=0)
+        image = Image.new("RGB", (width, height), color=255)
         return [image] * num_images
 
     def _get_dummy_videos(
@@ -84,7 +84,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         num_frames: int,
         num_videos: int,
     ) -> list[npt.NDArray]:
-        video = np.zeros((num_frames, width, height, 3))
+        video = np.full((num_frames, width, height, 3), 255)
         return [video] * num_videos
 
 
