@@ -17,7 +17,7 @@ from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
 from vllm.inputs import InputProcessingContext
-from vllm.jsontree import JSONTree, json_map_leaves, json_reduce_leaves
+from vllm.jsontree import json_map_leaves, json_reduce_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
@@ -26,7 +26,7 @@ from vllm.utils import GiB_bytes, flatten_2d_lists, full_groupby
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                      MultiModalFieldConfig, MultiModalInputs, MultiModalKwargs,
-                     MultiModalKwargsItem, PlaceholderRange)
+                     MultiModalKwargsItem, NestedTensors, PlaceholderRange)
 from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
 
@@ -862,14 +862,12 @@ class ProcessingCache:
         def get_leaf_size(leaf: object) -> int:
             # MultiModalKwargs is not a subclass of dict
             if isinstance(leaf, MultiModalKwargs):
-                tensors = cast(JSONTree[torch.Tensor], leaf.data)
-                return get_item_size(tensors)
+                return get_item_size(leaf.data)
 
             # MultiModalKwargsItem is not a subclass of dict
             if isinstance(leaf, MultiModalKwargsItem):
                 leaf_data = {k: v.data for k, v in leaf.items()}
-                tensors = cast(JSONTree[torch.Tensor], leaf_data)
-                return get_item_size(tensors)
+                return get_item_size(leaf_data)
 
             # sys.getsizeof doesn't work for tensors
             if isinstance(leaf, torch.Tensor):
@@ -879,7 +877,7 @@ class ProcessingCache:
 
         def get_item_size(
             value: Union[MultiModalKwargs, MultiModalKwargsItem,
-                         JSONTree[torch.Tensor]]
+                         Mapping[str, NestedTensors]]
         ) -> int:
             size = json_reduce_leaves(
                 lambda a, b: a + b,
