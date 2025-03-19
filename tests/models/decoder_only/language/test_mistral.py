@@ -5,15 +5,14 @@ Run `pytest tests/models/test_mistral.py`.
 """
 import copy
 import json
-import os
 
 import jsonschema
 import jsonschema.exceptions
 import pytest
 
+from tests.utils import maybe_test_rocm_aiter
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (  # noqa
     MistralToolParser)
-from vllm.platforms import current_platform
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 from ...utils import check_logprobs_close
@@ -176,16 +175,9 @@ SAMPLE_JSON_SCHEMA = {
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
+@maybe_test_rocm_aiter
 def test_models(hf_runner, vllm_runner, example_prompts, model: str,
-                dtype: str, max_tokens: int, num_logprobs: int,
-                use_rocm_aiter: bool, monkeypatch) -> None:
-    if use_rocm_aiter:
-        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
-            pytest.skip("Skipping test suite for ROCM AITER")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-
+                dtype: str, max_tokens: int, num_logprobs: int) -> None:
     # TODO(sang): Sliding window should be tested separately.
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
@@ -209,16 +201,9 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
+@maybe_test_rocm_aiter
 def test_mistral_format(vllm_runner, example_prompts, model: str, dtype: str,
-                        max_tokens: int, num_logprobs: int,
-                        use_rocm_aiter: bool, monkeypatch) -> None:
-    if use_rocm_aiter:
-        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
-            pytest.skip("Skipping test suite for ROCM AITER")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-
+                        max_tokens: int, num_logprobs: int) -> None:
     with vllm_runner(
             model,
             dtype=dtype,
@@ -249,15 +234,9 @@ def test_mistral_format(vllm_runner, example_prompts, model: str, dtype: str,
 
 @pytest.mark.parametrize("model", MISTRAL_FORMAT_MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
-def test_mistral_symbolic_languages(vllm_runner, model: str, dtype: str,
-                                    use_rocm_aiter: bool, monkeypatch) -> None:
-    if use_rocm_aiter:
-        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
-            pytest.skip("Skipping test suite for ROCM AITER")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-
+@maybe_test_rocm_aiter
+def test_mistral_symbolic_languages(vllm_runner, model: str,
+                                    dtype: str) -> None:
     with vllm_runner(model,
                      dtype=dtype,
                      max_model_len=8192,
@@ -275,15 +254,8 @@ def test_mistral_symbolic_languages(vllm_runner, model: str, dtype: str,
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("model",
                          MISTRAL_FORMAT_MODELS)  # v1 can't do func calling
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
-def test_mistral_function_calling(vllm_runner, model: str, dtype: str,
-                                  use_rocm_aiter: bool, monkeypatch) -> None:
-    if use_rocm_aiter:
-        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
-            pytest.skip("Skipping test suite for ROCM AITER")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-
+@maybe_test_rocm_aiter
+def test_mistral_function_calling(vllm_runner, model: str, dtype: str) -> None:
     with vllm_runner(model,
                      dtype=dtype,
                      tokenizer_mode="mistral",
@@ -314,15 +286,9 @@ def test_mistral_function_calling(vllm_runner, model: str, dtype: str,
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("guided_backend",
                          ["outlines", "lm-format-enforcer", "xgrammar"])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
-def test_mistral_guided_decoding(vllm_runner, model: str, guided_backend: str,
-                                 use_rocm_aiter: bool, monkeypatch) -> None:
-    if use_rocm_aiter:
-        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
-            pytest.skip("Skipping test suite for ROCM AITER")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-
+@maybe_test_rocm_aiter
+def test_mistral_guided_decoding(vllm_runner, model: str,
+                                 guided_backend: str) -> None:
     with vllm_runner(model, dtype='bfloat16',
                      tokenizer_mode="mistral") as vllm_model:
 
