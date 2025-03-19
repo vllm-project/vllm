@@ -853,23 +853,23 @@ class ProcessingCache:
 
     @staticmethod
     def get_lru_cache(
-        capacity_gb: int,
+        capacity_gb: float,
         value_type: type[_V],
         *,
         debug: bool = False,
     ) -> LRUCache[str, _V]:
 
-        def get_size(leaf: object) -> int:
+        def get_leaf_size(leaf: object) -> int:
             # MultiModalKwargs is not a subclass of dict
             if isinstance(leaf, MultiModalKwargs):
                 tensors = cast(JSONTree[torch.Tensor], leaf.data)
-                return getsizeof(tensors)
+                return get_item_size(tensors)
 
             # MultiModalKwargsItem is not a subclass of dict
             if isinstance(leaf, MultiModalKwargsItem):
                 leaf_data = {k: v.data for k, v in leaf.items()}
                 tensors = cast(JSONTree[torch.Tensor], leaf_data)
-                return getsizeof(tensors)
+                return get_item_size(tensors)
 
             # sys.getsizeof doesn't work for tensors
             if isinstance(leaf, torch.Tensor):
@@ -877,13 +877,13 @@ class ProcessingCache:
 
             return sys.getsizeof(leaf)
 
-        def getsizeof(
+        def get_item_size(
             value: Union[MultiModalKwargs, MultiModalKwargsItem,
                          JSONTree[torch.Tensor]]
         ) -> int:
             size = json_reduce_leaves(
                 lambda a, b: a + b,
-                json_map_leaves(get_size, value),
+                json_map_leaves(get_leaf_size, value),
             )
 
             if debug:
@@ -892,11 +892,11 @@ class ProcessingCache:
 
             return size
 
-        return LRUCache(GiB_bytes * capacity_gb, getsizeof=getsizeof)
+        return LRUCache(GiB_bytes * capacity_gb, getsizeof=get_item_size)
 
     def __init__(
         self,
-        capacity_gb: int,
+        capacity_gb: float,
         *,
         debug_cache_hit_ratio_steps: Optional[int] = None,
     ) -> None:
