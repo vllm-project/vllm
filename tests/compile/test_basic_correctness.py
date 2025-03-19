@@ -60,7 +60,7 @@ class TestSetting:
         # embedding model
         TestSetting(
             model="BAAI/bge-multilingual-gemma2",
-            model_args=["--task", "embed"],
+            model_args=["--task", "embed", "--dtype", "bfloat16"],
             pp_size=1,
             tp_size=1,
             attn_backend="FLASH_ATTN",

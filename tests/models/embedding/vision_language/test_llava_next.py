@@ -86,8 +86,7 @@ def _run_test(
         for inputs in all_inputs:
             # Based on: https://huggingface.co/royokong/e5-v
             outputs = hf_model.model(
-                **hf_model.wrap_device(inputs,
-                                       device=hf_model.model.device.type),
+                **hf_model.wrap_device(inputs),
                 return_dict=True,
                 output_hidden_states=True,
             )
