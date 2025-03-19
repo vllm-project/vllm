@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup
@@ -92,7 +92,7 @@ class PlaceholderBlockSpaceManager(BlockSpaceManager):
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return -1
 
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         return True
 
     def get_num_cached_tokens(self, seq: Sequence) -> int:
