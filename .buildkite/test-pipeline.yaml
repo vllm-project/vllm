@@ -493,6 +493,8 @@ steps:
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
+  - VLLM_USE_V1=1 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_torchrun_example.py
+  - torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_torchrun_example.py
 
 - label: Distributed Tests (2 GPUs) # 40min
   #mirror_hardwares: [amd]
@@ -511,8 +513,6 @@ steps:
   - entrypoints/llm/test_collective_rpc.py
   commands:
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - VLLM_USE_V1=1 torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
-  - torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
