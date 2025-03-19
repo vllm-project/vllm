@@ -1580,8 +1580,7 @@ class EngineArgs:
 
         # No support for device type other than CUDA, AMD (experiemntal) or
         # TPU (experimental) so far.
-        if not (current_platform.is_cuda() or current_platform.is_rocm()
-                or current_platform.is_tpu()):
+        if not (current_platform.is_cuda_alike() or current_platform.is_tpu()):
             _raise_or_fallback(
                 feature_name=f"device type={current_platform.device_type}",
                 recommend_to_remove=False)
