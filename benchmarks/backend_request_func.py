@@ -14,7 +14,8 @@ from tqdm.asyncio import tqdm
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
-from vllm.model_executor.model_loader.weight_utils import get_lock
+# NOTE(simon): do not import vLLM here so the benchmark script
+# can run without vLLM installed.
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -27,7 +28,6 @@ class RequestFuncInput:
     output_len: int
     model: str
     model_name: Optional[str] = None
-    best_of: int = 1
     logprobs: Optional[int] = None
     extra_body: Optional[dict] = None
     multi_modal_content: Optional[dict] = None
@@ -58,7 +58,6 @@ async def async_request_tgi(
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
         params = {
-            "best_of": request_func_input.best_of,
             "max_new_tokens": request_func_input.output_len,
             "do_sample": True,
             "temperature": 0.01,  # TGI does not accept 0.0 temperature.
@@ -130,7 +129,6 @@ async def async_request_trt_llm(
 
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
-        assert request_func_input.best_of == 1
         payload = {
             "accumulate_tokens": True,
             "text_input": request_func_input.prompt,
@@ -195,7 +193,6 @@ async def async_request_deepspeed_mii(
 ) -> RequestFuncOutput:
     async with aiohttp.ClientSession(trust_env=True,
                                      timeout=AIOHTTP_TIMEOUT) as session:
-        assert request_func_input.best_of == 1
 
         payload = {
             "prompt": request_func_input.prompt,
@@ -249,7 +246,6 @@ async def async_request_openai_completions(
                 if request_func_input.model_name else request_func_input.model,
             "prompt": request_func_input.prompt,
             "temperature": 0.0,
-            "best_of": request_func_input.best_of,
             "max_tokens": request_func_input.output_len,
             "logprobs": request_func_input.logprobs,
             "stream": True,
@@ -338,7 +334,7 @@ async def async_request_openai_chat_completions(
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(
-        "chat/completions"
+        ("chat/completions", "profile")
     ), "OpenAI Chat Completions API URL must end with 'chat/completions'."
 
     async with aiohttp.ClientSession(trust_env=True,
@@ -431,6 +427,8 @@ async def async_request_openai_chat_completions(
 def get_model(pretrained_model_name_or_path: str) -> str:
     if os.getenv('VLLM_USE_MODELSCOPE', 'False').lower() == 'true':
         from modelscope import snapshot_download
+
+        from vllm.model_executor.model_loader.weight_utils import get_lock
 
         # Use file lock to prevent multiple processes from
         # downloading the same model weights at the same time.

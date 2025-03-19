@@ -24,7 +24,7 @@ from typing import Callable, DefaultDict, Dict, List, Optional, Union
 import numpy as np
 import torch
 from outlines import grammars
-from outlines.caching import cache
+from outlines.caching import cache, disable_cache
 from outlines.fsm.guide import (CFGGuide, CFGState, Generate, Guide,
                                 RegexGuide, Write)
 from outlines.fsm.parsing import PartialLark
@@ -32,18 +32,26 @@ from outlines_core.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding.reasoner import Reasoner
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+if envs.VLLM_V0_USE_OUTLINES_CACHE:
+    logger.warning("Enabling outlines cache. This is an unbounded on-disk "
+                   "cache. It may consume a lot of disk space and should "
+                   "not be used with untrusted clients.")
+else:
+    disable_cache()
+
 
 class BaseLogitsProcessor:
 
     def __init__(self, guide: Guide, reasoner: Optional[Reasoner]):
         self._guide: Guide = guide
-        self._reasoner = reasoner
+        self._reasoner: Optional[Reasoner] = reasoner
         # CFGState is used for the FSM state for CFGGuide
         self._fsm_state: DefaultDict[int, Union[int,
                                                 CFGState]] = defaultdict(int)
@@ -54,10 +62,14 @@ class BaseLogitsProcessor:
 
         # Skip the structured logits processing if reasoning is not finished.
         # reasoner is not None only when `--enable-reasoning` is set.
-        if self._reasoner is not None and \
-        not self._reasoner.is_reasoning_end(
-                input_ids):
-            return scores
+        if self._reasoner is not None:
+            if not self._reasoner.is_reasoning_end(input_ids):
+                return scores
+            else:
+                # Remove the reasoning tokens from the input_ids
+                # We need this because our implementation relies on the
+                # hash of the input_ids to store the FSM state.
+                input_ids = self._reasoner.extract_content(input_ids)
 
         seq_id = hash(tuple(input_ids))
 

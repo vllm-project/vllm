@@ -354,11 +354,18 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.download_dir,
                 hf_folder,
                 hf_weights_files,
+                self.load_config.use_tqdm_on_load,
             )
         elif use_safetensors:
-            weights_iterator = safetensors_weights_iterator(hf_weights_files)
+            weights_iterator = safetensors_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+            )
         else:
-            weights_iterator = pt_weights_iterator(hf_weights_files)
+            weights_iterator = pt_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+            )
 
         if current_platform.is_tpu():
             # In PyTorch XLA, we should call `xm.mark_step` frequently so that
@@ -755,7 +762,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         model_name_or_path: str,
         allowed_patterns: List[str],
         revision: Optional[str] = None,
-    ) -> Tuple[List[str], str]:
+    ) -> Tuple[str, List[str], str]:
         """Retrieve weight files. Download the files if necessary.
 
         Return the weight files and the file pattern."""
@@ -766,7 +773,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 weight_files = glob.glob(
                     os.path.join(model_name_or_path, pattern))
                 if weight_files:
-                    return weight_files, pattern
+                    return model_name_or_path, weight_files, pattern
         else:
             hf_api = HfApi()
             repo_files = hf_api.list_repo_files(repo_id=model_name_or_path)
@@ -780,7 +787,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         revision,
                         ignore_patterns=self.load_config.ignore_patterns,
                     )
-                    return glob.glob(os.path.join(hf_folder, pattern)), pattern
+                    return hf_folder, glob.glob(
+                        os.path.join(hf_folder, pattern)), pattern
 
         raise RuntimeError(
             f"No model weights found in: `{model_name_or_path}`")
@@ -791,10 +799,28 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         allowed_patterns = ["*.safetensors", "*.bin", "*.pt"]
 
-        hf_weights_files, matched_pattern = self._get_weight_files(
+        hf_folder, hf_weights_files, matched_pattern = self._get_weight_files(
             model_name_or_path, allowed_patterns, revision)
 
-        if matched_pattern != "*.safetensors":
+        use_safetensors = matched_pattern == "*.safetensors"
+        is_local = os.path.isdir(model_name_or_path)
+        index_file = SAFE_WEIGHTS_INDEX_NAME
+        if use_safetensors:
+            # For models like Mistral-7B-Instruct-v0.3
+            # there are both sharded safetensors files and a consolidated
+            # safetensors file. Using both breaks.
+            # Here, we download the `model.safetensors.index.json` and filter
+            # any files not found in the index.
+            if not is_local:
+                download_safetensors_index_file_from_hf(
+                    model_name_or_path,
+                    index_file,
+                    self.load_config.download_dir,
+                    revision,
+                )
+            hf_weights_files = filter_duplicate_safetensors_files(
+                hf_weights_files, hf_folder, index_file)
+        else:
             hf_weights_files = filter_files_not_needed_for_inference(
                 hf_weights_files)
 
@@ -802,13 +828,19 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             raise RuntimeError(
                 f"Cannot find any model weights with `{model_name_or_path}`")
 
-        return hf_weights_files, matched_pattern == "*.safetensors"
+        return hf_weights_files, use_safetensors
 
     def _hf_weight_iter(self, hf_weights_files, use_safetensors: bool):
         if use_safetensors:
-            iterator = safetensors_weights_iterator(hf_weights_files)
+            iterator = safetensors_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+            )
         else:
-            iterator = pt_weights_iterator(hf_weights_files)
+            iterator = pt_weights_iterator(
+                hf_weights_files,
+                self.load_config.use_tqdm_on_load,
+            )
         for org_name, param in iterator:
             # mapping weight names from transformers to vllm while preserving
             # original names.
@@ -1317,11 +1349,14 @@ class GGUFModelLoader(BaseModelLoader):
                 local_model_path, gguf_weights_map):
             model_config.hf_config.update({"tie_word_embeddings": True})
 
+        target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
-            with torch.device(device_config.device):
+            with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
             model.load_weights(
                 self._get_weights_iterator(local_model_path, gguf_weights_map))
+
+            _process_weights_after_loading(model, model_config, target_device)
         return model
 
 
@@ -1396,7 +1431,10 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             revision: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
-        return runai_safetensors_weights_iterator(hf_weights_files)
+        return runai_safetensors_weights_iterator(
+            hf_weights_files,
+            self.load_config.use_tqdm_on_load,
+        )
 
     def download_model(self, model_config: ModelConfig) -> None:
         """Download model if necessary"""

@@ -9,7 +9,6 @@ from concurrent.futures import Future
 import pytest
 from transformers import AutoTokenizer
 
-from tests.utils import fork_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -18,6 +17,8 @@ from vllm.v1.engine.core import EngineCore
 from vllm.v1.executor.abstract import Executor, UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
+
+from ...utils import create_new_process_for_each_test
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -44,8 +45,8 @@ def make_request() -> EngineCoreRequest:
     )
 
 
-@fork_new_process_for_each_test
-def test_engine_core(monkeypatch):
+@create_new_process_for_each_test()
+def test_engine_core(monkeypatch: pytest.MonkeyPatch):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
@@ -102,14 +103,24 @@ def test_engine_core(monkeypatch):
         engine_core.add_request(req)
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0
+        assert engine_core.scheduler.has_unfinished_requests()
+        assert not engine_core.scheduler.has_finished_requests()
 
         _ = engine_core.step()
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 1
+        assert engine_core.scheduler.has_unfinished_requests()
+        assert not engine_core.scheduler.has_finished_requests()
 
         engine_core.abort_requests([request_id])
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 0
+        assert not engine_core.scheduler.has_unfinished_requests()
+        assert engine_core.scheduler.has_finished_requests()
+
+        _ = engine_core.step()
+        assert not engine_core.scheduler.has_unfinished_requests()
+        assert not engine_core.scheduler.has_finished_requests()
 
         # Add, step, abort 1 of the 3.
         req0 = make_request()
@@ -148,11 +159,11 @@ def test_engine_core(monkeypatch):
         assert len(engine_core.scheduler.running) == 0
 
 
-@fork_new_process_for_each_test
-def test_engine_core_advanced_sampling(monkeypatch):
+@create_new_process_for_each_test()
+def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
     """
-    A basic end-to-end test to verify that the engine functions correctly 
-    when additional sampling parameters, such as top_p, min_tokens, and 
+    A basic end-to-end test to verify that the engine functions correctly
+    when additional sampling parameters, such as top_p, min_tokens, and
     presence_penalty, are set.
     """
     with monkeypatch.context() as m:
@@ -198,8 +209,8 @@ def test_engine_core_advanced_sampling(monkeypatch):
         _check_engine_state()
 
 
-@fork_new_process_for_each_test
-def test_engine_core_concurrent_batches(monkeypatch):
+@create_new_process_for_each_test()
+def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
     """
     Test that the engine can handle multiple concurrent batches.
     """

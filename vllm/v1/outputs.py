@@ -46,7 +46,7 @@ class SamplerOutput:
     # [num_reqs, max_num_generated_tokens]
     # Different requests can have different number of generated tokens.
     # All requests are padded to max_num_generated_tokens.
-    # INVALID_TOKEN_ID (-1 by default) is used for padding.
+    # PLACEHOLDER_TOKEN_ID (-1 by default) is used for padding.
     sampled_token_ids: torch.Tensor
     logprobs_tensors: Optional[LogprobsTensors]
 
@@ -80,3 +80,13 @@ class ModelRunnerOutput:
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
+
+
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+    req_ids=[],
+    req_id_to_index={},
+    sampled_token_ids=[],
+    spec_token_ids=None,
+    logprobs=None,
+    prompt_logprobs_dict={},
+)
