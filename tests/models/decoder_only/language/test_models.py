@@ -6,7 +6,7 @@ Run `pytest tests/models/test_models.py`.
 
 import pytest
 
-from tests.utils import maybe_test_rocm_aiter
+from vllm.platforms import current_platform
 
 from ...utils import check_logprobs_close
 
@@ -17,6 +17,7 @@ from ...utils import check_logprobs_close
 REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
 
 
+# @maybe_test_rocm_aiter
 @pytest.mark.parametrize(
     "model",
     [
@@ -72,19 +73,17 @@ REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
-@maybe_test_rocm_aiter
-def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
-    monkeypatch,
-) -> None:
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
+def test_models(hf_runner, vllm_runner, example_prompts, model: str,
+                dtype: str, max_tokens: int, num_logprobs: int,
+                use_rocm_aiter: bool, monkeypatch) -> None:
+
     if model in REQUIRES_V0:
         monkeypatch.setenv("VLLM_USE_V1", "0")
+
+    if use_rocm_aiter:
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     with hf_runner(model, dtype=dtype) as hf_model:
         if model.startswith("THUDM/chatglm3"):

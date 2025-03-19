@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Custom normalization layers."""
-from typing import Callable, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -16,8 +16,8 @@ def is_rocm_aiter_rmsnorm_enabled() -> bool:
         and envs.VLLM_ROCM_USE_AITER
 
 
-def rms_norm(*, x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float,
-             **kwargs) -> torch.Tensor:
+def rms_norm(x: torch.Tensor, weight: torch.Tensor,
+             variance_epsilon: float) -> torch.Tensor:
     from vllm import _custom_ops as ops
     out = torch.empty_like(x)
     ops.rms_norm(
@@ -30,10 +30,9 @@ def rms_norm(*, x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float,
 
 
 def fused_add_rms_norm(
-        *, x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
         variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
-
     ops.fused_add_rms_norm(
         x,
         residual,
@@ -43,30 +42,40 @@ def fused_add_rms_norm(
     return x, residual
 
 
-def rocm_aiter_rmsnorm2d_fwd_with_add(
-        *, x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
+def rocm_aiter_rms_norm(x: torch.Tensor, weight: torch.Tensor,
+                        variance_epsilon: float) -> torch.Tensor:
+
+    import aiter as rocm_aiter
+    return rocm_aiter.rms_norm(x, weight, variance_epsilon)
+
+
+def rocm_aiter_fused_add_rms_norm(
+        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
         variance_epsilon: float) -> Tuple[torch.Tensor, torch.Tensor]:
+
     import aiter as rocm_aiter
 
+    # Assuming the correct signature for rmsnorm2d_fwd_with_add
     rocm_aiter.rmsnorm2d_fwd_with_add(
-        x,
-        x,
-        residual,
-        residual,
+        x,  # output
+        x,  # input
+        residual,  # residual input
+        residual,  # residual output
         weight,
         variance_epsilon,
     )
     return x, residual
 
 
-def dispatch_cuda_rmsnorm_func(
-    add_residual: bool
-) -> Callable[..., Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]:
-    if not add_residual:
-        return rms_norm
+def dispatch_cuda_rmsnorm_func(add_residual: bool):
+    if add_residual:
+        if is_rocm_aiter_rmsnorm_enabled():
+            return rocm_aiter_fused_add_rms_norm
+        return fused_add_rms_norm
+
     if is_rocm_aiter_rmsnorm_enabled():
-        return rocm_aiter_rmsnorm2d_fwd_with_add
-    return fused_add_rms_norm
+        return rocm_aiter_rms_norm
+    return rms_norm
 
 
 @CustomOp.register("rms_norm")
@@ -143,12 +152,13 @@ class RMSNorm(CustomOp):
             return self.forward_native(x, residual)
 
         add_residual = residual is not None
-        return dispatch_cuda_rmsnorm_func(add_residual)(
-            x=x,
-            residual=residual,
-            weight=self.weight.data,
-            variance_epsilon=self.variance_epsilon,
-        )
+        norm_func = dispatch_cuda_rmsnorm_func(add_residual)
+
+        if add_residual:
+            return norm_func(x, residual, self.weight.data,
+                             self.variance_epsilon)
+        else:
+            return norm_func(x, self.weight.data, self.variance_epsilon)
 
     def forward_hpu(
         self,

@@ -9,7 +9,7 @@ from vllm.model_executor.layers.activation import (GeluAndMul,
                                                    SiluAndMul)
 from vllm.model_executor.layers.layernorm import (
     RMSNorm, dispatch_cuda_rmsnorm_func, fused_add_rms_norm, rms_norm,
-    rocm_aiter_rmsnorm2d_fwd_with_add)
+    rocm_aiter_fused_add_rms_norm, rocm_aiter_rms_norm)
 from vllm.platforms import current_platform
 
 
@@ -102,9 +102,13 @@ def test_rms_norm_dispatch(add_residual: bool, use_rocm_aiter: str,
     rms_norm_func = dispatch_cuda_rmsnorm_func(add_residual)
 
     if not add_residual:
-        assert rms_norm_func == rms_norm
+        if current_platform.is_rocm() and int(use_rocm_aiter) and int(
+                use_rocm_aiter_norm):
+            assert rms_norm_func == rocm_aiter_rms_norm
+        else:
+            assert rms_norm_func == rms_norm
     elif current_platform.is_rocm() and int(use_rocm_aiter) and int(
             use_rocm_aiter_norm):
-        assert rms_norm_func == rocm_aiter_rmsnorm2d_fwd_with_add
+        assert rms_norm_func == rocm_aiter_fused_add_rms_norm
     else:
         assert rms_norm_func == fused_add_rms_norm
