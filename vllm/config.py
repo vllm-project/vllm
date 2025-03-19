@@ -1811,14 +1811,14 @@ class SpeculativeConfig:
             TypicalAcceptanceSampler respectively. If not specified, it
             defaults to 'rejection_sampler'.
         - draft_tensor_parallel_size (Optional[int]): The degree of the tensor
-            parallelism for the draft model. Can be 1 or match the target
-            model's tensor parallel size.
+            parallelism for the draft model. Can only be 1 or the same as the
+            target model's tensor parallel size.
         - disable_logprobs (bool): If set to True, token log probabilities are
             not returned during speculative decoding. If set to False, token
             log probabilities are returned according to the log probability
             settings in SamplingParams. If not specified, it defaults to True.
 
-    - Model Configuration:
+    - Draft Model Configuration:
         - model (Optional[str]): The name of the draft model, if provided.
         - quantization (Optional[str]): Quantization method that was used to
             quantize the draft model weights. If None, we assume the
@@ -1834,7 +1834,7 @@ class SpeculativeConfig:
             on Hugging Face Hub. It can be a branch name, a tag name, or a
             commit id. If unspecified, will use the default version.
 
-    - Advanced Token Control:
+    - Advanced Control:
         - disable_mqa_scorer (bool): Disable the MQA scorer and fall back to
             batch expansion for scoring proposals. If not specified, it
             defaults to False.
@@ -1956,18 +1956,17 @@ class SpeculativeConfig:
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
             # mtp acceleration for more models besides deepseek_v3
-            if (self.proposer == "mtp"
-                    or self.target_model_config.hf_text_config.model_type
-                    == "deepseek_v3"):
+            if self.target_model_config.hf_text_config.model_type \
+                        == "deepseek_v3":
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
-            elif self.proposer in ["ngram", "[ngram]"]:
+            elif "ngram" in self.proposer:
                 self.model = self.proposer
             else:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
 
-        if self.proposer in ["ngram", "[ngram]"]:
+        if "ngram" in self.proposer:
             if self.ngram_prompt_lookup_min is None:
                 self.ngram_prompt_lookup_min = 1
             if (self.ngram_prompt_lookup_max is None
@@ -2190,7 +2189,7 @@ class SpeculativeConfig:
                 self.draft_parallel_config)
             # Validate and set draft token acceptance related settings.
 
-        if (self.acceptance_method is None):
+        if self.acceptance_method is None:
             raise ValueError("acceptance_method is not set. "
                              "Expected values are rejection_sampler or "
                              "typical_acceptance_sampler.")
