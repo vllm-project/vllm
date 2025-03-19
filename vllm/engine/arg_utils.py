@@ -1469,8 +1469,12 @@ class EngineArgs:
             return False
 
         # Need at least Ampere for now (FA support required).
+        # Skip this check if we are running on a non-GPU platform,
+        # or if the device capability is not available
+        # (e.g. in a Ray actor without GPUs).
         from vllm.platforms import current_platform
         if (current_platform.is_cuda()
+                and current_platform.get_device_capability()
                 and current_platform.get_device_capability().major < 8):
             _raise_or_fallback(feature_name="Compute Capability < 8.0",
                                recommend_to_remove=False)
