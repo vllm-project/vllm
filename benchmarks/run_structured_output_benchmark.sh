@@ -54,6 +54,7 @@ for qps in "${QPS_VALUES[@]}"; do
   python "$SCRIPT_DIR/benchmark_serving_structured_output.py" $COMMON_PARAMS \
     --request-rate $qps \
     --result-filename "$FILENAME" \
+    --tokenizer-mode ${TOKENIZER_MODE:-"auto"} \
     --port ${PORT:-8000}
 
   echo "Completed benchmark with QPS: $qps"
