@@ -17,7 +17,10 @@ pip.main(['install', 'causal-conv1d'])
 importlib.reload(site)
 
 # This test is for the hybrid models
-MODELS = ["ai21labs/Jamba-tiny-dev", "Zyphra/Zamba2-1.2B-instruct", "pfnet/plamo-2-1b"]
+MODELS = [
+    "ai21labs/Jamba-tiny-dev", "Zyphra/Zamba2-1.2B-instruct",
+    "pfnet/plamo-2-1b"
+]
 # Bamba at Fp32 is too big for the CI (L4 GPU).
 # MODELS = ["ai21labs/Jamba-tiny-dev", "ibm-ai-platform/Bamba-9B"]
 
