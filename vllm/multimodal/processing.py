@@ -13,7 +13,6 @@ from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
                     TypeVar, Union, cast)
 
 import torch
-from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
 from vllm.inputs import InputProcessingContext
@@ -31,6 +30,8 @@ from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
 
 if TYPE_CHECKING:
+    from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
+
     from .profiling import BaseDummyInputsBuilder
 
 logger = init_logger(__name__)
@@ -1013,10 +1014,10 @@ class BaseProcessingInfo:
     def get_tokenizer(self) -> AnyTokenizer:
         return self.ctx.tokenizer
 
-    def get_hf_config(self) -> PretrainedConfig:
+    def get_hf_config(self) -> "PretrainedConfig":
         return self.ctx.get_hf_config()
 
-    def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
+    def get_hf_processor(self, **kwargs: object) -> "ProcessorMixin":
         """
         Subclasses can override this method to handle
         specific kwargs from model config or user inputs.
@@ -1128,7 +1129,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     @abstractmethod
     def _get_mm_fields_config(
         self,
-        hf_inputs: BatchFeature,
+        hf_inputs: "BatchFeature",
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         """Given the HF-processed data, output the metadata of each field."""
@@ -1185,7 +1186,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # This refers to the data to be passed to HF processor.
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
+    ) -> "BatchFeature":
         """
         Call the HF processor on the prompt text and
         associated multi-modal data.
@@ -1676,7 +1677,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: MultiModalDataDict,
     ) -> Union[str, list[int]]:
         """
-        Create input prompt for the encoder. HF processor will be applied on 
+        Create input prompt for the encoder. HF processor will be applied on
         this prompt during profiling and generation.
         """
         raise NotImplementedError

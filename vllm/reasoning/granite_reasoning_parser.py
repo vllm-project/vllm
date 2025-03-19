@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import re
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
-from transformers import PreTrainedTokenizerBase
-
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
+
+    from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                                  DeltaMessage)
 
 logger = init_logger(__name__)
 
@@ -138,7 +142,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Args:
             text (str): Text to check for leading substr.
-        
+
         Returns:
             bool: True if any of the possible reasoning start seqs match.
         """
@@ -151,7 +155,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Args:
             text (str): Text to check for leading substr.
-        
+
         Returns:
             bool: True if any of the possible response start seqs match.
         """
@@ -174,6 +178,8 @@ class GraniteReasoningParser(ReasoningParser):
         Returns:
             DeltaMessage: Message containing the parsed content.
         """
+        from vllm.entrypoints.openai.protocol import DeltaMessage
+
         prev_longest_length = len(current_text) - len(delta_text)
         is_substr = self._is_reasoning_start_substr(current_text)
         was_substr = self._is_reasoning_start_substr(
@@ -213,6 +219,8 @@ class GraniteReasoningParser(ReasoningParser):
         Returns:
             DeltaMessage: Message containing the parsed content.
         """
+        from vllm.entrypoints.openai.protocol import DeltaMessage
+
         # If we have no reasoning content or explicitly end with the start of
         # response sequence, we are in transition to the response; need to be
         # careful here, since the final token (:) will match the reasoning
@@ -286,6 +294,8 @@ class GraniteReasoningParser(ReasoningParser):
         Returns:
             DeltaMessage: Message containing the parsed content.
         """
+        from vllm.entrypoints.openai.protocol import DeltaMessage
+
         # Always have content; take length to the end
         delta_content = delta_text[-len(response_content):]
         reasoning_end_idx = len(delta_text) - (len(response_content) +

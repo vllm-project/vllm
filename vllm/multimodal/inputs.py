@@ -13,13 +13,14 @@ import numpy as np
 import torch
 import torch.types
 from PIL.Image import Image
-from transformers import BatchFeature
 from typing_extensions import NotRequired, TypeAlias
 
 from vllm.jsontree import JSONTree, json_map_leaves
 from vllm.utils import full_groupby, is_list_of
 
 if TYPE_CHECKING:
+    from transformers import BatchFeature
+
     from .hasher import MultiModalHashDict
 
 _T = TypeVar("_T")
@@ -599,7 +600,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
 
     @staticmethod
     def from_hf_inputs(
-        hf_inputs: BatchFeature,
+        hf_inputs: "BatchFeature",
         config_by_key: Mapping[str, MultiModalFieldConfig],
     ):
         # NOTE: This skips fields in `hf_inputs` that are not in `config_by_key`

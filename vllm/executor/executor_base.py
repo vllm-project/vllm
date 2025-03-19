@@ -109,6 +109,7 @@ class ExecutorBase(ABC):
         """Initialize the KV cache by invoking the underlying worker.
         """
         # NOTE: This is logged in the executor because there can be >1 workers.
+
         logger.info("# %s blocks: %d, # CPU blocks: %d",
                     vllm.platforms.current_platform.device_name,
                     num_gpu_blocks, num_cpu_blocks)

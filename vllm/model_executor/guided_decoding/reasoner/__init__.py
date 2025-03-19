@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from transformers import PreTrainedTokenizer
+from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding.reasoner.deepseek_reasoner import (  # noqa: E501
     DeepSeekReasoner)
 from vllm.model_executor.guided_decoding.reasoner.reasoner import Reasoner
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer
 
 logger = init_logger(__name__)
 

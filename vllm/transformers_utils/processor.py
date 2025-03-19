@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
 
-from transformers.processing_utils import ProcessorMixin
 from typing_extensions import TypeVar
 
 if TYPE_CHECKING:
+    from transformers.processing_utils import ProcessorMixin
+
     from vllm.config import ModelConfig
 
-_P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
+_P = TypeVar("_P", bound="ProcessorMixin", default="ProcessorMixin")
 
 
 class HashableDict(dict):
@@ -54,13 +55,16 @@ def get_processor(
     processor_name: str,
     *args: Any,
     trust_remote_code: bool = False,
-    processor_cls: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
+    processor_cls: Optional[Union[type[_P], tuple[type[_P], ...]]] = None,
     **kwargs: Any,
 ) -> _P:
     """Load a processor for the given model name via HuggingFace."""
     # don't put this import at the top level
     # it will call torch.cuda.device_count()
     from transformers import AutoProcessor
+    from transformers.processing_utils import ProcessorMixin
+    if processor_cls is None:
+        processor_cls = ProcessorMixin
 
     processor_factory = (AutoProcessor if processor_cls == ProcessorMixin or
                          isinstance(processor_cls, tuple) else processor_cls)
@@ -95,14 +99,19 @@ def get_processor(
     return processor
 
 
-cached_get_processor = lru_cache(get_processor)
+cached_get_processor: Callable = lru_cache(get_processor)
 
 
 def cached_processor_from_config(
     model_config: "ModelConfig",
-    processor_cls: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
+    processor_cls: Optional[Union[type[_P], tuple[type[_P], ...]]] = None,
     **kwargs: Any,
 ) -> _P:
+
+    from transformers.processing_utils import ProcessorMixin
+    if processor_cls is None:
+        processor_cls = ProcessorMixin
+
     return cached_get_processor(
         model_config.model,
         trust_remote_code=model_config.trust_remote_code,

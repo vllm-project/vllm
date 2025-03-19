@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import itertools
 import warnings
 from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union,
+                    cast, overload)
 
 import cloudpickle
 import torch.nn as nn
@@ -13,16 +16,7 @@ from typing_extensions import TypeVar, deprecated
 
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
-from vllm.config import CompilationConfig
-from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
-                                   TaskOption)
 from vllm.engine.llm_engine import LLMEngine
-from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         ChatTemplateContentFormatOption,
-                                         apply_hf_chat_template,
-                                         apply_mistral_chat_template,
-                                         parse_chat_messages,
-                                         resolve_chat_template_content_format)
 from vllm.entrypoints.score_utils import (_cosine_similarity,
                                           _validate_score_input_lens)
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
@@ -43,6 +37,11 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
                         is_list_of)
+
+if TYPE_CHECKING:
+    from vllm.engine.arg_utils import HfOverrides, PoolerConfig, TaskOption
+    from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                             ChatTemplateContentFormatOption)
 
 logger = init_logger(__name__)
 
@@ -117,7 +116,7 @@ class LLM:
         disable_async_output_proc: Disable async output processing.
             This may result in lower performance.
         hf_token: The token to use as HTTP bearer authorization for remote files
-            . If `True`, will use the token generated when running 
+            . If `True`, will use the token generated when running
             `huggingface-cli login` (stored in `~/.huggingface`).
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
@@ -194,6 +193,7 @@ class LLM:
         Note: if enforce_eager is unset (enforce_eager is None)
         it defaults to False.
         '''
+        from vllm.engine.arg_utils import EngineArgs
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
@@ -207,6 +207,7 @@ class LLM:
 
         if compilation_config is not None:
             if isinstance(compilation_config, (int, dict)):
+                from vllm.config import CompilationConfig
                 compilation_config_instance = CompilationConfig.from_cli(
                     str(compilation_config))
             else:
@@ -701,6 +702,10 @@ class LLM:
             A list of ``RequestOutput`` objects containing the generated
             responses in the same order as the input messages.
         """
+        from vllm.entrypoints.chat_utils import (
+            ChatCompletionMessageParam, apply_hf_chat_template,
+            apply_mistral_chat_template, parse_chat_messages,
+            resolve_chat_template_content_format)
         list_of_messages: list[list[ChatCompletionMessageParam]]
 
         # Handle multi and single conversations

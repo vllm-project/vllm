@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 # yapf: disable
 import argparse
 import dataclasses
@@ -7,8 +9,8 @@ import json
 import re
 import threading
 from dataclasses import MISSING, dataclass, fields
-from typing import (Any, Callable, Dict, List, Literal, Optional, Type,
-                    TypeVar, Union, cast, get_args, get_origin)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal,
+                    Optional, Type, TypeVar, Union, cast, get_args, get_origin)
 
 import torch
 from typing_extensions import TypeIs
@@ -26,9 +28,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerPoolConfig, VllmConfig,
                          get_attr_docs, get_field)
-from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
@@ -37,6 +37,9 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, GiB_bytes, is_in_ray_actor
 
 # yapf: enable
+
+if TYPE_CHECKING:
+    from vllm.executor.executor_base import ExecutorBase
 
 logger = init_logger(__name__)
 
@@ -73,7 +76,7 @@ def optional_float(val: str) -> Optional[float]:
 def nullable_kvs(val: str) -> Optional[dict[str, int]]:
     """NOTE: This function is deprecated, args should be passed as JSON
     strings instead.
-    
+
     Parses a string containing comma separate key [str] to value [int]
     pairs into a dictionary.
 
@@ -303,7 +306,9 @@ class EngineArgs:
 
         def is_custom_type(cls: TypeHint) -> bool:
             """Check if the class is a custom type."""
-            return cls.__module__ != "builtins"
+            if isinstance(cls, type):
+                return cls.__module__ != "builtins"
+            return True
 
         def get_kwargs(cls: ConfigType) -> dict[str, Any]:
             cls_docs = get_attr_docs(cls)
@@ -610,6 +615,9 @@ class EngineArgs:
                             action='store_true',
                             help='Disable logging statistics.')
         # Quantization settings.
+        from vllm.model_executor.layers.quantization import (
+            QUANTIZATION_METHODS)
+
         parser.add_argument('--quantization',
                             '-q',
                             type=optional_str,
@@ -1071,7 +1079,7 @@ class EngineArgs:
         target_parallel_config: ParallelConfig,
         enable_chunked_prefill: bool,
         disable_log_stats: bool,
-    ) -> Optional["SpeculativeConfig"]:
+    ) -> Optional[SpeculativeConfig]:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
 
@@ -1698,7 +1706,7 @@ def _warn_or_fallback(feature_name: str) -> bool:
 def human_readable_int(value):
     """Parse human-readable integers like '1k', '2M', etc.
     Including decimal values with decimal multipliers.
-    
+
     Examples:
     - '1k' -> 1,000
     - '1K' -> 1,024

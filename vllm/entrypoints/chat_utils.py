@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import asyncio
 import json
 from abc import ABC, abstractmethod
@@ -7,11 +9,10 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Iterable
 from functools import cache, lru_cache, partial
 from pathlib import Path
-from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
-                    cast)
+from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, Optional,
+                    TypeVar, Union, cast)
 
 import jinja2.nodes
-import transformers.utils.chat_template_utils as hf_chat_utils
 # yapf conflicts with isort for this block
 # yapf: disable
 from openai.types.chat import (ChatCompletionAssistantMessageParam,
@@ -29,8 +30,6 @@ from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
 from pydantic import TypeAdapter
 # yapf: enable
-from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
-                          ProcessorMixin)
 # pydantic needs the TypedDict from typing_extensions
 from typing_extensions import Required, TypeAlias, TypedDict
 
@@ -39,7 +38,12 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
 from vllm.transformers_utils.processor import cached_get_processor
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+
+    from vllm.transformers_utils.tokenizers import MistralTokenizer
 
 logger = init_logger(__name__)
 
@@ -280,6 +284,7 @@ def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
 
 def _try_extract_ast(chat_template: str) -> Optional[jinja2.nodes.Template]:
     try:
+        import transformers.utils.chat_template_utils as hf_chat_utils
         jinja_compiled = hf_chat_utils._compile_jinja_template(chat_template)
         return jinja_compiled.environment.parse(chat_template)
     except Exception:
@@ -338,6 +343,7 @@ def resolve_hf_chat_template(
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
         try:
+            from transformers import ProcessorMixin
             processor = cached_get_processor(
                 tokenizer.name_or_path,
                 processor_cls=(PreTrainedTokenizer, PreTrainedTokenizerFast,
@@ -369,6 +375,7 @@ def _resolve_chat_template_content_format(
     *,
     trust_remote_code: bool,
 ) -> _ChatTemplateContentFormat:
+    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
     if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
         hf_chat_template = resolve_hf_chat_template(
             tokenizer,
@@ -575,7 +582,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return self._placeholder_str(modality, current_count)
 
     @abstractmethod
-    def create_parser(self) -> "BaseMultiModalContentParser":
+    def create_parser(self) -> BaseMultiModalContentParser:
         raise NotImplementedError
 
 
@@ -604,7 +611,7 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
             mm_inputs["video"] = items_by_modality["video"] # A list of videos
         return mm_inputs
 
-    def create_parser(self) -> "BaseMultiModalContentParser":
+    def create_parser(self) -> BaseMultiModalContentParser:
         return MultiModalContentParser(self)
 
 
@@ -637,7 +644,7 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
             mm_inputs["video"] = items_by_modality["video"] # A list of videos
         return mm_inputs
 
-    def create_parser(self) -> "BaseMultiModalContentParser":
+    def create_parser(self) -> BaseMultiModalContentParser:
         return AsyncMultiModalContentParser(self)
 
 

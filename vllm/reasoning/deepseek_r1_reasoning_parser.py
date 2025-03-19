@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
-from transformers import PreTrainedTokenizerBase
-
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
+
+    from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                                  DeltaMessage)
 
 logger = init_logger(__name__)
 
@@ -72,6 +76,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         - 'abc' goes to reasoning_content
         - 'xyz' goes to content
         """
+        from vllm.entrypoints.openai.protocol import DeltaMessage
+
         # Skip single special tokens
         if len(delta_token_ids) == 1 and (delta_token_ids[0] in [
                 self.start_token_id, self.end_token_id
