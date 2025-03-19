@@ -943,7 +943,15 @@ class ModelConfig:
             # Hybrid model Jamba
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
-            if layers_block_type_value:
+            if layers_block_type_value is not None:
+                if hasattr(self.hf_text_config,
+                           "model_type") and (self.hf_text_config.model_type
+                                              == "zamba2"):
+                    if attn_block_type:
+                        return sum(t == "hybrid"
+                                   for t in layers_block_type_value[start:end])
+                    else:
+                        return self.get_num_layers(parallel_config)
                 return sum(t == block_type.value
                            for t in layers_block_type_value[start:end])
 
@@ -959,20 +967,7 @@ class ModelConfig:
                     "cannot determine the num of "
                     f"{block_type.value} layers")
 
-            if layers_block_type_value is not None:
-                if hasattr(self.hf_text_config,
-                           "model_type") and (self.hf_text_config.model_type
-                                              == "zamba2"):
-                    if attn_block_type:
-                        return sum(t == "hybrid"
-                                   for t in layers_block_type_value[start:end])
-                    else:
-                        return self.get_num_layers(parallel_config)
-                return sum(t == block_type.value
-                           for t in layers_block_type_value[start:end])
-            else:
-                assert attn_type_list is not None
-                return sum(t == 1 for t in attn_type_list[start:end])
+            return sum(t == 1 for t in attn_type_list[start:end])
 
     def get_multimodal_config(self) -> "MultiModalConfig":
         """
