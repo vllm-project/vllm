@@ -139,7 +139,15 @@ python3 vllm/benchmarks/benchmark_serving.py \
   --num-prompts "${NUM_PROMPTS}"
 ```
 
+<<<<<<< HEAD
 ### Huggingface dataset with `lmms-lab/LLaVA-OneVision-Data``
+=======
+### HuggingFaceDataset Example with `lmms-lab/LLaVA-OneVision-Data`
+
+Currently, HuggingFaceDataset only supports dataset formats
+similar to `lmms-lab/LLaVA-OneVision-Data`. If you need support for other dataset
+formats, please consider contributing.
+>>>>>>> d0e1bcf9 (update)
 
 ```bash
 # need a model with vision capability here
