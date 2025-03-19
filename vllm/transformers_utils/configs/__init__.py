@@ -22,7 +22,6 @@ from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
 from vllm.transformers_utils.configs.olmo2 import Olmo2Config
 from vllm.transformers_utils.configs.solar import SolarConfig
 from vllm.transformers_utils.configs.telechat2 import Telechat2Config
-from vllm.transformers_utils.configs.teleflm import TeleFLMConfig
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 __all__ = [
