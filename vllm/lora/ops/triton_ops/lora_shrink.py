@@ -8,10 +8,10 @@ https://arxiv.org/abs/2310.18547
 
 from typing import List
 
-import torch
 import triton
 import triton.language as tl
 
+import torch
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr
 from vllm.utils import direct_register_custom_op
@@ -106,9 +106,11 @@ def _lora_shrink(
     num_tokens_per_lora: torch.Tensor,  # shape [max-loras + 1]
     lora_token_start_loc: torch.Tensor,  # shape [max-loras + 2]
     lora_ids: torch.Tensor,  # shape [max-loras + 1]
+    no_lora_flag_cpu: torch.Tensor,  # shape [1]
     scaling: float,
 ) -> None:
     """
+    # TODO (varun) : Add no_lora_flag_cpu to the args desc.
     Args:
         inputs (torch.Tensor): Input tensor
         lora_a_weights (List[torch.Tensor]): LoRA weights
@@ -128,6 +130,11 @@ def _lora_shrink(
         lora_ids (torch.Tensor): LoRA ids to process.
         scaling (float): Scaling factor.
     """
+
+    if no_lora_flag_cpu.item():
+        # None of the inputs require LoRA.
+        return
+
     assert inputs.dtype == lora_a_weights[0].dtype
     assert inputs.dtype in [torch.float16, torch.bfloat16]
     for weight in lora_a_weights:
@@ -138,6 +145,8 @@ def _lora_shrink(
     assert output_tensor.is_contiguous()
 
     # metadata sanity check
+    M = inputs.size(0)
+    assert token_lora_mapping.size(0) == M
     assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(
         0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
@@ -146,7 +155,6 @@ def _lora_shrink(
     (lora_ptr_tensor, lora_strides_d0, lora_strides_d1,
      lora_strides_d2) = _get_lora_a_ptr(lora_a_weights, inputs.device)
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
-    M = inputs.size(0)
     NUM_SLICES = len(lora_a_weights)
     MAX_LORAS = lora_ids.size(0)
 
@@ -218,6 +226,7 @@ def _lora_shrink_fake(
     num_tokens_per_lora: torch.Tensor,
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
+    no_lora_flag_cpu: torch.Tensor,
     scaling: float,
 ) -> None:
     return
