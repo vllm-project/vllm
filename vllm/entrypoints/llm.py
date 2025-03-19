@@ -691,6 +691,7 @@ class LLM:
             chat_template,
             chat_template_content_format,
             tokenizer,
+            trust_remote_code=model_config.trust_remote_code,
         )
 
         prompts: list[Union[TokensPrompt, TextPrompt]] = []
@@ -719,6 +720,7 @@ class LLM:
             else:
                 prompt_data = apply_hf_chat_template(
                     tokenizer,
+                    trust_remote_code=model_config.trust_remote_code,
                     conversation=conversation,
                     chat_template=chat_template,
                     add_generation_prompt=add_generation_prompt,

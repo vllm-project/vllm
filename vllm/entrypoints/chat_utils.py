@@ -309,11 +309,14 @@ def _resolve_chat_template_content_format(
     chat_template: Optional[str],
     given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
+    *,
+    trust_remote_code: bool,
 ) -> _ChatTemplateContentFormat:
     if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
         try:
             # Prioritize processor's chat template for multi-modal models
-            processor = cached_get_processor(tokenizer.name_or_path)
+            processor = cached_get_processor(tokenizer.name_or_path,
+                                             trust_remote_code=trust_remote_code)
             hf_chat_template = processor.chat_template
         except Exception:
             hf_chat_template = tokenizer.chat_template
@@ -340,11 +343,14 @@ def resolve_chat_template_content_format(
     chat_template: Optional[str],
     given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
+    *,
+    trust_remote_code: bool = False,
 ) -> _ChatTemplateContentFormat:
     detected_format = _resolve_chat_template_content_format(
         chat_template,
         given_format,
         tokenizer,
+        trust_remote_code=trust_remote_code,
     )
 
     logger.info(
@@ -1072,13 +1078,15 @@ def apply_hf_chat_template(
     conversation: list[ConversationMessage],
     chat_template: Optional[str],
     *,
+    trust_remote_code: bool = False,
     tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
 ) -> str:
     if chat_template is None:
         try:
             # Prioritize processor's chat template for multi-modal models
-            processor = cached_get_processor(tokenizer.name_or_path)
+            processor = cached_get_processor(tokenizer.name_or_path,
+                                             trust_remote_code=trust_remote_code)
             chat_template = processor.chat_template
         except Exception:
             chat_template = tokenizer.chat_template
