@@ -690,6 +690,7 @@ setup(
         "tensorizer": ["tensorizer>=2.9.0"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile"],  # Required for audio processing
+        "video": [],  # Does nothing, kept for compatibility
     },
     cmdclass=cmdclass,
     package_data=package_data,
