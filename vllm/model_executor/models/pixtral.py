@@ -365,16 +365,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                 spatial_merge_size=self.vision_args.spatial_merge_size,
                 use_mlp_bias=False,
             )
-        if self.vision_args.add_pre_mm_projector_layer_norm:
-            self.pre_mm_projector_norm = RMSNorm(self.vision_args.hidden_size,
-                                                 eps=1e-5)
 
-        if self.vision_args.mm_projector_id == PATCH_MERGE:
-            self.patch_merger = PatchMerger(
-                vision_encoder_dim=self.vision_args.hidden_size,
-                spatial_merge_size=self.vision_args.spatial_merge_size,
-                use_mlp_bias=False,
-            )
         self.vision_language_adapter = VisionLanguageAdapter(
             self.vision_args, dim=config.text_config.hidden_size)
 
