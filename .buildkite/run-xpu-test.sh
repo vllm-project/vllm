@@ -12,10 +12,11 @@ docker build -t ${image_name} -f Dockerfile.xpu .
 
 # Setup cleanup
 remove_docker_container() { 
-  docker rm -f "${container_name}" || docker image rm -f "${image_name}" || true;
+  docker rm -f "${container_name}" || true; 
+  docker image rm -f "${image_name}" || true;
+  docker system prune -f || true;
 }
 trap remove_docker_container EXIT
-remove_docker_container
 
 # Run the image and test offline inference/tensor parallel
 docker run \
@@ -25,6 +26,6 @@ docker run \
     --name "${container_name}" \
     "${image_name}" \
     sh -c '
-    python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m
-    python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m -tp 2
+    VLLM_USE_V1=0 python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m
+    VLLM_USE_V1=0 python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m -tp 2
 '
