@@ -1664,6 +1664,10 @@ class SchedulerConfig:
                     _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
 
+            self.max_num_batched_tokens = min(
+                self.max_num_batched_tokens,
+                self.max_model_len * self.max_num_seqs)
+
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
 
@@ -1703,6 +1707,15 @@ class SchedulerConfig:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
                 f"({self.max_num_seqs}).")
+
+        if self.max_num_batched_tokens > self.max_model_len * self.max_num_seqs:
+            raise ValueError(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
+                f"greater than max_model_len ({self.max_model_len}) * "
+                f"max_num_seqs ({self.max_num_seqs}) = "
+                f"{self.max_model_len * self.max_num_seqs}. Please decrease "
+                "max_num_batched_tokens or increase max_num_seqs or "
+                "max_model_len")
 
         if self.num_lookahead_slots < 0:
             raise ValueError(
@@ -2366,7 +2379,6 @@ class PromptAdapterConfig:
         return hash_str
 
     def __post_init__(self):
-
         if self.max_prompt_adapters < 1:
             raise ValueError(f"max_prompt_adapters "
                              f"({self.max_prompt_adapters}) must be >= 1.")
