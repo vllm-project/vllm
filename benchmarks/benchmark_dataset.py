@@ -184,6 +184,24 @@ class BenchmarkDataset(ABC):
         """
         raise NotImplementedError("sample must be implemented in subclasses.")
 
+    def oversample_requests(self, requests: list[SampleRequest],
+                            num_requests: int) -> None:
+        """
+        Oversamples the list of requests if its size is less than the desired
+        number.
+
+        Args:
+            requests (List[SampleRequest]): The current list of sampled
+            requests.  num_requests (int): The target number of requests.
+        """
+        if len(requests) < num_requests:
+            random.seed(self.random_seed)
+            additional = random.choices(requests,
+                                        k=num_requests - len(requests))
+            requests.extend(additional)
+            logger.info("Oversampled requests to reach %d total samples.",
+                        num_requests)
+
 
 # -----------------------------------------------------------------------------
 # Utility Functions and Global Caches
@@ -398,6 +416,7 @@ class ShareGPTDataset(BenchmarkDataset):
                     expected_output_len=new_output_len,
                     lora_request=lora_request,
                 ))
+        self.oversample_requests(samples, num_requests)
         return samples
 
 
@@ -612,24 +631,6 @@ class HuggingFaceDataset(BenchmarkDataset):
         # conversation entries.
         self.data = self.data.shuffle(seed=self.random_seed).filter(
             lambda item: len(item["conversations"]) >= 2)
-
-    def oversample_requests(self, requests: list[SampleRequest],
-                            num_requests: int) -> None:
-        """
-        Oversamples the list of requests if its size is less than the desired
-        number.
-
-        Args:
-            requests (List[SampleRequest]): The current list of sampled
-            requests.  num_requests (int): The target number of requests.
-        """
-        if len(requests) < num_requests:
-            random.seed(self.random_seed)
-            additional = random.choices(requests,
-                                        k=num_requests - len(requests))
-            requests.extend(additional)
-            logger.info("Oversampled requests to reach %d total samples.",
-                        num_requests)
 
     def sample(
         self,
