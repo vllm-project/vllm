@@ -104,11 +104,11 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
 
     TOKEN_BLOCK = get_bounded_value(16, next_multiple_of(T, 16), 128)
     if is_expand: # Expand
-        LORA_BLOCK = 1024
+        LORA_BLOCK = min(1024, next_multiple_of(L, 256))
         DIM_BLOCK = 256
     else: # Shrink
         LORA_BLOCK = 256
-        DIM_BLOCK = 1024
+        DIM_BLOCK = min(1024, next_multiple_of(D, 256))
 
     kernel = make_kernel_from_pallas(
         functools.partial(
