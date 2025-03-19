@@ -30,10 +30,15 @@ _ON_NAVI = "gfx1" in _GPU_ARCH
 _ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
 
+def is_rocm_aiter_paged_attn_enabled() -> bool:
+    return envs.VLLM_ROCM_USE_AITER_PAGED_ATTN \
+        and envs.VLLM_ROCM_USE_AITER \
+
+
 def _get_paged_attn_module() -> PagedAttention:
     """
     Initializes the appropriate PagedAttention module from `attention/ops`, 
-    which is a component of the attention mechanism used 
+    which is used as helper function
     by `ROCmFlashAttentionImpl` and `ROCmFlashAttentionBackend`.
 
     The choice of attention module depends on whether 
@@ -41,7 +46,7 @@ def _get_paged_attn_module() -> PagedAttention:
     - If enabled, `ROCmFlashAttentionImpl` uses `AITERPagedAttention`.
     - Otherwise, it defaults to using the original `PagedAttention`.
     """
-    if envs.VLLM_ROCM_USE_AITER_PAGED_ATTN:
+    if is_rocm_aiter_paged_attn_enabled():
         return AITERPagedAttention()
     return PagedAttention()
 
@@ -648,8 +653,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         # when the size of one element is one byte (int8/fp8 dtypes).
         # This reshaping is only required on the first forward call
         # and the kv cache must not be empty.
-        if (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
-                and kv_cache.dtype.itemsize == 1
+        if (is_rocm_aiter_paged_attn_enabled() and kv_cache.dtype.itemsize == 1
                 and not self.aiter_kv_scales_initialized
                 and kv_cache.shape != torch.Size([0])):
             num_blocks = kv_cache.shape[1]
@@ -960,4 +964,4 @@ def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768
-            and not envs.VLLM_ROCM_USE_AITER_PAGED_ATTN)
+            and not is_rocm_aiter_paged_attn_enabled())

@@ -524,18 +524,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
 
-    # use aiter ops unless specifically disabled.
-    # Acts as a parent switch to enable the rest of the other operations.
+    # Whether to enable all aiter ops.
+    # Acts as a parent switch to enable/disable the aiter ops.
+    # By default is enabled.
     "VLLM_ROCM_USE_AITER":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
              ("true", "1")),
 
-    # use aiter paged attention if aiter ops are enabled.
-    # this is disabled by default.
+    # Whether to use aiter paged attention.
+    # By default is enabled.
     "VLLM_ROCM_USE_AITER_PAGED_ATTN":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
-             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN",
-                                         "True").lower() in ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "True").lower() in
+             ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
