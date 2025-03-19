@@ -595,6 +595,13 @@ class AsyncLLMEngine(EngineClient):
                  log_requests: bool = True,
                  start_engine_loop: bool = True,
                  **kwargs) -> None:
+        if envs.VLLM_USE_V1:
+            raise ValueError(
+                "Using V0 AsyncLLMEngine, but envs.VLLM_USE_V1=True. "
+                "This should not happen. As a workaround, try using "
+                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
+                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+
         self.log_requests = log_requests
         self.engine = self._engine_class(*args, **kwargs)
 
@@ -630,32 +637,52 @@ class AsyncLLMEngine(EngineClient):
         return LLMEngine._get_executor_cls(engine_config)
 
     @classmethod
+    def from_vllm_config(
+        cls,
+        vllm_config: VllmConfig,
+        start_engine_loop: bool = True,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        disable_log_requests: bool = False,
+        disable_log_stats: bool = False,
+    ) -> "AsyncLLMEngine":
+        """Create an AsyncLLMEngine from the EngineArgs."""
+
+        return cls(
+            vllm_config=vllm_config,
+            executor_class=cls._get_executor_cls(vllm_config),
+            start_engine_loop=start_engine_loop,
+            log_requests=not disable_log_requests,
+            log_stats=not disable_log_stats,
+            usage_context=usage_context,
+            stat_loggers=stat_loggers,
+        )
+
+    @classmethod
     def from_engine_args(
         cls,
         engine_args: AsyncEngineArgs,
-        engine_config: Optional[VllmConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
-        # Create the engine configs.
-        if engine_config is None:
-            engine_config = engine_args.create_engine_config(usage_context)
 
-        executor_class = cls._get_executor_cls(engine_config)
+        vllm_config = engine_args.create_engine_config(usage_context)
 
-        # Create the async LLM engine.
-        engine = cls(
-            vllm_config=engine_config,
-            executor_class=executor_class,
-            log_requests=not engine_args.disable_log_requests,
-            log_stats=not engine_args.disable_log_stats,
+        async_engine_cls = cls
+        if envs.VLLM_USE_V1:
+            from vllm.v1.engine.async_llm import AsyncLLM as V1AsyncLLMEngine
+            async_engine_cls = V1AsyncLLMEngine
+
+        return async_engine_cls.from_vllm_config(
+            vllm_config=vllm_config,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
+            disable_log_stats=engine_args.disable_log_stats,
+            disable_log_requests=engine_args.disable_log_requests,
         )
-        return engine
 
     @property
     def is_running(self) -> bool:
@@ -1198,12 +1225,15 @@ class AsyncLLMEngine(EngineClient):
     async def wake_up(self) -> None:
         self.engine.wake_up()
 
+    async def is_sleeping(self) -> bool:
+        return self.engine.is_sleeping()
+
     async def add_lora(self, lora_request: LoRARequest) -> None:
         self.engine.add_lora(lora_request)
 
 
 # TODO(v1): Remove this class proxy when V1 goes default.
-if envs.VLLM_USE_V1:
+if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
     from vllm.v1.engine.async_llm import AsyncLLM
 
     AsyncLLMEngine = AsyncLLM  # type: ignore

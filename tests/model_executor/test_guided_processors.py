@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import pickle
 
 import pytest
@@ -208,8 +209,6 @@ def test_guided_decoding_backend_options():
 
 
 def test_pickle_xgrammar_tokenizer_data():
-
-    # TODO: move to another test file for xgrammar
     try:
         import xgrammar as xgr
     except ImportError:
@@ -217,7 +216,11 @@ def test_pickle_xgrammar_tokenizer_data():
 
     from vllm.model_executor.guided_decoding.xgrammar_decoding import (
         TokenizerData)
-    tokenizer_data = TokenizerData(vocab_type=xgr.VocabType.RAW)
+    tokenizer_data = TokenizerData(
+        metadata=
+        '{"vocab_type":2,"vocab_size":151665,"add_prefix_space":false,"stop_token_ids":[151645]}',
+        encoded_vocab=['!', '"', '#', '$', '%'],
+    )
     pickled = pickle.dumps(tokenizer_data)
 
     assert pickled is not None
@@ -225,4 +228,5 @@ def test_pickle_xgrammar_tokenizer_data():
     depickled: TokenizerData = pickle.loads(pickled)
 
     assert depickled is not None
-    assert depickled.vocab_type == xgr.VocabType.RAW
+    assert json.loads(
+        depickled.metadata)['vocab_type'] == xgr.VocabType.BYTE_LEVEL.value
