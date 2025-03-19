@@ -767,22 +767,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             for i, patch_features_batch in enumerate(patch_embeddings)
         ]
 
-    def _add_image_newline(
-        self,
-        video_features: torch.Tensor,
-        videos: int = 1,
-        frames: int = 1,
-        strategy: str = "one_token",
-    ) -> torch.Tensor:
-        if strategy == "one_token":
-            video_features = video_features.reshape(
-                videos, frames * video_features.shape[1], -1)
-            image_newline = self.image_newline[None, None, :].repeat(
-                videos, 1, 1).to(video_features.device)
-            video_features = torch.cat((video_features, image_newline), dim=1)
-            return video_features
-        raise ValueError(f"Unexpected video newline strategy: {strategy}")
-
     def _video_pixels_to_features(
         self,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
@@ -813,25 +797,23 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             embeddings_flat = self._video_pixels_to_features(
                 self.vision_tower, video_pixels_flat)
 
-            return self._add_image_newline(embeddings_flat,
-                                           videos=total_videos,
-                                           frames=frames,
-                                           strategy="one_token")
+            embeddings_flat = embeddings_flat.reshape(
+                total_videos, frames * embeddings_flat.shape[1], -1)
+
+            image_newline = self.image_newline[None, None, :].expand(
+                total_videos, -1, -1)
+            return torch.cat((embeddings_flat, image_newline), dim=1)
 
         frames_per_video = [len(video) for video in video_pixels]
         video_pixels_flat = torch.cat(video_pixels)
 
         embeddings_flat = self._video_pixels_to_features(
             self.vision_tower, video_pixels_flat)
-        embeddings = torch.split(embeddings_flat, frames_per_video)
 
+        image_newline = self.image_newline[None, :]
         return [
-            self._add_image_newline(
-                embeddings_one.unsqueeze(0),
-                videos=1,
-                frames=len(embeddings_one),
-                strategy="one_token",
-            ).squeeze(0) for embeddings_one in embeddings
+            torch.cat((embeds, image_newline), dim=0)
+            for embeds in torch.split(embeddings_flat, frames_per_video)
         ]
 
     def apply_pooling(self, image_features: torch.Tensor, stride: int = 2):
