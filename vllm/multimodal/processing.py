@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+from __future__ import annotations
+
 import re
 import sys
 from abc import ABC, abstractmethod
@@ -13,7 +15,6 @@ from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
 
 import torch
 from cachetools import LRUCache
-from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
 from vllm.inputs import InputProcessingContext
@@ -117,7 +118,7 @@ class PromptUpdateDetails:
     """
 
     @staticmethod
-    def from_seq(seq: PromptSeq) -> "PromptUpdateDetails":
+    def from_seq(seq: PromptSeq) -> PromptUpdateDetails:
         return PromptUpdateDetails(full=seq, features=seq)
 
 
@@ -169,7 +170,7 @@ class PromptUpdate(ABC):
         """Defines how to update the prompt."""
         raise NotImplementedError
 
-    def bind(self, tokenizer: AnyTokenizer) -> "BoundPromptUpdate":
+    def bind(self, tokenizer: AnyTokenizer) -> BoundPromptUpdate:
         return BoundPromptUpdate(
             _origin=self,
             tokenizer=tokenizer,
@@ -373,7 +374,7 @@ class _BoundPromptSequence:
     def from_seq(
         tokenizer: AnyTokenizer,
         seq: PromptSeq,
-    ) -> "_BoundPromptSequence":
+    ) -> _BoundPromptSequence:
         return _BoundPromptSequence(
             tokenizer=tokenizer,
             _text=seq if isinstance(seq, str) else None,
@@ -977,7 +978,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def __init__(self,
                  info: _I,
-                 dummy_inputs: "BaseDummyInputsBuilder[_I]",
+                 dummy_inputs: BaseDummyInputsBuilder[_I],
                  *,
                  cache: Optional[ProcessingCache] = None,
                  enable_sanity_checks: bool = True) -> None:

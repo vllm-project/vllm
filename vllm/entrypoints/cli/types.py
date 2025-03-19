@@ -2,7 +2,7 @@
 
 import argparse
 
-from vllm.utils import FlexibleArgumentParser
+from vllm.entrypoints.cli.utils import FlexibleArgumentParser
 
 
 class CLISubcommand:
@@ -22,3 +22,7 @@ class CLISubcommand:
             self,
             subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
         raise NotImplementedError("Subclasses should implement this method")
+
+    def add_cli_args(self, parser: argparse.ArgumentParser) -> None:
+        # No needed by default
+        pass

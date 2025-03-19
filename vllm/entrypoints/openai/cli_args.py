@@ -14,10 +14,10 @@ from typing import Optional, Union, get_args
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
+from vllm.entrypoints.cli.utils import FlexibleArgumentParser
 from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
                                                     PromptAdapterPath)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.utils import FlexibleArgumentParser
 
 
 class LoRAParserAction(argparse.Action):

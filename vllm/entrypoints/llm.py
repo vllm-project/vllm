@@ -1,5 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import time
+
+
+def log_import(module_name):
+    print(
+        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Importing {module_name} ...",
+        end=" ",
+        flush=True)
+    start_time = time.time()
+    return start_time
+
+
+def log_import_end(start_time):
+    end_time = time.time()
+    print(f"Done in {end_time - start_time:.6f} sec")
+
+
+start = log_import("vllm.beam_search")
+from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
+                              BeamSearchSequence, get_beam_search_score)
+
+log_import_end(start)
+
+start = log_import("vllm.config")
+from vllm.config import CompilationConfig
+
+log_import_end(start)
+
+start = log_import("vllm.engine.arg_utils")
+from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
+                                   TaskOption)
+
+log_import_end(start)
+
+start = log_import("vllm.entrypoints.chat_utils")
 import itertools
 import warnings
 from collections.abc import Sequence
@@ -11,11 +46,6 @@ import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
 
-from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
-                              BeamSearchSequence, get_beam_search_score)
-from vllm.config import CompilationConfig
-from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
-                                   TaskOption)
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption,
@@ -38,7 +68,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
-from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
@@ -707,7 +737,7 @@ class LLM:
             )
 
             prompt_data: Union[str, list[int]]
-            if isinstance(tokenizer, MistralTokenizer):
+            if isinstance(tokenizer, "MistralTokenizer"):
                 prompt_data = apply_mistral_chat_template(
                     tokenizer,
                     messages=msgs,
@@ -1040,7 +1070,7 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
 
-        if isinstance(tokenizer, MistralTokenizer):
+        if isinstance(tokenizer, "MistralTokenizer"):
             raise ValueError(
                 "Score API is only enabled for `--task embed or score`")
 

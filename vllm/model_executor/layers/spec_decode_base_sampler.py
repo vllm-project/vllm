@@ -7,8 +7,6 @@ import torch
 import torch.jit
 import torch.nn as nn
 
-from vllm.platforms import current_platform
-
 
 class SpecDecodeBaseSampler(nn.Module):
     """Base class for samplers used for Speculative Decoding verification
@@ -37,6 +35,7 @@ class SpecDecodeBaseSampler(nn.Module):
     def init_gpu_tensors(self, device: Union[int, str]) -> None:
         assert self.num_accepted_tokens is None
         if isinstance(device, int):
+            from vllm.platforms import current_platform
             device = f"{current_platform.device_type}:{device}"
         elif not isinstance(device, str):
             raise ValueError(f"Device must be int or str, get {type(device)}")
