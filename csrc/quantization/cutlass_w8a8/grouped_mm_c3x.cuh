@@ -8,34 +8,13 @@
 
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 #include "cutlass_extensions/common.hpp"
+#include "get_group_starts.cuh"
 
 using namespace cute;
 
 #if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 900
   #define ENABLE_SM90_KERNEL_LEVEL 1
 #endif
-
-__global__ void get_group_gemm_starts(
-    int32_t* expert_offsets, int64_t* a_offsets, int64_t* b_offsets,
-    int64_t* out_offsets, int64_t* a_scales_offsets, int64_t* b_scales_offsets,
-    const int64_t a_base_as_int, const int64_t b_base_as_int,
-    const int64_t out_base_as_int, const int64_t a_scales_base_as_int,
-    const int64_t b_scales_base_as_int, int64_t n, int64_t k,
-    bool per_act_token, bool per_out_ch, int64_t ab_size, int64_t c_size,
-    int64_t acc_size) {
-  int expert_id = threadIdx.x;
-
-  int64_t expert_offset = expert_offsets[expert_id];
-
-  a_offsets[expert_id] = a_base_as_int + expert_offset * k * ab_size;
-  b_offsets[expert_id] = b_base_as_int + expert_id * k * n * ab_size;
-  out_offsets[expert_id] = out_base_as_int + expert_offset * n * c_size;
-  a_scales_offsets[expert_id] =
-      a_scales_base_as_int + (per_act_token ? expert_offset : 0) * acc_size;
-  b_scales_offsets[expert_id] =
-      b_scales_base_as_int +
-      (per_out_ch ? n * expert_id : expert_id) * acc_size;
-}
 
 namespace {
 
@@ -105,38 +84,27 @@ void cutlass_group_gemm_caller(
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
-  int groups = (int)expert_offsets.size(0);
+  int num_experts = (int)expert_offsets.size(0);
   int k_size = a_tensors.size(1);
   int n_size = out_tensors.size(1);
 
   bool per_act_token = a_scales.numel() != 1;
-  bool per_out_ch = b_scales.numel() != groups;
+  bool per_out_ch = b_scales.numel() != num_experts;
 
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
 
   auto options_int =
       torch::TensorOptions().dtype(torch::kInt64).device(a_tensors.device());
 
-  torch::Tensor a_ptrs = torch::empty(groups, options_int);
-  torch::Tensor b_ptrs = torch::empty(groups, options_int);
-  torch::Tensor out_ptrs = torch::empty(groups, options_int);
-  torch::Tensor a_scales_ptrs = torch::empty(groups, options_int);
-  torch::Tensor b_scales_ptrs = torch::empty(groups, options_int);
+  torch::Tensor a_ptrs = torch::empty(num_experts, options_int);
+  torch::Tensor b_ptrs = torch::empty(num_experts, options_int);
+  torch::Tensor out_ptrs = torch::empty(num_experts, options_int);
+  torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
+  torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
 
-  get_group_gemm_starts<<<1, groups, 0, stream>>>(
-      static_cast<int32_t*>(expert_offsets.data_ptr()),
-      static_cast<int64_t*>(a_ptrs.data_ptr()),
-      static_cast<int64_t*>(b_ptrs.data_ptr()),
-      static_cast<int64_t*>(out_ptrs.data_ptr()),
-      static_cast<int64_t*>(a_scales_ptrs.data_ptr()),
-      static_cast<int64_t*>(b_scales_ptrs.data_ptr()),
-      reinterpret_cast<int64_t>(a_tensors.data_ptr()),
-      reinterpret_cast<int64_t>(b_tensors.data_ptr()),
-      reinterpret_cast<int64_t>(out_tensors.data_ptr()),
-      reinterpret_cast<int64_t>(a_scales.data_ptr()),
-      reinterpret_cast<int64_t>(b_scales.data_ptr()), out_tensors.size(1),
-      a_tensors.size(1), per_act_token, per_out_ch, sizeof(ElementAB),
-      sizeof(ElementD), sizeof(ElementAccumulator));
+  run_get_group_gemm_starts(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
+                            a_scales_ptrs, b_scales_ptrs, a_tensors, b_tensors,
+                            out_tensors, a_scales, b_scales);
 
   using GemmKernel = typename Gemm::GemmKernel;
   using StrideA = Stride<int64_t, Int<1>, Int<0>>;
@@ -146,7 +114,7 @@ void cutlass_group_gemm_caller(
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       static_cast<ProblemShape::UnderlyingProblemShape*>(
           problem_sizes.data_ptr());
-  ProblemShape prob_shape{groups, problem_sizes_as_shapes, nullptr};
+  ProblemShape prob_shape{num_experts, problem_sizes_as_shapes, nullptr};
 
   typename GemmKernel::MainloopArguments mainloop_args{
       static_cast<const ElementAB**>(a_ptrs.data_ptr()),

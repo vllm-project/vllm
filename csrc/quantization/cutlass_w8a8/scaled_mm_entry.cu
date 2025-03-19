@@ -210,8 +210,9 @@ void cutlass_moe_mm(
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
-      "cutlass_moe_mm requires capability 90. Current CUDA device capability: ",
-      version_num);
+      "No compiled cutlass_scaled_mm for a compute capability less than "
+      "CUDA device capability: ",
+      version_num, ". Required capability: 90");
 }
 
 void get_cutlass_moe_mm_data(
@@ -222,7 +223,6 @@ void get_cutlass_moe_mm_data(
   get_cutlass_moe_mm_data_caller(topk_ids, expert_offsets, problem_sizes1,
                                  problem_sizes2, input_permutation,
                                  output_permutation, num_experts, n, k);
-  return;
 }
 
 void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
