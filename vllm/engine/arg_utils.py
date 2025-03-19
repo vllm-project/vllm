@@ -3,6 +3,7 @@
 import argparse
 import dataclasses
 import json
+import threading
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
                     Tuple, Type, Union, cast, get_args)
@@ -1468,8 +1469,12 @@ class EngineArgs:
             return False
 
         # Need at least Ampere for now (FA support required).
+        # Skip this check if we are running on a non-GPU platform,
+        # or if the device capability is not available
+        # (e.g. in a Ray actor without GPUs).
         from vllm.platforms import current_platform
         if (current_platform.is_cuda()
+                and current_platform.get_device_capability()
                 and current_platform.get_device_capability().major < 8):
             _raise_or_fallback(feature_name="Compute Capability < 8.0",
                                recommend_to_remove=False)
@@ -1573,8 +1578,20 @@ class EngineArgs:
             _raise_or_fallback(feature_name=name, recommend_to_remove=True)
             return False
 
+        # No support for device type other than CUDA, AMD (experiemntal) or
+        # TPU (experimental) so far.
+        if not (current_platform.is_cuda_alike() or current_platform.is_tpu()):
+            _raise_or_fallback(
+                feature_name=f"device type={current_platform.device_type}",
+                recommend_to_remove=False)
+            return False
         #############################################################
         # Experimental Features - allow users to opt in.
+
+        # Signal Handlers requires running in main thread.
+        if (threading.current_thread() != threading.main_thread()
+                and _warn_or_fallback("Engine in background thread")):
+            return False
 
         # LoRA is supported on V1, but off by default for now.
         if self.enable_lora and _warn_or_fallback("LORA"):
