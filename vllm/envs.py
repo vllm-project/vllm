@@ -86,7 +86,6 @@ if TYPE_CHECKING:
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
-    VLLM_RAY_PLACEMENT_GROUP: Optional[str] = None
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     VLLM_DP_RANK: int = 0
@@ -577,12 +576,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Format: comma-separated list of integers, e.g. "0,1,2,3"
     "VLLM_RAY_BUNDLE_INDICES":
     lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
-
-    # Ray placement group (serialized string), if it is set and
-    # ray.util.get_current_placement_group() is None, it will be used as the
-    # placement group in vLLM Ray executor.
-    "VLLM_RAY_PLACEMENT_GROUP":
-    lambda: os.getenv("VLLM_RAY_PLACEMENT_GROUP", None),
 
     # In some system, find_loaded_library() may not work. So we allow users to
     # specify the path through environment variable VLLM_CUDART_SO_PATH.

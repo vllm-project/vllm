@@ -44,9 +44,8 @@ train_model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
 train_model.to("cuda:0")
 """
 Start the inference process, here we use vLLM to hold a model on GPU 1 and 
-GPU 2 by creating a Ray placement group. The placement group will be passed
-to the worker processes spawned by vLLM. For the details on how to use Ray,
-please refer to the Ray documentation https://docs.ray.io/en/latest/ .
+GPU 2. For the details on how to use ray, please refer to the ray 
+documentation https://docs.ray.io/en/latest/ .
 """
 os.environ["CUDA_VISIBLE_DEVICES"] = "1,2"
 ray.init()
