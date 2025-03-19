@@ -23,6 +23,7 @@ EXAMPLES_DIR = VLLM_PATH / "examples"
 PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 ULTRAVOX_MODEL_ID = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 QWEN2VL_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
+QWEN25VL_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 LLAMA_GUARD_MODEL_ID = "meta-llama/Llama-Guard-3-1B"
 
@@ -716,6 +717,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     ("model", "expected_format"),
     [(PHI3V_MODEL_ID, "string"),
      (QWEN2VL_MODEL_ID, "openai"),
+     (QWEN25VL_MODEL_ID, "openai"),
      (ULTRAVOX_MODEL_ID, "string"),
      (MLLAMA_MODEL_ID, "openai"),
      (LLAMA_GUARD_MODEL_ID, "openai")],

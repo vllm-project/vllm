@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import codecs
 import json
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
@@ -312,16 +311,21 @@ def _resolve_chat_template_content_format(
     tokenizer: AnyTokenizer,
 ) -> _ChatTemplateContentFormat:
     if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
-        tokenizer_chat_template = tokenizer.chat_template
+        try:
+            # Prioritize processor's chat template for multi-modal models
+            processor = cached_get_processor(tokenizer.name_or_path)
+            hf_chat_template = processor.chat_template
+        except Exception:
+            hf_chat_template = tokenizer.chat_template
     else:
-        tokenizer_chat_template = None
+        hf_chat_template = None
 
     jinja_text: Optional[str]
-    if isinstance(tokenizer_chat_template, str) and chat_template is None:
-        jinja_text = tokenizer_chat_template
-    elif (isinstance(tokenizer_chat_template, dict)
-            and chat_template in tokenizer_chat_template):
-        jinja_text = tokenizer_chat_template[chat_template]
+    if isinstance(hf_chat_template, str) and chat_template is None:
+        jinja_text = hf_chat_template
+    elif (isinstance(hf_chat_template, dict)
+            and chat_template in hf_chat_template):
+        jinja_text = hf_chat_template[chat_template]
     else:
         jinja_text = load_chat_template(chat_template, is_literal=True)
 
@@ -724,7 +728,7 @@ def load_chat_template(
             raise TypeError("chat_template is expected to be read directly "
                             "from its value")
 
-        return codecs.decode(chat_template, "unicode_escape")
+        return chat_template
 
     try:
         with open(chat_template) as f:
@@ -1072,16 +1076,12 @@ def apply_hf_chat_template(
     **kwargs: Any,
 ) -> str:
     if chat_template is None:
-        chat_template = tokenizer.chat_template
-
-    # FIXME: Temporary workaround for
-    # https://huggingface.co/mistral-community/pixtral-12b/discussions/31
-    if chat_template is None:
         try:
+            # Prioritize processor's chat template for multi-modal models
             processor = cached_get_processor(tokenizer.name_or_path)
             chat_template = processor.chat_template
         except Exception:
-            pass
+            chat_template = tokenizer.chat_template
 
     if chat_template is None:
         raise ValueError(
