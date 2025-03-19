@@ -111,8 +111,8 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
         DIM_BLOCK = 1024
 
     TOKEN_BLOCK = min(max(TOKEN_BLOCK, pl.next_power_of_2(T)), 128)
-    LORA_BLOCK = max(LORA_BLOCK, pl.next_power_of_2(L))
-    DIM_BLOCK = max(DIM_BLOCK, pl.next_power_of_2(D))
+    LORA_BLOCK = min(max(LORA_BLOCK, pl.next_power_of_2(L)), 4096)
+    DIM_BLOCK = min(max(DIM_BLOCK, pl.next_power_of_2(D)), 4096)
 
     kernel = make_kernel_from_pallas(
         functools.partial(
