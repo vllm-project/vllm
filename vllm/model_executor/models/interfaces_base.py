@@ -1,27 +1,23 @@
-from typing import (TYPE_CHECKING, List, Optional, Protocol, Type, Union,
-                    overload, runtime_checkable)
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import (TYPE_CHECKING, Optional, Protocol, Type, Union, overload,
+                    runtime_checkable)
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
 from typing_extensions import TypeIs, TypeVar
 
 from vllm.logger import init_logger
 from vllm.utils import supports_kw
 
 if TYPE_CHECKING:
-    from vllm.attention import AttentionMetadata
-    from vllm.config import CacheConfig
+    from vllm.config import VllmConfig
     from vllm.model_executor.layers.pooler import PoolerOutput
-    from vllm.model_executor.layers.quantization import QuantizationConfig
     from vllm.model_executor.layers.sampler import SamplerOutput
     from vllm.model_executor.pooling_metadata import PoolingMetadata
     from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 logger = init_logger(__name__)
-
-# The type of HF config
-C_co = TypeVar("C_co", bound=PretrainedConfig, covariant=True)
 
 # The type of hidden states
 # Currently, T = torch.Tensor for all models except for Medusa
@@ -35,14 +31,13 @@ T_co = TypeVar("T_co", default=torch.Tensor, covariant=True)
 
 
 @runtime_checkable
-class VllmModel(Protocol[C_co, T_co]):
+class VllmModel(Protocol[T_co]):
+    """The interface required for all models in vLLM."""
 
     def __init__(
         self,
-        config: C_co,
-        *,
-        cache_config: Optional["CacheConfig"],
-        quant_config: Optional["QuantizationConfig"],
+        vllm_config: "VllmConfig",
+        prefix: str = "",
     ) -> None:
         ...
 
@@ -50,28 +45,13 @@ class VllmModel(Protocol[C_co, T_co]):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: "AttentionMetadata",
     ) -> T_co:
         ...
 
 
 def _check_vllm_model_init(model: Union[Type[object], object]) -> bool:
     model_init = model.__init__
-    vllm_kws = ("cache_config", "quant_config")
-    missing_kws = tuple(kw for kw in vllm_kws
-                        if not supports_kw(model_init, kw))
-
-    if missing_kws and (isinstance(model, type)
-                        and issubclass(model, nn.Module)):
-        logger.warning(
-            "The model (%s) is missing "
-            "vLLM-specific keywords from its initializer: %s",
-            model,
-            missing_kws,
-        )
-
-    return len(missing_kws) == 0
+    return supports_kw(model_init, "vllm_config")
 
 
 def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
@@ -79,7 +59,7 @@ def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
     if not callable(model_forward):
         return False
 
-    vllm_kws = ("input_ids", "positions", "kv_caches", "attn_metadata")
+    vllm_kws = ("input_ids", "positions")
     missing_kws = tuple(kw for kw in vllm_kws
                         if not supports_kw(model_forward, kw))
 
@@ -87,7 +67,7 @@ def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
                         and issubclass(model, nn.Module)):
         logger.warning(
             "The model (%s) is missing "
-            "vLLM-specific keywords from its initializer: %s",
+            "vLLM-specific keywords from its `forward` method: %s",
             model,
             missing_kws,
         )
@@ -112,7 +92,8 @@ def is_vllm_model(
 
 
 @runtime_checkable
-class VllmModelForTextGeneration(VllmModel[C_co, T], Protocol[C_co, T]):
+class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
+    """The interface required for all generative models in vLLM."""
 
     def compute_logits(
         self,
@@ -157,7 +138,8 @@ def is_text_generation_model(
 
 
 @runtime_checkable
-class VllmModelForEmbedding(VllmModel[C_co, T], Protocol[C_co, T]):
+class VllmModelForPooling(VllmModel[T], Protocol[T]):
+    """The interface required for all pooling models in vLLM."""
 
     def pooler(
         self,
@@ -169,23 +151,22 @@ class VllmModelForEmbedding(VllmModel[C_co, T], Protocol[C_co, T]):
 
 
 @overload
-def is_embedding_model(
-        model: Type[object]) -> TypeIs[Type[VllmModelForEmbedding]]:
+def is_pooling_model(model: Type[object]) -> TypeIs[Type[VllmModelForPooling]]:
     ...
 
 
 @overload
-def is_embedding_model(model: object) -> TypeIs[VllmModelForEmbedding]:
+def is_pooling_model(model: object) -> TypeIs[VllmModelForPooling]:
     ...
 
 
-def is_embedding_model(
+def is_pooling_model(
     model: Union[Type[object], object],
-) -> Union[TypeIs[Type[VllmModelForEmbedding]], TypeIs[VllmModelForEmbedding]]:
+) -> Union[TypeIs[Type[VllmModelForPooling]], TypeIs[VllmModelForPooling]]:
     if not is_vllm_model(model):
         return False
 
     if isinstance(model, type):
-        return isinstance(model, VllmModelForEmbedding)
+        return isinstance(model, VllmModelForPooling)
 
-    return isinstance(model, VllmModelForEmbedding)
+    return isinstance(model, VllmModelForPooling)

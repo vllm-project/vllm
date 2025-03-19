@@ -1,4 +1,4 @@
-from typing import List, Type
+# SPDX-License-Identifier: Apache-2.0
 
 import pytest
 import torch.nn.functional as F
@@ -27,9 +27,9 @@ MODELS = ["TIGER-Lab/VLM2Vec-Full"]
 
 
 def _run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
-    input_texts: List[str],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    input_texts: list[str],
     input_images: PromptImageInput,
     model: str,
     *,
@@ -39,7 +39,7 @@ def _run_test(
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    with vllm_runner(model, task="embedding", dtype=dtype,
+    with vllm_runner(model, task="embed", dtype=dtype,
                      enforce_eager=True) as vllm_model:
         vllm_outputs = vllm_model.encode(input_texts, images=input_images)
 
@@ -74,6 +74,7 @@ def _run_test(
     )
 
 
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_text(
@@ -98,6 +99,7 @@ def test_models_text(
 
 
 @large_gpu_test(min_gb=48)
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_image(

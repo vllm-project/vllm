@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+
+import os
 import subprocess
 import sys
 import time
@@ -25,27 +28,35 @@ def _query_server_long(prompt: str) -> dict:
 
 
 @pytest.fixture
-def api_server(tokenizer_pool_size: int, worker_use_ray: bool):
+def api_server(tokenizer_pool_size: int, distributed_executor_backend: str):
     script_path = Path(__file__).parent.joinpath(
         "api_server_async_engine.py").absolute()
     commands = [
-        sys.executable, "-u",
-        str(script_path), "--model", "facebook/opt-125m", "--host",
-        "127.0.0.1", "--tokenizer-pool-size",
-        str(tokenizer_pool_size)
+        sys.executable,
+        "-u",
+        str(script_path),
+        "--model",
+        "facebook/opt-125m",
+        "--host",
+        "127.0.0.1",
+        "--tokenizer-pool-size",
+        str(tokenizer_pool_size),
+        "--distributed-executor-backend",
+        distributed_executor_backend,
     ]
 
-    if worker_use_ray:
-        commands.append("--worker-use-ray")
-    uvicorn_process = subprocess.Popen(commands)
+    # API Server Test Requires V0.
+    my_env = os.environ.copy()
+    my_env["VLLM_USE_V1"] = "0"
+    uvicorn_process = subprocess.Popen(commands, env=my_env)
     yield
     uvicorn_process.terminate()
 
 
 @pytest.mark.parametrize("tokenizer_pool_size", [0, 2])
-@pytest.mark.parametrize("worker_use_ray", [False, True])
+@pytest.mark.parametrize("distributed_executor_backend", ["mp", "ray"])
 def test_api_server(api_server, tokenizer_pool_size: int,
-                    worker_use_ray: bool):
+                    distributed_executor_backend: str):
     """
     Run the API server and test it.
 

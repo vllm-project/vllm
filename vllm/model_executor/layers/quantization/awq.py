@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -24,6 +26,7 @@ class AWQConfig(QuantizationConfig):
         zero_point: bool,
         modules_to_not_convert: Optional[List[str]] = None,
     ) -> None:
+        super().__init__()
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.zero_point = zero_point
@@ -76,9 +79,6 @@ class AWQConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return AWQLinearMethod(self)
         return None
-
-    def get_scaled_act_names(self) -> List[str]:
-        return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
 
 
 def is_layer_skipped_awq(prefix: str, modules_to_not_convert: List[str]):

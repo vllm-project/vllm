@@ -1,11 +1,12 @@
-from typing import List, Optional, Tuple, Union
+# SPDX-License-Identifier: Apache-2.0
+
+from typing import Optional, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -13,8 +14,6 @@ from vllm.model_executor.models.internlm2 import (InternLM2Attention,
                                                   InternLM2ForCausalLM,
                                                   InternLM2MLP, InternLM2Model)
 from vllm.sequence import IntermediateTensors
-
-from .utils import make_layers, maybe_prefix
 
 
 class InternLM2VEDecoderLayer(nn.Module):
@@ -65,8 +64,6 @@ class InternLM2VEDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
         visual_token_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -80,8 +77,6 @@ class InternLM2VEDecoderLayer(nn.Module):
         hidden_states = self.attention(
             positions=positions,
             hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         # Fully Connected
@@ -104,26 +99,15 @@ class InternLM2VEDecoderLayer(nn.Module):
 
 class InternLM2VEModel(InternLM2Model):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config, cache_config, quant_config)
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            lambda prefix: InternLM2VEDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix),
-            prefix=f"{prefix}.layers")
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config,
+                         prefix=prefix,
+                         layer_type=InternLM2VEDecoderLayer)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         visual_token_mask: Optional[torch.Tensor] = None,
@@ -138,13 +122,10 @@ class InternLM2VEModel(InternLM2Model):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                kv_caches[i - self.start_layer],
-                attn_metadata,
                 residual,
                 visual_token_mask=visual_token_mask,
             )
@@ -159,15 +140,7 @@ class InternLM2VEModel(InternLM2Model):
 
 class InternLM2VEForCausalLM(InternLM2ForCausalLM):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config, cache_config, quant_config)
-        self.model = InternLM2VEModel(config,
-                                      cache_config,
-                                      quant_config,
-                                      prefix=maybe_prefix(prefix, "model"))
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config,
+                         prefix=prefix,
+                         model_type=InternLM2VEModel)

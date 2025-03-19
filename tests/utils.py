@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import copy
 import functools
@@ -5,16 +7,19 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import warnings
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type, Union
+from typing import Any, Callable, Literal, Optional, Union
 
+import cloudpickle
 import openai
 import pytest
 import requests
 import torch
+import torch.nn.functional as F
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec
 
@@ -43,8 +48,9 @@ if current_platform.is_rocm():
         finally:
             amdsmi_shut_down()
 elif current_platform.is_cuda():
-    from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
-                        nvmlInit, nvmlShutdown)
+    from vllm.third_party.pynvml import (nvmlDeviceGetHandleByIndex,
+                                         nvmlDeviceGetMemoryInfo, nvmlInit,
+                                         nvmlShutdown)
 
     @contextmanager
     def _nvml():
@@ -69,9 +75,10 @@ class RemoteOpenAIServer:
 
     def __init__(self,
                  model: str,
-                 vllm_serve_args: List[str],
+                 vllm_serve_args: list[str],
                  *,
-                 env_dict: Optional[Dict[str, str]] = None,
+                 env_dict: Optional[dict[str, str]] = None,
+                 seed: Optional[int] = 0,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None) -> None:
         if auto_port:
@@ -83,6 +90,12 @@ class RemoteOpenAIServer:
             vllm_serve_args = vllm_serve_args + [
                 "--port", str(get_open_port())
             ]
+        if seed is not None:
+            if "--seed" in vllm_serve_args:
+                raise ValueError("You have manually specified the seed "
+                                 f"when `seed={seed}`.")
+
+            vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
 
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")
@@ -156,25 +169,30 @@ class RemoteOpenAIServer:
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
 
-    def get_client(self):
+    def get_client(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
         return openai.OpenAI(
             base_url=self.url_for("v1"),
             api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
         )
 
-    def get_async_client(self):
-        return openai.AsyncOpenAI(
-            base_url=self.url_for("v1"),
-            api_key=self.DUMMY_API_KEY,
-            max_retries=0,
-        )
+    def get_async_client(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return openai.AsyncOpenAI(base_url=self.url_for("v1"),
+                                  api_key=self.DUMMY_API_KEY,
+                                  max_retries=0,
+                                  **kwargs)
 
 
 def _test_completion(
     client: openai.OpenAI,
     model: str,
     prompt: str,
-    token_ids: List[int],
+    token_ids: list[int],
 ):
     results = []
 
@@ -288,12 +306,12 @@ def _test_completion_close(
                                            logprobs=5,
                                            temperature=0.0)
 
-    logporbs = completion.choices[0].logprobs.top_logprobs[0]
-    logporbs = {k: round(v, 2) for k, v in logporbs.items()}
+    logprobs = completion.choices[0].logprobs.top_logprobs[0]
+    logprobs = {k: round(v, 2) for k, v in logprobs.items()}
 
     results.append({
         "test": "completion_close",
-        "logprobs": logporbs,
+        "logprobs": logprobs,
     })
 
     return results
@@ -391,10 +409,10 @@ def _test_image_text(
 
 
 def compare_two_settings(model: str,
-                         arg1: List[str],
-                         arg2: List[str],
-                         env1: Optional[Dict[str, str]] = None,
-                         env2: Optional[Dict[str, str]] = None,
+                         arg1: list[str],
+                         arg2: list[str],
+                         env1: Optional[dict[str, str]] = None,
+                         env2: Optional[dict[str, str]] = None,
                          *,
                          method: str = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
@@ -420,8 +438,8 @@ def compare_two_settings(model: str,
 
 
 def compare_all_settings(model: str,
-                         all_args: List[List[str]],
-                         all_envs: List[Optional[Dict[str, str]]],
+                         all_args: list[list[str]],
+                         all_envs: list[Optional[dict[str, str]]],
                          *,
                          method: str = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
@@ -461,7 +479,7 @@ def compare_all_settings(model: str,
 
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt).input_ids
-    ref_results: List = []
+    ref_results: list = []
     for i, (args, env) in enumerate(zip(all_args, all_envs)):
         if can_force_load_format:
             # we are comparing the results and
@@ -472,7 +490,7 @@ def compare_all_settings(model: str,
             # environment variable to force the load format,
             # e.g. in quantization tests.
             args = args + ["--load-format", envs.VLLM_TEST_FORCE_LOAD_FORMAT]
-        compare_results: List = []
+        compare_results: list = []
         results = ref_results if i == 0 else compare_results
         with RemoteOpenAIServer(model,
                                 args,
@@ -515,13 +533,14 @@ def compare_all_settings(model: str,
                     ref_result = copy.deepcopy(ref_result)
                     compare_result = copy.deepcopy(compare_result)
                     if "embedding" in ref_result and method == "encode":
-                        ref_embedding = torch.tensor(ref_result["embedding"])
-                        compare_embedding = torch.tensor(
-                            compare_result["embedding"])
-                        mse = ((ref_embedding - compare_embedding)**2).mean()
-                        assert mse < 1e-6, (
+                        sim = F.cosine_similarity(
+                            torch.tensor(ref_result["embedding"]),
+                            torch.tensor(compare_result["embedding"]),
+                            dim=0,
+                        )
+                        assert sim >= 0.999, (
                             f"Embedding for {model=} are not the same.\n"
-                            f"mse={mse}\n")
+                            f"cosine_similarity={sim}\n")
                         del ref_result["embedding"]
                         del compare_result["embedding"]
                     assert ref_result == compare_result, (
@@ -549,6 +568,7 @@ def init_test_distributed_environment(
 
 
 def multi_process_parallel(
+    monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
     pp_size: int,
     test_target: Any,
@@ -565,14 +585,20 @@ def multi_process_parallel(
     refs = []
     for rank in range(tp_size * pp_size):
         refs.append(
-            test_target.remote(tp_size, pp_size, rank, distributed_init_port))
+            test_target.remote(
+                monkeypatch,
+                tp_size,
+                pp_size,
+                rank,
+                distributed_init_port,
+            ), )
     ray.get(refs)
 
     ray.shutdown()
 
 
 @contextmanager
-def error_on_warning(category: Type[Warning] = Warning):
+def error_on_warning(category: type[Warning] = Warning):
     """
     Within the scope of this context manager, tests will fail if any warning
     of the given category is emitted.
@@ -594,7 +620,7 @@ def get_physical_device_indices(devices):
 
 
 @_nvml()
-def wait_for_gpu_memory_to_clear(devices: List[int],
+def wait_for_gpu_memory_to_clear(devices: list[int],
                                  threshold_bytes: int,
                                  timeout_s: float = 120) -> None:
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
@@ -602,8 +628,8 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
     devices = get_physical_device_indices(devices)
     start_time = time.time()
     while True:
-        output: Dict[int, str] = {}
-        output_raw: Dict[int, float] = {}
+        output: dict[int, str] = {}
+        output_raw: dict[int, float] = {}
         for device in devices:
             if current_platform.is_rocm():
                 dev_handle = amdsmi_get_processor_handles()[device]
@@ -679,14 +705,88 @@ def fork_new_process_for_each_test(
     return wrapper
 
 
+def spawn_new_process_for_each_test(
+        f: Callable[_P, None]) -> Callable[_P, None]:
+    """Decorator to spawn a new process for each test function.
+    """
+
+    @functools.wraps(f)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        # Check if we're already in a subprocess
+        if os.environ.get('RUNNING_IN_SUBPROCESS') == '1':
+            # If we are, just run the function directly
+            return f(*args, **kwargs)
+
+        import torch.multiprocessing as mp
+        with suppress(RuntimeError):
+            mp.set_start_method('spawn')
+
+        # Get the module
+        module_name = f.__module__
+
+        # Create a process with environment variable set
+        env = os.environ.copy()
+        env['RUNNING_IN_SUBPROCESS'] = '1'
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            output_filepath = os.path.join(tempdir, "new_process.tmp")
+
+            # `cloudpickle` allows pickling complex functions directly
+            input_bytes = cloudpickle.dumps((f, output_filepath))
+
+            cmd = [sys.executable, "-m", f"{module_name}"]
+
+            returned = subprocess.run(cmd,
+                                      input=input_bytes,
+                                      capture_output=True,
+                                      env=env)
+
+            # check if the subprocess is successful
+            try:
+                returned.check_returncode()
+            except Exception as e:
+                # wrap raised exception to provide more information
+                raise RuntimeError(f"Error raised in subprocess:\n"
+                                   f"{returned.stderr.decode()}") from e
+
+    return wrapper
+
+
+def create_new_process_for_each_test(
+    method: Optional[Literal["spawn", "fork"]] = None
+) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
+    """Creates a decorator that runs each test function in a new process.
+
+    Args:
+        method: The process creation method. Can be either "spawn" or "fork". 
+               If not specified,
+               it defaults to "spawn" on ROCm platforms and "fork" otherwise.
+
+    Returns:
+        A decorator to run test functions in separate processes.
+    """
+    if method is None:
+        method = "spawn" if current_platform.is_rocm() else "fork"
+
+    assert method in ["spawn",
+                      "fork"], "Method must be either 'spawn' or 'fork'"
+
+    if method == "fork":
+        return fork_new_process_for_each_test
+
+    return spawn_new_process_for_each_test
+
+
 def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
-    """Gets a pytest skipif mark, which triggers ig the the device doesn't have
-    meet a minimum memory requirement in gb; can be leveraged via 
-    @large_gpu_test to skip tests in environments without enough resources, or
-    called when filtering tests to run directly.
+    """
+    Get a pytest mark, which skips the test if the GPU doesn't meet
+    a minimum memory requirement in GB.
+
+    This can be leveraged via `@large_gpu_test` to skip tests in environments
+    without enough resources, or called when filtering tests to run directly.
     """
     try:
-        if current_platform.is_cpu():
+        if current_platform.is_cpu() or current_platform.is_openvino():
             memory_gb = 0
         else:
             memory_gb = current_platform.get_device_total_memory() / GB_bytes
@@ -710,38 +810,49 @@ def large_gpu_test(*, min_gb: int):
 
     Currently, the CI machine uses L4 GPU which has 24 GB VRAM.
     """
-    test_skipif = large_gpu_mark(min_gb)
+    mark = large_gpu_mark(min_gb)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        return test_skipif(f)
+        return mark(f)
 
     return wrapper
+
+
+def multi_gpu_marks(*, num_gpus: int):
+    """Get a collection of pytest marks to apply for `@multi_gpu_test`."""
+    test_selector = pytest.mark.distributed(num_gpus=num_gpus)
+    test_skipif = pytest.mark.skipif(
+        cuda_device_count_stateless() < num_gpus,
+        reason=f"Need at least {num_gpus} GPUs to run the test.",
+    )
+
+    return [test_selector, test_skipif]
 
 
 def multi_gpu_test(*, num_gpus: int):
     """
     Decorate a test to be run only when multiple GPUs are available.
     """
-    test_selector = getattr(pytest.mark, f"distributed_{num_gpus}_gpus")
-    test_skipif = pytest.mark.skipif(
-        cuda_device_count_stateless() < num_gpus,
-        reason=f"Need at least {num_gpus} GPUs to run the test.",
-    )
+    marks = multi_gpu_marks(num_gpus=num_gpus)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        return test_selector(test_skipif(fork_new_process_for_each_test(f)))
+        func = create_new_process_for_each_test()(f)
+        for mark in reversed(marks):
+            func = mark(func)
+
+        return func
 
     return wrapper
 
 
 async def completions_with_server_args(
-    prompts: List[str],
+    prompts: list[str],
     model_name: str,
-    server_cli_args: List[str],
+    server_cli_args: list[str],
     num_logprobs: Optional[int],
     max_wait_seconds: int = 240,
     max_tokens: Union[int, list] = 5,
-) -> List[Completion]:
+) -> list[Completion]:
     '''Construct a remote OpenAI server, obtain an async client to the
     server & invoke the completions API to obtain completions.
 
@@ -766,7 +877,6 @@ async def completions_with_server_args(
     assert len(max_tokens) == len(prompts)
 
     outputs = None
-    max_wait_seconds = 240 * 3  # 240 is default
     with RemoteOpenAIServer(model_name,
                             server_cli_args,
                             max_wait_seconds=max_wait_seconds) as server:
@@ -785,7 +895,7 @@ async def completions_with_server_args(
     return outputs
 
 
-def get_client_text_generations(completions: List[Completion]) -> List[str]:
+def get_client_text_generations(completions: list[Completion]) -> list[str]:
     '''Extract generated tokens from the output of a
     request made to an Open-AI-protocol completions endpoint.
     '''
@@ -794,7 +904,7 @@ def get_client_text_generations(completions: List[Completion]) -> List[str]:
 
 
 def get_client_text_logprob_generations(
-        completions: List[Completion]) -> List[TextTextLogprobs]:
+        completions: list[Completion]) -> list[TextTextLogprobs]:
     '''Operates on the output of a request made to an Open-AI-protocol
     completions endpoint; obtains top-rank logprobs for each token in
     each :class:`SequenceGroup`

@@ -1,49 +1,69 @@
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
 import argparse
 import asyncio
+import concurrent
 import contextlib
 import datetime
 import enum
 import gc
+import getpass
+import importlib
+import importlib.metadata
+import importlib.util
 import inspect
 import ipaddress
+import multiprocessing
 import os
+import re
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import traceback
+import types
 import uuid
 import warnings
 import weakref
-from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
-from collections.abc import Mapping
-from functools import lru_cache, partial, wraps
-from platform import uname
-from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Literal, Optional, OrderedDict, Set, Tuple,
-                    Type, TypeVar, Union, overload)
+from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
+from collections import OrderedDict, UserDict, defaultdict
+from collections.abc import (AsyncGenerator, Awaitable, Generator, Hashable,
+                             Iterable, Iterator, Mapping)
+from dataclasses import dataclass, field
+from functools import cache, lru_cache, partial, wraps
+from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
+                    Optional, TypeVar, Union)
 from uuid import uuid4
 
+import cloudpickle
 import numpy as np
 import numpy.typing as npt
 import psutil
 import torch
 import torch.types
 import yaml
+import zmq
+import zmq.asyncio
 from packaging.version import Version
 from torch.library import Library
-from typing_extensions import ParamSpec, TypeIs, assert_never
+from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
-from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
 # Exception strings for non-implemented encoder/decoder scenarios
 
-# Reminder: Please update docs/source/serving/compatibility_matrix.rst
+# Reminder: Please update docs/source/features/compatibility_matrix.md
 # If the feature combo become valid
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
@@ -88,9 +108,6 @@ STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
                                        "currently supported with encoder/"
                                        "decoder models.")
 
-STR_NOT_IMPL_ENC_DEC_CPU = ("CPU is not currently supported with "
-                            "encoder/decoder models.")
-
 # Efficiently import all enc/dec error strings
 # rather than having to import all of the above
 STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
@@ -105,7 +122,6 @@ STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
     "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
     "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
     "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
-    "STR_NOT_IMPL_ENC_DEC_CPU": STR_NOT_IMPL_ENC_DEC_CPU
 }
 
 # Constants related to forcing the attention backend selection
@@ -149,9 +165,11 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
 }
 
 P = ParamSpec('P')
-K = TypeVar("K")
 T = TypeVar("T")
 U = TypeVar("U")
+
+_K = TypeVar("_K", bound=Hashable)
+_V = TypeVar("_V")
 
 
 class _Sentinel:
@@ -164,6 +182,11 @@ ALL_PINNED_SENTINEL = _Sentinel()
 class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()
+
+
+class LayerBlockType(enum.Enum):
+    attention = "attention"
+    mamba = "mamba"
 
 
 class Counter:
@@ -180,50 +203,71 @@ class Counter:
         self.counter = 0
 
 
-class LRUCache(Generic[T]):
+class CacheInfo(NamedTuple):
+    hits: int
+    total: int
 
-    def __init__(self, capacity: int):
-        self.cache: OrderedDict[Hashable, T] = OrderedDict()
-        self.pinned_items: Set[Hashable] = set()
+    @property
+    def hit_ratio(self) -> float:
+        if self.total == 0:
+            return 0
+
+        return self.hits / self.total
+
+
+class LRUCache(Generic[_K, _V]):
+    """Note: This class is not thread safe!"""
+
+    def __init__(self, capacity: int) -> None:
+        self.cache = OrderedDict[_K, _V]()
+        self.pinned_items = set[_K]()
         self.capacity = capacity
 
-    def __contains__(self, key: Hashable) -> bool:
+        self._hits = 0
+        self._total = 0
+
+    def __contains__(self, key: _K) -> bool:
         return key in self.cache
 
     def __len__(self) -> int:
         return len(self.cache)
 
-    def __getitem__(self, key: Hashable) -> T:
+    def __getitem__(self, key: _K) -> _V:
         value = self.cache[key]  # Raise KeyError if not exists
         self.cache.move_to_end(key)
         return value
 
-    def __setitem__(self, key: Hashable, value: T) -> None:
+    def __setitem__(self, key: _K, value: _V) -> None:
         self.put(key, value)
 
-    def __delitem__(self, key: Hashable) -> None:
+    def __delitem__(self, key: _K) -> None:
         self.pop(key)
 
-    def touch(self, key: Hashable) -> None:
+    def stat(self) -> CacheInfo:
+        return CacheInfo(hits=self._hits, total=self._total)
+
+    def touch(self, key: _K) -> None:
         self.cache.move_to_end(key)
 
-    def get(self,
-            key: Hashable,
-            default_value: Optional[T] = None) -> Optional[T]:
-        value: Optional[T]
+    def get(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
+        value: Optional[_V]
         if key in self.cache:
             value = self.cache[key]
             self.cache.move_to_end(key)
+
+            self._hits += 1
         else:
-            value = default_value
+            value = default
+
+        self._total += 1
         return value
 
-    def put(self, key: Hashable, value: T) -> None:
+    def put(self, key: _K, value: _V) -> None:
         self.cache[key] = value
         self.cache.move_to_end(key)
         self._remove_old_if_needed()
 
-    def pin(self, key: Hashable) -> None:
+    def pin(self, key: _K) -> None:
         """
         Pins a key in the cache preventing it from being
         evicted in the LRU order.
@@ -232,13 +276,13 @@ class LRUCache(Generic[T]):
             raise ValueError(f"Cannot pin key: {key} not in cache.")
         self.pinned_items.add(key)
 
-    def _unpin(self, key: Hashable) -> None:
+    def _unpin(self, key: _K) -> None:
         self.pinned_items.remove(key)
 
-    def _on_remove(self, key: Hashable, value: Optional[T]):
+    def _on_remove(self, key: _K, value: Optional[_V]) -> None:
         pass
 
-    def remove_oldest(self, remove_pinned=False):
+    def remove_oldest(self, *, remove_pinned: bool = False) -> None:
         if not self.cache:
             return
 
@@ -252,17 +296,15 @@ class LRUCache(Generic[T]):
                                    "cannot remove oldest from the cache.")
         else:
             lru_key = next(iter(self.cache))
-        self.pop(lru_key)
+        self.pop(lru_key)  # type: ignore
 
     def _remove_old_if_needed(self) -> None:
         while len(self.cache) > self.capacity:
             self.remove_oldest()
 
-    def pop(self,
-            key: Hashable,
-            default_value: Optional[T] = None) -> Optional[T]:
+    def pop(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
         run_on_remove = key in self.cache
-        value: Optional[T] = self.cache.pop(key, default_value)
+        value = self.cache.pop(key, default)
         # remove from pinned items
         if key in self.pinned_items:
             self._unpin(key)
@@ -270,7 +312,7 @@ class LRUCache(Generic[T]):
             self._on_remove(key, value)
         return value
 
-    def clear(self):
+    def clear(self) -> None:
         while len(self.cache) > 0:
             self.remove_oldest(remove_pinned=True)
         self.cache.clear()
@@ -314,7 +356,7 @@ class PyObjectCache:
         self._index = 0
 
 
-@lru_cache(maxsize=None)
+@cache
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     from vllm import _custom_ops as ops
@@ -335,24 +377,10 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
-@lru_cache(maxsize=None)
-def get_vllm_instance_id() -> str:
-    """
-    If the environment variable VLLM_INSTANCE_ID is set, return it.
-    Otherwise, return a random UUID.
-    Instance id represents an instance of the VLLM. All processes in the same
-    instance should have the same instance id.
-    """
-    return envs.VLLM_INSTANCE_ID or f"vllm-instance-{random_uuid()}"
-
-
-@lru_cache(maxsize=None)
-def in_wsl() -> bool:
-    # Reference: https://github.com/microsoft/WSL/issues/4071
-    return "microsoft" in " ".join(uname()).lower()
-
-
-def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
+def make_async(
+    func: Callable[P, T],
+    executor: Optional[concurrent.futures.Executor] = None
+) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
     This function prevents the blocking function from blocking the
@@ -363,7 +391,7 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future:
         loop = asyncio.get_event_loop()
         p_func = partial(func, *args, **kwargs)
-        return loop.run_in_executor(executor=None, func=p_func)
+        return loop.run_in_executor(executor=executor, func=p_func)
 
     return _async_wrapper
 
@@ -374,72 +402,23 @@ def _next_task(iterator: AsyncGenerator[T, None],
     return loop.create_task(iterator.__anext__())  # type: ignore[arg-type]
 
 
-async def iterate_with_cancellation(
-    iterator: AsyncGenerator[T, None],
-    is_cancelled: Callable[[], Awaitable[bool]],
-) -> AsyncGenerator[T, None]:
-    """Convert async iterator into one that polls the provided function
-    at least once per second to check for client cancellation.
-    """
-
-    loop = asyncio.get_running_loop()
-
-    awaits: List[Future[T]] = [_next_task(iterator, loop)]
-    next_cancel_check: float = 0
-    while True:
-        done, pending = await asyncio.wait(awaits, timeout=1.5)
-
-        # Check for cancellation at most once per second
-        time_now = time.time()
-        if time_now >= next_cancel_check:
-            if await is_cancelled():
-                with contextlib.suppress(BaseException):
-                    awaits[0].cancel()
-                    await iterator.aclose()
-                raise asyncio.CancelledError("client cancelled")
-            next_cancel_check = time_now + 1
-
-        if done:
-            try:
-                item = await awaits[0]
-                awaits[0] = _next_task(iterator, loop)
-                yield item
-            except StopAsyncIteration:
-                # we are done
-                return
-
-
 async def merge_async_iterators(
-    *iterators: AsyncGenerator[T, None],
-    is_cancelled: Optional[Callable[[], Awaitable[bool]]] = None,
-) -> AsyncGenerator[Tuple[int, T], None]:
+    *iterators: AsyncGenerator[T,
+                               None], ) -> AsyncGenerator[tuple[int, T], None]:
     """Merge multiple asynchronous iterators into a single iterator.
 
     This method handle the case where some iterators finish before others.
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
-
-    It also optionally polls a provided function at least once per second
-    to check for client cancellation.
     """
 
     loop = asyncio.get_running_loop()
 
     awaits = {_next_task(pair[1], loop): pair for pair in enumerate(iterators)}
-    timeout = None if is_cancelled is None else 1.5
-    next_cancel_check: float = 0
     try:
         while awaits:
-            done, pending = await asyncio.wait(awaits.keys(),
-                                               return_when=FIRST_COMPLETED,
-                                               timeout=timeout)
-            if is_cancelled is not None:
-                # Check for cancellation at most once per second
-                time_now = time.time()
-                if time_now >= next_cancel_check:
-                    if await is_cancelled():
-                        raise asyncio.CancelledError("client cancelled")
-                    next_cancel_check = time_now + 1
+            done, _ = await asyncio.wait(awaits.keys(),
+                                         return_when=FIRST_COMPLETED)
             for d in done:
                 pair = awaits.pop(d)
                 try:
@@ -458,7 +437,7 @@ async def merge_async_iterators(
 
 
 async def collect_from_async_generator(
-        iterator: AsyncGenerator[T, None]) -> List[T]:
+        iterator: AsyncGenerator[T, None]) -> list[T]:
     """Collect all items from an async generator into a list."""
     items = []
     async for item in iterator:
@@ -468,6 +447,13 @@ async def collect_from_async_generator(
 
 def get_ip() -> str:
     host_ip = envs.VLLM_HOST_IP
+    if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
+        logger.warning(
+            "The environment variable HOST_IP is deprecated and ignored, as"
+            " it is often used by Docker and other software to"
+            " interact with the container's network stack. Please "
+            "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
+            " to communicate with each other.")
     if host_ip:
         return host_ip
 
@@ -518,7 +504,30 @@ def get_open_zmq_ipc_path() -> str:
     return f"ipc://{base_rpc_path}/{uuid4()}"
 
 
+def get_open_zmq_inproc_path() -> str:
+    return f"inproc://{uuid4()}"
+
+
 def get_open_port() -> int:
+    """
+    Get an open port for the vLLM process to listen on.
+    An edge case to handle, is when we run data parallel,
+    we need to avoid ports that are potentially used by
+    the data parallel master process.
+    Right now we reserve 10 ports for the data parallel master
+    process. Currently it uses 2 ports.
+    """
+    if "VLLM_DP_MASTER_PORT" in os.environ:
+        dp_port = envs.VLLM_DP_MASTER_PORT
+        while True:
+            port = _get_open_port()
+            if port >= dp_port and port < dp_port + 10:
+                continue
+            return port
+    return _get_open_port()
+
+
+def _get_open_port() -> int:
     port = envs.VLLM_PORT
     if port is not None:
         while True:
@@ -543,6 +552,13 @@ def get_open_port() -> int:
 
 
 def find_process_using_port(port: int) -> Optional[psutil.Process]:
+    # TODO: We can not check for running processes with network
+    # port on macOS. Therefore, we can not have a full graceful shutdown
+    # of vLLM. For now, let's not look for processes in this case.
+    # Ref: https://www.florianreinhard.de/accessdenied-in-psutil/
+    if sys.platform.startswith("darwin"):
+        return None
+
     for conn in psutil.net_connections():
         if conn.laddr.port == port:
             try:
@@ -552,7 +568,7 @@ def find_process_using_port(port: int) -> Optional[psutil.Process]:
     return None
 
 
-def update_environment_variables(envs: Dict[str, str]):
+def update_environment_variables(envs: dict[str, str]):
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
             logger.warning(
@@ -561,7 +577,7 @@ def update_environment_variables(envs: Dict[str, str]):
         os.environ[k] = v
 
 
-def chunk_list(lst: List[T], chunk_size: int):
+def chunk_list(lst: list[T], chunk_size: int):
     """Yield successive chunk_size chunks from lst."""
     for i in range(0, len(lst), chunk_size):
         yield lst[i:i + chunk_size]
@@ -570,6 +586,14 @@ def chunk_list(lst: List[T], chunk_size: int):
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
     return -(a // -b)
+
+
+def round_up(x: int, y: int) -> int:
+    return ((x + y - 1) // y) * y
+
+
+def round_down(x: int, y: int) -> int:
+    return (x // y) * y
 
 
 def _generate_random_fp8(
@@ -624,17 +648,18 @@ def create_kv_caches_with_random_flash(
     head_size: int,
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: int = 0,
+    seed: Optional[int] = None,
     device: Optional[str] = "cuda",
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    from vllm.platforms import current_platform
     current_platform.seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
     scale = head_size**-0.5
 
-    key_caches: List[torch.Tensor] = []
-    value_caches: List[torch.Tensor] = []
+    key_caches: list[torch.Tensor] = []
+    value_caches: list[torch.Tensor] = []
 
     for _ in range(num_layers):
         key_value_cache = torch.empty(size=key_value_cache_shape,
@@ -660,15 +685,15 @@ def create_kv_caches_with_random(
     head_size: int,
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: int = 0,
+    seed: Optional[int] = None,
     device: Optional[str] = "cuda",
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
 
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(
             f"Does not support key cache of type fp8 with head_size {head_size}"
         )
-
+    from vllm.platforms import current_platform
     current_platform.seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
@@ -676,7 +701,7 @@ def create_kv_caches_with_random(
     scale = head_size**-0.5
     x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
-    key_caches: List[torch.Tensor] = []
+    key_caches: list[torch.Tensor] = []
     for _ in range(num_layers):
         key_cache = torch.empty(size=key_cache_shape,
                                 dtype=torch_dtype,
@@ -691,7 +716,7 @@ def create_kv_caches_with_random(
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
-    value_caches: List[torch.Tensor] = []
+    value_caches: list[torch.Tensor] = []
     for _ in range(num_layers):
         value_cache = torch.empty(size=value_cache_shape,
                                   dtype=torch_dtype,
@@ -707,33 +732,10 @@ def create_kv_caches_with_random(
     return key_caches, value_caches
 
 
-@lru_cache
-def print_warning_once(msg: str) -> None:
-    # Set the stacklevel to 2 to print the caller's line info
-    logger.warning(msg, stacklevel=2)
-
-
-@lru_cache(maxsize=None)
+@cache
 def is_pin_memory_available() -> bool:
-
-    if in_wsl():
-        # Pinning memory in WSL is not supported.
-        # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-        print_warning_once("Using 'pin_memory=False' as WSL is detected. "
-                           "This may slow down the performance.")
-        return False
-    elif current_platform.is_xpu():
-        print_warning_once("Pin memory is not supported on XPU.")
-        return False
-    elif current_platform.is_neuron():
-        print_warning_once("Pin memory is not supported on Neuron.")
-        return False
-    elif current_platform.is_hpu():
-        print_warning_once("Pin memory is not supported on HPU.")
-        return False
-    elif current_platform.is_cpu() or current_platform.is_openvino():
-        return False
-    return True
+    from vllm.platforms import current_platform
+    return current_platform.is_pin_memory_available()
 
 
 class DeviceMemoryProfiler:
@@ -743,13 +745,8 @@ class DeviceMemoryProfiler:
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        if current_platform.is_cuda_alike():
-            torch.cuda.reset_peak_memory_stats(self.device)
-            mem = torch.cuda.max_memory_allocated(self.device)
-        elif current_platform.is_xpu():
-            torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
-            mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
-        return mem
+        from vllm.platforms import current_platform
+        return current_platform.get_current_memory_usage(self.device)
 
     def __enter__(self):
         self.initial_memory = self.current_memory_usage()
@@ -765,7 +762,7 @@ class DeviceMemoryProfiler:
 
 
 def make_ndarray_with_pad(
-    x: List[List[T]],
+    x: list[list[T]],
     pad: T,
     dtype: npt.DTypeLike,
     *,
@@ -790,7 +787,7 @@ def make_ndarray_with_pad(
 
 
 def make_tensor_with_pad(
-    x: List[List[T]],
+    x: list[list[T]],
     pad: T,
     dtype: torch.dtype,
     *,
@@ -833,10 +830,10 @@ def get_dtype_size(dtype: torch.dtype) -> int:
 # `collections` helpers
 def is_list_of(
     value: object,
-    typ: Type[T],
+    typ: Union[type[T], tuple[type[T], ...]],
     *,
     check: Literal["first", "all"] = "first",
-) -> TypeIs[List[T]]:
+) -> TypeIs[list[T]]:
     if not isinstance(value, list):
         return False
 
@@ -848,57 +845,22 @@ def is_list_of(
     assert_never(check)
 
 
-JSONTree = Union[Dict[str, "JSONTree[T]"], List["JSONTree[T]"],
-                 Tuple["JSONTree[T]", ...], T]
-"""A nested JSON structure where the leaves need not be JSON-serializable."""
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: Dict[str, JSONTree[T]],
-) -> Dict[str, JSONTree[U]]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: List[JSONTree[T]],
-) -> List[JSONTree[U]]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: Tuple[JSONTree[T], ...],
-) -> Tuple[JSONTree[U], ...]:
-    ...
-
-
-@overload
-def json_map_leaves(
-    func: Callable[[T], U],
-    value: JSONTree[T],
-) -> JSONTree[U]:
-    ...
-
-
-def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
-    if isinstance(value, dict):
-        return {k: json_map_leaves(func, v) for k, v in value.items()}
-    elif isinstance(value, list):
-        return [json_map_leaves(func, v) for v in value]
-    elif isinstance(value, tuple):
-        return tuple(json_map_leaves(func, v) for v in value)
-    else:
-        return func(value)
-
-
-def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
+def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
     """Flatten a list of lists to a single list."""
     return [item for sublist in lists for item in sublist]
+
+
+def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
+    """
+    Unlike :class:`itertools.groupby`, groups are not broken by
+    non-contiguous data.
+    """
+    groups = defaultdict[_K, list[_V]](list)
+
+    for value in values:
+        groups[key(value)].append(value)
+
+    return groups.items()
 
 
 # TODO: This function can be removed if transformer_modules classes are
@@ -911,7 +873,7 @@ def init_cached_hf_modules() -> None:
     init_hf_modules()
 
 
-@lru_cache(maxsize=None)
+@cache
 def find_library(lib_name: str) -> str:
     """
     Find the library file in the system.
@@ -964,17 +926,58 @@ def find_nccl_library() -> str:
     return so_file
 
 
-def enable_trace_function_call_for_thread() -> None:
+prev_set_stream = torch.cuda.set_stream
+
+_current_stream = None
+
+
+def _patched_set_stream(stream: torch.cuda.Stream) -> None:
+    global _current_stream
+    _current_stream = stream
+    prev_set_stream(stream)
+
+
+torch.cuda.set_stream = _patched_set_stream
+
+
+def current_stream() -> torch.cuda.Stream:
+    """
+    replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
+    it turns out that `torch.cuda.current_stream()` is quite expensive,
+    as it will construct a new stream object at each call.
+    here we patch `torch.cuda.set_stream` to keep track of the current stream
+    directly, so that we can avoid calling `torch.cuda.current_stream()`.
+
+    the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
+    from C/C++ code.
+    """
+    from vllm.platforms import current_platform
+    global _current_stream
+    if _current_stream is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        # On ROCm using the default 0 stream in combination with RCCL
+        # is hurting performance. Therefore creating a dedicated stream
+        # per process
+        _current_stream = torch.cuda.Stream() if current_platform.is_rocm(
+        ) else torch.cuda.current_stream()
+    return _current_stream
+
+
+def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
     """Set up function tracing for the current thread,
     if enabled via the VLLM_TRACE_FUNCTION environment variable
     """
 
     if envs.VLLM_TRACE_FUNCTION:
         tmp_dir = tempfile.gettempdir()
+        # add username to tmp_dir to avoid permission issues
+        tmp_dir = os.path.join(tmp_dir, getpass.getuser())
         filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
                     f"_thread_{threading.get_ident()}_"
                     f"at_{datetime.datetime.now()}.log").replace(" ", "_")
-        log_path = os.path.join(tmp_dir, "vllm", get_vllm_instance_id(),
+        log_path = os.path.join(tmp_dir, "vllm",
+                                f"vllm-instance-{vllm_config.instance_id}",
                                 filename)
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         enable_trace_function_call(log_path)
@@ -1080,6 +1083,7 @@ def _cuda_device_count_stateless(
     import torch.cuda
     import torch.version
 
+    from vllm.platforms import current_platform
     if not torch.cuda._is_compiled():
         return 0
     if current_platform.is_rocm():
@@ -1186,12 +1190,29 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 else:
                     processed_args.append('--' +
                                           arg[len('--'):].replace('_', '-'))
+            elif arg.startswith('-O') and arg != '-O' and len(arg) == 2:
+                # allow -O flag to be used without space, e.g. -O3
+                processed_args.append('-O')
+                processed_args.append(arg[2:])
             else:
                 processed_args.append(arg)
 
         return super().parse_args(processed_args, namespace)
 
-    def _pull_args_from_config(self, args: List[str]) -> List[str]:
+    def check_port(self, value):
+        try:
+            value = int(value)
+        except ValueError:
+            msg = "Port must be an integer"
+            raise argparse.ArgumentTypeError(msg) from None
+
+        if not (1024 <= value <= 65535):
+            raise argparse.ArgumentTypeError(
+                "Port must be between 1024 and 65535")
+
+        return value
+
+    def _pull_args_from_config(self, args: list[str]) -> list[str]:
         """Method to pull arguments specified in the config file
         into the command-line args variable.
 
@@ -1256,7 +1277,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return args
 
-    def _load_config_file(self, file_path: str) -> List[str]:
+    def _load_config_file(self, file_path: str) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
         flattened list with argparse like pattern
         ```yaml
@@ -1278,9 +1299,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                               %s supplied", extension)
 
         # only expecting a flat dictionary of atomic types
-        processed_args: List[str] = []
+        processed_args: list[str] = []
 
-        config: Dict[str, Union[int, str]] = {}
+        config: dict[str, Union[int, str]] = {}
         try:
             with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
@@ -1316,6 +1337,7 @@ async def _run_task_with_lock(task: Callable, lock: asyncio.Lock, *args,
 def supports_kw(
     callable: Callable[..., object],
     kw_name: str,
+    *,
     requires_kw_only: bool = False,
     allow_var_kwargs: bool = True,
 ) -> bool:
@@ -1357,11 +1379,13 @@ def supports_kw(
 
 
 def resolve_mm_processor_kwargs(
-    init_kwargs: Optional[Dict[str, Any]],
-    inference_kwargs: Optional[Dict[str, Any]],
+    init_kwargs: Optional[Mapping[str, object]],
+    inference_kwargs: Optional[Mapping[str, object]],
     callable: Callable[..., object],
+    *,
+    requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Applies filtering to eliminate invalid mm_processor_kwargs, i.e.,
     those who are not explicit keywords to the given callable (of one is
     given; otherwise no filtering is done), then merges the kwarg dicts,
@@ -1378,11 +1402,17 @@ def resolve_mm_processor_kwargs(
     runtime_mm_kwargs = get_allowed_kwarg_only_overrides(
         callable,
         overrides=inference_kwargs,
-        allow_var_kwargs=allow_var_kwargs)
+        requires_kw_only=requires_kw_only,
+        allow_var_kwargs=allow_var_kwargs,
+    )
 
     # Filter init time multimodal processor kwargs provided
     init_mm_kwargs = get_allowed_kwarg_only_overrides(
-        callable, overrides=init_kwargs, allow_var_kwargs=allow_var_kwargs)
+        callable,
+        overrides=init_kwargs,
+        requires_kw_only=requires_kw_only,
+        allow_var_kwargs=allow_var_kwargs,
+    )
 
     # Merge the final processor kwargs, prioritizing inference
     # time values over the initialization time values.
@@ -1392,9 +1422,11 @@ def resolve_mm_processor_kwargs(
 
 def get_allowed_kwarg_only_overrides(
     callable: Callable[..., object],
-    overrides: Optional[Dict[str, Any]],
+    overrides: Optional[Mapping[str, object]],
+    *,
+    requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Given a callable which has one or more keyword only params and a dict
     mapping param names to values, drop values that can be not be kwarg
@@ -1424,16 +1456,21 @@ def get_allowed_kwarg_only_overrides(
         for kwarg_name, val in overrides.items()
         if supports_kw(callable,
                        kwarg_name,
-                       requires_kw_only=True,
+                       requires_kw_only=requires_kw_only,
                        allow_var_kwargs=allow_var_kwargs)
     }
 
     # If anything is dropped, log a warning
     dropped_keys = overrides.keys() - filtered_overrides.keys()
     if dropped_keys:
-        logger.warning(
-            "The following intended overrides are not keyword-only args "
-            "and and will be dropped: %s", dropped_keys)
+        if requires_kw_only:
+            logger.warning(
+                "The following intended overrides are not keyword-only args "
+                "and will be dropped: %s", dropped_keys)
+        else:
+            logger.warning(
+                "The following intended overrides are not keyword args "
+                "and will be dropped: %s", dropped_keys)
 
     return filtered_overrides
 
@@ -1478,18 +1515,21 @@ class AtomicCounter:
 
 
 # Adapted from: https://stackoverflow.com/a/47212782/5082708
-class LazyDict(Mapping, Generic[T]):
+class LazyDict(Mapping[str, T], Generic[T]):
 
-    def __init__(self, factory: Dict[str, Callable[[], T]]):
+    def __init__(self, factory: dict[str, Callable[[], T]]):
         self._factory = factory
-        self._dict: Dict[str, T] = {}
+        self._dict: dict[str, T] = {}
 
-    def __getitem__(self, key) -> T:
+    def __getitem__(self, key: str) -> T:
         if key not in self._dict:
             if key not in self._factory:
                 raise KeyError(key)
             self._dict[key] = self._factory[key]()
         return self._dict[key]
+
+    def __setitem__(self, key: str, value: Callable[[], T]):
+        self._factory[key] = value
 
     def __iter__(self):
         return iter(self._factory)
@@ -1498,13 +1538,26 @@ class LazyDict(Mapping, Generic[T]):
         return len(self._factory)
 
 
-def combine_fx_passes(passes: List[Callable]) -> Callable:
+class ClassRegistry(UserDict[type[T], _V]):
 
-    def combined_fx(graph) -> None:
-        for fx in passes:
-            fx(graph)
+    def __getitem__(self, key: type[T]) -> _V:
+        for cls in key.mro():
+            if cls in self.data:
+                return self.data[cls]
 
-    return combined_fx
+        raise KeyError(key)
+
+    def __contains__(self, key: object) -> bool:
+        return self.contains(key)
+
+    def contains(self, key: object, *, strict: bool = False) -> bool:
+        if not isinstance(key, type):
+            return False
+
+        if strict:
+            return key in self.data
+
+        return any(cls in self.data for cls in key.mro())
 
 
 def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -1517,8 +1570,8 @@ def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def weak_ref_tensors(
-    tensors: Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]]
-) -> Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]]:
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
@@ -1540,6 +1593,249 @@ def is_in_doc_build() -> bool:
         return False
 
 
+def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
+    """
+    Import a Python file according to its file path.
+
+    Based on the official recipe:
+    https://docs.python.org/3/library/importlib.html#importing-a-source-file-directly
+    """
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None:
+        raise ModuleNotFoundError(f"No module named '{module_name}'")
+
+    assert spec.loader is not None
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@cache
+def get_vllm_optional_dependencies():
+    metadata = importlib.metadata.metadata("vllm")
+    requirements = metadata.get_all("Requires-Dist", [])
+    extras = metadata.get_all("Provides-Extra", [])
+
+    return {
+        extra: [
+            re.split(r";|>=|<=|==", req)[0] for req in requirements
+            if req.endswith(f'extra == "{extra}"')
+        ]
+        for extra in extras
+    }
+
+
+class _PlaceholderBase:
+    """
+    Disallows downstream usage of placeholder modules.
+
+    We need to explicitly override each dunder method because
+    :meth:`__getattr__` is not called when they are accessed.
+
+    See also:
+        [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)
+    """
+
+    def __getattr__(self, key: str) -> Never:
+        """
+        The main class should implement this to throw an error
+        for attribute accesses representing downstream usage.
+        """
+        raise NotImplementedError
+
+    # [Basic customization]
+
+    def __lt__(self, other: object):
+        return self.__getattr__("__lt__")
+
+    def __le__(self, other: object):
+        return self.__getattr__("__le__")
+
+    def __eq__(self, other: object):
+        return self.__getattr__("__eq__")
+
+    def __ne__(self, other: object):
+        return self.__getattr__("__ne__")
+
+    def __gt__(self, other: object):
+        return self.__getattr__("__gt__")
+
+    def __ge__(self, other: object):
+        return self.__getattr__("__ge__")
+
+    def __hash__(self):
+        return self.__getattr__("__hash__")
+
+    def __bool__(self):
+        return self.__getattr__("__bool__")
+
+    # [Callable objects]
+
+    def __call__(self, *args: object, **kwargs: object):
+        return self.__getattr__("__call__")
+
+    # [Container types]
+
+    def __len__(self):
+        return self.__getattr__("__len__")
+
+    def __getitem__(self, key: object):
+        return self.__getattr__("__getitem__")
+
+    def __setitem__(self, key: object, value: object):
+        return self.__getattr__("__setitem__")
+
+    def __delitem__(self, key: object):
+        return self.__getattr__("__delitem__")
+
+    # __missing__ is optional according to __getitem__ specification,
+    # so it is skipped
+
+    # __iter__ and __reversed__ have a default implementation
+    # based on __len__ and __getitem__, so they are skipped.
+
+    # [Numeric Types]
+
+    def __add__(self, other: object):
+        return self.__getattr__("__add__")
+
+    def __sub__(self, other: object):
+        return self.__getattr__("__sub__")
+
+    def __mul__(self, other: object):
+        return self.__getattr__("__mul__")
+
+    def __matmul__(self, other: object):
+        return self.__getattr__("__matmul__")
+
+    def __truediv__(self, other: object):
+        return self.__getattr__("__truediv__")
+
+    def __floordiv__(self, other: object):
+        return self.__getattr__("__floordiv__")
+
+    def __mod__(self, other: object):
+        return self.__getattr__("__mod__")
+
+    def __divmod__(self, other: object):
+        return self.__getattr__("__divmod__")
+
+    def __pow__(self, other: object, modulo: object = ...):
+        return self.__getattr__("__pow__")
+
+    def __lshift__(self, other: object):
+        return self.__getattr__("__lshift__")
+
+    def __rshift__(self, other: object):
+        return self.__getattr__("__rshift__")
+
+    def __and__(self, other: object):
+        return self.__getattr__("__and__")
+
+    def __xor__(self, other: object):
+        return self.__getattr__("__xor__")
+
+    def __or__(self, other: object):
+        return self.__getattr__("__or__")
+
+    # r* and i* methods have lower priority than
+    # the methods for left operand so they are skipped
+
+    def __neg__(self):
+        return self.__getattr__("__neg__")
+
+    def __pos__(self):
+        return self.__getattr__("__pos__")
+
+    def __abs__(self):
+        return self.__getattr__("__abs__")
+
+    def __invert__(self):
+        return self.__getattr__("__invert__")
+
+    # __complex__, __int__ and __float__ have a default implementation
+    # based on __index__, so they are skipped.
+
+    def __index__(self):
+        return self.__getattr__("__index__")
+
+    def __round__(self, ndigits: object = ...):
+        return self.__getattr__("__round__")
+
+    def __trunc__(self):
+        return self.__getattr__("__trunc__")
+
+    def __floor__(self):
+        return self.__getattr__("__floor__")
+
+    def __ceil__(self):
+        return self.__getattr__("__ceil__")
+
+    # [Context managers]
+
+    def __enter__(self):
+        return self.__getattr__("__enter__")
+
+    def __exit__(self, *args: object, **kwargs: object):
+        return self.__getattr__("__exit__")
+
+
+class PlaceholderModule(_PlaceholderBase):
+    """
+    A placeholder object to use when a module does not exist.
+
+    This enables more informative errors when trying to access attributes
+    of a module that does not exists.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__()
+
+        # Apply name mangling to avoid conflicting with module attributes
+        self.__name = name
+
+    def placeholder_attr(self, attr_path: str):
+        return _PlaceholderModuleAttr(self, attr_path)
+
+    def __getattr__(self, key: str):
+        name = self.__name
+
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:
+            for extra, names in get_vllm_optional_dependencies().items():
+                if name in names:
+                    msg = f"Please install vllm[{extra}] for {extra} support"
+                    raise ImportError(msg) from exc
+
+            raise exc
+
+        raise AssertionError("PlaceholderModule should not be used "
+                             "when the original module can be imported")
+
+
+class _PlaceholderModuleAttr(_PlaceholderBase):
+
+    def __init__(self, module: PlaceholderModule, attr_path: str) -> None:
+        super().__init__()
+
+        # Apply name mangling to avoid conflicting with module attributes
+        self.__module = module
+        self.__attr_path = attr_path
+
+    def placeholder_attr(self, attr_path: str):
+        return _PlaceholderModuleAttr(self.__module,
+                                      f"{self.__attr_path}.{attr_path}")
+
+    def __getattr__(self, key: str):
+        getattr(self.__module, f"{self.__attr_path}.{key}")
+
+        raise AssertionError("PlaceholderModule should not be used "
+                             "when the original module can be imported")
+
+
 # create a library to hold the custom op
 vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
@@ -1547,9 +1843,10 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 def direct_register_custom_op(
     op_name: str,
     op_func: Callable,
-    mutates_args: List[str],
+    mutates_args: list[str],
     fake_impl: Optional[Callable] = None,
     target_lib: Optional[Library] = None,
+    dispatch_key: str = "CUDA",
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -1568,6 +1865,17 @@ def direct_register_custom_op(
     """
     if is_in_doc_build():
         return
+
+    if not supports_custom_op():
+        from vllm.platforms import current_platform
+        assert not current_platform.is_cuda_alike(), (
+            "cuda platform needs torch>=2.4 to support custom op, "
+            "chances are you are using an old version of pytorch "
+            "or a custom build of pytorch. It is recommended to "
+            "use vLLM in a fresh new environment and let it install "
+            "the required dependencies.")
+        return
+
     import torch.library
     if hasattr(torch.library, "infer_schema"):
         schema_str = torch.library.infer_schema(op_func,
@@ -1578,6 +1886,472 @@ def direct_register_custom_op(
         schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str)
-    my_lib.impl(op_name, op_func, "CUDA")
+    my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
+
+
+def resolve_obj_by_qualname(qualname: str) -> Any:
+    """
+    Resolve an object by its fully qualified name.
+    """
+    module_name, obj_name = qualname.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, obj_name)
+
+
+def kill_process_tree(pid: int):
+    """
+    Kills all descendant processes of the given pid by sending SIGKILL.
+
+    Args:
+        pid (int): Process ID of the parent process
+    """
+    try:
+        parent = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+
+    # Get all children recursively
+    children = parent.children(recursive=True)
+
+    # Send SIGKILL to all children first
+    for child in children:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child.pid, signal.SIGKILL)
+
+    # Finally kill the parent
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+
+
+@dataclass
+class MemorySnapshot:
+    """Memory snapshot."""
+    torch_peak: int = 0
+    cuda_memory: int = 0
+    torch_memory: int = 0
+    non_torch_memory: int = 0
+    timestamp: float = 0.0
+    auto_measure: bool = True
+
+    def __post_init__(self):
+        if self.auto_measure:
+            self.measure()
+
+    def measure(self):
+        # we measure the torch peak memory usage via allocated_bytes,
+        # rather than `torch.cuda.memory_reserved()` .
+        # After `torch.cuda.reset_peak_memory_stats()`,
+        # `torch.cuda.memory_reserved()` will keep growing, and only shrink
+        # when we call `torch.cuda.empty_cache()` or OOM happens.
+        self.torch_peak = torch.cuda.memory_stats().get(
+            "allocated_bytes.all.peak", 0)
+
+        self.cuda_memory = torch.cuda.mem_get_info(
+        )[1] - torch.cuda.mem_get_info()[0]
+
+        # torch.cuda.memory_reserved() is how many bytes
+        # PyTorch gets from cuda (by calling cudaMalloc, etc.)
+        # this is used to measure the non-torch memory usage
+        self.torch_memory = torch.cuda.memory_reserved()
+
+        self.non_torch_memory = self.cuda_memory - self.torch_memory
+        self.timestamp = time.time()
+
+    def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
+        return MemorySnapshot(
+            torch_peak=self.torch_peak - other.torch_peak,
+            cuda_memory=self.cuda_memory - other.cuda_memory,
+            torch_memory=self.torch_memory - other.torch_memory,
+            non_torch_memory=self.non_torch_memory - other.non_torch_memory,
+            timestamp=self.timestamp - other.timestamp,
+            auto_measure=False,
+        )
+
+
+@dataclass
+class MemoryProfilingResult:
+    """Memory profiling result. All numbers are in bytes.
+    """
+    non_kv_cache_memory: int = 0
+    torch_peak_increase: int = 0
+    non_torch_increase: int = 0
+    weights_memory: float = 0
+    before_create: MemorySnapshot = field(default_factory=MemorySnapshot)
+    before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
+    after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
+    profile_time: float = 0.0
+
+
+@contextlib.contextmanager
+def memory_profiling(
+        baseline_snapshot: MemorySnapshot,
+        weights_memory: int) -> Generator[MemoryProfilingResult, None, None]:
+    """Memory profiling context manager.
+    baseline_snapshot: the memory snapshot before the current vLLM instance.
+    weights_memory: memory used by PyTorch when loading the model weights.
+        Note that, before loading the model weights, we also initialize the device
+        and distributed environment, which may consume some memory. This part is not
+        included in the weights_memory because PyTorch does not control it.
+
+    The memory in one GPU can be classified into 3 categories:
+    1. memory used by anything other than the current vLLM instance.
+    2. memory used by torch in the current vLLM instance.
+    3. memory used in the current vLLM instance, but not by torch.
+
+    A quantitive example:
+
+    Before creating the current vLLM instance:
+        category 1: 1 GiB
+        category 2: 0 GiB
+        category 3: 0 GiB
+
+    After creating the current vLLM instance and loading the model,
+    (i.e. before profiling):
+        category 1: 1 GiB
+        category 2: 2 GiB (model weights take 2 GiB)
+        category 3: 0.5 GiB (memory used by NCCL)
+
+    During profiling (peak):
+        category 1: 1 GiB
+        category 2: 4 GiB (peak activation tensors take 2 GiB)
+        category 3: 1 GiB (memory used by NCCL + buffers for some attention backends)
+
+    After profiling:
+        category 1: 1 GiB
+        category 2: 3 GiB (after garbage-collecting activation tensors)
+        category 3: 1 GiB (memory used by NCCL + buffers for some attention backends)
+
+    In this case, non-kv cache takes 5 GiB in total, including:
+    a. 2 GiB used by the model weights (category 2)
+    b. 2 GiB reserved for the peak activation tensors (category 2)
+    c. 1 GiB used by non-torch components (category 3)
+
+    The memory used for loading weights (a.) is directly given from the argument `weights_memory`.
+
+    The increase of `torch.cuda.memory_stats()["allocated_bytes.all.peak"]` during profiling gives (b.).
+
+    The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
+    """ # noqa
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
+    result = MemoryProfilingResult()
+
+    result.before_create = baseline_snapshot
+    # the part of memory used for holding the model weights
+    result.weights_memory = weights_memory
+
+    result.before_profile.measure()
+
+    yield result
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    result.after_profile.measure()
+
+    diff_profile = result.after_profile - result.before_profile
+    diff_from_create = result.after_profile - result.before_create
+    result.torch_peak_increase = diff_profile.torch_peak
+    result.non_torch_increase = diff_from_create.non_torch_memory
+    result.profile_time = diff_profile.timestamp
+    result.non_kv_cache_memory = result.non_torch_increase + result.torch_peak_increase + result.weights_memory  # noqa
+
+
+# Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
+def set_ulimit(target_soft_limit=65535):
+    if sys.platform.startswith('win'):
+        logger.info("Windows detected, skipping ulimit adjustment.")
+        return
+
+    import resource
+    resource_type = resource.RLIMIT_NOFILE
+    current_soft, current_hard = resource.getrlimit(resource_type)
+
+    if current_soft < target_soft_limit:
+        try:
+            resource.setrlimit(resource_type,
+                               (target_soft_limit, current_hard))
+        except ValueError as e:
+            logger.warning(
+                "Found ulimit of %s and failed to automatically increase "
+                "with error %s. This can cause fd limit errors like "
+                "`OSError: [Errno 24] Too many open files`. Consider "
+                "increasing with ulimit -n", current_soft, e)
+
+
+# Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/utils.py#L28 # noqa: E501
+def get_exception_traceback():
+    etype, value, tb = sys.exc_info()
+    err_str = "".join(traceback.format_exception(etype, value, tb))
+    return err_str
+
+
+# Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
+def make_zmq_socket(
+    ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
+    path: str,
+    socket_type: Any,
+) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
+    """Make a ZMQ socket with the proper bind/connect semantics."""
+
+    mem = psutil.virtual_memory()
+    socket = ctx.socket(socket_type)
+
+    # Calculate buffer size based on system memory
+    total_mem = mem.total / 1024**3
+    available_mem = mem.available / 1024**3
+    # For systems with substantial memory (>32GB total, >16GB available):
+    # - Set a large 0.5GB buffer to improve throughput
+    # For systems with less memory:
+    # - Use system default (-1) to avoid excessive memory consumption
+    if total_mem > 32 and available_mem > 16:
+        buf_size = int(0.5 * 1024**3)  # 0.5GB in bytes
+    else:
+        buf_size = -1  # Use system default buffer size
+
+    if socket_type == zmq.constants.PULL:
+        socket.setsockopt(zmq.constants.RCVHWM, 0)
+        socket.setsockopt(zmq.constants.RCVBUF, buf_size)
+        socket.connect(path)
+    elif socket_type == zmq.constants.PUSH:
+        socket.setsockopt(zmq.constants.SNDHWM, 0)
+        socket.setsockopt(zmq.constants.SNDBUF, buf_size)
+        socket.bind(path)
+    else:
+        raise ValueError(f"Unknown Socket Type: {socket_type}")
+
+    return socket
+
+
+@contextlib.contextmanager
+def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
+    """Context manager for a ZMQ socket"""
+
+    ctx = zmq.Context()  # type: ignore[attr-defined]
+    try:
+        yield make_zmq_socket(ctx, path, socket_type)
+
+    except KeyboardInterrupt:
+        logger.debug("Got Keyboard Interrupt.")
+
+    finally:
+        ctx.destroy(linger=0)
+
+
+def _check_multiproc_method():
+    if (cuda_is_initialized()
+            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
+        logger.warning("CUDA was previously initialized. We must use "
+                       "the `spawn` multiprocessing start method. Setting "
+                       "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+                       "See https://docs.vllm.ai/en/latest/getting_started/"
+                       "troubleshooting.html#python-multiprocessing "
+                       "for more information.")
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
+def get_mp_context():
+    _check_multiproc_method()
+    mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
+    return multiprocessing.get_context(mp_method)
+
+
+def bind_kv_cache(
+        ctx: dict[str, Any],
+        kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
+) -> None:
+    # Bind the kv_cache tensor to Attention modules, similar to
+    # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
+    # Special things handled here:
+    # 1. Some models have non-attention layers, e.g., Jamba
+    # 2. Pipeline parallelism, each rank only has a subset of layers
+    # 3. Encoder attention has no kv cache
+    # 4. Encoder-decoder models, encoder-decoder attention and decoder-only
+    #    attention of the same layer (e.g., bart's decoder.layers.1.self_attn
+    #    and decoder.layers.1.encoder_attn) is mapped to the same kv cache
+    #    tensor
+    from vllm.attention import AttentionType
+    from vllm.model_executor.models.utils import extract_layer_index
+    layer_need_kv_cache = [
+        layer_name for layer_name in ctx
+        if (hasattr(ctx[layer_name], 'attn_type') and ctx[layer_name].attn_type
+            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER))
+    ]
+    layer_index_sorted = sorted(
+        set(
+            extract_layer_index(layer_name)
+            for layer_name in layer_need_kv_cache))
+    for layer_name in layer_need_kv_cache:
+        kv_cache_idx = layer_index_sorted.index(
+            extract_layer_index(layer_name))
+        forward_ctx = ctx[layer_name]
+        assert len(forward_ctx.kv_cache) == len(kv_cache)
+        for ve, ve_kv_cache in enumerate(kv_cache):
+            forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
+
+
+def run_method(obj: Any, method: Union[str, bytes, Callable], args: tuple[Any],
+               kwargs: dict[str, Any]) -> Any:
+    """
+    Run a method of an object with the given arguments and keyword arguments.
+    If the method is string, it will be converted to a method using getattr.
+    If the method is serialized bytes and will be deserialized using
+    cloudpickle.
+    If the method is a callable, it will be called directly.
+    """
+    if isinstance(method, bytes):
+        func = partial(cloudpickle.loads(method), obj)
+    elif isinstance(method, str):
+        try:
+            func = getattr(obj, method)
+        except AttributeError:
+            raise NotImplementedError(f"Method {method!r} is not"
+                                      " implemented.") from None
+    else:
+        func = partial(method, obj)  # type: ignore
+    return func(*args, **kwargs)
+
+
+def import_pynvml():
+    """
+    Historical comments:
+
+    libnvml.so is the library behind nvidia-smi, and
+    pynvml is a Python wrapper around it. We use it to get GPU
+    status without initializing CUDA context in the current process.
+    Historically, there are two packages that provide pynvml:
+    - `nvidia-ml-py` (https://pypi.org/project/nvidia-ml-py/): The official
+        wrapper. It is a dependency of vLLM, and is installed when users
+        install vLLM. It provides a Python module named `pynvml`.
+    - `pynvml` (https://pypi.org/project/pynvml/): An unofficial wrapper.
+        Prior to version 12.0, it also provides a Python module `pynvml`,
+        and therefore conflicts with the official one. What's worse,
+        the module is a Python package, and has higher priority than
+        the official one which is a standalone Python file.
+        This causes errors when both of them are installed.
+        Starting from version 12.0, it migrates to a new module
+        named `pynvml_utils` to avoid the conflict.
+    It is so confusing that many packages in the community use the
+    unofficial one by mistake, and we have to handle this case.
+    For example, `nvcr.io/nvidia/pytorch:24.12-py3` uses the unofficial
+    one, and it will cause errors, see the issue
+    https://github.com/vllm-project/vllm/issues/12847 for example.
+    After all the troubles, we decide to copy the official `pynvml`
+    module to our codebase, and use it directly.
+    """
+    import vllm.third_party.pynvml as pynvml
+    return pynvml
+
+
+def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
+    """
+    A replacement for `abc.ABC`.
+    When we use `abc.ABC`, subclasses will fail to instantiate
+    if they do not implement all abstract methods.
+    Here, we only require `raise NotImplementedError` in the
+    base class, and log a warning if the method is not implemented
+    in the subclass.
+    """
+
+    original_init = cls.__init__
+
+    def find_unimplemented_methods(self: object):
+        unimplemented_methods = []
+        for attr_name in dir(self):
+            # bypass inner method
+            if attr_name.startswith('_'):
+                continue
+
+            try:
+                attr = getattr(self, attr_name)
+                # get the func of callable method
+                if callable(attr):
+                    attr_func = attr.__func__
+            except AttributeError:
+                continue
+            src = inspect.getsource(attr_func)
+            if "NotImplementedError" in src:
+                unimplemented_methods.append(attr_name)
+        if unimplemented_methods:
+            method_names = ','.join(unimplemented_methods)
+            msg = (f"Methods {method_names} not implemented in {self}")
+            logger.warning(msg)
+
+    @wraps(original_init)
+    def wrapped_init(self, *args, **kwargs) -> None:
+        original_init(self, *args, **kwargs)
+        find_unimplemented_methods(self)
+
+    type.__setattr__(cls, '__init__', wrapped_init)
+    return cls
+
+
+class LazyLoader(types.ModuleType):
+    """
+    LazyLoader module borrowed from Tensorflow
+    https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
+    with a addition of "module caching".
+
+    Lazily import a module, mainly to avoid pulling in large dependencies.
+    Modules such as `xgrammar` might do additional side effects, so we
+    only want to use this when it is needed, delaying all eager effects
+    """
+
+    def __init__(
+        self,
+        local_name: str,
+        parent_module_globals: dict[str, Any],
+        name: str,
+    ):
+        self._local_name = local_name
+        self._parent_module_globals = parent_module_globals
+        self._module: types.ModuleType | None = None
+
+        super().__init__(str(name))
+
+    def _load(self) -> types.ModuleType:
+        # Import the target module and insert it into the parent's namespace
+        try:
+            module = importlib.import_module(self.__name__)
+            self._parent_module_globals[self._local_name] = module
+            # The additional add to sys.modules
+            # ensures library is actually loaded.
+            sys.modules[self._local_name] = module
+        except ModuleNotFoundError as err:
+            raise err from None
+
+        # Update this object's dict so that if someone keeps a
+        # reference to the LazyLoader, lookups are efficient
+        # (__getattr__ is only called on lookups that fail).
+        self.__dict__.update(module.__dict__)
+        return module
+
+    def __getattr__(self, item: Any) -> Any:
+        if self._module is None:
+            self._module = self._load()
+        return getattr(self._module, item)
+
+    def __dir__(self) -> list[str]:
+        if self._module is None:
+            self._module = self._load()
+        return dir(self._module)
+
+
+def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
+    """
+    Helper function to swap values for two keys
+    """
+    v1 = obj.get(key1)
+    v2 = obj.get(key2)
+    if v1 is not None:
+        obj[key2] = v1
+    else:
+        obj.pop(key2, None)
+    if v2 is not None:
+        obj[key1] = v2
+    else:
+        obj.pop(key1, None)

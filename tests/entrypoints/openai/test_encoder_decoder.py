@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import openai
 import pytest
 import pytest_asyncio

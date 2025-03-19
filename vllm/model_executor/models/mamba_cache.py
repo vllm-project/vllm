@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.utils import PAD_SLOT_ID
+from vllm.config import VllmConfig
 
 
 @dataclass
@@ -21,8 +23,14 @@ class MambaCacheParams:
 
 class MambaCacheManager:
 
-    def __init__(self, dtype, num_mamba_layers, max_batch_size,
-                 conv_state_shape, temporal_state_shape):
+    def __init__(self, vllm_config: VllmConfig, dtype: torch.dtype,
+                 num_mamba_layers: int, conv_state_shape: Tuple[int, int],
+                 temporal_state_shape: Tuple[int, int]):
+
+        # Determine max batch size to set size of MambaCache
+        max_batch_size = vllm_config.scheduler_config.max_num_seqs
+        if not vllm_config.model_config.enforce_eager:
+            max_batch_size = vllm_config.pad_for_cudagraph(max_batch_size)
 
         conv_state = torch.empty(size=(num_mamba_layers, max_batch_size) +
                                  conv_state_shape,
@@ -40,8 +48,7 @@ class MambaCacheManager:
         self.mamba_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
         self.free_cache_indices = list(range(max_batch_size))
 
-    def current_run_tensors(self, input_ids: torch.Tensor,
-                            attn_metadata: AttentionMetadata, **kwargs):
+    def current_run_tensors(self, **kwargs) -> MambaCacheParams:
         """
         Return the tensors for the current run's conv and ssm state.
         """
@@ -64,7 +71,8 @@ class MambaCacheManager:
             (mamba_cache_tensors,
              state_indices_tensor) = kwargs["seqlen_agnostic_capture_inputs"]
 
-        return (mamba_cache_tensors, state_indices_tensor)
+        return MambaCacheParams(mamba_cache_tensors[0], mamba_cache_tensors[1],
+                                state_indices_tensor)
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         """

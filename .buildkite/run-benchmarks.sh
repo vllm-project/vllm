@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # This script is run by buildkite to run the benchmarks and upload the results to buildkite
 
 set -ex

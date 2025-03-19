@@ -3,30 +3,40 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
 
+#include "cutlass_extensions/common.hpp"
+
 void cutlass_scaled_mm_sm75(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales,
-                            c10::optional<torch::Tensor> const& bias);
+                            std::optional<torch::Tensor> const& bias);
 
 void cutlass_scaled_mm_sm80(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales,
-                            c10::optional<torch::Tensor> const& bias);
+                            std::optional<torch::Tensor> const& bias);
 
 void cutlass_scaled_mm_sm89(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales,
-                            c10::optional<torch::Tensor> const& bias);
+                            std::optional<torch::Tensor> const& bias);
 
-#if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
+#if defined ENABLE_SCALED_MM_SM90 && ENABLE_SCALED_MM_SM90
 void cutlass_scaled_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
                             torch::Tensor const& b_scales,
-                            c10::optional<torch::Tensor> const& bias);
+                            std::optional<torch::Tensor> const& bias);
+#endif
+
+#if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
+void cutlass_scaled_mm_sm100(torch::Tensor& c, torch::Tensor const& a,
+                             torch::Tensor const& b,
+                             torch::Tensor const& a_scales,
+                             torch::Tensor const& b_scales,
+                             std::optional<torch::Tensor> const& bias);
 #endif
 
 void cutlass_scaled_mm_azp_sm75(torch::Tensor& c, torch::Tensor const& a,
@@ -34,33 +44,33 @@ void cutlass_scaled_mm_azp_sm75(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
                                 torch::Tensor const& azp_adj,
-                                c10::optional<torch::Tensor> const& azp,
-                                c10::optional<torch::Tensor> const& bias);
+                                std::optional<torch::Tensor> const& azp,
+                                std::optional<torch::Tensor> const& bias);
 
 void cutlass_scaled_mm_azp_sm80(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
                                 torch::Tensor const& azp_adj,
-                                c10::optional<torch::Tensor> const& azp,
-                                c10::optional<torch::Tensor> const& bias);
+                                std::optional<torch::Tensor> const& azp,
+                                std::optional<torch::Tensor> const& bias);
 
 void cutlass_scaled_mm_azp_sm89(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
                                 torch::Tensor const& azp_adj,
-                                c10::optional<torch::Tensor> const& azp,
-                                c10::optional<torch::Tensor> const& bias);
+                                std::optional<torch::Tensor> const& azp,
+                                std::optional<torch::Tensor> const& bias);
 
-#if defined CUDA_VERSION && CUDA_VERSION >= 12000
+#if defined ENABLE_SCALED_MM_SM90 && ENABLE_SCALED_MM_SM90
 void cutlass_scaled_mm_azp_sm90(torch::Tensor& c, torch::Tensor const& a,
                                 torch::Tensor const& b,
                                 torch::Tensor const& a_scales,
                                 torch::Tensor const& b_scales,
                                 torch::Tensor const& azp_adj,
-                                c10::optional<torch::Tensor> const& azp,
-                                c10::optional<torch::Tensor> const& bias);
+                                std::optional<torch::Tensor> const& azp,
+                                std::optional<torch::Tensor> const& bias);
 #endif
 
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability) {
@@ -79,33 +89,33 @@ bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability) {
   return false;
 }
 
-int32_t get_sm_version_num() {
-  int32_t major_capability, minor_capability;
-  cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor,
-                         0);
-  cudaDeviceGetAttribute(&minor_capability, cudaDevAttrComputeCapabilityMinor,
-                         0);
-  int32_t version_num = major_capability * 10 + minor_capability;
-  return version_num;
+bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability) {
+  // CUTLASS block-quantized FP8 kernels need at least CUDA 12.0
+  // and at least SM90 (Hopper)
+
+#if defined CUDA_VERSION
+  if (cuda_device_capability >= 90 && cuda_device_capability < 100) {
+    return CUDA_VERSION >= 12000;
+  }
+#endif
+
+  return false;
 }
 
 void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales,
-                       c10::optional<torch::Tensor> const& bias) {
+                       std::optional<torch::Tensor> const& bias) {
   // Checks for conformality
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
   TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
               b.size(1) == c.size(1));
-  TORCH_CHECK(a_scales.numel() == 1 || a_scales.numel() == a.size(0));
-  TORCH_CHECK(b_scales.numel() == 1 || b_scales.numel() == b.size(1));
 
   // Check for strides and alignment
   TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);  // Row-major
   TORCH_CHECK(b.stride(0) == 1);                      // Column-major
   TORCH_CHECK(c.stride(0) % 16 == 0 &&
               b.stride(1) % 16 == 0);  // 16 Byte Alignment
-  TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
 
   if (bias) {
     TORCH_CHECK(bias->numel() == b.size(1) && bias->is_contiguous() &&
@@ -114,11 +124,18 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
 
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
   int32_t version_num = get_sm_version_num();
-  // Hopper
+
+#if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
+  if (version_num >= 100) {
+    cutlass_scaled_mm_sm100(c, a, b, a_scales, b_scales, bias);
+    return;
+  }
+#endif
 
   // Guard against compilation issues for sm90 kernels
-#if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
-  if (version_num >= 90) {
+#if defined ENABLE_SCALED_MM_SM90 && ENABLE_SCALED_MM_SM90
+  if (version_num >= 90 && version_num < 100) {
+    // Hopper
     cutlass_scaled_mm_sm90(c, a, b, a_scales, b_scales, bias);
     return;
   }
@@ -156,8 +173,8 @@ void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
                            torch::Tensor const& a_scales,
                            torch::Tensor const& b_scales,
                            torch::Tensor const& azp_adj,
-                           c10::optional<torch::Tensor> const& azp,
-                           c10::optional<torch::Tensor> const& bias) {
+                           std::optional<torch::Tensor> const& azp,
+                           std::optional<torch::Tensor> const& bias) {
   // Checks for conformality
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
   TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
@@ -192,7 +209,7 @@ void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
 
   int32_t version_num = get_sm_version_num();
 
-#if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
+#if defined ENABLE_SCALED_MM_SM90 && ENABLE_SCALED_MM_SM90
   if (version_num >= 90) {
     cutlass_scaled_mm_azp_sm90(c, a, b, a_scales, b_scales, azp_adj, azp, bias);
     return;

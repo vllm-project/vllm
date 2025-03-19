@@ -1,11 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import re
-from typing import List, Optional, Tuple, Type
+from typing import Optional
 
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.multimodal.utils import rescale_image_size
+from vllm.multimodal.image import rescale_image_size
 from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
 
@@ -23,7 +25,7 @@ HF_MULTIIMAGE_IMAGE_PROMPT = "<|user|>\n<|image_1|>\n<|image_2|>\nDescribe these
 models = ["microsoft/Phi-3.5-vision-instruct"]
 
 
-def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
+def vllm_to_hf_output(vllm_output: tuple[list[int], str,
                                          Optional[SampleLogprobs]],
                       model: str):
     """Sanitize vllm output to be comparable with hf output."""
@@ -44,8 +46,6 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
 
 target_dtype = "half"
-if current_platform.is_cpu():
-    target_dtype = "bfloat16"
 
 # ROCm Triton FA can run into shared memory issues with these models,
 # use other backends in the meantime
@@ -55,9 +55,9 @@ if current_platform.is_rocm():
 
 
 def run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
-    inputs: List[Tuple[List[str], PromptImageInput]],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    inputs: list[tuple[list[str], PromptImageInput]],
     model: str,
     *,
     dtype: str,

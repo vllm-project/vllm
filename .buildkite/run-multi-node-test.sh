@@ -14,7 +14,7 @@ DOCKER_IMAGE=$4
 
 shift 4
 COMMANDS=("$@")
-if [ ${#COMMANDS[@]} -ne $NUM_NODES ]; then
+if [ ${#COMMANDS[@]} -ne "$NUM_NODES" ]; then
     echo "The number of commands must be equal to the number of nodes."
     echo "Number of nodes: $NUM_NODES"
     echo "Number of commands: ${#COMMANDS[@]}"
@@ -23,7 +23,7 @@ fi
 
 echo "List of commands"
 for command in "${COMMANDS[@]}"; do
-    echo $command
+    echo "$command"
 done
 
 start_network() {
@@ -36,7 +36,7 @@ start_nodes() {
         for node_gpu in $(seq 0 $(($NUM_GPUS - 1))); do
             DEVICE_NUM=$(($node * $NUM_GPUS + $node_gpu))
             GPU_DEVICES+=$(($DEVICE_NUM))
-            if [ $node_gpu -lt $(($NUM_GPUS - 1)) ]; then
+            if [ "$node_gpu" -lt $(($NUM_GPUS - 1)) ]; then
                 GPU_DEVICES+=','
             fi
         done
@@ -49,17 +49,20 @@ start_nodes() {
         # 3. map the huggingface cache directory to the container
         # 3. assign ip addresses to the containers (head node: 192.168.10.10, worker nodes:
         #    starting from 192.168.10.11)
-        docker run -d --gpus "$GPU_DEVICES" --shm-size=10.24gb -e HF_TOKEN -v ~/.cache/huggingface:/root/.cache/huggingface --name node$node --network docker-net --ip 192.168.10.$((10 + $node)) --rm $DOCKER_IMAGE /bin/bash -c "tail -f /dev/null"
+        docker run -d --gpus "$GPU_DEVICES" --shm-size=10.24gb -e HF_TOKEN \
+            -v ~/.cache/huggingface:/root/.cache/huggingface --name "node$node" \
+            --network docker-net --ip 192.168.10.$((10 + $node)) --rm "$DOCKER_IMAGE" \
+            /bin/bash -c "tail -f /dev/null"
 
         # organize containers into a ray cluster
-        if [ $node -eq 0 ]; then
+        if [ "$node" -eq 0 ]; then
             # start the ray head node
-            docker exec -d node$node /bin/bash -c "ray start --head --port=6379 --block"
+            docker exec -d "node$node" /bin/bash -c "ray start --head --port=6379 --block"
             # wait for the head node to be ready
             sleep 10
         else
             # start the ray worker nodes, and connect them to the head node
-            docker exec -d node$node /bin/bash -c "ray start --address=192.168.10.10:6379 --block"
+            docker exec -d "node$node" /bin/bash -c "ray start --address=192.168.10.10:6379 --block"
         fi
     done
 
@@ -79,22 +82,22 @@ run_nodes() {
         for node_gpu in $(seq 0 $(($NUM_GPUS - 1))); do
             DEVICE_NUM=$(($node * $NUM_GPUS + $node_gpu))
             GPU_DEVICES+=$(($DEVICE_NUM))
-            if [ $node_gpu -lt $(($NUM_GPUS - 1)) ]; then
+            if [ "$node_gpu" -lt $(($NUM_GPUS - 1)) ]; then
                 GPU_DEVICES+=','
             fi
         done
         GPU_DEVICES+='"'
         echo "Running node$node with GPU devices: $GPU_DEVICES"
-        if [ $node -ne 0 ]; then
-            docker exec -d node$node /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
+        if [ "$node" -ne 0 ]; then
+            docker exec -d "node$node" /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
         else
-            docker exec node$node /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
+            docker exec "node$node" /bin/bash -c "cd $WORKING_DIR ; ${COMMANDS[$node]}"
         fi
     done
 }
 cleanup() {
     for node in $(seq 0 $(($NUM_NODES-1))); do
-        docker stop node$node
+        docker stop "node$node"
     done
     docker network rm docker-net
 }

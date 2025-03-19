@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import logging
 import math
 from typing import Any, Callable, Dict, List, Optional, Type
@@ -224,7 +226,7 @@ class PromptAdapterModelManager(AdapterModelManager):
     def pin_adapter(self, prompt_adapter_id: int) -> bool:
         """Pin a PromptAdapterModel in the manager cache."""
         raise NotImplementedError(
-            "Pinning is not supported in PromptAdapterModelManager."
+            "Pinning is not supported in PromptAdapterModelManager. "
             "Use LRUCachePromptAdapterModelManager for pinning"
         )  # type: ignore
 

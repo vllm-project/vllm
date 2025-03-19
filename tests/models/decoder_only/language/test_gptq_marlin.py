@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Compares the outputs of gptq vs gptq_marlin 
 Note: GPTQ and Marlin do not have bitwise correctness.
 As a result, in this test, we just confirm that the top selected tokens of the
@@ -33,6 +34,7 @@ MODELS = [
 ]
 
 
+@pytest.mark.quant_model
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="gptq_marlin is not supported on this GPU type.")

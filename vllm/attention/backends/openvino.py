@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
@@ -138,3 +140,7 @@ class OpenVINOAttentionMetadata:
     # `model_executable`.
     multi_modal_placeholder_index_maps: Optional[Dict[
         str, MultiModalPlaceholderMap.IndexMap]]
+
+    # Enable/disable KV scales calculation. This is so that we can disable the
+    # calculation until after prefill and cuda graph capture.
+    enable_kv_scales_calculation: bool

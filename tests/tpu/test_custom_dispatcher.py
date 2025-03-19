@@ -1,19 +1,30 @@
-import os
+# SPDX-License-Identifier: Apache-2.0
 
-from vllm.compilation.levels import CompilationLevel
+import pytest
+
+from vllm.config import CompilationLevel
 
 from ..utils import compare_two_settings
 
 # --enforce-eager on TPU causes graph compilation
 # this times out default Health Check in the MQLLMEngine,
 # so we set the timeout here to 30s
-os.environ["VLLM_RPC_TIMEOUT"] = "30000"
 
 
-def test_custom_dispatcher():
-    compare_two_settings(
-        "google/gemma-2b",
-        arg1=["--enforce-eager"],
-        arg2=["--enforce-eager"],
-        env1={"VLLM_TORCH_COMPILE_LEVEL": str(CompilationLevel.DYNAMO_ONCE)},
-        env2={"VLLM_TORCH_COMPILE_LEVEL": str(CompilationLevel.DYNAMO_AS_IS)})
+def test_custom_dispatcher(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_RPC_TIMEOUT", "30000")
+        compare_two_settings("Qwen/Qwen2.5-1.5B-Instruct",
+                             arg1=[
+                                 "--max-model-len=256",
+                                 "--max-num-seqs=32",
+                                 "--enforce-eager",
+                                 f"-O{CompilationLevel.DYNAMO_ONCE}",
+                             ],
+                             arg2=[
+                                 "--max-model-len=256", "--max-num-seqs=32",
+                                 "--enforce-eager",
+                                 f"-O{CompilationLevel.DYNAMO_AS_IS}"
+                             ],
+                             env1={},
+                             env2={})

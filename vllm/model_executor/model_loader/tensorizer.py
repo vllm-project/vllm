@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 import dataclasses
 import io
@@ -13,17 +15,13 @@ from torch import nn
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, ParallelConfig
+from vllm.config import ModelConfig, ParallelConfig, set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.utils import FlexibleArgumentParser
-
-tensorizer_error_msg = None
+from vllm.utils import FlexibleArgumentParser, PlaceholderModule
 
 try:
     from tensorizer import (DecryptionParams, EncryptionParams,
@@ -36,8 +34,19 @@ try:
         open_stream,
         mode=mode,
     ) for mode in ("rb", "wb+"))
-except ImportError as e:
-    tensorizer_error_msg = str(e)
+except ImportError:
+    tensorizer = PlaceholderModule("tensorizer")
+    DecryptionParams = tensorizer.placeholder_attr("DecryptionParams")
+    EncryptionParams = tensorizer.placeholder_attr("EncryptionParams")
+    TensorDeserializer = tensorizer.placeholder_attr("TensorDeserializer")
+    TensorSerializer = tensorizer.placeholder_attr("TensorSerializer")
+    open_stream = tensorizer.placeholder_attr("stream_io.open_stream")
+    convert_bytes = tensorizer.placeholder_attr("utils.convert_bytes")
+    get_mem_usage = tensorizer.placeholder_attr("utils.get_mem_usage")
+    no_init_or_tensor = tensorizer.placeholder_attr("utils.no_init_or_tensor")
+
+    _read_stream = tensorizer.placeholder_attr("_read_stream")
+    _write_stream = tensorizer.placeholder_attr("_write_stream")
 
 __all__ = [
     'EncryptionParams', 'DecryptionParams', 'TensorDeserializer',
@@ -148,7 +157,7 @@ class TensorizerArgs:
       encryption_keyfile: File path to a binary file containing a  
           binary key to use for decryption. `None` (the default) means 
           no decryption. See the example script in 
-          examples/tensorize_vllm_model.py. 
+          examples/other/tensorize_vllm_model.py. 
       s3_access_key_id: The access key for the S3 bucket. Can also be set via
           the S3_ACCESS_KEY_ID environment variable.
       s3_secret_access_key: The secret access key for the S3 bucket. Can also
@@ -268,22 +277,11 @@ class TensorizerAgent:
     in vllm/model_executor/model_loader/weight_utils.py
     """
 
-    def __init__(self, tensorizer_config: TensorizerConfig,
-                 quant_config: QuantizationConfig, **extra_kwargs):
-        if tensorizer_error_msg is not None:
-            raise ImportError(
-                "Tensorizer is not installed. Please install tensorizer "
-                "to use this feature with `pip install vllm[tensorizer]`. "
-                "Error message: {}".format(tensorizer_error_msg))
-
+    def __init__(self, tensorizer_config: TensorizerConfig, vllm_config):
         self.tensorizer_config = tensorizer_config
         self.tensorizer_args = (
             self.tensorizer_config._construct_tensorizer_args())
-        self.extra_kwargs = extra_kwargs
-        if extra_kwargs.get("quant_config") is not None:
-            self.quant_config = extra_kwargs["quant_config"]
-        else:
-            self.quant_config = quant_config
+        self.vllm_config = vllm_config
         self.model = self._init_model()
 
     def _init_model(self):
@@ -291,19 +289,19 @@ class TensorizerAgent:
         model_args = self.tensorizer_config.hf_config
         model_args.torch_dtype = self.tensorizer_config.dtype
         assert self.tensorizer_config.model_class is not None
-        with no_init_or_tensor():
+        # TODO: Do we need to consider old-style model class?
+        with no_init_or_tensor(), set_current_vllm_config(self.vllm_config,
+                                                          check_compile=True):
             return self.tensorizer_config.model_class(
-                config=model_args,
-                quant_config=self.quant_config,
-                **self.extra_kwargs)
+                vllm_config=self.vllm_config, )
 
     def _resize_lora_embeddings(self):
         """Modify LoRA embedding layers to use bigger tensors
         to allow for adapter added tokens."""
         for child in self.model.modules():
             if (isinstance(child, VocabParallelEmbedding)
-                    and child.weight.shape[0] <
-                    child.num_embeddings_per_partition):
+                    and child.weight.shape[0]
+                    < child.num_embeddings_per_partition):
                 new_weight = torch.empty(child.num_embeddings_per_partition,
                                          child.embedding_dim,
                                          dtype=child.weight.dtype,
@@ -368,12 +366,12 @@ class TensorizerAgent:
 def tensorizer_weights_iterator(
     tensorizer_args: "TensorizerArgs"
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
-    logger.warning(
-        "Deserializing HuggingFace models is not optimized for "
-        "loading on vLLM, as tensorizer is forced to load to CPU. "
-        "Consider deserializing a vLLM model instead for faster "
-        "load times. See the examples/tensorize_vllm_model.py example "
-        "script for serializing vLLM models.")
+    logger.warning("Deserializing HuggingFace models is not optimized for "
+                   "loading on vLLM, as tensorizer is forced to load to CPU. "
+                   "Consider deserializing a vLLM model instead for faster "
+                   "load times. See the "
+                   "examples/other/tensorize_vllm_model.py example script "
+                   "for serializing vLLM models.")
 
     deserializer_args = tensorizer_args.deserializer_params
     stream_params = tensorizer_args.stream_params
@@ -464,16 +462,7 @@ def tensorize_vllm_model(engine_args: EngineArgs,
             stream.write(encryption_params.key)
 
     engine = LLMEngine.from_engine_args(engine_args)
-    if tensorizer_config._is_sharded:
-        # if the engine is a distributed engine (for tensor parallel) then each
-        # worker shard needs to serialize its part of the model.
-        engine.model_executor._run_workers(
-            "save_tensorized_model",
-            tensorizer_config=tensorizer_config,
-        )
-    else:
-        # with a single worker, we can get to the underlying model directly
-        serialize_vllm_model(
-            engine.model_executor.driver_worker.model_runner.model,
-            tensorizer_config,
-        )
+    engine.model_executor.collective_rpc(
+        "save_tensorized_model",
+        kwargs=dict(tensorizer_config=tensorizer_config),
+    )

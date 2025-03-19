@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import inspect
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Type
@@ -57,6 +59,11 @@ def method_has_implemented_embedding(
 
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
+
+    def __init__(self):
+        super().__init__()
+        # mapping is updated by models as they initialize
+        self.packed_modules_mapping: Dict[str, List[str]] = dict()
 
     @abstractmethod
     def get_name(self) -> str:
@@ -134,10 +141,5 @@ class QuantizationConfig(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def get_scaled_act_names(self) -> List[str]:
-        """Returns the activation function names that should be post-scaled.
-
-        For now, this is only used by AWQ.
-        """
-        raise NotImplementedError
+    def get_cache_scale(self, name: str) -> Optional[str]:
+        return None

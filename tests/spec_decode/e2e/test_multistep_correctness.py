@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """The tests in this file verify end-to-end speculative decoding correctness.
 
 This docstring details important information on the testing methodology.
@@ -41,7 +42,7 @@ from transformers import AutoTokenizer
 
 from vllm import SamplingParams
 
-from ...utils import fork_new_process_for_each_test
+from ...utils import create_new_process_for_each_test
 from .conftest import (get_output_from_llm_generator,
                        run_equality_correctness_test)
 
@@ -62,6 +63,16 @@ from .conftest import (get_output_from_llm_generator,
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
+            "enable_chunked_prefill": False,
+        },
+        {
+            # Chunked prefill enabled with small value
+            # to make sure we get mixed batches.
+            "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": 5,
+            "enable_chunked_prefill": True,
+            "max_num_batched_tokens": 4,
+            "max_num_seqs": 4
         },
         {
             # Verify the detokenizer assertions in the test work when spec
@@ -71,7 +82,7 @@ from .conftest import (get_output_from_llm_generator,
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_spec_decode_e2e_with_detokenization(test_llm_generator,
                                              batch_size: int):
     """Run generation with speculative decoding on a batch. Verify the engine
@@ -137,12 +148,20 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [
-    {
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
-    },
-])
+@pytest.mark.parametrize("test_llm_kwargs",
+                         [{
+                             "speculative_model": "JackFram/llama-68m",
+                             "num_speculative_tokens": 5,
+                             "enable_chunked_prefill": False,
+                             "disable_logprobs_during_spec_decoding": False
+                         }, {
+                             "speculative_model": "JackFram/llama-68m",
+                             "num_speculative_tokens": 3,
+                             "enable_chunked_prefill": True,
+                             "max_num_batched_tokens": 4,
+                             "max_num_seqs": 4,
+                             "disable_logprobs_during_spec_decoding": False
+                         }])
 @pytest.mark.parametrize(
     "output_len",
     [
@@ -151,7 +170,7 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
     ])
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
@@ -174,6 +193,9 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
                                   batch_size,
                                   max_output_len=output_len,
                                   seed=seed,
+                                  prompt_logprobs=2,
+                                  logprobs=2,
+                                  disable_logprobs=False,
                                   temperature=0.0,
                                   ensure_all_accepted=ensure_all_accepted)
 
@@ -204,6 +226,14 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "enable_chunked_prefill": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
     },
 ])
 @pytest.mark.parametrize(
@@ -214,7 +244,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
     ])
 @pytest.mark.parametrize("batch_size", [64])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
@@ -255,6 +285,14 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "enable_chunked_prefill": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
     },
 ])
 @pytest.mark.parametrize("max_output_len", [
@@ -262,7 +300,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
 ])
 @pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
@@ -300,6 +338,14 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "enable_chunked_prefill": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
     },
 ])
 @pytest.mark.parametrize("batch_size", [1])
@@ -310,7 +356,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
         256,
     ])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
@@ -347,6 +393,14 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "enable_chunked_prefill": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
     },
 ])
 @pytest.mark.parametrize("batch_size", [32])
@@ -357,7 +411,7 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
         64,
     ])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
@@ -397,6 +451,14 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "enable_chunked_prefill": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
     },
 ])
 @pytest.mark.parametrize(
@@ -407,7 +469,7 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
     ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_spec_decode_e2e_greedy_correctness_with_preemption(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
@@ -454,6 +516,14 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "enable_chunked_prefill": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
     },
 ])
 @pytest.mark.parametrize("batch_size", [2])
@@ -464,7 +534,7 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_spec_decode_different_block_size(vllm_runner, common_llm_kwargs,
                                           per_test_common_llm_kwargs,
                                           baseline_llm_kwargs, test_llm_kwargs,
@@ -503,6 +573,15 @@ def test_spec_decode_different_block_size(vllm_runner, common_llm_kwargs,
             # Artificially limit the draft model max model len; this forces vLLM
             # to skip speculation once the sequences grow beyond 32-k tokens.
             "speculative_max_model_len": 32,
+            "enable_chunked_prefill": False,
+        },
+        {
+            "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": 5,
+            "enable_chunked_prefill": True,
+            "max_num_batched_tokens": 4,
+            "max_num_seqs": 4,
+            "speculative_max_model_len": 32,
         },
     ])
 @pytest.mark.parametrize("batch_size", [8])
@@ -515,7 +594,7 @@ def test_spec_decode_different_block_size(vllm_runner, common_llm_kwargs,
         64,
     ])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_skip_speculation(vllm_runner, common_llm_kwargs,
                           per_test_common_llm_kwargs, baseline_llm_kwargs,
                           test_llm_kwargs, batch_size: int, output_len: int,
@@ -551,12 +630,21 @@ def test_skip_speculation(vllm_runner, common_llm_kwargs,
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
         "speculative_disable_by_batch_size": 2,
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "speculative_disable_by_batch_size": 2,
+        "enable_chunked_prefill": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4,
     },
 ])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("output_len", [10])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_disable_speculation(vllm_runner, common_llm_kwargs,
                              per_test_common_llm_kwargs, baseline_llm_kwargs,
                              test_llm_kwargs, batch_size: int, output_len: int,
@@ -590,10 +678,17 @@ def test_disable_speculation(vllm_runner, common_llm_kwargs,
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": k,
+            "enable_chunked_prefill": False,
         }
         # Try a range of common k, as well as large speculation.
         for k in [1, 2, 3, 4, 5, 6, 7, 8, 9, 63]
-    ])
+    ] + [{
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": k,
+        "enable_chunked_prefill": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4,
+    } for k in [1, 2, 3, 4, 5, 6, 7, 8, 9, 63]])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(
     "output_len",
@@ -602,7 +697,7 @@ def test_disable_speculation(vllm_runner, common_llm_kwargs,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_many_k(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
                 baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
                 output_len: int, seed: int):
@@ -636,11 +731,19 @@ def test_many_k(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": k,
-            "spec_decoding_acceptance_method": "typical_acceptance_sampler"
+            "spec_decoding_acceptance_method": "typical_acceptance_sampler",
+            "enable_chunked_prefill": False
         }
         # Try a range of common k.
         for k in [1, 2, 3]
-    ])
+    ] + [{
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": k,
+        "spec_decoding_acceptance_method": "typical_acceptance_sampler",
+        "enable_chunked_prefill": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
+    } for k in [1, 2, 3]])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize(
     "output_len",
@@ -649,7 +752,7 @@ def test_many_k(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_typical_acceptance_sampling(vllm_runner, common_llm_kwargs,
                                      per_test_common_llm_kwargs,
                                      baseline_llm_kwargs, test_llm_kwargs,

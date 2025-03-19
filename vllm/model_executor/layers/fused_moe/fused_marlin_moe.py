@@ -1,12 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
 """Fused MoE utilities for GPTQ."""
 import functools
 from typing import Optional
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, moe_align_block_size, try_get_optimal_moe_config)
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import direct_register_custom_op
 
@@ -238,7 +239,7 @@ def fused_marlin_moe(
     max_workspace_size = (max(2 * N, K) // 64) * 16
     workspace = torch.zeros(max_workspace_size,
                             dtype=torch.int,
-                            device="cuda",
+                            device=current_platform.device_type,
                             requires_grad=False)
 
     if has_no_zp:
@@ -301,7 +302,8 @@ def fused_marlin_moe(
         False,
     )
 
-    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, 2 * N))
+    torch.ops._C.silu_and_mul(intermediate_cache2,
+                              intermediate_cache1.view(-1, 2 * N))
 
     intermediate_cache3 = torch.ops._moe_C.marlin_gemm_moe(
         intermediate_cache2,

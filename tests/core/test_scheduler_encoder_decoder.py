@@ -1,4 +1,4 @@
-from typing import List
+# SPDX-License-Identifier: Apache-2.0
 
 import pytest  # noqa
 
@@ -37,7 +37,7 @@ def test_scheduler_schedule_simple_encoder_decoder():
     num_seq_group = 4
     max_model_len = 16
     scheduler_config = SchedulerConfig(
-        task="generate",
+        "generate",
         max_num_batched_tokens=64,
         max_num_seqs=num_seq_group,
         max_model_len=max_model_len,
@@ -46,7 +46,7 @@ def test_scheduler_schedule_simple_encoder_decoder():
     cache_config.num_cpu_blocks = 16  # enc and dec prompts per seq_group
     cache_config.num_gpu_blocks = 16  # enc and dec prompts per seq_group
     scheduler = Scheduler(scheduler_config, cache_config, None)
-    running: List[SequenceGroup] = []
+    running: list[SequenceGroup] = []
 
     # Add seq groups to scheduler.
     req_id_list = []

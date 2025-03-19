@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # imports for guided decoding tests
 import json
 import re
 import shutil
 from tempfile import TemporaryDirectory
-from typing import Dict, List, Optional
+from typing import Optional
 
 import jsonschema
 import openai  # use the official client for correctness check
@@ -27,6 +29,8 @@ PA_NAME = "swapnilbp/llama_tweet_ptune"
 # if PA_NAME changes, PA_NUM_VIRTUAL_TOKENS might also
 # need to change to match the prompt adapter
 PA_NUM_VIRTUAL_TOKENS = 8
+
+GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 
 
 @pytest.fixture(scope="module")
@@ -283,7 +287,7 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
 async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
                                           model_name: str,
                                           prompt_logprobs: Optional[int]):
-    params: Dict = {
+    params: dict = {
         "prompt": ["A robot may not injure another robot", "My name is"],
         "model": model_name,
     }
@@ -327,7 +331,7 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
                                              max_tokens=5,
                                              temperature=0.0,
                                              stream=True)
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         chunks.append(chunk.choices[0].text)
@@ -360,7 +364,7 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
                                              max_tokens=max_tokens,
                                              n=n,
                                              stream=True)
-    chunks: List[List[str]] = [[] for i in range(n)]
+    chunks: list[list[str]] = [[] for i in range(n)]
     finish_reason_count = 0
     async for chunk in stream:
         index = chunk.choices[0].index
@@ -635,8 +639,7 @@ async def test_allowed_token_ids(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_json_completion(client: openai.AsyncOpenAI,
                                       guided_decoding_backend: str,
                                       sample_json_schema):
@@ -658,8 +661,7 @@ async def test_guided_json_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_regex_completion(client: openai.AsyncOpenAI,
                                        guided_decoding_backend: str,
                                        sample_regex):
@@ -680,8 +682,7 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_choice_completion(client: openai.AsyncOpenAI,
                                         guided_decoding_backend: str,
                                         sample_guided_choice):
@@ -761,8 +762,7 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("guided_decoding_backend",
-                         ["outlines", "lm-format-enforcer"])
+@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
                                           guided_decoding_backend: str,
                                           sample_json_schema, sample_regex):

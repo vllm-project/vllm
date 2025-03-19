@@ -1,5 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+
 import dataclasses
-from typing import List, Tuple, Type
 
 import torch
 
@@ -8,10 +9,10 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.worker.embedding_model_runner import (
-    ModelInputForGPUWithPoolingMetadata)
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 from vllm.worker.multi_step_model_runner import StatefulModelInput
+from vllm.worker.pooling_model_runner import (
+    ModelInputForGPUWithPoolingMetadata)
 
 
 class MockAttentionBackend(AttentionBackend):
@@ -25,15 +26,15 @@ class MockAttentionBackend(AttentionBackend):
         raise NotImplementedError
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["AttentionMetadata"]:
         return AttentionMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
+    def get_builder_cls() -> type["AttentionMetadataBuilder"]:
         return AttentionMetadataBuilder
 
     @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
+    def get_state_cls() -> type["CommonAttentionState"]:
         return CommonAttentionState
 
     @staticmethod
@@ -42,7 +43,7 @@ class MockAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         raise NotImplementedError
 
     @staticmethod
@@ -55,7 +56,7 @@ class MockAttentionBackend(AttentionBackend):
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         pass
@@ -74,6 +75,7 @@ def test_model_runner_input():
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
         multi_modal_placeholder_index_maps=None,
+        enable_kv_scales_calculation=True,
     )
     model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.ones(10),
@@ -126,6 +128,7 @@ def test_embedding_model_runner_input():
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
         multi_modal_placeholder_index_maps=None,
+        enable_kv_scales_calculation=True,
     )
     model_input = ModelInputForGPUWithPoolingMetadata(
         input_tokens=torch.ones(10),
@@ -177,6 +180,7 @@ def test_multi_step_model_runner_input():
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
         multi_modal_placeholder_index_maps=None,
+        enable_kv_scales_calculation=True,
     )
     frozen_model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.ones(10),
