@@ -162,6 +162,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         allow_zero_draft_token_step = True
         enable_lm_head_weight_load = False
         num_spec_prefill_steps = 1
+        require_prefill_hidden_states = False
         ngram_prompt_lookup_max = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
@@ -204,6 +205,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 if draft_model_config.hf_config.model_type == "deepseek_mtp":
                     num_spec_prefill_steps = \
                         draft_model_config.hf_config.n_predict
+                    require_prefill_hidden_states = True
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
@@ -257,7 +259,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             spec_decode_sampler=spec_decode_sampler,
             allow_zero_draft_token_step=allow_zero_draft_token_step,
             enable_lm_head_weight_load=enable_lm_head_weight_load,
-            num_spec_prefill_steps=num_spec_prefill_steps)
+            num_spec_prefill_steps=num_spec_prefill_steps,
+            require_prefill_hidden_states=require_prefill_hidden_states)
 
     def __init__(
         self,
@@ -272,6 +275,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         allow_zero_draft_token_step: Optional[bool] = True,
         enable_lm_head_weight_load: Optional[bool] = False,
         num_spec_prefill_steps: int = 1,
+        require_prefill_hidden_states: Optional[bool] = False,
     ):
         """
         Create a SpecDecodeWorker.
@@ -284,7 +288,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 Worker.
             spec_decode_sampler: A Torch module used to perform acceptance
                 sampling of the draft tokens in the verification step of
-                speculative decoding. Currently we support two different 
+                speculative decoding. Currently we support two different
                 types of sampler namely RejectionSampler and
                 TypicalAcceptanceSampler. 'spec_decode_sampler' is either an
                 instance of RejectionSampler or TypicalAcceptanceSampler.
@@ -308,6 +312,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 before the speculative decoding starts. This is only used when
                 the draft model is a deepseek_mtp model that requires prefill
                 kv cache separately for each MTP layer.
+            require_prefill_hidden_states: whether to require full prefill
+                hidden states. This is only used for deepseek_mtp model.
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
@@ -342,6 +348,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         self._disable_logprobs = disable_logprobs
         self._disable_log_stats = disable_log_stats
         self._num_spec_prefill_steps = num_spec_prefill_steps
+        self._require_prefill_hidden_states = require_prefill_hidden_states
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -578,7 +585,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         """
         Creates and returns a `SamplerOutput` with only the token IDs being
         serialized to CPU and populated in `CompletionSequenceGroupOutput`.
-        All other parameters in `CompletionSequenceGroupOutput` related to log 
+        All other parameters in `CompletionSequenceGroupOutput` related to log
         probabilities are skipped.
 
         Args:
@@ -588,7 +595,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             only GPU tensors populated.
 
         Returns:
-            SamplerOutput: A new `SamplerOutput` instance containing a list of 
+            SamplerOutput: A new `SamplerOutput` instance containing a list of
             `CompletionSequenceGroupOutput` objects with only token IDs
             populated.
         """
@@ -765,7 +772,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         This invokes the proposer worker to get k speculative tokens for each
         sequence, then scores each speculative token using the scoring worker.
 
-        When `enable_chunked_prefill` is set, scorer will batch decodes and 
+        When `enable_chunked_prefill` is set, scorer will batch decodes and
         prefills, while proposer will sync its KV-cache by running an extra
         forward on prefills.
 
@@ -812,6 +819,11 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 prefill_hidden_states = all_hidden_states[non_spec_indices]
                 execute_model_req.previous_hidden_states = \
                     prepare_prefill_hidden_states(prefill_hidden_states)
+            if proposal_scores.prefill_hidden_states is not None and self.\
+              _require_prefill_hidden_states:
+                execute_model_req.previous_hidden_states = \
+                  prepare_prefill_hidden_states(
+                    proposal_scores.prefill_hidden_states)
             # Sync proposer KV cache for prefills.
             prefill_req = execute_model_req.clone(non_spec_seqs)
             # TODO avoid sampling here?
@@ -1128,7 +1140,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                List[List[List[Optional[float]]]],
                List[List[List[Optional[int]]]]]:
         """
-        Creates and returns four dummy lists representing token probabilities 
+        Creates and returns four dummy lists representing token probabilities
         and their ranks.
 
         This method initializes and returns:
@@ -1145,7 +1157,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             num_steps (int): The number of steps in the sequence.
             num_top_k (int): The number of top-k token log probabilities to
             return.
-        
+
         Returns:
             A tuple containing four dummy lists as described above.
         """
@@ -1189,10 +1201,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             log probabilities of the target model,
             shaped (num_steps, batch_size, vocab_size)
             accepted_token_ids_by_step (torch.Tensor): Tensor representing
-            the accepted  token_ids, shaped (num_steps, batch_size) 
+            the accepted  token_ids, shaped (num_steps, batch_size)
             num_top_k (int): The number of top-k token log probabilities to
             return.
-        
+
         Returns:
             A tuple containing the lists as described above.
         """
@@ -1274,7 +1286,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
     def get_cache_block_size_bytes(self):
         """Return the size of a cache block in bytes.
-        
+
         This function is only used to compose workers within a SpecDecodeWorker.
         We leave composing a SpecDecodeWorker within a SpecDecodeWorker
         undefined for now, although it could be implemented in the future.

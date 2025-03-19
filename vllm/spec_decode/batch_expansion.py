@@ -143,10 +143,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             non_spec_indices: List[int], non_spec_outputs: SpeculativeScores,
             has_prompt_log: bool) -> SpeculativeScores:
         """
-            Augment input `scores` with non-speculative requests outputs. 
+            Augment input `scores` with non-speculative requests outputs.
             This includes decode requests with speculation turned off, as well
             as prefill requests when `enable_chunked_prefill` is set.
-            For the latter, prefills are further separated into terminal and 
+            For the latter, prefills are further separated into terminal and
             non-terminal chunks (from which no token is sampled).
         """
         if not non_spec_indices:
@@ -195,6 +195,22 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         contracted_bs is the original batch size, and the batch size that the
         target_sampler_output will be contracted to.
         """
+        prefill_hidden_states = None
+        if target_sampler_output.prefill_hidden_states is not None:
+            prefill_size = 0
+            for seq in contracted_seq_group_metadata_list:
+                if seq.is_prompt:
+                    prefill_size += sum([
+                        min(x.get_prompt_len() - x.get_num_computed_tokens(),
+                            seq.token_chunk_size)
+                        for _, x in seq.seq_data.items()
+                    ])
+            prefill_hidden_states, _ = torch.split(
+                target_sampler_output.prefill_hidden_states,
+                (prefill_size,
+                 target_sampler_output.prefill_hidden_states.shape[0] -
+                 prefill_size))
+
         contracted_bs = len(contracted_seq_group_metadata_list)
         (target_token_ids, target_probs, target_logprobs, target_hidden_states,
          non_spec_target_token_ids, non_spec_target_probs,
@@ -262,11 +278,13 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             if all_hidden_states is not None:
                 all_hidden_states[spec_indices] = target_hidden_states
 
-        spec_scores = SpeculativeScores(probs=all_probs,
-                                        token_ids=all_tokens,
-                                        logprobs=all_logprobs,
-                                        hidden_states=all_hidden_states,
-                                        prompt_logprobs=prompt_logprobs)
+        spec_scores = SpeculativeScores(
+            probs=all_probs,
+            token_ids=all_tokens,
+            logprobs=all_logprobs,
+            hidden_states=all_hidden_states,
+            prompt_logprobs=prompt_logprobs,
+            prefill_hidden_states=prefill_hidden_states)
 
         non_spec_outputs = SpeculativeScores(
             probs=non_spec_target_probs,
