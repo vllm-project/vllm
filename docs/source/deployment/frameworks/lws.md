@@ -7,17 +7,16 @@ A major use case is for multi-host/multi-node distributed inference.
 
 vLLM can be deployed with [LWS](https://github.com/kubernetes-sigs/lws) on Kubernetes for distributed model serving.
 
+## Prerequisites
 
-# Preqrequisites
-1. At least two Kubernetes nodes, each with 8 GPUs, are required.
-2. Install LWS by following the instructions found [here](https://lws.sigs.k8s.io/docs/installation/).
+* At least two Kubernetes nodes, each with 8 GPUs, are required.
+* Install LWS by following the instructions found [here](https://lws.sigs.k8s.io/docs/installation/).
 
-
-# Deploy and Serve
+## Deploy and Serve
 
 Deploy the following yaml file `lws.yaml`
 
-```
+```yaml
 apiVersion: leaderworkerset.x-k8s.io/v1
 kind: LeaderWorkerSet
 metadata:
@@ -111,19 +110,19 @@ spec:
   type: ClusterIP
 ```
 
-```
+```bash
 kubectl apply -f lws.yaml
 ```
 
-Verify the status of the pods
+Verify the status of the pods:
 
-```
+```bash
 kubectl get pods
 ```
 
-Should get an output similar to this
+Should get an output similar to this:
 
-```
+```bash
 NAME       READY   STATUS    RESTARTS   AGE
 vllm-0     1/1     Running   0          2s
 vllm-0-1   1/1     Running   0          2s
@@ -131,38 +130,38 @@ vllm-1     1/1     Running   0          2s
 vllm-1-1   1/1     Running   0          2s
 ```
 
-Verify that the distributed tensor-parallel inference works
+Verify that the distributed tensor-parallel inference works:
 
-```
+```bash
 kubectl logs vllm-0 |grep -i "Loading model weights took" 
 ```
 
-Should get something similar to this
+Should get something similar to this:
 
-```
+```text
 INFO 05-08 03:20:24 model_runner.py:173] Loading model weights took 0.1189 GB
 (RayWorkerWrapper pid=169, ip=10.20.0.197) INFO 05-08 03:20:28 model_runner.py:173] Loading model weights took 0.1189 GB
 ```
 
-# Access ClusterIP service
+## Access ClusterIP service
 
-```
+```bash
 # Listen on port 8080 locally, forwarding to the targetPort of the service's port 8080 in a pod selected by the service
 kubectl port-forward svc/vllm-leader 8080:8080
 ```
 
-The output should be similar to the following
+The output should be similar to the following:
 
-```
+```text
 Forwarding from 127.0.0.1:8080 -> 8080
 Forwarding from [::1]:8080 -> 8080
 ```
 
-# Serve the model
+## Serve the model
 
 Open another terminal and send a request
 
-```
+```text
 curl http://localhost:8080/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
@@ -175,7 +174,7 @@ curl http://localhost:8080/v1/completions \
 
 The output should be similar to the following
 
-```
+```text
 {
   "id": "cmpl-1bb34faba88b43f9862cfbfb2200949d",
   "object": "text_completion",
@@ -197,5 +196,3 @@ The output should be similar to the following
   }
 }
 ```
-
-
