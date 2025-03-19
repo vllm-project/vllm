@@ -46,8 +46,8 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx1030;gfx1100;gfx1101")
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.5.1")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.5.1")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.6.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.6.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -319,7 +319,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # Only build AllSpark kernels if we are building for at least some compatible archs.
   cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
-  if (${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND ALLSPARK_ARCHS)
+  if (ALLSPARK_ARCHS)
     set(ALLSPARK_SRCS
        "csrc/quantization/gptq_allspark/allspark_repack.cu"
        "csrc/quantization/gptq_allspark/allspark_qgemm_w8a16.cu")
@@ -330,7 +330,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building AllSpark kernels for archs: ${ALLSPARK_ARCHS}")
   else()
     message(STATUS "Not building AllSpark kernels as no compatible archs found"
-                   " in CUDA target architectures, or CUDA not >= 12.0")
+                   " in CUDA target architectures")
   endif()
 
 
@@ -559,8 +559,11 @@ target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
-  "csrc/moe/moe_wna16.cu"
   "csrc/moe/topk_softmax_kernels.cu")
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_MOE_EXT_SRC "csrc/moe/moe_wna16.cu")
+endif()
 
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
@@ -574,6 +577,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     SRCS "${VLLM_MOE_WNA16_SRC}"
     CUDA_ARCHS "${CUDA_ARCHS}")
 
+  list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
     set(MARLIN_MOE_SRC

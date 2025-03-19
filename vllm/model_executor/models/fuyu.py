@@ -18,7 +18,7 @@
 """ PyTorch Fuyu model."""
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import List, Literal, Optional, Set, Tuple, TypedDict, Union
+from typing import Literal, Optional, Set, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
@@ -31,8 +31,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -41,7 +40,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
 
@@ -58,10 +57,12 @@ class FuyuImagePatchInputs(TypedDict):
     `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
     """
 
-    patches_per_image: List[int]
+    patches_per_image: list[int]
     """
-    List of number of total patches for each image in the batch.
-    This is used to restore the first two dimensions of `flat_data`.
+    The number of total patches for each image in the batch.
+
+    This is used to split the embeddings which has the first two dimensions
+    flattened just like `flat_data`.
     """
 
 
@@ -317,7 +318,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return None
 
     def _process_image_input(
-            self, image_input: FuyuImagePatchInputs) -> NestedTensors:
+            self, image_input: FuyuImagePatchInputs) -> MultiModalEmbeddings:
         image_patches_flat = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"]
 
@@ -327,8 +328,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return vision_embeddings_flat.split(patches_per_image, dim=0)
 
     def get_multimodal_embeddings(
-        self, **kwargs
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -338,7 +338,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
