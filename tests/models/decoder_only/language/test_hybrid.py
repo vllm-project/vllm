@@ -17,7 +17,7 @@ pip.main(['install', 'causal-conv1d'])
 importlib.reload(site)
 
 # This test is for the hybrid models
-MODELS = ["ai21labs/Jamba-tiny-dev", "pfnet/plamo-2-1b"]
+MODELS = ["ai21labs/Jamba-tiny-dev", "Zyphra/Zamba2-1.2B-instruct", "pfnet/plamo-2-1b"]
 # Bamba at Fp32 is too big for the CI (L4 GPU).
 # MODELS = ["ai21labs/Jamba-tiny-dev", "ibm-ai-platform/Bamba-9B"]
 
@@ -33,15 +33,17 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
-
     # numeric error produces different generation
+    if "Bamba" in model:
+        example_prompts.pop(3)
+
     model_kwargs = {
         "use_mamba_kernels": False,  # mamba kernels are not installed so HF 
         # don't use them
     }
-    if 'Bamba' in model:
-        example_prompts.pop(3)
-    if 'plamo' in model:
+    if "Zamba2" in model or "plamo" in model:
+        # Zamba2 HF implementation automatically checks if mamba kernels are
+        # installed
         model_kwargs = {}
 
     with hf_runner(model, dtype=dtype, model_kwargs=model_kwargs) as hf_model:
@@ -123,25 +125,31 @@ def test_mamba_prefill_chunking_with_parallel_sampling(
 def test_mamba_prefill_chunking(hf_runner, vllm_runner, example_prompts,
                                 model: str, dtype: str,
                                 max_tokens: int) -> None:
-    # numeric error during prefill chucking produces different generation
+    # numeric error during prefill chunking produces different generation
     # compared to w/o prefill chunking for those examples, removed them for now
-    if 'Jamba' in model:
+    if "Jamba" in model:
         example_prompts.pop(7)
         example_prompts.pop(2)
         example_prompts.pop(1)
-    elif 'Bamba' in model:
+    elif "Bamba" in model:
         example_prompts.pop(6)
         example_prompts.pop(3)
         example_prompts.pop(2)
         dtype = "half"  # use a different dtype for Bamba
-    elif 'plamo' in model:
+
+    elif "Zamba2" in model:
+        example_prompts.pop(7)
+        dtype = "half"
+    elif "plamo" in model:
         example_prompts.pop(7)
 
     model_kwargs = {
         "use_mamba_kernels": False,  # mamba kernels are not installed so HF 
         # don't use them
     }
-    if 'plamo' in model:
+    if "Zamba2" in model or "plamo" in model:
+        # Zamba2 HF implementation automatically checks if mamba kernels are
+        # installed
         model_kwargs = {}
 
     with hf_runner(model, dtype=dtype, model_kwargs=model_kwargs) as hf_model:

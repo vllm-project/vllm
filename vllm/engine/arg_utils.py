@@ -3,6 +3,7 @@
 import argparse
 import dataclasses
 import json
+import threading
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
                     Tuple, Type, Union, cast, get_args)
@@ -1191,7 +1192,7 @@ class EngineArgs:
         NOTE: for autoselection of V0 vs V1 engine, we need to
         create the ModelConfig first, since ModelConfig's attrs
         (e.g. the model arch) are needed to make the decision.
-        
+
         This function set VLLM_USE_V1=X if VLLM_USE_V1 is
         unspecified by the user.
 
@@ -1468,8 +1469,12 @@ class EngineArgs:
             return False
 
         # Need at least Ampere for now (FA support required).
+        # Skip this check if we are running on a non-GPU platform,
+        # or if the device capability is not available
+        # (e.g. in a Ray actor without GPUs).
         from vllm.platforms import current_platform
         if (current_platform.is_cuda()
+                and current_platform.get_device_capability()
                 and current_platform.get_device_capability().major < 8):
             _raise_or_fallback(feature_name="Compute Capability < 8.0",
                                recommend_to_remove=False)
@@ -1576,8 +1581,9 @@ class EngineArgs:
         #############################################################
         # Experimental Features - allow users to opt in.
 
-        # MLA is is supported on V1, but off by default for now.
-        if model_config.use_mla and _warn_or_fallback("MLA"):
+        # Signal Handlers requires running in main thread.
+        if (threading.current_thread() != threading.main_thread()
+                and _warn_or_fallback("Engine in background thread")):
             return False
 
         # LoRA is supported on V1, but off by default for now.
