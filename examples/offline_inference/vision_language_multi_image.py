@@ -342,7 +342,6 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
         limit_mm_per_prompt={"image": len(image_urls)},
         enable_lora=True,
         max_lora_rank=320,
-        lora_extra_vocab_size=0,
     )
 
     placeholders = "".join(f"<|image_{i}|>"
