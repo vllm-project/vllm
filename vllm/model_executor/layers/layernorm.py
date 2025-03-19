@@ -5,8 +5,15 @@ from typing import Callable, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
+
+
+def is_rocm_aiter_rmsnorm_enabled() -> bool:
+    return current_platform.is_rocm() \
+        and envs.VLLM_ROCM_USE_AITER_RMSNORM \
+        and envs.VLLM_ROCM_USE_AITER
 
 
 def rms_norm(*, x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float,
@@ -57,7 +64,7 @@ def dispatch_cuda_rmsnorm_func(
 ) -> Callable[..., Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]:
     if not add_residual:
         return rms_norm
-    if current_platform.is_rocm_aiter_rmsnorm_enabled():
+    if is_rocm_aiter_rmsnorm_enabled():
         return rocm_aiter_rmsnorm2d_fwd_with_add
     return fused_add_rms_norm
 

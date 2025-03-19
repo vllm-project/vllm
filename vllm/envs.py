@@ -532,9 +532,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
-             ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True"
-                                         ).lower() in ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
+             ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
