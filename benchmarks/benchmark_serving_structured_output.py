@@ -732,8 +732,11 @@ def main(args: argparse.Namespace):
         api_url = f"http://{args.host}:{args.port}{args.endpoint}"
         base_url = f"http://{args.host}:{args.port}"
 
-    tokenizer = get_tokenizer(tokenizer_id,
-                              trust_remote_code=args.trust_remote_code)
+    tokenizer = get_tokenizer(
+        tokenizer_id,
+        trust_remote_code=args.trust_remote_code,
+        tokenizer_mode=args.tokenizer_mode,
+    )
 
     if args.dataset == 'grammar':
         args.structure_type = 'guided_grammar'
@@ -873,6 +876,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tokenizer",
         type=str,
+        help=
+        "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+    )
+    parser.add_argument(
+        "--tokenizer-mode",
+        type=str,
+        default="auto",
         help=
         "Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
     )
