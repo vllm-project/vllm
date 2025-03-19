@@ -1029,7 +1029,10 @@ class MllamaTextModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.vocab_size = config.vocab_size
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size + 8,
+
+        # Adjusting to the nearest padding multiple
+        vocab_size_adjusted = math.ceil(config.vocab_size / 64) * 64
+        self.embed_tokens = VocabParallelEmbedding(vocab_size_adjusted,
                                                    config.hidden_size)
         self.cross_attention_layers = config.cross_attention_layers
 
