@@ -511,8 +511,35 @@ def iter_token_matches(
             start_idx += 1
 
 
+def replace_token_matches(
+    token_ids: list[int],
+    match_ids: list[int],
+    new_ids: list[int],
+) -> list[int]:
+    """
+    Replace each occurrence of :code:`match_ids` in :code:`token_ids`
+    with :code:`new_ids`.
+
+    Note that empty matches are ignored.
+    """
+    out_seqs = list[list[int]]()
+    prev_end_idx = 0
+
+    for match in iter_token_matches(token_ids, match_ids):
+        start_idx = match.start_idx
+        end_idx = match.end_idx
+
+        out_seqs.append(token_ids[prev_end_idx:start_idx])
+        out_seqs.append(new_ids)
+        prev_end_idx = end_idx
+
+    out_seqs.append(token_ids[prev_end_idx:])
+
+    return flatten_2d_lists(out_seqs)
+
+
 @dataclass(repr=False)
-class _PromptTargetMatch(ABC):
+class PromptTargetMatch(ABC):
     _origin: BoundPromptUpdate
 
     @property
@@ -535,7 +562,7 @@ class _PromptTargetMatch(ABC):
 
 
 @dataclass(repr=False)
-class _PromptTargetIndexMatch(_PromptTargetMatch):
+class _PromptTargetIndexMatch(PromptTargetMatch):
     match_idx: int
 
     @property
@@ -548,7 +575,7 @@ class _PromptTargetIndexMatch(_PromptTargetMatch):
 
 
 @dataclass(repr=False)
-class _PromptTargetTokenMatch(_PromptTargetMatch):
+class _PromptTargetTokenMatch(PromptTargetMatch):
     match: _TokenMatch
 
     @property
@@ -561,7 +588,7 @@ class _PromptTargetTokenMatch(_PromptTargetMatch):
 
 
 @dataclass(repr=False)
-class _PromptTargetTextMatch(_PromptTargetMatch):
+class _PromptTargetTextMatch(PromptTargetMatch):
     match: re.Match[str]
 
     @property
@@ -594,7 +621,7 @@ class PlaceholderFeaturesInfo:
 def find_token_matches(
     prompt: list[int],
     prompt_updates: Sequence[BoundPromptUpdate],
-) -> Sequence[_PromptTargetMatch]:
+) -> Sequence[PromptTargetMatch]:
     """Return each target of :code:`prompt_updates` found in :code:`prompt`."""
 
     def get_matches(update: BoundPromptUpdate):
@@ -620,7 +647,7 @@ def find_token_matches(
 def find_text_matches(
     prompt: str,
     prompt_updates: Sequence[BoundPromptUpdate],
-) -> Sequence[_PromptTargetMatch]:
+) -> Sequence[PromptTargetMatch]:
     """Return each target of :code:`prompt_updates` found in :code:`prompt`."""
 
     def get_matches(update: BoundPromptUpdate):
@@ -645,15 +672,15 @@ def find_text_matches(
 
 def _resolve_matches(
     prompt: PromptSeq,
-    mm_matches: Mapping[str, Sequence[_PromptTargetMatch]],
-) -> list[_PromptTargetMatch]:
+    mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
+) -> list[PromptTargetMatch]:
     """
     Resolve :code:`mm_matches` to ensure that there are no overlapping matches,
     and sort them such that earlier matches take priority over later ones.
     """
     matches = [m for matches in mm_matches.values() for m in matches]
 
-    seen_matches: list[Optional[_PromptTargetMatch]] = [None] * len(prompt)
+    seen_matches: list[Optional[PromptTargetMatch]] = [None] * len(prompt)
 
     for match in matches:
         for idx in range(match.start_idx, match.end_idx):
@@ -669,7 +696,7 @@ def _resolve_matches(
 
 def _apply_matches(
     prompt: _S,
-    mm_matches: Mapping[str, Sequence[_PromptTargetMatch]],
+    mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> list[_S]:
     """Apply the updates in :code:`mm_matches` to :code:`prompt`."""
@@ -718,7 +745,7 @@ def _apply_matches(
 
 def apply_token_matches(
     prompt: list[int],
-    mm_matches: Mapping[str, Sequence[_PromptTargetMatch]],
+    mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> list[int]:
     """Apply the updates in :code:`mm_matches` to :code:`prompt`."""
@@ -732,7 +759,7 @@ def apply_token_matches(
 
 def apply_text_matches(
     prompt: str,
-    mm_matches: Mapping[str, Sequence[_PromptTargetMatch]],
+    mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
     mm_item_counts: Mapping[str, int],
 ) -> str:
     """Apply the updates in :code:`mm_matches` to :code:`prompt`."""
@@ -1055,14 +1082,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Given the original multi-modal items for this modality
         and HF-processed data, output the updates to perform.
 
-        Notes:
-            - You should not assume that HF processor always performs prompt
-              updates: in :meth:`_apply_hf_processor_missing`, this method
-              is called on text-only and multimodal-only inputs separately,
-              instead of passing them in the same call.
-            - The update information returned by this method is also used to
-              determine the placeholder token positions for each multi-modal
-              item.
+        The information returned by this method is used to update token inputs
+        which bypass the HF processor. It is also used to update the output of
+        HF processor if the HF process does not apply prompt updates to text
+        inputs.
+
+        Moreover, this information is critical to determine the token positions
+        in order to construct  :class:`~vllm-multimodal.input.PlaceholderRange`
+        for each multi-modal item.
         """
         raise NotImplementedError
 
@@ -1357,6 +1384,22 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         it = (update.bind(tokenizer) for update in prompt_updates)
         return dict(full_groupby_modality(it))
 
+    def _apply_token_matches(
+        self,
+        prompt: list[int],
+        mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
+        mm_item_counts: Mapping[str, int],
+    ) -> list[int]:
+        return apply_token_matches(prompt, mm_matches, mm_item_counts)
+
+    def _apply_text_matches(
+        self,
+        prompt: str,
+        mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
+        mm_item_counts: Mapping[str, int],
+    ) -> str:
+        return apply_text_matches(prompt, mm_matches, mm_item_counts)
+
     def _apply_prompt_updates(
         self,
         token_ids: list[int],
@@ -1388,7 +1431,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_match_counts.get(modality, 0) >= item_count
             for modality, item_count in mm_item_counts.items()
         ):  # yapf: disable
-            token_ids = apply_token_matches(
+            token_ids = self._apply_token_matches(
                 token_ids,
                 mm_token_matches,
                 mm_item_counts,
@@ -1406,7 +1449,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 modality: find_text_matches(text, updates)
                 for modality, updates in mm_prompt_updates.items()
             }
-            text = apply_text_matches(
+            text = self._apply_text_matches(
                 text,
                 mm_text_matches,
                 mm_item_counts,
