@@ -24,7 +24,7 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import cdiv, kill_process_tree
+from vllm.utils import Device, cdiv, kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -398,7 +398,10 @@ class AsyncLLM(EngineClient):
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
 
-    async def reset_prefix_cache(self) -> None:
+    async def reset_prefix_cache(self,
+                                 device: Optional[Device] = None) -> None:
+        if device == Device.CPU:
+            raise ValueError("Not supported on CPU.")
         await self.engine_core.reset_prefix_cache_async()
 
     async def sleep(self, level: int = 1) -> None:

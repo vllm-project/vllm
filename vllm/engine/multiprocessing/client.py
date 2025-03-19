@@ -47,7 +47,7 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.utils import deprecate_kwargs
+from vllm.utils import Device, deprecate_kwargs
 
 logger = init_logger(__name__)
 
@@ -684,11 +684,12 @@ class MQLLMEngineClient(EngineClient):
         await self._send_one_way_rpc_request(
             request=RPCUProfileRequest.STOP_PROFILE, socket=self.input_socket)
 
-    async def reset_prefix_cache(self) -> None:
+    async def reset_prefix_cache(self,
+                                 device: Optional[Device] = None) -> None:
         """Reset the prefix cache"""
 
         await self._send_one_way_rpc_request(
-            request=RPCResetPrefixCacheRequest.RESET_PREFIX_CACHE,
+            request=RPCResetPrefixCacheRequest(device),
             socket=self.input_socket)
 
     async def sleep(self, level: int = 1) -> None:
