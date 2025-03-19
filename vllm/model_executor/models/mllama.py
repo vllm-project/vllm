@@ -1187,8 +1187,6 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                 config.text_config.vocab_size)
         self.sampler = get_sampler()
 
-        self.capture_mode = False
-
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -1368,19 +1366,12 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         cross_attention_mask = None
         kv_range_for_decode = None
 
-        skip_cross_attention = False
-
         # For 1) text-only prefill and decode, 2) image-present decode.
         if image_inputs is None:
             full_text_row_masked_out_mask = (
                 attn_metadata.encoder_seq_lens_tensor
                 != 0).reshape(-1, 1).to(input_ids.device)
-
-            if not self.capture_mode:
-                # NOTE: when doing cuda graph capture, we never want to skip
-                # cross attention. Skipping this line in such case enables
-                # CUDA graph capture to succeed.
-                skip_cross_attention = max(attn_metadata.encoder_seq_lens) == 0
+            skip_cross_attention = attn_metadata.max_encoder_seq_len == 0
 
         # For image-present prefill.
         else:
