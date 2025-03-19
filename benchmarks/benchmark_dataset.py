@@ -36,10 +36,6 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
@@ -395,11 +391,10 @@ class ShareGPTDataset(BenchmarkDataset):
             prompt_len = len(prompt_ids)
             new_output_len = (len(completion_ids)
                               if output_len is None else output_len)
-            if not is_valid_sequence(
-                    prompt_len,
-                    new_output_len,
-                    skip_min_output_len_check=output_len is not None,
-            ):
+            if not is_valid_sequence(prompt_len,
+                                     new_output_len,
+                                     skip_min_output_len_check=output_len
+                                     is not None):
                 continue
             if enable_multimodal_chat:
                 prompt = self.apply_multimodal_chat_transformation(
