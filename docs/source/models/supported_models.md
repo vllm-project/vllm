@@ -477,6 +477,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.
   * ✅︎
   * ✅︎
+- * `Zamba2ForCausalLM`
+  * Zamba2
+  * `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc.
+  *
+  *
 :::
 
 :::{note}
@@ -879,7 +884,7 @@ See [this page](#generative-models) for more information on how to use generativ
 - * `PixtralForConditionalGeneration`
   * Pixtral
   * T + I<sup>+</sup>
-  * `mistralai/Pixtral-12B-2409`, `mistral-community/pixtral-12b`, etc.
+  * `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, `mistral-community/pixtral-12b`, etc.
   *
   * ✅︎
   * ✅︎
@@ -946,7 +951,7 @@ V0 correctly implements the model's attention pattern:
 
 V1 currently uses a simplified attention pattern:
 - Uses causal attention for all tokens, including image tokens
-- Generates reasonable outputs but does not match the original model's attention for text + image inputs
+- Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": True}`
 - Will be updated in the future to support the correct behavior
 
 This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
