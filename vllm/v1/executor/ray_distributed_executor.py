@@ -52,6 +52,9 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
 
         refs = self.forward_dag.execute(scheduler_output)  # type: ignore
 
+        env_vars_to_copy.append('TPU_HOST_BOUNDS')
+        env_vars_to_copy.append('TPU_CHIPS_PER_HOST_BOUNDS')
+
         # When PP is not used, we block here until the result is available.
         if self.max_concurrent_batches == 1:
             return refs[0].get()
