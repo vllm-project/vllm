@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 import time
 from collections import defaultdict
@@ -7,6 +8,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
+import vllm.envs as envs
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
@@ -162,6 +164,41 @@ def assert_ray_available():
                          "`pip install ray`.") from ray_import_err
 
 
+def serialize_placement_group_to_str(placement_group: "PlacementGroup") -> str:
+    """Serialize a placement group to a string.
+    FIXME: This should be implemented in Ray.
+
+    Args:
+        placement_group: The placement group to serialize.
+
+    Returns:
+        A string representation of the placement group.
+    """
+    placement_group_data = {
+        "id": placement_group.id.hex(),
+        "bundle_cache": placement_group.bundle_cache,
+    }
+    return json.dumps(placement_group_data)
+
+
+def deserialize_placement_group_from_str(
+        placement_group_str: str) -> "PlacementGroup":
+    """Deserialize a placement group from a string.
+    FIXME: This should be implemented in Ray.
+
+    Args:
+        placement_group_str: The string representation of the placement group.
+
+    Returns:
+        A placement group.
+    """
+    placement_group_data = json.loads(placement_group_str)
+    return PlacementGroup(
+        id=ray._raylet.PlacementGroupID.from_hex(placement_group_data["id"]),
+        bundle_cache=placement_group_data["bundle_cache"],
+    )
+
+
 def _verify_bundles(placement_group: "PlacementGroup",
                     parallel_config: ParallelConfig, device_str: str):
     """Verify a given placement group has bundles located in the right place.
@@ -308,12 +345,19 @@ def initialize_ray_cluster(
 
     # Create or get the placement group for worker processes
     if parallel_config.placement_group:
+        logger.info(
+            "Using the existing Ray placement group from parallel config")
         current_placement_group = parallel_config.placement_group
+    elif envs.VLLM_RAY_PLACEMENT_GROUP:
+        logger.info("Using the existing Ray placement group from "
+                    "VLLM_RAY_PLACEMENT_GROUP")
+        current_placement_group = deserialize_placement_group_from_str(
+            envs.VLLM_RAY_PLACEMENT_GROUP)
     else:
+        logger.info("Trying to get the existing Ray placement group")
         current_placement_group = ray.util.get_current_placement_group()
 
     if current_placement_group:
-        logger.info("Using the existing placement group")
 
         # We are in a placement group
         bundles = current_placement_group.bundle_specs
