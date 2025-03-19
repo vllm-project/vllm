@@ -35,6 +35,7 @@ import triton.language as tl
 
 from vllm import envs
 from vllm.platforms import current_platform
+from vllm.utils import aiter_mla_enabled
 
 is_hip_ = current_platform.is_rocm()
 
@@ -641,7 +642,7 @@ def decode_attention_fwd(
     assert num_kv_splits == attn_logits.shape[2]
     kv_group_num = q.shape[1] // v_buffer.shape[-2]
 
-    if is_hip_ and envs.VLLM_USE_AITER_MLA:
+    if aiter_mla_enabled():
         from aiter.mla import mla_decode_fwd
 
         mla_decode_fwd(

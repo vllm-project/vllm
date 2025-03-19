@@ -1786,6 +1786,9 @@ def aiter_linear_enabled() -> bool:
 def aiter_norm_enabled() -> bool:
     return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_NORM
 
+@cache
+def aiter_mla_enabled() -> bool:
+    return envs.VLLM_USE_AITER and envs.VLLM_USE_AITER_MLA
 
 def weak_ref_tensors(
     tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
