@@ -119,7 +119,7 @@ class HPUAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> List[Tuple[int, ...]]:
         return HPUPagedAttention.get_kv_cache_shape(num_blocks, block_size,
                                                     num_kv_heads, head_size)
 
@@ -163,8 +163,8 @@ class HPUMLAAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
-        return (num_blocks, block_size, head_size // 9 * 1, head_size // 9 * 8)
+    ) -> List[Tuple[int, ...]]:
+        return [(num_blocks, block_size, head_size // 9 * 1), (num_blocks, block_size, head_size // 9 * 8)]
 
     @staticmethod
     def swap_blocks(

@@ -38,8 +38,8 @@ class HPUPagedAttention:
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
-        return (num_blocks, block_size, num_kv_heads, head_size)
+    ) -> List[Tuple[int, ...]]:
+        return [(num_blocks, block_size, num_kv_heads, head_size)] * 2
 
     @staticmethod
     def split_kv_cache(

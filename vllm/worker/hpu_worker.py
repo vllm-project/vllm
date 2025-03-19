@@ -489,12 +489,8 @@ class HPUCacheEngine(CacheEngine):
         """Allocates KV cache on the specified device."""
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
-        if len(kv_cache_shape) == 4:
-            k_cache_shape = list(kv_cache_shape[:-2]) + [kv_cache_shape[-2]]
-            v_cache_shape = list(kv_cache_shape[:-2]) + [kv_cache_shape[-1]]
-        else:
-            k_cache_shape = kv_cache_shape
-            v_cache_shape = kv_cache_shape
+        k_cache_shape = kv_cache_shape[0]
+        v_cache_shape = kv_cache_shape[1]
         kv_cache: List[Tuple[torch.Tensor, torch.Tensor]] = []
         for _ in range(self.num_attention_layers):
             key_cache = torch.zeros(k_cache_shape,
