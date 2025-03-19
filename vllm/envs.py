@@ -525,26 +525,25 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
 
-    # use aiter ops unless specifically disabled.
-    # Acts as a parent switch to enable the rest of the other operations.
+    # Whether to enable all aiter ops.
+    # Acts as a parent switch to enable/disable the aiter ops.
+    # By default is enabled.
     "VLLM_ROCM_USE_AITER":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
              ("true", "1")),
 
-    # use aiter moe op if aiter ops are enabled.
+    # Whether to use aiter moe ops.
+    # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE":
-    lambda:
-    (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
-     ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
-     ("true", "1")),
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in
+             ("true", "1")),
 
-    # use aiter block scaled moe op if aiter ops are enabled.
-    # by default this is disabled.
+    # Whether to use aiter block scaled moe kernel.
+    # By default this is disabled.
     "VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE":
     lambda:
-    (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
-     ("true", "1") and os.getenv("VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE",
-                                 "false").lower() in ("true", "1")),
+    (os.getenv("VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE", "false").lower() in
+     ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
