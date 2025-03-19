@@ -73,8 +73,8 @@ mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
 
 # environment variables
-SKIP_ROCM_ATIER_MODEL_TEST_CASES="True"
-echo $SKIP_ROCM_ATIER_MODEL_TEST_CASES
+ROCM_SKIP_AITER_TEST_CASES="1"
+echo $ROCM_SKIP_AITER_TEST_CASES
 
 commands=$@
 echo "Commands:$commands"
