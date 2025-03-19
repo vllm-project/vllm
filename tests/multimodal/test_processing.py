@@ -19,7 +19,8 @@ from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
                                         apply_token_matches,
                                         find_mm_placeholders,
                                         find_text_matches, find_token_matches,
-                                        iter_token_matches)
+                                        iter_token_matches,
+                                        replace_token_matches)
 # yapf: enable
 from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.transformers_utils.tokenizer import (AnyTokenizer,
@@ -87,6 +88,58 @@ def test_iter_token_matches(token_ids, match_ids, expected):
     match_lens = [end - start for start, end in result]
     print("match_lens:", match_lens)  # Only displayed on error
     assert all(match_len == len(match_ids) for match_len in match_lens)
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    ("token_ids", "match_ids", "new_ids", "expected"),
+    [
+        ([], [], [-1], []),
+        ([], [32000], [-1], []),
+        (
+            [32000, 32000, 32000],
+            [32000],
+            [-1],
+            [-1, -1, -1],
+        ),
+        (
+            [32000, 32000, 32000],
+            [32000, 32000],
+            [-1],
+            [-1, 32000],
+        ),
+        (
+            [32000, 32000, 32000],
+            [32000, 32000, 32000],
+            [-1],
+            [-1],
+        ),
+        (
+            [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
+            [28747, 32000],
+            [-1],
+            [9833, -1, 32000, 32000, 9833, -1, 32000, 918],
+        ),
+        (
+            [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
+            [28747, 32000, 32000, 32000],
+            [-1],
+            [9833, -1, 9833, 28747, 32000, 32000, 918],
+        ),
+        (
+            [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
+            [28747, 0, 32000],
+            [-1],
+            [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
+        ),
+    ],
+)
+# yapf: enable
+def test_replace_token_matches(token_ids, match_ids, new_ids, expected):
+    result = replace_token_matches(token_ids, match_ids, new_ids)
+
+    # Manually constructed results
+    assert result == expected
 
 
 # yapf: disable
