@@ -17,7 +17,7 @@ import numpy as np  # np sort is stable
 from vllm.platforms import current_platform
 
 NUM_EXPERTS = [16, 64]
-TOP_KS = [2, 4, 8]
+TOP_KS = [2, 4, 6, 8]
 EP_SIZE = [1, 4, 16]
 
 def torch_permute(
@@ -82,8 +82,8 @@ def torch_unpermute(permuted_hidden_states: torch.Tensor,
     output = output.sum(dim=1).to(permuted_hidden_states.dtype)
     return output
 
-@pytest.mark.parametrize("n_token", [1, 33, 64, 222, 1024])
-@pytest.mark.parametrize("n_hidden", [128, 1024, 2048])
+@pytest.mark.parametrize("n_token", [1, 33, 64, 222, 1024, 2048, 3000, 5000])
+@pytest.mark.parametrize("n_hidden", [2048, 4096, 7168])
 @pytest.mark.parametrize("n_expert", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
