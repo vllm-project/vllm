@@ -150,7 +150,12 @@ class Platform:
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     def is_sleep_mode_available(self) -> bool:
-        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+        if self._enum == PlatformEnum.CUDA:
+            return True
+        return self._enum == PlatformEnum.ROCM and any([
+            arch in torch.cuda.get_device_properties("cuda").gcnArchName
+            for arch in ["gfx942"]
+        ])
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
