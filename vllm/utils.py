@@ -2142,12 +2142,13 @@ def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
         ctx.destroy(linger=0)
 
 
-def ray_is_initialized():
-    """Check if Ray is initialized."""
+def is_in_ray_actor():
+    """Check if we are in a Ray actor."""
 
     try:
         import ray
-        return ray.is_initialized()
+        return (ray.is_initialized()
+                and ray.get_runtime_context().get_actor_id() is not None)
     except ImportError:
         return False
 
@@ -2162,8 +2163,8 @@ def _maybe_force_spawn():
     reason = None
     if cuda_is_initialized():
         reason = "CUDA is initialized"
-    elif ray_is_initialized():
-        reason = "Ray is initialized and Ray process can only be spawned"
+    elif is_in_ray_actor():
+        reason = "In a Ray actor and can only be spawned"
 
     if reason is not None:
         logger.warning(
