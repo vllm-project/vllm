@@ -7,7 +7,8 @@ import numpy as np
 import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionMetadata, AttentionType,
+                                              is_quantized_kv_cache)
 from vllm.attention.backends.utils import get_flash_attn_version
 from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
@@ -180,6 +181,9 @@ class FlashAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError(
+                "FlashAttention V1 with FP8 KV cache not yet supported")
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -192,7 +196,8 @@ class FlashAttentionImpl(AttentionImpl):
         if head_size not in support_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
-                f"Supported head sizes are: {support_head_sizes}.")
+                f"Supported head sizes are: {support_head_sizes}. "
+                "Set VLLM_USE_V1=0 to use another attention backend.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "

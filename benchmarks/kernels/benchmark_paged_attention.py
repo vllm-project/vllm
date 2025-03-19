@@ -176,7 +176,7 @@ def main(
 
         end_time = time.perf_counter()
         if profile:
-            torch.cuda.cudart().cudaProfilerStart()
+            torch.cuda.cudart().cudaProfilerStop()
         return (end_time - start_time) / num_iters
 
     # Warmup.

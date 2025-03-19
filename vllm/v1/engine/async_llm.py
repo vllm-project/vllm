@@ -8,6 +8,7 @@ from typing import Optional, Union
 
 import numpy as np
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
@@ -49,6 +50,12 @@ class AsyncLLM(EngineClient):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
+        if not envs.VLLM_USE_V1:
+            raise ValueError(
+                "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
+                "This should not happen. As a workaround, try using "
+                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
+                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
         assert start_engine_loop
 
@@ -72,9 +79,7 @@ class AsyncLLM(EngineClient):
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
-            model_config=vllm_config.model_config,
-            cache_config=vllm_config.cache_config,
-            lora_config=vllm_config.lora_config,
+            vllm_config=vllm_config,
             tokenizer=self.tokenizer,
             input_registry=input_registry,
         )
@@ -95,21 +100,49 @@ class AsyncLLM(EngineClient):
         self.output_handler: Optional[asyncio.Task] = None
 
     @classmethod
+    def from_vllm_config(
+        cls,
+        vllm_config: VllmConfig,
+        start_engine_loop: bool = True,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+        disable_log_requests: bool = False,
+        disable_log_stats: bool = False,
+    ) -> "AsyncLLM":
+        if not envs.VLLM_USE_V1:
+            raise ValueError(
+                "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
+                "This should not happen. As a workaround, try using "
+                "AsyncLLMEngine.from_vllm_config(...) or explicitly set "
+                "VLLM_USE_V1=0 or 1 and report this issue on Github.")
+
+        # FIXME(rob): refactor VllmConfig to include the StatLoggers
+        # include StatLogger in the Oracle decision.
+        if stat_loggers is not None:
+            raise ValueError("Custom StatLoggers are not yet supported on V1. "
+                             "Explicitly set VLLM_USE_V1=0 to disable V1.")
+
+        # Create the LLMEngine.
+        return cls(
+            vllm_config=vllm_config,
+            executor_class=Executor.get_class(vllm_config),
+            start_engine_loop=start_engine_loop,
+            log_requests=not disable_log_requests,
+            log_stats=not disable_log_stats,
+            usage_context=usage_context,
+        )
+
+    @classmethod
     def from_engine_args(
         cls,
         engine_args: AsyncEngineArgs,
-        engine_config: Optional[VllmConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
         # Create the engine configs.
-        if engine_config is None:
-            vllm_config = engine_args.create_engine_config(usage_context)
-        else:
-            vllm_config = engine_config
-
+        vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
 
         # Create the AsyncLLM.
@@ -194,8 +227,8 @@ class AsyncLLM(EngineClient):
             * 3) Adding the Request to the Detokenizer.
             * 4) Adding the Request to the EngineCore (separate process).
 
-        A separate output_handler loop runs in a background AsyncIO task, 
-        pulling outputs from EngineCore and putting them into the 
+        A separate output_handler loop runs in a background AsyncIO task,
+        pulling outputs from EngineCore and putting them into the
         per-request AsyncStream.
 
         The caller of generate() iterates the returned AsyncGenerator,
@@ -255,13 +288,14 @@ class AsyncLLM(EngineClient):
             while True:
                 # 1) Pull EngineCoreOutputs from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
+                num_outputs = len(outputs.outputs)
 
-                iteration_stats = IterationStats() if self.log_stats else None
+                iteration_stats = IterationStats() if (
+                    self.log_stats and num_outputs) else None
 
                 # Split outputs into chunks of at most
                 # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                 # event loop for too long.
-                num_outputs = len(outputs.outputs)
                 if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
                     slices = (outputs.outputs, )
                 else:
@@ -299,9 +333,8 @@ class AsyncLLM(EngineClient):
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
-        request_ids = [request_id]
+        request_ids = self.output_processor.abort_requests((request_id, ))
         await self.engine_core.abort_requests_async(request_ids)
-        self.output_processor.abort_requests(request_ids)
 
         if self.log_requests:
             logger.info("Aborted request %s.", request_id)
@@ -315,7 +348,6 @@ class AsyncLLM(EngineClient):
             return
 
         assert scheduler_stats is not None
-        assert iteration_stats is not None
         for stat_logger in self.stat_loggers:
             stat_logger.record(scheduler_stats=scheduler_stats,
                                iteration_stats=iteration_stats)
@@ -374,6 +406,9 @@ class AsyncLLM(EngineClient):
 
     async def wake_up(self) -> None:
         await self.engine_core.wake_up_async()
+
+    async def is_sleeping(self) -> bool:
+        return await self.engine_core.is_sleeping_async()
 
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""

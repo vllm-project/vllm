@@ -11,7 +11,6 @@ import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
 
-from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.config import CompilationConfig
@@ -169,7 +168,7 @@ class LLM:
         quantization: Optional[str] = None,
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
-        seed: int = 0,
+        seed: Optional[int] = None,
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
@@ -238,22 +237,14 @@ class LLM:
             compilation_config=compilation_config_instance,
             **kwargs,
         )
-        # Logic to switch between engines is done at runtime instead of import
-        # to avoid import order issues
-        self.engine_class = self.get_engine_class()
-        self.llm_engine = self.engine_class.from_engine_args(
-            engine_args, usage_context=UsageContext.LLM_CLASS)
+
+        # Create the Engine (autoselects V0 vs V1)
+        self.llm_engine = LLMEngine.from_engine_args(
+            engine_args=engine_args, usage_context=UsageContext.LLM_CLASS)
+        self.engine_class = type(self.llm_engine)
 
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
-
-    @staticmethod
-    def get_engine_class() -> type[LLMEngine]:
-        if envs.VLLM_USE_V1:
-            # Lazy import: the v1 package isn't distributed
-            from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
-            return V1LLMEngine  # type: ignore
-        return LLMEngine
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
@@ -1384,8 +1375,9 @@ class LLM:
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
+                            n = len(output.outputs)
                             assert output.prompt_token_ids is not None
-                            total_in_toks += len(output.prompt_token_ids)
+                            total_in_toks += len(output.prompt_token_ids) * n
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
                             total_out_toks += sum(
                                 len(stp.token_ids) for stp in output.outputs)
@@ -1394,7 +1386,9 @@ class LLM:
                             pbar.postfix = (
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
-                        pbar.update(1)
+                            pbar.update(n)
+                        else:
+                            pbar.update(1)
 
         if use_tqdm:
             pbar.close()

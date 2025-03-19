@@ -4,6 +4,7 @@ import asyncio
 import os
 import queue
 import signal
+import threading
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -88,6 +89,9 @@ class EngineCoreClient(ABC):
     def wake_up(self) -> None:
         raise NotImplementedError
 
+    def is_sleeping(self) -> bool:
+        raise NotImplementedError
+
     def execute_dummy_batch(self) -> None:
         raise NotImplementedError
 
@@ -125,6 +129,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def wake_up_async(self) -> None:
+        raise NotImplementedError
+
+    async def is_sleeping_async(self) -> bool:
         raise NotImplementedError
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
@@ -180,6 +187,9 @@ class InprocClient(EngineCoreClient):
 
     def wake_up(self) -> None:
         self.engine_core.wake_up()
+
+    def is_sleeping(self) -> bool:
+        return self.engine_core.is_sleeping()
 
     def execute_dummy_batch(self) -> None:
         self.engine_core.execute_dummy_batch()
@@ -254,13 +264,20 @@ class MPClient(EngineCoreClient):
         # TODO(rob): rather than killing the main process, we should
         # figure out how to raise an AsyncEngineDeadError and
         # handle at the API server level so we can return a better
-        # error code to the clients calling VLLM.
+        # error code to the clients calling vLLM.
         def sigusr1_handler(signum, frame):
             logger.fatal("Got fatal signal from worker processes, shutting "
                          "down. See stack trace above for root cause issue.")
             kill_process_tree(os.getpid())
 
-        signal.signal(signal.SIGUSR1, sigusr1_handler)
+        if threading.current_thread() == threading.main_thread():
+            signal.signal(signal.SIGUSR1, sigusr1_handler)
+        else:
+            logger.warning("SIGUSR1 handler not installed because we are not "
+                           "running in the main thread. In this case the "
+                           "forked engine process may not be killed when "
+                           "an exception is raised, and you need to handle "
+                           "the engine process shutdown manually.")
 
         # Serialization setup.
         self.encoder = MsgpackEncoder()
@@ -425,6 +442,9 @@ class SyncMPClient(MPClient):
     def wake_up(self) -> None:
         self._call_utility("wake_up")
 
+    def is_sleeping(self) -> bool:
+        return self._call_utility("is_sleeping")
+
     def execute_dummy_batch(self) -> None:
         self._call_utility("execute_dummy_batch")
 
@@ -514,6 +534,9 @@ class AsyncMPClient(MPClient):
 
     async def wake_up_async(self) -> None:
         await self._call_utility_async("wake_up")
+
+    async def is_sleeping_async(self) -> bool:
+        return await self._call_utility_async("is_sleeping")
 
     async def execute_dummy_batch_async(self) -> None:
         await self._call_utility_async("execute_dummy_batch")

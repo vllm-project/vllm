@@ -25,22 +25,28 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, cdiv, is_pin_memory_available)
+                        LayerBlockType, LazyLoader, cdiv,
+                        is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
+                             ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 if TYPE_CHECKING:
+    import xgrammar as xgr
+
     from vllm.v1.core.scheduler_output import SchedulerOutput
+else:
+    xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
 
@@ -76,8 +82,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
-        self.is_multimodal_model = model_config.is_multimodal_model
+        # NOTE(woosuk): sliding_window is None for models with interleaved
+        # attention. Use interleaved_sliding_window instead.
         self.sliding_window = model_config.get_sliding_window()
+        self.interleaved_sliding_window = getattr(
+            model_config.hf_text_config, "interleaved_sliding_window", None)
+        self.window_size = (self.sliding_window
+                            or self.interleaved_sliding_window)
+
+        self.is_multimodal_model = model_config.is_multimodal_model
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
@@ -118,14 +131,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-
-        if self.is_multimodal_model:
-            # NOTE: Initialized client is only used for processing dummy
-            # multimodal data into multimodal kwargs for GPU memory profiling.
-            # Only applicable to multimodal models with legacy input mapper.
-            self.mm_input_mapper_profiling = MMInputCacheClient(
-                self.model_config)
-            self.mm_input_mapper_profiling.use_cache = False
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
@@ -668,7 +673,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_query_heads=self.num_query_heads,
             num_kv_heads=self.num_kv_heads,
             use_alibi=False,  # FIXME
-            use_sliding_window=self.sliding_window is not None,
+            use_sliding_window=self.window_size is not None,
             num_sms=self.num_sms,
         )
         return common_prefix_len if use_cascade else 0
@@ -860,6 +865,53 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
+    def apply_grammar_bitmask(
+        self,
+        scheduler_output: "SchedulerOutput",
+        logits: torch.Tensor,
+    ):
+        # Serialization of np.ndarray is much more efficient than a tensor,
+        # so we receive it in that format.
+        grammar_bitmask = scheduler_output.grammar_bitmask
+        if grammar_bitmask is None:
+            return
+
+        # We receive the structured output bitmask from the scheduler, but the
+        # indices of the requests in the batch may not match the indices of
+        # the bitmask since the scheduler doesn't know how the gpu runner is
+        # ordering the requests in the batch. We need to sort the bitmask to
+        # match the order of the requests used here.
+        struct_out_req_batch_indices: dict[str, int] = {}
+        indices_match = True
+        for req_id in self.input_batch.req_ids:
+            mask_index = scheduler_output.structured_output_request_ids.get(
+                req_id)
+            if mask_index is None:
+                # not a structured output request
+                continue
+            batch_index = self.input_batch.req_id_to_index[req_id]
+            if batch_index != mask_index:
+                indices_match = False
+            struct_out_req_batch_indices[req_id] = batch_index
+
+        if not indices_match:
+            # Sort the bitmask to match the order of the requests
+            sorted_bitmask = np.zeros_like(grammar_bitmask)
+            for req_id, batch_index in struct_out_req_batch_indices.items():
+                orig_index = scheduler_output.structured_output_request_ids[
+                    req_id]
+                sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
+            grammar_bitmask = sorted_bitmask
+
+        grammar_bitmask = torch.from_numpy(grammar_bitmask)
+
+        # TODO: compatibility with spec decode
+        xgr.apply_token_bitmask_inplace(
+            logits,
+            grammar_bitmask.to(self.device, non_blocking=True),
+            indices=list(struct_out_req_batch_indices.values()),
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -867,6 +919,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
         self._update_states(scheduler_output)
+        if not scheduler_output.total_num_scheduled_tokens:
+            # Return empty ModelRunnerOuptut if there's no work to do.
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -945,6 +1000,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
+        # Apply structured output bitmasks if present
+        if scheduler_output.grammar_bitmask is not None:
+            self.apply_grammar_bitmask(scheduler_output, logits)
+
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         if not self.use_spec_decode:
@@ -953,31 +1012,39 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
             )
         else:
-            target_probs = self.model.sampler.compute_probs(
-                logits, sampling_metadata)
-            scheduled_request_ids = scheduler_output.num_scheduled_tokens.keys(
-            )
             draft_token_ids = [
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
-                for req_id in scheduled_request_ids
+                for req_id in self.input_batch.req_ids
             ]
-            sampler_output = self.rejection_sampler(draft_token_ids,
-                                                    target_probs,
-                                                    sampling_metadata)
+            sample_lens = [len(tokens) + 1 for tokens in draft_token_ids]
+            recover_logits_idx = np.cumsum(sample_lens) - 1
+            target_probs = self.rejection_sampler.compute_probs(
+                logits, sampling_metadata, sample_lens)
+            sampler_output = self.model.sample(
+                logits=logits[recover_logits_idx, :],
+                sampling_metadata=sampling_metadata,
+            )
+            bonus_token_ids = sampler_output.sampled_token_ids
+            output_token_ids = self.rejection_sampler(
+                draft_token_ids,
+                None,  # draft_probs
+                bonus_token_ids,
+                target_probs,
+                sampling_metadata)
+            sampler_output.sampled_token_ids = output_token_ids
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
-        for i, req_id in enumerate(self.input_batch.req_ids):
+        for i, generator in self.input_batch.generators.items():
+            req_id = self.input_batch.req_ids[i]
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
             if seq_len < req_state.num_tokens:
-                # Ignore the sampled token.
+                # Ignore the sampled token for partial prefills.
                 # Rewind the generator state as if the token was not sampled.
-                generator = self.input_batch.generators.get(i)
-                if generator is not None:
-                    # This relies on cuda-specific torch-internal impl details
-                    generator.set_offset(generator.get_offset() - 4)
+                # This relies on cuda-specific torch-internal impl details
+                generator.set_offset(generator.get_offset() - 4)
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
@@ -1011,9 +1078,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids = None
         else:
             spec_token_ids = self.generate_draft_token_ids(
-                valid_sampled_token_ids)
+                valid_sampled_token_ids, sampling_metadata)
 
-        model_runner_output = ModelRunnerOutput(
+        return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
@@ -1021,11 +1088,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
-        return model_runner_output
 
     def generate_draft_token_ids(
         self,
         sampled_token_ids: list[list[int]],
+        sampling_metadata: SamplingMetadata,
     ) -> list[list[int]]:
         # TODO(woosuk): Optimize.
         draft_token_ids: list[list[int]] = []
@@ -1033,6 +1100,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
                 # Skip speculative decoding.
+                draft_token_ids.append([])
+                continue
+
+            # Skip requests that require top-p, top-k, etc.
+            req_id = self.input_batch.req_ids[i]
+            if not is_spec_decode_supported(req_id, self.input_batch):
                 draft_token_ids.append([])
                 continue
 
@@ -1143,41 +1216,107 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         num_tokens: int,
     ) -> torch.Tensor:
-        model = self.model
-        if self.is_multimodal_model:
-            input_ids = None
-            inputs_embeds = self.inputs_embeds[:num_tokens]
-        else:
-            input_ids = self.input_ids[:num_tokens]
-            inputs_embeds = None
-        if self.uses_mrope:
-            positions = self.mrope_positions[:, :num_tokens]
-        else:
-            positions = self.positions[:num_tokens]
 
-        if get_pp_group().is_first_rank:
-            intermediate_tensors = None
-        else:
-            if self.intermediate_tensors is None:
-                self.intermediate_tensors = (
-                    self.model.make_empty_intermediate_tensors(
-                        batch_size=self.max_num_tokens,
-                        dtype=self.model_config.dtype,
-                        device=self.device))
-            intermediate_tensors = IntermediateTensors({
-                k: v[:num_tokens]
-                for k, v in self.intermediate_tensors.items()
-            })
+        # Set num_scheduled_tokens based on num_tokens and max_num_seqs
+        # for dummy run with LoRA so that the num_reqs collectively
+        # has num_tokens in total.
+        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
+        max_num_reqs = self.scheduler_config.max_num_seqs
+        num_reqs = max_num_reqs if num_tokens >= max_num_reqs else num_tokens
+        min_tokens_per_req = num_tokens // num_reqs
+        num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
+        num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+        assert sum(num_scheduled_tokens_list) == num_tokens
+        assert len(num_scheduled_tokens_list) == num_reqs
+        num_scheduled_tokens = np.array(num_scheduled_tokens_list,
+                                        dtype=np.int32)
 
-        with set_forward_context(None, self.vllm_config,
-                                 num_tokens=num_tokens):
-            hidden_states = model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-            )
-        return hidden_states
+        with self.maybe_dummy_run_with_lora(self.lora_config,
+                                            num_scheduled_tokens):
+            model = self.model
+            if self.is_multimodal_model:
+                input_ids = None
+                inputs_embeds = self.inputs_embeds[:num_tokens]
+            else:
+                input_ids = self.input_ids[:num_tokens]
+                inputs_embeds = None
+            if self.uses_mrope:
+                positions = self.mrope_positions[:, :num_tokens]
+            else:
+                positions = self.positions[:num_tokens]
+
+            if get_pp_group().is_first_rank:
+                intermediate_tensors = None
+            else:
+                if self.intermediate_tensors is None:
+                    self.intermediate_tensors = (
+                        self.model.make_empty_intermediate_tensors(
+                            batch_size=self.max_num_tokens,
+                            dtype=self.model_config.dtype,
+                            device=self.device))
+                intermediate_tensors = IntermediateTensors({
+                    k: v[:num_tokens]
+                    for k, v in self.intermediate_tensors.items()
+                })
+
+            with set_forward_context(None,
+                                     self.vllm_config,
+                                     num_tokens=num_tokens):
+                hidden_states = model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                )
+
+        logit_indices = np.cumsum(num_scheduled_tokens) - 1
+        return hidden_states[logit_indices]
+
+    @torch.inference_mode()
+    def _dummy_sampler_run(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+
+        logits = self.model.compute_logits(hidden_states, None)
+        num_reqs = logits.size(0)
+
+        dummy_tensors = lambda v: torch.full(
+            (num_reqs, ), v, device=self.device)
+
+        dummy_metadata = SamplingMetadata(
+            temperature=dummy_tensors(0.5),
+            all_greedy=False,
+            all_random=False,
+            top_p=dummy_tensors(0.9),
+            top_k=dummy_tensors(logits.size(1) - 1),
+            min_p=None,
+            generators={},
+            max_num_logprobs=None,
+            no_penalties=True,
+            prompt_token_ids=None,
+            frequency_penalties=dummy_tensors(0.1),
+            presence_penalties=dummy_tensors(0.1),
+            repetition_penalties=dummy_tensors(0.1),
+            output_token_ids=[[] for _ in range(num_reqs)],
+            min_tokens={},
+            logit_bias=[None for _ in range(num_reqs)],
+            allowed_token_ids_mask=None,
+            bad_words_token_ids={},
+        )
+        try:
+            sampler_output = self.model.sample(
+                logits=logits, sampling_metadata=dummy_metadata)
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                raise RuntimeError(
+                    "CUDA out of memory occurred when warming up sampler with "
+                    f"{num_reqs} dummy requests. Please try lowering "
+                    "`max_num_seqs` or `gpu_memory_utilization` when "
+                    "initializing the engine.") from e
+            else:
+                raise e
+        return sampler_output
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
@@ -1228,32 +1367,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_registry=self.mm_registry,
             )
             dummy_mm_data = dummy_request_data.multi_modal_data
+            if not isinstance(dummy_mm_data, MultiModalKwargs):
+                # TODO: Delete this check once input mapper is fully removed.
+                raise RuntimeError(
+                    "Legacy input mapper is not supported in V1")
 
-            # Dummy data definition in V0 may contain multiple multimodal items
+            # Dummy data definition may contain multiple multimodal items
             # (e.g, multiple images) for a single request, therefore here we
             # always replicate first item by max_num_mm_items times since in V1
             # they are scheduled to be processed separately.
-
-            # Case when models have a merged processor, their dummy data is
-            # already batched `MultiModalKwargs`, therefore we take the first
-            # `MultiModalKwargsItem` from the desired modality to profile on.
-            if isinstance(dummy_mm_data, MultiModalKwargs):
-                dummy_mm_item = dummy_mm_data.get_item(
-                    modality=dummy_data_modality, item_index=0)
-                dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
-
-            # Case when models have dummy data explicitly defined as
-            # `MultiModalDataDict`, so they need to be processed through input
-            # mapper.
-            # TODO (ywang96): deprecate this path once merged processor is
-            # supported on all models.
-            else:
-                mm_kwargs_list = self.mm_input_mapper_profiling.process_inputs(
-                    mm_data=dummy_mm_data,
-                    mm_hashes=None,
-                    mm_processor_kwargs=None,
-                    precomputed_mm_inputs=None)
-                dummy_mm_kwargs = mm_kwargs_list[0]
+            dummy_mm_item = dummy_mm_data.get_item(
+                modality=dummy_data_modality, item_index=0)
+            dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
 
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items)
@@ -1273,59 +1398,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Cache the dummy encoder outputs.
             self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
-        # For profile, have maximum num_reqs and that collectively have
-        # maximum num_tokens.
-        num_reqs = self.scheduler_config.max_num_seqs
-        num_tokens = self.max_num_tokens
-        min_tokens_per_req = num_tokens // num_reqs
-
-        num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
-        num_scheduled_tokens_list[-1] += num_tokens % num_reqs
-        assert sum(num_scheduled_tokens_list) == num_tokens
-        assert len(num_scheduled_tokens_list) == num_reqs
-
-        num_scheduled_tokens = np.array(num_scheduled_tokens_list,
-                                        dtype=np.int32)
-        logit_indices = np.cumsum(num_scheduled_tokens) - 1
-
-        with self.maybe_profile_with_lora(self.lora_config,
-                                          num_scheduled_tokens):
-            # Trigger compilation for general shape.
-            hidden_states = self._dummy_run(self.max_num_tokens)
-            if get_pp_group().is_last_rank:
-                hidden_states = hidden_states[logit_indices]
-                logits = self.model.compute_logits(hidden_states, None)
-                dummy_tensors = lambda v: torch.full(
-                    (num_reqs, ), v, device=self.device)
-                dummy_metadata = SamplingMetadata(
-                    temperature=dummy_tensors(0.5),
-                    all_greedy=False,
-                    all_random=False,
-                    top_p=dummy_tensors(0.9),
-                    top_k=dummy_tensors(logits.size(1) - 1),
-                    min_p=None,
-                    generators={},
-                    max_num_logprobs=None,
-                    no_penalties=True,
-                    prompt_token_ids=torch.ones_like(logits,
-                                                     dtype=torch.int64),
-                    frequency_penalties=dummy_tensors(0.1),
-                    presence_penalties=dummy_tensors(0.1),
-                    repetition_penalties=dummy_tensors(0.1),
-                    output_token_ids=[[] for _ in range(num_reqs)],
-                    min_tokens={},
-                    logit_bias=[None for _ in range(num_reqs)],
-                    allowed_token_ids_mask=None,
-                )
-                sampler_output = self.model.sample(
-                    logits=logits, sampling_metadata=dummy_metadata)
-            else:
-                logits = None
-                sampler_output = None
-                dummy_metadata = None
-            torch.cuda.synchronize()
-            del hidden_states, logits, sampler_output, dummy_metadata
-            self.encoder_cache.clear()
+        hidden_states = self._dummy_run(self.max_num_tokens)
+        if get_pp_group().is_last_rank:
+            sampler_output = self._dummy_sampler_run(hidden_states)
+        else:
+            sampler_output = None
+        torch.cuda.synchronize()
+        del hidden_states, sampler_output
+        self.encoder_cache.clear()
         gc.collect()
 
     def capture_model(self) -> None:
@@ -1401,13 +1481,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
+        use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: KVCacheSpec = {}
         for layer_name, attn_module in forward_ctx.items():
             if isinstance(attn_module, FusedMoE):
                 continue
 
             # TODO: Support other attention modules, e.g., sliding window,
-            # cross-attention, MLA.
+            # cross-attention
             assert isinstance(attn_module, Attention)
             if attn_module.attn_type == AttentionType.DECODER:
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -1415,7 +1496,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=attn_module.dtype,
-                )
+                    use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.

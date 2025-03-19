@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import concurrent
@@ -8,6 +10,7 @@ import datetime
 import enum
 import gc
 import getpass
+import importlib
 import importlib.metadata
 import importlib.util
 import inspect
@@ -23,6 +26,7 @@ import tempfile
 import threading
 import time
 import traceback
+import types
 import uuid
 import warnings
 import weakref
@@ -644,7 +648,7 @@ def create_kv_caches_with_random_flash(
     head_size: int,
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: int = 0,
+    seed: Optional[int] = None,
     device: Optional[str] = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
@@ -681,7 +685,7 @@ def create_kv_caches_with_random(
     head_size: int,
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: int = 0,
+    seed: Optional[int] = None,
     device: Optional[str] = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
 
@@ -823,12 +827,6 @@ def get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()
 
 
-def align_to_256bytes(extent: int, dtype: torch.dtype) -> int:
-    dtype_size = get_dtype_size(dtype)
-    eles_per_256bytes = 256 // dtype_size
-    return round_up(extent, eles_per_256bytes)
-
-
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -847,23 +845,7 @@ def is_list_of(
     assert_never(check)
 
 
-JSONTree = Union[dict[str, "JSONTree[T]"], list["JSONTree[T]"],
-                 tuple["JSONTree[T]", ...], T]
-"""A nested JSON structure where the leaves need not be JSON-serializable."""
-
-
-def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
-    if isinstance(value, dict):
-        return {k: json_map_leaves(func, v) for k, v in value.items()}
-    elif isinstance(value, list):
-        return [json_map_leaves(func, v) for v in value]
-    elif isinstance(value, tuple):
-        return tuple(json_map_leaves(func, v) for v in value)
-    else:
-        return func(value)
-
-
-def flatten_2d_lists(lists: list[list[T]]) -> list[T]:
+def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
     """Flatten a list of lists to a single list."""
     return [item for sublist in lists for item in sublist]
 
@@ -982,7 +964,7 @@ def current_stream() -> torch.cuda.Stream:
     return _current_stream
 
 
-def enable_trace_function_call_for_thread(vllm_config: "VllmConfig") -> None:
+def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
     """Set up function tracing for the current thread,
     if enabled via the VLLM_TRACE_FUNCTION environment variable
     """
@@ -1484,11 +1466,11 @@ def get_allowed_kwarg_only_overrides(
         if requires_kw_only:
             logger.warning(
                 "The following intended overrides are not keyword-only args "
-                "and and will be dropped: %s", dropped_keys)
+                "and will be dropped: %s", dropped_keys)
         else:
             logger.warning(
                 "The following intended overrides are not keyword args "
-                "and and will be dropped: %s", dropped_keys)
+                "and will be dropped: %s", dropped_keys)
 
     return filtered_overrides
 
@@ -1977,7 +1959,7 @@ class MemorySnapshot:
         self.non_torch_memory = self.cuda_memory - self.torch_memory
         self.timestamp = time.time()
 
-    def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
+    def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
             cuda_memory=self.cuda_memory - other.cuda_memory,
@@ -2306,3 +2288,70 @@ def warn_for_unimplemented_methods(cls: type[T]) -> type[T]:
 
     type.__setattr__(cls, '__init__', wrapped_init)
     return cls
+
+
+class LazyLoader(types.ModuleType):
+    """
+    LazyLoader module borrowed from Tensorflow
+    https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
+    with a addition of "module caching".
+
+    Lazily import a module, mainly to avoid pulling in large dependencies.
+    Modules such as `xgrammar` might do additional side effects, so we
+    only want to use this when it is needed, delaying all eager effects
+    """
+
+    def __init__(
+        self,
+        local_name: str,
+        parent_module_globals: dict[str, Any],
+        name: str,
+    ):
+        self._local_name = local_name
+        self._parent_module_globals = parent_module_globals
+        self._module: types.ModuleType | None = None
+
+        super().__init__(str(name))
+
+    def _load(self) -> types.ModuleType:
+        # Import the target module and insert it into the parent's namespace
+        try:
+            module = importlib.import_module(self.__name__)
+            self._parent_module_globals[self._local_name] = module
+            # The additional add to sys.modules
+            # ensures library is actually loaded.
+            sys.modules[self._local_name] = module
+        except ModuleNotFoundError as err:
+            raise err from None
+
+        # Update this object's dict so that if someone keeps a
+        # reference to the LazyLoader, lookups are efficient
+        # (__getattr__ is only called on lookups that fail).
+        self.__dict__.update(module.__dict__)
+        return module
+
+    def __getattr__(self, item: Any) -> Any:
+        if self._module is None:
+            self._module = self._load()
+        return getattr(self._module, item)
+
+    def __dir__(self) -> list[str]:
+        if self._module is None:
+            self._module = self._load()
+        return dir(self._module)
+
+
+def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
+    """
+    Helper function to swap values for two keys
+    """
+    v1 = obj.get(key1)
+    v2 = obj.get(key2)
+    if v1 is not None:
+        obj[key2] = v1
+    else:
+        obj.pop(key2, None)
+    if v2 is not None:
+        obj[key1] = v2
+    else:
+        obj.pop(key1, None)
