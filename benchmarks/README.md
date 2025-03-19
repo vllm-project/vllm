@@ -42,7 +42,7 @@ become available.
     </tr>
     <tr>
       <td><strong>HuggingFace</strong></td>
-      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">🟡</td>
       <td style="text-align: center;">🟡</td>
       <td>Specify your dataset path on HuggingFace</td>
     </tr>
@@ -137,6 +137,32 @@ python3 vllm/benchmarks/benchmark_serving.py \
   --dataset-path "${DATASET_PATH}" \
   --hf-split "${DATASET_SPLIT}" \
   --num-prompts "${NUM_PROMPTS}"
+```
+
+### Huggingface dataset with `lmms-lab/LLaVA-OneVision-Data``
+
+```bash
+# need a model with vision capability here
+vllm serve llava-hf/llava-v1.6-mistral-7b-hf --disable-log-requests
+```
+
+```bash
+MODEL_NAME="llava-hf/llava-v1.6-mistral-7b-hf"
+NUM_PROMPTS=10
+BACKEND="openai-chat"
+DATASET_NAME="hf"
+DATASET_PATH="lmms-lab/LLaVA-OneVision-Data"
+DATASET_SPLIT='train'
+DATASET_SUBSET='chart2text(cauldron)'
+python3 vllm/benchmarks/benchmark_serving.py \
+  --backend "${BACKEND}" \
+  --model "${MODEL_NAME}" \
+  --endpoint "/v1/chat/completions" \
+  --dataset-name "${DATASET_NAME}" \
+  --dataset-path "${DATASET_PATH}" \
+  --hf-split "${DATASET_SPLIT}" \
+  --num-prompts "${NUM_PROMPTS}" \
+  --hf-subset "${DATASET_SUBSET}"
 ```
 
 ---
