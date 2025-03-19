@@ -82,8 +82,7 @@ async def generate(engine: AsyncLLM,
 @pytest.mark.asyncio
 async def test_load(monkeypatch: pytest.MonkeyPatch,
                     output_kind: RequestOutputKind,
-                    engine_args: AsyncEngineArgs,
-                    prompt: PromptType):
+                    engine_args: AsyncEngineArgs, prompt: PromptType):
     # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
     # so that in the future when we switch, we don't have to change all the
     # tests.
@@ -128,8 +127,7 @@ async def test_load(monkeypatch: pytest.MonkeyPatch,
 @pytest.mark.asyncio
 async def test_abort(monkeypatch: pytest.MonkeyPatch,
                      output_kind: RequestOutputKind,
-                     engine_args: AsyncEngineArgs,
-                     prompt: PromptType):
+                     engine_args: AsyncEngineArgs, prompt: PromptType):
 
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
@@ -194,10 +192,8 @@ async def test_abort(monkeypatch: pytest.MonkeyPatch,
                          [(TEXT_ENGINE_ARGS, TEXT_PROMPT),
                           (VISION_ENGINE_ARGS, VISION_PROMPT)])
 @pytest.mark.asyncio
-async def test_finished_flag(monkeypatch: pytest.MonkeyPatch,
-                             n: int,
-                             engine_args: AsyncEngineArgs,
-                             prompt: PromptType):
+async def test_finished_flag(monkeypatch: pytest.MonkeyPatch, n: int,
+                             engine_args: AsyncEngineArgs, prompt: PromptType):
 
     with monkeypatch.context() as m, ExitStack() as after:
         m.setenv("VLLM_USE_V1", "1")
