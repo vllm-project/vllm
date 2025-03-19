@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from https://github.com/sgl-project/sglang/blob/main/benchmark/kernels/quantization/tuning_block_wise_kernel.py. Thank you @HandH1998
+# Adapted from sglang quantization/tuning_block_wise_kernel.py
 
 import argparse
 import json
@@ -7,18 +7,18 @@ import multiprocessing as mp
 import os
 import time
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any
 
 import torch
+import tqdm
 import triton
-from tqdm import tqdm
-
-mp.set_start_method("spawn", force=True)
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
+
+mp.set_start_method("spawn", force=True)
 
 assert current_platform.is_cuda(
 ), "Only support tune w8a8 block fp8 kernel on CUDA device."
@@ -36,11 +36,12 @@ def w8a8_block_matmul(
     B: torch.Tensor,
     As: torch.Tensor,
     Bs: torch.Tensor,
-    block_size: List[int],
-    config: Dict[str, Any],
+    block_size: list[int],
+    config: dict[str, Any],
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    """This function performs matrix multiplication with block-wise quantization.
+    """This function performs matrix multiplication with 
+    block-wise quantization.
 
     It takes two input tensors `A` and `B` with scales `As` and `Bs`.
     The output is returned in the specified `output_dtype`.
@@ -50,7 +51,8 @@ def w8a8_block_matmul(
         B: The input tensor, e.g., weight.
         As: The per-token-group quantization scale for `A`.
         Bs: The per-block quantization scale for `B`.
-        block_size: The block size for per-block quantization. It should be 2-dim, e.g., [128, 128].
+        block_size: The block size for per-block quantization. 
+                    It should be 2-dim, e.g., [128, 128].
         output_dytpe: The dtype of the returned tensor.
 
     Returns:
@@ -129,7 +131,8 @@ def get_configs_compute_bound():
 
 
 def get_weight_shapes(tp_size):
-    # NOTE(HandH1998): The weight shapes only works for DeepSeek-V3. Modify them, if you tune for another different model.
+    # NOTE(HandH1998): The weight shapes only works for DeepSeek-V3.
+    # Modify them, if you tune for another different model.
     # cannot TP
     total = [
         (512 + 64, 7168),
@@ -183,7 +186,7 @@ def benchmark_config(A,
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
-    latencies: List[float] = []
+    latencies: list[float] = []
     for i in range(num_iters):
         torch.cuda.synchronize()
         start_event.record()
@@ -262,7 +265,9 @@ def save_configs(
 ) -> None:
     os.makedirs(save_path, exist_ok=True)
     device_name = current_platform.get_device_name().replace(" ", "_")
-    json_file_name = f"N={N},K={K},device_name={device_name},dtype={input_type}_w8a8,block_shape=[{block_n},{block_k}].json"
+    json_file_name = (
+        f"N={N},K={K},device_name={device_name},dtype={input_type}_w8a8,"
+        f"block_shape=[{block_n},{block_k}].json")
 
     config_file_path = os.path.join(save_path, json_file_name)
     print(f"Writing best config to {config_file_path}...")
@@ -270,11 +275,6 @@ def save_configs(
     with open(config_file_path, "w") as f:
         json.dump(configs, f, indent=4)
         f.write("\n")
-
-
-def get_available_gpu_count():
-    """Get the number of available GPUs."""
-    return torch.cuda.device_count()
 
 
 def tune_on_gpu(args_dict):
@@ -396,7 +396,7 @@ if __name__ == "__main__":
         description="""
 Tune triton w8a8 block fp8 for DeepSeek-V3/DeepSeek-R1:
     python3 benchmark_w8a8_block_fp8.py --tp-size 8 --input-type fp8
-Then copy then configs to vllm/model_executor/layers/quantization/utils/configs
+Then copy to model_executor/layers/quantization/utils/configs
         """,
         formatter_class=argparse.RawTextHelpFormatter)
 
