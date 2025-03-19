@@ -1479,6 +1479,18 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
 
+        dummy_lora_id = None
+        dummy_lora_request = None
+        if self.lora_config:
+            assert self.lora_manager is not None
+            dummy_lora_id = 1
+            dummy_lora_request = LoRARequest(
+                lora_name=f"dummy_{dummy_lora_id}",
+                lora_int_id=dummy_lora_id,
+                lora_path='/not/a/real/path')
+            self.lora_manager.add_dummy_lora(dummy_lora_request,
+                                             LORA_WARMUP_RANK)
+
         with self.attn_state.graph_capture(max_batch_size), graph_capture(
                 self.device) as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
@@ -1503,10 +1515,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     attn_metadata.enable_kv_scales_calculation = False
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
-                            **dict(index_mapping=[0] * batch_size,
-                                   prompt_mapping=[0] * batch_size,
+                            **dict(index_mapping=[dummy_lora_id] * batch_size,
+                                   prompt_mapping=[dummy_lora_id] * batch_size,
                                    is_prefill=False))
-                        self.set_active_loras(set(), lora_mapping)
+                        self.set_active_loras(set([dummy_lora_request]),
+                                              lora_mapping)
 
                     if self.prompt_adapter_config:
                         prompt_adapter_mapping = PromptAdapterMapping(
@@ -1561,6 +1574,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
                         graph_runner)
+
+        if self.lora_config:
+            # Remove dummy loras.
+            assert self.lora_manager is not None
+            self.remove_all_loras()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
