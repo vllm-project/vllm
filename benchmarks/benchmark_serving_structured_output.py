@@ -747,7 +747,7 @@ def main(args: argparse.Namespace):
     else:
         args.structure_type = 'guided_json'
 
-    if not args.structured_output:
+    if args.no_structured_output:
         args.structured_output_ratio = 0
     if args.save_results:
         result_file_name = f'{args.structured_output_ratio}guided'
@@ -991,9 +991,9 @@ if __name__ == "__main__":
         "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
         "and the blog: https://hao-ai-lab.github.io/blogs/distserve")
 
-    parser.add_argument("--structured-output",
-                        action=argparse.BooleanOptionalAction,
-                        default=True,
+    parser.add_argument("--no-structured-output",
+                        action='store_true',
+                        default=False,
                         help="Whether to disable JSON decoding or not.")
     parser.add_argument("--structured-output-ratio",
                         type=float,
