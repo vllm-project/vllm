@@ -34,7 +34,7 @@ void moe_permute(
   auto n_hidden = input.sizes()[1];
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const long sorter_size =
-      CubKeyValueSorter::getWorkspaceSize(n_token, n_expert);
+      CubKeyValueSorter::getWorkspaceSize(n_token * topk, n_expert);
   auto sort_workspace = torch::empty(
       {sorter_size},
       torch::dtype(torch::kInt8).device(torch::kCUDA).requires_grad(false));
