@@ -548,7 +548,7 @@ SP_TEST_MODELS = [
         if model_id in SP_TEST_MODELS
     ],
 )
-@fork_new_process_for_each_test
+@create_new_process_for_each_test
 def test_tp_sp_generation(
     model_id: str,
     parallel_setup: ParallelSetup,

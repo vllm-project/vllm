@@ -49,13 +49,9 @@ def all_reduce_test_worker(
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def reduce_scatter_test_worker(
-    monkeypatch: pytest.MonkeyPatch,
-    tp_size: int, 
-    pp_size: int, 
-    rank: int,
-    distributed_init_port: str
-):
+def reduce_scatter_test_worker(monkeypatch: pytest.MonkeyPatch, tp_size: int,
+                               pp_size: int, rank: int,
+                               distributed_init_port: str):
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
