@@ -1318,8 +1318,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         assert hidden_states.shape[1] // 2 == w1.shape[
             2], "Hidden size mismatch"
     else:
-        assert hidden_states.shape[
-            1] == w1.shape[2], "Hidden size mismatch"
+        assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
