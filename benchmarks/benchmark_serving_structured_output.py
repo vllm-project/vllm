@@ -851,7 +851,7 @@ if __name__ == "__main__":
                             'json', 'json-unique', 'grammar', 'regex',
                             'choice', 'xgrammar_bench'
                         ])
-    parser.add_argument("--json-schema-path",
+    parser.add_argument("--json_schema_path",
                         type=str,
                         default=None,
                         help="Path to json schema.")
