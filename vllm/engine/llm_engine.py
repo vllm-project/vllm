@@ -955,7 +955,7 @@ class LLMEngine:
         """
         return self.scheduler[virtual_engine].has_unfinished_seqs()
 
-    def reset_prefix_cache(self, device: Device) -> bool:
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         """Reset prefix cache for all devices."""
 
         success = True

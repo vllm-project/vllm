@@ -13,7 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-from vllm.utils import deprecate_kwargs, Device
+from vllm.utils import Device, deprecate_kwargs
 
 VLLM_RPC_SUCCESS_STR = "SUCCESS"
 

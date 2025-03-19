@@ -341,7 +341,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         assert device in self._allocators
         return self._allocators[device].get_prefix_cache_hit_rate()
 
-    def reset_prefix_cache(self, device: Device) -> bool:
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         """Reset prefix cache for specified or all devices."""
         if device:
             return self._allocators[device].reset_prefix_cache()

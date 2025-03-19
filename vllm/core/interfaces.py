@@ -2,7 +2,7 @@
 
 import enum
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple
 
@@ -125,7 +125,7 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def reset_prefix_cache(self, device: Device) -> bool:
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         """Reset prefix cache for specified or all devices."""
         pass
 
