@@ -8,10 +8,10 @@ https://arxiv.org/abs/2310.18547
 
 from typing import List
 
+import torch
 import triton
 import triton.language as tl
 
-import torch
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr
 from vllm.utils import direct_register_custom_op
