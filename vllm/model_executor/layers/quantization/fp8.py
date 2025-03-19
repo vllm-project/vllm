@@ -13,6 +13,9 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    expand_weights, is_rocm_aiter_block_scaled_moe_enabled,
+    is_rocm_aiter_moe_enabled, shuffle_weights)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -529,11 +532,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        is_rocm_aiter_moe_enabled = current_platform.is_rocm() and \
-            envs.VLLM_ROCM_USE_AITER_MOE
-        is_rocm_aiter_block_scaled_moe_enabled = is_rocm_aiter_moe_enabled and \
-            envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
-
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"
@@ -559,15 +557,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(w2_weight_scale_inv,
                                                   requires_grad=False)
-            if is_rocm_aiter_block_scaled_moe_enabled:
+            if is_rocm_aiter_block_scaled_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
-                from aiter.ops.shuffle import shuffle_weight
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight.data, layer.w2_weight.data)
 
-                layer.w13_weight = torch.nn.Parameter(shuffle_weight(
-                    layer.w13_weight.data),
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
-                layer.w2_weight = torch.nn.Parameter(shuffle_weight(
-                    layer.w2_weight.data),
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                      requires_grad=False)
             return
 
@@ -596,24 +593,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                   requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(w2_weight,
                                                  requires_grad=False)
-            if is_rocm_aiter_moe_enabled:
+            if is_rocm_aiter_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
-                from aiter.ops.shuffle import shuffle_weight
-
-                w13_scales = layer.w13_weight_scale.data.unsqueeze(
-                    -1).unsqueeze(-1).expand(
-                        (-1, layer.w13_weight.shape[1], -1))
-                w2_scales = layer.w2_weight_scale.data.unsqueeze(-1).unsqueeze(
-                    -1).expand((-1, layer.w2_weight.shape[1], -1))
-                layer.w2_weight_scale = torch.nn.Parameter(
-                    w2_scales.contiguous(), requires_grad=False)
+                w13_scales, w2_scales = expand_weights(
+                    layer.w13_weight_scale.data,
+                    layer.w2_weight_scale.data,
+                    expansion_dims=[
+                        layer.w13_weight.shape[1], layer.w2_weight.shape[1]
+                    ])
                 layer.w13_weight_scale = torch.nn.Parameter(
                     w13_scales.contiguous(), requires_grad=False)
-                layer.w13_weight = torch.nn.Parameter(shuffle_weight(
-                    layer.w13_weight),
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    w2_scales.contiguous(), requires_grad=False)
+
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight, layer.w2_weight)
+
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
-                layer.w2_weight = torch.nn.Parameter(shuffle_weight(
-                    layer.w2_weight),
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                      requires_grad=False)
             return
 
@@ -682,21 +680,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                             dq_weight, max_w13_scales[expert_id])
                     start += shard_size
 
-            if is_rocm_aiter_moe_enabled:
+            if is_rocm_aiter_moe_enabled():
                 # reshaping weights is required for aiter moe kernel.
-                from aiter.ops.shuffle import shuffle_weight
-
-                max_w13_scales = max_w13_scales.unsqueeze(-1).unsqueeze(
-                    -1).expand((-1, layer.w13_weight.shape[1], -1))
-                w2_scales = layer.w2_weight_scale.data.unsqueeze(-1).unsqueeze(
-                    -1).expand((-1, layer.w2_weight.shape[1], -1))
+                expansion_dims = [
+                    layer.w13_weight.shape[1], layer.w2_weight.shape[1]
+                ]
+                max_w13_scales, w2_scales = expand_weights(
+                    max_w13_scales,
+                    layer.w2_weight_scale.data,
+                    expansion_dims=expansion_dims)
                 layer.w2_weight_scale = torch.nn.Parameter(
                     w2_scales.contiguous(), requires_grad=False)
-                layer.w13_weight = torch.nn.Parameter(shuffle_weight(
-                    layer.w13_weight),
+
+                shuffled_w13, shuffled_w2 = shuffle_weights(
+                    layer.w13_weight, layer.w2_weight)
+
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13,
                                                       requires_grad=False)
-                layer.w2_weight = torch.nn.Parameter(shuffle_weight(
-                    layer.w2_weight),
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                      requires_grad=False)
 
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,

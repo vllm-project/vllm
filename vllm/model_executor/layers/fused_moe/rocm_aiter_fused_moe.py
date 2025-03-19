@@ -6,6 +6,18 @@ import torch
 import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
+from vllm.platforms import current_platform
+
+
+def is_rocm_aiter_moe_enabled() -> bool:
+    return current_platform.is_rocm() \
+        and envs.VLLM_ROCM_USE_AITER_MOE \
+        and envs.VLLM_ROCM_USE_AITER \
+
+
+def is_rocm_aiter_block_scaled_moe_enabled() -> bool:
+    return is_rocm_aiter_moe_enabled() and \
+        envs.VLLM_ROCM_USE_AITER_FP8_BLOCK_SCALED_MOE
 
 
 def rocm_aiter_fused_experts(
@@ -103,3 +115,41 @@ def rocm_aiter_topk_softmax(topk_weights: torch.Tensor,
     import aiter as rocm_aiter
     rocm_aiter.topk_softmax(topk_weights, topk_indices, token_expert_indices,
                             gating_output, renormalize)
+
+
+def shuffle_weights(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """
+    Applies shuffle_weight function from AITER to each 
+    input tensor and returns them.
+
+    Args:
+    *tensors: Variable number of torch.Tensor objects.
+
+    Returns:
+    A tuple of shuffled tensors.
+    """
+    from aiter.ops.shuffle import shuffle_weight
+
+    return tuple(shuffle_weight(tensor) for tensor in tensors)
+
+
+def expand_weights(*tensors: torch.Tensor,
+                   expansion_dims: list[int]) -> tuple[torch.Tensor, ...]:
+    """
+    Expands the dimensions of input tensors.
+
+    Args:
+        *tensors: A variable number of torch.Tensor objects.
+        expansion_dims: A list of expansion dimensions 
+        corresponding to each tensor.
+
+    Returns:
+        A tuple of tensors with expanded dimensions.
+    """
+
+    assert len(tensors) == len(expansion_dims), \
+    "Number of tensors must match the number of expansion dimensions."
+
+    return tuple(
+        tensor.unsqueeze(-1).unsqueeze(-1).expand((-1, dim, -1))
+        for tensor, dim in zip(tensors, expansion_dims))

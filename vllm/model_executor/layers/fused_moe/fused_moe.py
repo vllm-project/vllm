@@ -17,6 +17,10 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
+from .rocm_aiter_fused_moe import (is_rocm_aiter_moe_enabled,
+                                   rocm_aiter_fused_experts,
+                                   rocm_aiter_topk_softmax)
+
 logger = init_logger(__name__)
 
 
@@ -1044,8 +1048,7 @@ def vllm_topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
 
 
 def dispatch_topk_func() -> Callable[..., torch.Tensor]:
-    if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER_MOE:
-        from .rocm_aiter_fused_moe import rocm_aiter_topk_softmax
+    if is_rocm_aiter_moe_enabled():
         return rocm_aiter_topk_softmax
     return vllm_topk_softmax
 
@@ -1280,8 +1283,7 @@ def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
 
 
 def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
-    if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER_MOE:
-        from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
+    if is_rocm_aiter_moe_enabled():
         return rocm_aiter_fused_experts
     if inplace:
         return torch_vllm_inplace_fused_experts
