@@ -252,7 +252,7 @@ class OpenAIServing:
                 f"{max_tokens} in the completion). "
                 f"Please reduce the length of the messages or completion.")
         elif (self.max_output_len is not None 
-            and max_tokens > self.max_output_len):
+              and max_tokens > self.max_output_len):
             raise ValueError(
                 f"This model's maximum output length is "
                 f"{self.max_output_len} tokens. However, you requested "
