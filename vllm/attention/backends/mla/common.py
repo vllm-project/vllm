@@ -352,6 +352,16 @@ class MLACommonState(AttentionState, Generic[T]):
                                       dtype=torch.long,
                                       device=self.runner.device)
 
+        self._paged_kv_indptr_tensor = torch.zeros(max_batch_size+1,
+                                                    dtype=torch.int32,
+                                                    device=self.runner.device)
+        self._paged_kv_indices_tensor = torch.from_numpy(
+            self.runner.paged_kv_indices).to(device=self.runner.device)
+        self._paged_kv_last_page_lens_tensor = torch.full((max_batch_size, ),
+                                                          self.runner.block_size,
+                                                          dtype=torch.int32,
+                                                          device=self.runner.device)
+
         yield
 
         self._is_graph_capturing = False
@@ -359,6 +369,9 @@ class MLACommonState(AttentionState, Generic[T]):
         del self._graph_seq_lens
         del self._graph_block_tables
         del self._positions
+        del self._paged_kv_indices_tensor
+        del self._paged_kv_indptr_tensor
+        del self._paged_kv_last_page_lens_tensor 
 
     def graph_clone(self, batch_size: int):
         assert self._is_graph_capturing
@@ -389,7 +402,11 @@ class MLACommonState(AttentionState, Generic[T]):
             context_lens_tensor=None,
             block_tables=self._graph_block_tables[:batch_size],
             input_positions=self._positions[:batch_size],
-            head_dim=self.runner.model_config.get_head_size())
+            head_dim=self.runner.model_config.get_head_size(),
+            paged_kv_indptr=self._paged_kv_indptr_tensor[:batch_size+1],
+            paged_kv_indices=self._paged_kv_indices_tensor,
+            paged_kv_last_page_lens=self._paged_kv_last_page_lens_tensor[:batch_size],
+        )
 
         if is_encoder_decoder_model:
             raise NotImplementedError(
@@ -405,6 +422,9 @@ class MLACommonState(AttentionState, Generic[T]):
             "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
             "block_tables": attn_metadata.decode_metadata.block_tables,
             "input_positions": attn_metadata.decode_metadata.input_positions,
+            "paged_kv_indptr": attn_metadata.decode_metadata.paged_kv_indptr,
+            "paged_kv_indices": attn_metadata.decode_metadata.paged_kv_indices,
+            "paged_kv_last_page_lens": attn_metadata.decode_metadata.paged_kv_last_page_lens,
         }
         if is_encoder_decoder_model:
             raise NotImplementedError(
@@ -429,6 +449,14 @@ class MLACommonState(AttentionState, Generic[T]):
         if is_encoder_decoder_model:
             raise NotImplementedError(
                 "TritonMLAState does not support encoder/decoder yet")
+        
+        num_total_blocks = attn_metadata.decode_metadata.paged_kv_indices.shape[0]
+        input_buffers["paged_kv_indptr"].copy_(
+            attn_metadata.decode_metadata.paged_kv_indptr, non_blocking=True)
+        input_buffers["paged_kv_indices"][:num_total_blocks].copy_(
+            attn_metadata.decode_metadata.paged_kv_indices, non_blocking=True)
+        input_buffers["paged_kv_last_page_lens"].copy_(
+            attn_metadata.decode_metadata.paged_kv_last_page_lens, non_blocking=True)
 
     def begin_forward(self, model_input):
         if self.chunked_prefill_enabled or self.enable_prefix_caching:
@@ -540,6 +568,16 @@ class MLACommonMetadata(AttentionMetadata):
     # Set by MLAAttentionState in `begin_forward` so it doesn't get broadcasted
     context_chunk_workspace: Optional[torch.Tensor] = None
 
+    # The following 4 tensors are for current version of AITER MLA
+    block_table_bound: Optional[torch.Tensor] = None
+    # The indptr of the paged kv cache, shape: [batch_size + 1]
+    paged_kv_indptr: Optional[torch.Tensor] = None
+    # The page indices of the paged kv cache
+    paged_kv_indices: Optional[torch.Tensor] = None
+    # The number of entries in the last page of each request in
+    # the paged kv cache, shape: [batch_size]
+    paged_kv_last_page_lens: Optional[torch.Tensor] = None
+
     def __post_init__(self):
         supported_head_sizes = MLACommonBackend.get_supported_head_sizes()
         if self.head_dim is not None and self.head_dim \
@@ -607,6 +645,11 @@ class MLACommonMetadata(AttentionMetadata):
             context_chunk_starts=self.context_chunk_starts,
             context_chunk_seq_tot=self.context_chunk_seq_tot,
             context_chunk_max_seq_lens=self.context_chunk_max_seq_lens,
+            # AITER MLA specific
+            paged_kv_indptr=self.paged_kv_indptr,
+            paged_kv_indices=self.paged_kv_indices,
+            paged_kv_last_page_lens=self.paged_kv_last_page_lens,
+            block_table_bound=self.block_table_bound,
         )
         return self._cached_prefill_metadata
 
@@ -659,7 +702,13 @@ class MLACommonMetadata(AttentionMetadata):
             block_tables=block_tables,
             input_positions=input_positions,
             head_dim=self.head_dim,
-            is_profile_run=self.is_profile_run)
+            is_profile_run=self.is_profile_run,
+            # AITER MLA specific
+            paged_kv_indptr=self.paged_kv_indptr,
+            paged_kv_indices=self.paged_kv_indices,
+            paged_kv_last_page_lens=self.paged_kv_last_page_lens,
+            block_table_bound=self.block_table_bound,
+        )
         return self._cached_decode_metadata
 
     def advance_step(self,
@@ -724,15 +773,22 @@ class MLACommonMetadata(AttentionMetadata):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
 
-        ops.advance_step_flashattn(num_seqs=num_seqs,
-                                   num_queries=num_queries,
-                                   block_size=block_size,
-                                   input_tokens=model_input.input_tokens,
-                                   sampled_token_ids=sampled_token_ids,
-                                   input_positions=model_input.input_positions,
-                                   seq_lens=self.seq_lens_tensor,
-                                   slot_mapping=self.slot_mapping,
-                                   block_tables=self.block_tables)
+        # here we use advance_step_flashinfo to update the paged_kv_* tensors
+        ops.advance_step_flashinfer(
+            num_seqs=num_seqs,
+            num_queries=num_queries,
+            block_size=block_size,
+            input_tokens=model_input.input_tokens,
+            sampled_token_ids=sampled_token_ids,
+            input_positions=model_input.input_positions,
+            seq_lens=self.seq_lens_tensor,
+            slot_mapping=self.slot_mapping,
+            block_tables=self.block_tables,
+            paged_kv_indices=self.paged_kv_indices,
+            paged_kv_indptr=self.paged_kv_indptr,
+            paged_kv_last_page_lens=self.paged_kv_last_page_lens,
+            block_table_bound=self.block_table_bound
+        )
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
@@ -771,6 +827,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
         self.has_prefix_cache_hit = False
+
+        # For current version of AITER MLA
+        self.paged_kv_indices: List[int] = []
+        self.paged_kv_indptr: List[int] = [0]
+        self.paged_kv_last_page_lens: List[int] = []
+        self.total_blocks = 0
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
@@ -826,6 +888,31 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
+            if is_profile_run:
+                 return
+ 
+            # Update paged_kv_* tensors only for non-profile run
+            block_table = block_tables[seq_id]
+            self._update_paged_kv_tensors(block_table, seq_len)
+ 
+    def _update_paged_kv_tensors(self, block_table: List[int], seq_len: int):
+        # Get the number of valid blocks based on sequence length.
+        # If seq_len = 16, block_size = 16,
+        # block_table_bound is 1 with 1 valid block.
+        # If seq_len = 15, block_size = 16,
+        # block_table_bound is 0 + 1 with 1 valid block.
+        self.total_blocks += len(block_table)
+        block_table_bound = seq_len // self.block_size + 1 \
+            if seq_len % self.block_size != 0 \
+            else seq_len // self.block_size
+        self.paged_kv_indices.extend(block_table[:block_table_bound])
+        self.paged_kv_indptr.append(self.paged_kv_indptr[-1] +
+                                    block_table_bound)
+ 
+        last_page_len = seq_len % self.block_size
+        if last_page_len == 0:
+            last_page_len = self.block_size
+        self.paged_kv_last_page_lens.append(last_page_len)
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int,
@@ -890,10 +977,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
         num_seqs = len(seq_lens)
         if use_captured_graph:
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-            self.block_tables.extend([] * cuda_graph_pad_size)
+            self.block_tables.extend([[]] * cuda_graph_pad_size)
             num_decode_tokens = batch_size - self.num_prefill_tokens
             block_tables = self._get_graph_runner_block_tables(
                 num_seqs, self.block_tables)
+            # For current version of AITER MLA
+            last_paged_kv_indptr = self.paged_kv_indptr[-1]
+            self.paged_kv_indptr.extend([last_paged_kv_indptr] *
+                                        cuda_graph_pad_size)
+            self.paged_kv_last_page_lens.extend([0] * cuda_graph_pad_size)
         else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
@@ -971,6 +1063,30 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             assert max(context_chunk_seq_tot) <= \
                 self.context_chunk_workspace_size
 
+        # For current version of AITER MLA
+        if len(self.paged_kv_indptr) > 0:
+            # extend to the maximum number of blocks as returned by the
+            # scheduler
+            self.paged_kv_indices.extend(
+                [0] * (self.total_blocks - len(self.paged_kv_indices)))
+            paged_kv_indices_tensor = torch.tensor(self.paged_kv_indices,
+                                                   device=device,
+                                                   dtype=torch.int)
+            paged_kv_indptr_tensor = torch.tensor(self.paged_kv_indptr,
+                                                  device=device,
+                                                  dtype=torch.int)
+            paged_kv_last_page_lens_tensor = torch.tensor(
+                self.paged_kv_last_page_lens, device=device, dtype=torch.int)
+            block_table_bound_tensor = torch.zeros(len(self.paged_kv_indptr) -
+                                                   1,
+                                                   device=device,
+                                                   dtype=torch.int)
+        else:
+            paged_kv_indices_tensor = None
+            paged_kv_indptr_tensor = None
+            paged_kv_last_page_lens_tensor = None
+            block_table_bound_tensor = None
+
         return self.runner.attn_backend.make_metadata(
             # Required by ModelRunner
             use_cuda_graph=use_captured_graph,  # Not Attention Related
@@ -1001,6 +1117,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             context_chunk_starts=context_chunk_starts,
             context_chunk_seq_tot=context_chunk_seq_tot,
             context_chunk_max_seq_lens=context_chunk_max_seq_lens,
+            paged_kv_indptr=paged_kv_indptr_tensor,
+            paged_kv_indices=paged_kv_indices_tensor,
+            paged_kv_last_page_lens=paged_kv_last_page_lens_tensor,
+            block_table_bound=block_table_bound_tensor,
         )
 
 

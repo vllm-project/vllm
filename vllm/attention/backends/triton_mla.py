@@ -108,6 +108,9 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         decode_attention_fwd(q, kv_c_and_k_pe_cache, kv_c_cache, o,
                              decode_meta.block_tables,
                              decode_meta.seq_lens_tensor, attn_logits,
-                             num_kv_splits, self.scale, PAGE_SIZE)
+                             num_kv_splits, self.scale, PAGE_SIZE,
+                             attn_metadata.paged_kv_indptr,
+                             attn_metadata.paged_kv_indices,
+                             attn_metadata.paged_kv_last_page_lens)
 
         return self._v_up_proj_and_o_proj(o)
