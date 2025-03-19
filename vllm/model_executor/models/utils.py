@@ -472,6 +472,16 @@ class PPMissingLayer(torch.nn.Identity):
 
     def __init__(self, *args, **kwargs):
         super().__init__()
+        self.return_tuple = kwargs.get("return_tuple", False)
+
+    def forward(self, *args, **kwargs):
+        """
+        Return the first arg from args or the first value from kwargs.
+
+        Wraps the input in a tuple if `self.return_tuple` is True.
+        """
+        input = args[0] if args else next(iter(kwargs.values()))
+        return (input, ) if self.return_tuple else input
 
 
 _CPU_OFFLOAD_BYTES = 0
@@ -641,3 +651,13 @@ def extract_layer_index(layer_name: str) -> int:
     assert len(int_vals) == 1, (f"layer name {layer_name} should"
                                 " only contain one integer")
     return int_vals[0]
+
+
+def cast_overflow_tensors(
+    tensors: torch.Tensor,
+    offset: float = 1000,
+) -> torch.Tensor:
+    if tensors.isinf().any() or tensors.isnan().any():
+        clamp_value = torch.finfo(tensors.dtype).max - offset
+        tensors = torch.clamp(tensors, min=-clamp_value, max=clamp_value)
+    return tensors

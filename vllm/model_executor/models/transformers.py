@@ -24,15 +24,11 @@ from transformers import AutoModel, PretrainedConfig, PreTrainedModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.attention import Attention
-from vllm.config import CacheConfig, DeviceConfig, VllmConfig
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, VllmConfig)
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.distributed.utils import divide, get_pp_indices
+from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
-from vllm.lora.fully_sharded_layers import (
-    ColumnParallelLinearWithShardedLoRA, RowParallelLinearWithShardedLoRA)
-from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
-                              ReplicatedLinearWithLoRA,
-                              RowParallelLinearWithLoRA)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -45,7 +41,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP, SupportsQuant
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, maybe_prefix)
 
@@ -104,64 +100,16 @@ def replace_linear_class(
         "rowwise": RowParallelLinear,
     }.get(style, ReplicatedLinear)
 
-    lora_linear_cls = {
-        ColumnParallelLinear: {
-            True: ColumnParallelLinearWithShardedLoRA,  # fully sharded
-            False: ColumnParallelLinearWithLoRA  # not fully sharded
-        },
-        RowParallelLinear: {
-            True: RowParallelLinearWithShardedLoRA,
-            False: RowParallelLinearWithLoRA
-        },
-        # ReplicatedLinear doesn't support fully sharded LoRA yet,
-        # so we use the same class for both cases.
-        ReplicatedLinear: {
-            True: ReplicatedLinearWithLoRA,
-            False: ReplicatedLinearWithLoRA
-        }
-    }
-
-    class HFCompatibleLinear(vllm_linear_cls):
-        """
-        Wrapper class that removes `output_bias` from returned output.
-        """
-
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return super().forward(input)[0]
-
-        @classmethod
-        def get_lora_class(cls, fully_sharded: bool = False):
-            """
-            Get the LoRA class corresponding to the current transformer
-            linear class.
-
-            Args:
-                fully_sharded (bool): If True, select the LoRA class variant
-                that supports fully sharded LoRA. Defaults to False.
-
-            """
-            return lora_linear_cls[vllm_linear_cls][fully_sharded]
-
-    return HFCompatibleLinear(
+    return vllm_linear_cls(
         input_size=linear.in_features,
         output_size=linear.out_features,
         bias=linear.bias is not None,
         quant_config=quant_config,
+        return_bias=False,
     )
 
 
-class HFCompatiblePPMissingLayer(PPMissingLayer):
-    """
-    A version of `PPMissingLayer` that can replace Transformers
-    transformer layers.
-    """
-
-    def forward(self, *args, **kwargs):
-        input = args[0] if args else kwargs.get("input")
-        return (super().forward(input), )
-
-
-class TransformersModel(nn.Module, SupportsPP, SupportsQuant):
+class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"
                          ]  # TODO transformers will have a util to get it
@@ -173,12 +121,19 @@ class TransformersModel(nn.Module, SupportsPP, SupportsQuant):
         config: PretrainedConfig = vllm_config.model_config.hf_config
         cache_config: CacheConfig = vllm_config.cache_config
         device_config: DeviceConfig = vllm_config.device_config
+        model_config: ModelConfig = vllm_config.model_config
+        parallel_config: ParallelConfig = vllm_config.parallel_config
         quant_config: QuantizationConfig = vllm_config.quant_config
 
         self.config = config
         self.cache_config = cache_config
         self.device_config = device_config
+        self.model_config = model_config
+        self.parallel_config = parallel_config
         self.quant_config = quant_config
+
+        self.vocab_size = model_config.get_vocab_size()
+        self.unpadded_vocab_size = model_config.get_vocab_size()
 
         self.pp_group = get_pp_group()
         self.pp_size = self.pp_group.world_size
@@ -188,10 +143,10 @@ class TransformersModel(nn.Module, SupportsPP, SupportsQuant):
         # Use meta device to delay allocating GPU tensors
         with torch.device("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(
-                self.config,
+                config,
                 attn_implementation="vllm",
-                torch_dtype=vllm_config.model_config.dtype,
-                trust_remote_code=vllm_config.model_config.trust_remote_code,
+                torch_dtype=model_config.dtype,
+                trust_remote_code=model_config.trust_remote_code,
             )
         prefix = self.model.base_model_prefix
 
@@ -283,7 +238,7 @@ class TransformersModel(nn.Module, SupportsPP, SupportsQuant):
         for i in range(len(layers)):
             if start_layer <= i and i < end_layer:
                 continue
-            layers[i] = HFCompatiblePPMissingLayer()
+            layers[i] = PPMissingLayer(return_tuple=True)
 
         # Layers after module list
         for name in pp_plan[module_list_idx + 1:]:
@@ -299,7 +254,7 @@ class TransformersModel(nn.Module, SupportsPP, SupportsQuant):
         Apply the model's tensor parallelization plan.
         Currently only supports linear layers.
         """
-        if self.tp_size > 1 and not self.model.supports_tp_plan:
+        if self.tp_size > 1 and self.config.base_model_tp_plan is None:
             raise ValueError(
                 f"{type(self.model)} does not support tensor parallel yet!")
 
@@ -324,18 +279,20 @@ class TransformersModel(nn.Module, SupportsPP, SupportsQuant):
         """
         Create `Attention` instances to inform KV cache allocation.
         """
-        num_heads = divide(self.config.num_attention_heads, self.tp_size)
-        num_kv_heads = divide(self.config.num_key_value_heads, self.tp_size)
+        num_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
+        head_size = self.model_config.get_head_size()
+        num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         start, end = get_pp_indices(self.config.num_hidden_layers,
                                     self.pp_rank, self.pp_size)
         return {
             i:
             Attention(
                 num_heads=num_heads,
-                head_size=self.config.head_dim,
+                head_size=head_size,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_flash_attention_forward
-                scale=self.config.head_dim**-0.5,
+                scale=head_size**-0.5,
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,

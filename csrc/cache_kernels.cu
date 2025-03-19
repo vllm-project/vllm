@@ -350,8 +350,8 @@ __global__ void concat_and_cache_mla_kernel(
 
 }  // namespace vllm
 
-// KV_T is the stored data type of kv-cache.
-// CACHE_T is the data type of key and value tensors.
+// KV_T is the data type of key and value tensors.
+// CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
 #define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)               \
   vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>             \
@@ -375,7 +375,7 @@ void reshape_and_cache(
     torch::Tensor& slot_mapping,  // [num_tokens]
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale) {
-  int num_tokens = key.size(0);
+  int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
   int block_size = key_cache.size(3);
@@ -393,8 +393,8 @@ void reshape_and_cache(
                              CALL_RESHAPE_AND_CACHE)
 }
 
-// KV_T is the stored data type of kv-cache.
-// CACHE_T is the data type of key and value tensors.
+// KV_T is the data type of key and value tensors.
+// CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
 #define CALL_RESHAPE_AND_CACHE_FLASH(KV_T, CACHE_T, KV_DTYPE)         \
   vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE>       \
@@ -446,8 +446,8 @@ void reshape_and_cache_flash(
                              CALL_RESHAPE_AND_CACHE_FLASH);
 }
 
-// KV_T is the stored data type of kv-cache.
-// CACHE_T is the data type of key and value tensors.
+// KV_T is the data type of key and value tensors.
+// CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
 #define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)              \
   vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>            \

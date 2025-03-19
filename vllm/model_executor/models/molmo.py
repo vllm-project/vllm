@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
-from typing import (Iterable, List, Mapping, Optional, Set, Tuple, TypedDict,
-                    Union, cast)
+from typing import List, Optional, Set, Tuple, TypedDict, Union
 
 import numpy as np
 import torch
@@ -41,23 +41,23 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldConfig, MultiModalKwargs,
-                                    NestedTensors)
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptReplacementDetails)
+                                        BaseProcessingInfo, PromptIndexTargets,
+                                        PromptInsertion, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.utils import JSONTree, json_map_leaves
+from vllm.utils import flatten_2d_lists
 
-from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
-                         SupportsQuant)
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP, SupportsQuant)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix, merge_multimodal_embeddings)
+from .vision import select_patch_features
 
 # TODO: hard-coded for now. Consider making it configurable.
 VIT_LAYERS = [-2, -9]
@@ -1190,6 +1190,8 @@ class MolmoProcessingInfo(BaseProcessingInfo):
         return MolmoProcessorWrapper(processor)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        # TODO: Investigate different `embed_is_patch` between cache/no-cache
+        # in multi-image case
         return {"image": 1}
 
     def get_mm_max_tokens_per_item(
@@ -1328,24 +1330,17 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             img_patch_id=MultiModalFieldConfig.shared("image", num_images),
         )
 
-    def _get_prompt_replacements(
+    def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
-    ) -> list[PromptReplacement]:
+    ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
 
         image_token_length_w = processor.image_token_length_w
         image_token_length_h = processor.image_token_length_h
         pooling_size = processor.pooling_size
-
-        user_str = "User:"
-        if processor.always_start_with_space:
-            user_str = " " + user_str
-
-        user_tokens = tokenizer.encode(user_str, add_special_tokens=False)
 
         img_patch_id = processor.image_patch_id
         img_col_id = processor.im_col_id
@@ -1356,7 +1351,7 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
         extra_joint = ([img_start_id] + extra_row * image_token_length_h +
                        [img_end_id])
 
-        def get_replacement_molmo(item_idx: int):
+        def get_insertion_molmo(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
@@ -1371,17 +1366,13 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
                      ((nrows + 1) // pooling_size) + [img_end_id])
 
             image_tokens = extra_joint + joint
-
-            return PromptReplacementDetails(
-                full=image_tokens + user_tokens,
-                features=image_tokens,
-            )
+            return image_tokens
 
         return [
-            PromptReplacement(
+            PromptInsertion(
                 modality="image",
-                target=user_str,
-                replacement=get_replacement_molmo,
+                target=PromptIndexTargets.prefix("<|endoftext|>"),
+                insertion=get_insertion_molmo,
             )
         ]
 
@@ -1487,14 +1478,14 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
                              f"Got type: {type(embed_is_patch)}")
 
         num_crops = kwargs.pop("num_crops", None)
-        if not isinstance(num_crops, torch.Tensor):
+        if not isinstance(num_crops, (torch.Tensor, list)):
             raise ValueError("Incorrect type of num_crops. "
                              f"Got type: {type(num_crops)}")
 
         img_patch_id = kwargs.pop("img_patch_id", None)
         if not isinstance(img_patch_id, torch.Tensor):
-            raise ValueError("Incorrect type of num_crops. "
-                             f"Got type: {type(num_crops)}")
+            raise ValueError("Incorrect type of img_patch_id. "
+                             f"Got type: {type(img_patch_id)}")
         self.img_patch_id = img_patch_id.flatten().unique().item()
 
         return MolmoImageInputs(
@@ -1585,41 +1576,35 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
 
         return embeds_in_batch
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
 
         image_features = self._process_image_input(image_input)
 
-        return [
+        return flatten_2d_lists(
             self._get_mm_embeds(*args) for args in zip(
                 image_features,
                 image_input["feat_is_patch"],
                 image_input["num_crops"],
                 image_input["embed_is_patch"],
-            )
-        ]
+            ))
 
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             assert self.img_patch_id is not None
 
-            # Extract the patch tokens scattered in _get_mm_embeds
-            patch_embeddings = json_map_leaves(
-                lambda x: x[~x.isnan()].view(-1, *x.shape[1:]),
-                cast(JSONTree[torch.Tensor], multimodal_embeddings),
-            )
-
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
-                cast(NestedTensors, patch_embeddings),
+                select_patch_features(multimodal_embeddings),
                 self.img_patch_id,
             )
         return inputs_embeds
