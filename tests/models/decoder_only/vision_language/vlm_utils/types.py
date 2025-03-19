@@ -8,13 +8,12 @@ from typing import Any, Callable, NamedTuple, Optional, Union
 import torch
 from PIL.Image import Image
 from pytest import MarkDecorator
-from transformers import AutoModelForCausalLM, BatchEncoding
+from transformers import AutoModelForCausalLM
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from vllm.config import TaskOption
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import identity
 
 from .....conftest import IMAGE_ASSETS, HfRunner, ImageAsset, _ImageAssets
 from ....utils import check_logprobs_close
@@ -110,11 +109,6 @@ class VLMTestInfo(NamedTuple):
     # Indicates we should explicitly pass the EOS from the tokenizer
     use_tokenizer_eos: bool = False
     auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM
-    # Callable to pass to the HF runner to run on inputs; for now, we also pass
-    # the data type to input post processing, because almost all of the uses of
-    # postprocess_inputs are to fix the data types of BatchEncoding values.
-    postprocess_inputs: Callable[[BatchEncoding, str],
-                                 BatchEncoding] = identity
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]] = None
 
     # Post processors that if defined, will run oun the outputs of the
@@ -130,7 +124,7 @@ class VLMTestInfo(NamedTuple):
     # is all combinations of .models + all fields below
     max_tokens: Union[int, tuple[int]] = 128
     num_logprobs: Union[int, tuple[int]] = 5
-    dtype: Union[str, Iterable[str]] = "half"
+    dtype: Union[str, Union[list[str], tuple[str, ...]]] = "auto"
     distributed_executor_backend: Optional[Union[str, Iterable[str]]] = None
     # Only expanded in video tests
     num_video_frames: Union[int, tuple[int]] = 16
@@ -171,7 +165,6 @@ class VLMTestInfo(NamedTuple):
             "vllm_output_post_proc": self.vllm_output_post_proc,
             "auto_cls": self.auto_cls,
             "use_tokenizer_eos": self.use_tokenizer_eos,
-            "postprocess_inputs": self.postprocess_inputs,
             "comparator": self.comparator,
             "get_stop_token_ids": self.get_stop_token_ids,
             "hf_model_kwargs": self.hf_model_kwargs,
