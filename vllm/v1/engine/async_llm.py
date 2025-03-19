@@ -398,7 +398,7 @@ class AsyncLLM(EngineClient):
     async def stop_profile(self) -> None:
         await self.engine_core.profile_async(False)
 
-    async def reset_prefix_cache(self, device: Device) -> None:
+    async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
         if device == Device.CPU:
             raise ValueError("Not supported on CPU.")
         await self.engine_core.reset_prefix_cache_async()

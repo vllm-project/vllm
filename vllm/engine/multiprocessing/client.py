@@ -684,7 +684,7 @@ class MQLLMEngineClient(EngineClient):
         await self._send_one_way_rpc_request(
             request=RPCUProfileRequest.STOP_PROFILE, socket=self.input_socket)
 
-    async def reset_prefix_cache(self, device: Device) -> None:
+    async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
         """Reset the prefix cache"""
 
         await self._send_one_way_rpc_request(
