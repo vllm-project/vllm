@@ -179,6 +179,10 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
+
+        assert isinstance(params, SamplingParams), \
+            "Pooling is not supported in V1"
+
         # 1) Fan out child requests (for n>1)
         parent_req = ParentRequest.from_params(request_id, params)
         n = params.n if isinstance(params, SamplingParams) else 1

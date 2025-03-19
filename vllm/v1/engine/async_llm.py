@@ -26,7 +26,8 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, cdiv, kill_process_tree
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.output_processor import (OutputProcessor,
+                                             RequestOutputCollector)
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
@@ -174,11 +175,15 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> asyncio.Queue[RequestOutput]:
+    ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
-        # 1) Create a new output queue for the request.
-        queue: asyncio.Queue[RequestOutput] = asyncio.Queue()
+        assert isinstance(params, SamplingParams), \
+            "Pooling is not supported in V1"
+
+        # 1) Create a new output collector for the request.
+        aggregate_outputs = params.output_kind == RequestOutputKind.DELTA
+        queue = RequestOutputCollector(aggregate=aggregate_outputs)
 
         # 2) Fan out child requests (for n>1)
         parent_req = ParentRequest.from_params(request_id, params)
@@ -259,15 +264,7 @@ class AsyncLLM(EngineClient):
             while not finished:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
-                out = q.get_nowait() if not q.empty() else await q.get()
-
-                # Coalesce any additional queued outputs
-                while not q.empty():
-                    next_out = q.get_nowait()
-                    if sampling_params.output_kind == RequestOutputKind.DELTA:
-                        out.add(next_out)
-                    else:
-                        out = next_out
+                out = q.get_nowait() or await q.get()
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
