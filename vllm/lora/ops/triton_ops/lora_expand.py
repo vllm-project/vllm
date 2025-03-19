@@ -158,6 +158,8 @@ def _lora_expand(
             identifies the the region in token_indices_sorted_by_lora_ids that
             LoRA lora_ids[i] should process.
         lora_ids (torch.Tensor): LoRA ids to process.
+        no_lora_flag_cpu (torch.Tensor): A CPU tensor of size 1, that indicates
+            if there are any requests that require LoRA.
         offset_start (int, optional): Offset start for output_tensor. 
             Defaults to 0.
         add_inputs (bool, optional): Whether to add the input tensor to the 

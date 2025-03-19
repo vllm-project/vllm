@@ -110,7 +110,6 @@ def _lora_shrink(
     scaling: float,
 ) -> None:
     """
-    # TODO (varun) : Add no_lora_flag_cpu to the args desc.
     Args:
         inputs (torch.Tensor): Input tensor
         lora_a_weights (List[torch.Tensor]): LoRA weights
@@ -128,6 +127,8 @@ def _lora_shrink(
             identifies the region in token_indices_sorted_by_lora_ids that
             LoRA lora_ids[i] should process.
         lora_ids (torch.Tensor): LoRA ids to process.
+        no_lora_flag_cpu (torch.Tensor): A CPU tensor of size 1, that indicates
+            if there are any requests that require LoRA.
         scaling (float): Scaling factor.
     """
 
