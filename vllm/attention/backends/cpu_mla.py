@@ -75,6 +75,9 @@ class CPUMLAMetadata(TorchSDPAMetadata):
     # position embeddings are applied inside the attention backend
     input_positions: torch.Tensor = None
 
+    # required by MLACommonImpl
+    is_profile_run: bool = False
+
 
 class CPUMLAMetadataBuilder(AttentionMetadataBuilder[CPUMLAMetadata]):
 

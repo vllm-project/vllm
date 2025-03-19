@@ -983,7 +983,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             head_dim=self.runner.model_config.get_head_size(),
-            is_profile_run=getattr(self.runner, "in_profile_run", False),
+            is_profile_run=self.runner.in_profile_run,
             # MLACommonMetadata Chunk prefill specific
             context_chunk_cu_seq_lens=context_chunk_cu_seq_lens,
             context_chunk_starts=context_chunk_starts,
@@ -1348,7 +1348,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
             raise NotImplementedError(
                 "output is not yet supported for MLAImplBase")
 
-        if getattr(attn_metadata, "is_profile_run", False) and \
+        if attn_metadata.is_profile_run and \
             attn_metadata.context_chunk_workspace is not None:
             # During the profile run try to simulate to worse case output size
             # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
