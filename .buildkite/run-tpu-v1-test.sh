@@ -19,7 +19,8 @@ docker run --privileged --net host --shm-size=16G -it \
     vllm-tpu /bin/bash -c "python3 -m pip install git+https://github.com/thuml/depyf.git \
     && python3 -m pip install pytest \
     && python3 -m pip install lm_eval[api]==0.4.4 \
-    && VLLM_USE_V1=1 VLLM_XLA_CHECK_RECOMPILATION=1
+    && export VLLM_USE_V1=1 \
+    && export VLLM_XLA_CHECK_RECOMPILATION=1 \
     && echo TEST_1 \
     && python3 /workspace/vllm/tests/tpu/test_compilation.py \
     && echo TEST_2 \
@@ -30,7 +31,7 @@ docker run --privileged --net host --shm-size=16G -it \
     && pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py \
     && echo TEST_5 \
     && python3 /workspace/vllm/examples/offline_inference/tpu.py" \
-    
+
 
 # TODO: This test fails because it uses RANDOM_SEED sampling
 # && VLLM_USE_V1=1 pytest -v -s /workspace/vllm/tests/tpu/test_custom_dispatcher.py \
