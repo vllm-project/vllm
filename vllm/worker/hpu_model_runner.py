@@ -712,6 +712,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.graphed_buckets: Set[Any] = set()
 
         self._set_gc_threshold()
+        if self.vllm_config.cache_config.enable_prefix_caching:
+            os.environ.setdefault("VLLM_CONTIGUOUS_PA", "False")
+            assert os.environ.get(
+                "VLLM_CONTIGUOUS_PA",
+                "").lower() != "true", "Contiguous PA doesn't support APC"
         self.use_contiguous_pa = os.environ.get('VLLM_CONTIGUOUS_PA',
                                                 'true').lower() == 'true'
         if vllm_config.speculative_config is not None \
@@ -925,7 +930,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             phase = self._phase(attn_metadata)
             num_blocks = self._num_blocks(attn_metadata)
             cfg = (batch_size, seq_len, num_blocks, phase)
-            phase = phase.value
         else:
             phase = 'prompt' if attn_metadata.is_prompt else 'decode'
             cfg = (batch_size, seq_len, phase)
