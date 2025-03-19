@@ -1579,7 +1579,7 @@ class EngineArgs:
             return False
 
         # No support for device type other than CUDA, AMD (experiemntal) or
-        # TPU (experimental).
+        # TPU (experimental) so far.
         if not (current_platform.is_cuda() or current_platform.is_rocm()
                 or current_platform.is_tpu()):
             _raise_or_fallback(
