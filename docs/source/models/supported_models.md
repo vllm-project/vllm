@@ -73,7 +73,7 @@ The Transformers fallback explicitly supports the following features:
 
 - <project:#quantization-index> (except GGUF)
 - <project:#lora-adapter>
-- <project:#distributed-serving> (pipeline parallel coming soon <gh-pr:12832>!)
+- <project:#distributed-serving> (requires `transformers>=4.49.0`)
 
 #### Remote code
 
@@ -472,6 +472,11 @@ See [this page](#generative-models) for more information on how to use generativ
   * `Tele-AI/TeleChat2-3B`, `Tele-AI/TeleChat2-7B`, `Tele-AI/TeleChat2-35B`, etc.
   * ✅︎
   * ✅︎
+- * `TeleFLMForCausalLM`
+  * TeleFLM
+  * `CofeAI/FLM-2-52B-Instruct-2407`, `CofeAI/Tele-FLM`, etc.
+  * ✅︎
+  * ✅︎
 - * `XverseForCausalLM`
   * XVERSE
   * `xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.
@@ -848,7 +853,7 @@ See [this page](#generative-models) for more information on how to use generativ
   *
 - * `MolmoForCausalLM`
   * Molmo
-  * T + I
+  * T + I<sup>+</sup>
   * `allenai/Molmo-7B-D-0924`, `allenai/Molmo-7B-O-0924`, etc.
   * ✅︎
   * ✅︎
@@ -914,6 +919,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * T + I<sup>E+</sup> + V<sup>E+</sup>
   * `Qwen/Qwen2.5-VL-3B-Instruct`, `Qwen/Qwen2.5-VL-72B-Instruct`, etc.
   * ✅︎
+  * ✅︎
+  * ✅︎
+- * `Qwen2_5OmniThinkerForConditionalGeneration`
+  * Qwen2.5-Omni
+  * T + I<sup>E+</sup> + V<sup>E+</sup> + A<sup>+</sup>
+  * `Qwen/Qwen2.5-Omni-7B`
+  *
   * ✅︎
   * ✅︎
 - * `UltravoxModel`

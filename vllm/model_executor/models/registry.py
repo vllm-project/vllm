@@ -104,6 +104,7 @@ _TEXT_GENERATION_MODELS = {
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
+    "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
     # [Encoder-decoder]
@@ -184,6 +185,7 @@ _MULTIMODAL_MODELS = {
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
     "Qwen2_5_VLForConditionalGeneration": ("qwen2_5_vl", "Qwen2_5_VLForConditionalGeneration"),  # noqa: E501
     "Qwen2AudioForConditionalGeneration": ("qwen2_audio", "Qwen2AudioForConditionalGeneration"),  # noqa: E501
+    "Qwen2_5OmniModel": ("qwen2_5_omni_thinker", "Qwen2_5OmniThinkerForConditionalGeneration"),  # noqa: E501
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
     # [Encoder-decoder]
@@ -418,11 +420,13 @@ class _ModelRegistry:
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        normalized_arch = []
-        for model in architectures:
-            if model not in self.models:
-                model = "TransformersModel"
-            normalized_arch.append(model)
+        # filter out support architectures
+        normalized_arch = list(
+            filter(lambda model: model in self.models, architectures))
+
+        # make sure Transformers fallback are put at the last
+        if len(normalized_arch) != len(architectures):
+            normalized_arch.append("TransformersModel")
         return normalized_arch
 
     def inspect_model_cls(

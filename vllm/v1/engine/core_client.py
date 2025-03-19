@@ -212,9 +212,9 @@ class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
     circular reference back to the client object."""
 
-    ctx: Union[zmq.Context] = None
-    output_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
-    input_socket: Union[zmq.Socket, zmq.asyncio.Socket] = None
+    ctx: zmq.Context
+    output_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
+    input_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
     proc_handle: Optional[BackgroundProcHandle] = None
     shutdown_path: Optional[str] = None
 

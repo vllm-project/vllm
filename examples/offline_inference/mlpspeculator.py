@@ -50,7 +50,9 @@ if __name__ == "__main__":
     # Create an LLM with spec decoding
     llm = LLM(
         model="meta-llama/Llama-2-13b-chat-hf",
-        speculative_model="ibm-ai-platform/llama-13b-accelerator",
+        speculative_config={
+            "model": "ibm-ai-platform/llama-13b-accelerator",
+        },
     )
 
     print("With speculation")
