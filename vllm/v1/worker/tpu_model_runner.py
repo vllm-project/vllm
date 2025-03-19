@@ -271,7 +271,7 @@ class TPUModelRunner:
                             mm_input["second_per_grid_ts"])
 
                 hf_config = self.model_config.hf_config
-
+                # This happens on host.
                 self.requests[req_id].mrope_positions, \
                     self.requests[req_id].mrope_position_delta = \
                     MRotaryEmbedding.get_input_positions_tensor(
@@ -463,6 +463,11 @@ class TPUModelRunner:
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
+        self.positions_cpu[
+            total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
+        self.mrope_positions_cpu[
+            total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
+
         self.input_ids = self.input_ids_cpu[:
                                             padded_total_num_scheduled_tokens].to(
                                                 self.device)
@@ -686,10 +691,8 @@ class TPUModelRunner:
             input_ids = self.input_ids
             inputs_embeds = None
 
-        if self.uses_mrope:
-            positions = self.mrope_positions[:, :total_num_scheduled_tokens]
-        else:
-            positions = self.positions[:total_num_scheduled_tokens]
+        # Both mrope and positions are padded to input_ids shape.
+        positions = self.mrope_positions if self.uses_mrope else self.positions
 
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
