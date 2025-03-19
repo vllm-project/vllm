@@ -6,13 +6,14 @@ using the chat template defined by the model.
 """
 import os
 from argparse import Namespace
+from dataclasses import asdict
 from typing import NamedTuple, Optional
 
 from huggingface_hub import snapshot_download
 from PIL.Image import Image
 from transformers import AutoProcessor, AutoTokenizer
 
-from vllm import LLM, SamplingParams
+from vllm import LLM, EngineArgs, SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.utils import fetch_image
 from vllm.utils import FlexibleArgumentParser
@@ -25,11 +26,12 @@ IMAGE_URLS = [
 
 
 class ModelRequestData(NamedTuple):
-    llm: LLM
+    engine_args: EngineArgs
     prompt: str
-    stop_token_ids: Optional[list[int]]
     image_data: list[Image]
-    chat_template: Optional[str]
+    stop_token_ids: Optional[list[int]] = None
+    chat_template: Optional[str] = None
+    lora_requests: Optional[list[LoRARequest]] = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -37,56 +39,62 @@ class ModelRequestData(NamedTuple):
 # Unless specified, these settings have been tested to work on a single L4.
 
 
-def load_aria(question, image_urls: list[str]) -> ModelRequestData:
+def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "rhymes-ai/Aria"
-    llm = LLM(model=model_name,
-              tokenizer_mode="slow",
-              trust_remote_code=True,
-              dtype="bfloat16",
-              limit_mm_per_prompt={"image": len(image_urls)})
+    engine_args = EngineArgs(
+        model=model_name,
+        tokenizer_mode="slow",
+        trust_remote_code=True,
+        dtype="bfloat16",
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
     placeholders = "<fim_prefix><|img|><fim_suffix>\n" * len(image_urls)
     prompt = (f"<|im_start|>user\n{placeholders}{question}<|im_end|>\n"
               "<|im_start|>assistant\n")
     stop_token_ids = [93532, 93653, 944, 93421, 1019, 93653, 93519]
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
     )
 
 
-def load_deepseek_vl2(question: str, image_urls: list[str]):
+def load_deepseek_vl2(question: str,
+                      image_urls: list[str]) -> ModelRequestData:
     model_name = "deepseek-ai/deepseek-vl2-tiny"
 
-    llm = LLM(model=model_name,
-              max_model_len=4096,
-              max_num_seqs=2,
-              hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]},
-              limit_mm_per_prompt={"image": len(image_urls)})
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        hf_overrides={"architectures": ["DeepseekVLV2ForCausalLM"]},
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
 
     placeholder = "".join(f"image_{i}:<image>\n"
                           for i, _ in enumerate(image_urls, start=1))
     prompt = f"<|User|>: {placeholder}{question}\n\n<|Assistant|>:"
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
-        stop_token_ids=None,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
     )
 
 
-def load_gemma3(question, image_urls: list[str]) -> ModelRequestData:
+def load_gemma3(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "google/gemma-3-4b-it"
 
-    llm = LLM(model=model_name,
-              max_model_len=8192,
-              max_num_seqs=2,
-              limit_mm_per_prompt={"image": len(image_urls)})
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        # Default is False; setting it to True is not supported in V1 yet
+        mm_processor_kwargs={"do_pan_and_scan": True},
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
 
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [{
@@ -108,18 +116,16 @@ def load_gemma3(question, image_urls: list[str]) -> ModelRequestData:
                                            add_generation_prompt=True)
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
-        stop_token_ids=None,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
     )
 
 
 def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "h2oai/h2ovl-mississippi-800m"
 
-    llm = LLM(
+    engine_args = EngineArgs(
         model=model_name,
         trust_remote_code=True,
         max_model_len=8192,
@@ -142,19 +148,18 @@ def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
     stop_token_ids = [tokenizer.eos_token_id]
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
     )
 
 
-def load_idefics3(question, image_urls: list[str]) -> ModelRequestData:
+def load_idefics3(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "HuggingFaceM4/Idefics3-8B-Llama3"
 
     # The configuration below has been confirmed to launch on a single L40 GPU.
-    llm = LLM(
+    engine_args = EngineArgs(
         model=model_name,
         max_model_len=8192,
         max_num_seqs=16,
@@ -173,18 +178,16 @@ def load_idefics3(question, image_urls: list[str]) -> ModelRequestData:
                              for i, _ in enumerate(image_urls, start=1))
     prompt = f"<|begin_of_text|>User:{placeholders}\n{question}<end_of_utterance>\nAssistant:"  # noqa: E501
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
-        stop_token_ids=None,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
     )
 
 
 def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL2-2B"
 
-    llm = LLM(
+    engine_args = EngineArgs(
         model=model_name,
         trust_remote_code=True,
         max_model_len=4096,
@@ -210,19 +213,18 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
     )
 
 
-def load_mllama(question, image_urls: list[str]) -> ModelRequestData:
+def load_mllama(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 
     # The configuration below has been confirmed to launch on a single L40 GPU.
-    llm = LLM(
+    engine_args = EngineArgs(
         model=model_name,
         max_model_len=4096,
         max_num_seqs=16,
@@ -232,19 +234,17 @@ def load_mllama(question, image_urls: list[str]) -> ModelRequestData:
     placeholders = "<|image|>" * len(image_urls)
     prompt = f"{placeholders}<|begin_of_text|>{question}"
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
-        stop_token_ids=None,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
     )
 
 
-def load_nvlm_d(question: str, image_urls: list[str]):
+def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "nvidia/NVLM-D-72B"
 
     # Adjust this as necessary to fit in GPU
-    llm = LLM(
+    engine_args = EngineArgs(
         model=model_name,
         trust_remote_code=True,
         max_model_len=8192,
@@ -262,14 +262,11 @@ def load_nvlm_d(question: str, image_urls: list[str]):
     prompt = tokenizer.apply_chat_template(messages,
                                            tokenize=False,
                                            add_generation_prompt=True)
-    stop_token_ids = None
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
-        stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
     )
 
 
@@ -277,7 +274,7 @@ def load_pixtral_hf(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "mistral-community/pixtral-12b"
 
     # Adjust this as necessary to fit in GPU
-    llm = LLM(
+    engine_args = EngineArgs(
         model=model_name,
         max_model_len=8192,
         max_num_seqs=2,
@@ -287,14 +284,11 @@ def load_pixtral_hf(question: str, image_urls: list[str]) -> ModelRequestData:
 
     placeholders = "[IMG]" * len(image_urls)
     prompt = f"<s>[INST]{question}\n{placeholders}[/INST]"
-    stop_token_ids = None
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
-        stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
     )
 
 
@@ -311,7 +305,7 @@ def load_phi3v(question: str, image_urls: list[str]) -> ModelRequestData:
     #
     # https://huggingface.co/microsoft/Phi-3.5-vision-instruct#loading-the-model-locally
     # https://huggingface.co/microsoft/Phi-3.5-vision-instruct/blob/main/processing_phi3_v.py#L194
-    llm = LLM(
+    engine_args = EngineArgs(
         model="microsoft/Phi-3.5-vision-instruct",
         trust_remote_code=True,
         max_model_len=4096,
@@ -322,14 +316,11 @@ def load_phi3v(question: str, image_urls: list[str]) -> ModelRequestData:
     placeholders = "\n".join(f"<|image_{i}|>"
                              for i, _ in enumerate(image_urls, start=1))
     prompt = f"<|user|>\n{placeholders}\n{question}<|end|>\n<|assistant|>\n"
-    stop_token_ids = None
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
-        stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
     )
 
 
@@ -343,7 +334,7 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
     # Since the vision-lora and speech-lora co-exist with the base model,
     # we have to manually specify the path of the lora weights.
     vision_lora_path = os.path.join(model_path, "vision-lora")
-    llm = LLM(
+    engine_args = EngineArgs(
         model=model_path,
         trust_remote_code=True,
         max_model_len=10000,
@@ -351,32 +342,24 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
         limit_mm_per_prompt={"image": len(image_urls)},
         enable_lora=True,
         max_lora_rank=320,
-        lora_extra_vocab_size=0,
     )
-    lora_request = LoRARequest("vision", 1, vision_lora_path)
-    # To maintain code compatibility in this script, we add LoRA here.
-    llm.llm_engine.add_lora(lora_request=lora_request)
-    # You can also add LoRA using:
-    # llm.generate(prompts, lora_request=lora_request,...)
 
     placeholders = "".join(f"<|image_{i}|>"
                            for i, _ in enumerate(image_urls, start=1))
     prompt = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
-    stop_token_ids = None
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
-        stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
-        chat_template=None,
+        lora_requests=[LoRARequest("vision", 1, vision_lora_path)],
     )
 
 
 def load_qwen_vl_chat(question: str,
                       image_urls: list[str]) -> ModelRequestData:
     model_name = "Qwen/Qwen-VL-Chat"
-    llm = LLM(
+    engine_args = EngineArgs(
         model=model_name,
         trust_remote_code=True,
         max_model_len=1024,
@@ -407,7 +390,7 @@ def load_qwen_vl_chat(question: str,
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
         image_data=[fetch_image(url) for url in image_urls],
@@ -415,7 +398,7 @@ def load_qwen_vl_chat(question: str,
     )
 
 
-def load_qwen2_vl(question, image_urls: list[str]) -> ModelRequestData:
+def load_qwen2_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     try:
         from qwen_vl_utils import process_vision_info
     except ModuleNotFoundError:
@@ -427,7 +410,7 @@ def load_qwen2_vl(question, image_urls: list[str]) -> ModelRequestData:
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
     # Tested on L40
-    llm = LLM(
+    engine_args = EngineArgs(
         model=model_name,
         max_model_len=32768 if process_vision_info is None else 4096,
         max_num_seqs=5,
@@ -456,23 +439,19 @@ def load_qwen2_vl(question, image_urls: list[str]) -> ModelRequestData:
                                            tokenize=False,
                                            add_generation_prompt=True)
 
-    stop_token_ids = None
-
     if process_vision_info is None:
         image_data = [fetch_image(url) for url in image_urls]
     else:
         image_data, _ = process_vision_info(messages)
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
-        stop_token_ids=stop_token_ids,
         image_data=image_data,
-        chat_template=None,
     )
 
 
-def load_qwen2_5_vl(question, image_urls: list[str]) -> ModelRequestData:
+def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     try:
         from qwen_vl_utils import process_vision_info
     except ModuleNotFoundError:
@@ -483,7 +462,7 @@ def load_qwen2_5_vl(question, image_urls: list[str]) -> ModelRequestData:
 
     model_name = "Qwen/Qwen2.5-VL-3B-Instruct"
 
-    llm = LLM(
+    engine_args = EngineArgs(
         model=model_name,
         max_model_len=32768 if process_vision_info is None else 4096,
         max_num_seqs=5,
@@ -512,8 +491,6 @@ def load_qwen2_5_vl(question, image_urls: list[str]) -> ModelRequestData:
                                            tokenize=False,
                                            add_generation_prompt=True)
 
-    stop_token_ids = None
-
     if process_vision_info is None:
         image_data = [fetch_image(url) for url in image_urls]
     else:
@@ -521,11 +498,9 @@ def load_qwen2_5_vl(question, image_urls: list[str]) -> ModelRequestData:
                                             return_video_kwargs=False)
 
     return ModelRequestData(
-        llm=llm,
+        engine_args=engine_args,
         prompt=prompt,
-        stop_token_ids=stop_token_ids,
         image_data=image_data,
-        chat_template=None,
     )
 
 
@@ -547,14 +522,25 @@ model_example_map = {
 }
 
 
-def run_generate(model, question: str, image_urls: list[str]):
+def run_generate(model, question: str, image_urls: list[str],
+                 seed: Optional[int]):
     req_data = model_example_map[model](question, image_urls)
+
+    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    llm = LLM(**engine_args)
+
+    # To maintain code compatibility in this script, we add LoRA here.
+    # You can also add LoRA using:
+    # llm.generate(prompts, lora_request=lora_request,...)
+    if req_data.lora_requests:
+        for lora_request in req_data.lora_requests:
+            llm.llm_engine.add_lora(lora_request=lora_request)
 
     sampling_params = SamplingParams(temperature=0.0,
                                      max_tokens=128,
                                      stop_token_ids=req_data.stop_token_ids)
 
-    outputs = req_data.llm.generate(
+    outputs = llm.generate(
         {
             "prompt": req_data.prompt,
             "multi_modal_data": {
@@ -568,13 +554,24 @@ def run_generate(model, question: str, image_urls: list[str]):
         print(generated_text)
 
 
-def run_chat(model: str, question: str, image_urls: list[str]):
+def run_chat(model: str, question: str, image_urls: list[str],
+             seed: Optional[int]):
     req_data = model_example_map[model](question, image_urls)
+
+    engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    llm = LLM(**engine_args)
+
+    # To maintain code compatibility in this script, we add LoRA here.
+    # You can also add LoRA using:
+    # llm.generate(prompts, lora_request=lora_request,...)
+    if req_data.lora_requests:
+        for lora_request in req_data.lora_requests:
+            llm.llm_engine.add_lora(lora_request=lora_request)
 
     sampling_params = SamplingParams(temperature=0.0,
                                      max_tokens=128,
                                      stop_token_ids=req_data.stop_token_ids)
-    outputs = req_data.llm.chat(
+    outputs = llm.chat(
         [{
             "role":
             "user",
@@ -603,11 +600,12 @@ def run_chat(model: str, question: str, image_urls: list[str]):
 def main(args: Namespace):
     model = args.model_type
     method = args.method
+    seed = args.seed
 
     if method == "generate":
-        run_generate(model, QUESTION, IMAGE_URLS)
+        run_generate(model, QUESTION, IMAGE_URLS, seed)
     elif method == "chat":
-        run_chat(model, QUESTION, IMAGE_URLS)
+        run_chat(model, QUESTION, IMAGE_URLS, seed)
     else:
         raise ValueError(f"Invalid method: {method}")
 
@@ -628,6 +626,10 @@ if __name__ == "__main__":
                         default="generate",
                         choices=["generate", "chat"],
                         help="The method to run in `vllm.LLM`.")
+    parser.add_argument("--seed",
+                        type=int,
+                        default=None,
+                        help="Set the seed when initializing `vllm.LLM`.")
 
     args = parser.parse_args()
     main(args)

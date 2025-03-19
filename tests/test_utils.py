@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa
 
 import asyncio
-import os
 import socket
 from collections.abc import AsyncIterator
 from unittest.mock import patch
@@ -16,7 +16,7 @@ from vllm.utils import (FlexibleArgumentParser, MemorySnapshot,
                         deprecate_kwargs, get_open_port, memory_profiling,
                         merge_async_iterators, supports_kw, swap_dict_values)
 
-from .utils import error_on_warning, fork_new_process_for_each_test
+from .utils import create_new_process_for_each_test, error_on_warning
 
 
 @pytest.mark.asyncio
@@ -112,16 +112,16 @@ def test_deprecate_kwargs_additional_message():
         dummy(old_arg=1)
 
 
-def test_get_open_port():
-    os.environ["VLLM_PORT"] = "5678"
-    # make sure we can get multiple ports, even if the env var is set
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:
-        s1.bind(("localhost", get_open_port()))
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
-            s2.bind(("localhost", get_open_port()))
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
-                s3.bind(("localhost", get_open_port()))
-    os.environ.pop("VLLM_PORT")
+def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_PORT", "5678")
+        # make sure we can get multiple ports, even if the env var is set
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:
+            s1.bind(("localhost", get_open_port()))
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                s2.bind(("localhost", get_open_port()))
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
+                    s3.bind(("localhost", get_open_port()))
 
 
 # Tests for FlexibleArgumentParser
@@ -276,7 +276,7 @@ def test_supports_kw(callable,kw_name,requires_kw_only,
     ) == is_supported
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_memory_profiling():
     # Fake out some model loading + inference memory usage to test profiling
     # Memory used by other processes will show up as cuda usage outside of torch
@@ -366,28 +366,32 @@ def test_bind_kv_cache_non_attention():
     assert ctx['model.layers.28.attn'].kv_cache[0] is kv_cache[1]
 
 
-def test_bind_kv_cache_encoder_decoder():
-    from vllm.attention import Attention, AttentionType
+def test_bind_kv_cache_encoder_decoder(monkeypatch: pytest.MonkeyPatch):
+    # V1 TESTS: ENCODER_DECODER is not supported on V1 yet.
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "0")
 
-    # example from bart
-    ctx = {
-        'encoder.layers.0.self_attn.attn':
-            Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER),
-        'decoder.layers.0.encoder_attn.attn':
-            Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER),
-        'decoder.layers.0.self_attn.attn':
-            Attention(32, 128, 0.1, attn_type=AttentionType.DECODER),
-    }
+        from vllm.attention import Attention, AttentionType
 
-    kv_cache = [
-        torch.zeros((1, )),
-    ]
-    encoder_kv_cache = ctx['encoder.layers.0.self_attn.attn'].kv_cache
+        # example from bart
+        ctx = {
+            'encoder.layers.0.self_attn.attn':
+                Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER),
+            'decoder.layers.0.encoder_attn.attn':
+                Attention(32, 128, 0.1, attn_type=AttentionType.ENCODER_DECODER),
+            'decoder.layers.0.self_attn.attn':
+                Attention(32, 128, 0.1, attn_type=AttentionType.DECODER),
+        }
 
-    bind_kv_cache(ctx, [kv_cache])
-    assert ctx['encoder.layers.0.self_attn.attn'].kv_cache is encoder_kv_cache
-    assert ctx['decoder.layers.0.encoder_attn.attn'].kv_cache[0] is kv_cache[0]
-    assert ctx['decoder.layers.0.self_attn.attn'].kv_cache[0] is kv_cache[0]
+        kv_cache = [
+            torch.zeros((1, )),
+        ]
+        encoder_kv_cache = ctx['encoder.layers.0.self_attn.attn'].kv_cache
+
+        bind_kv_cache(ctx, [kv_cache])
+        assert ctx['encoder.layers.0.self_attn.attn'].kv_cache is encoder_kv_cache
+        assert ctx['decoder.layers.0.encoder_attn.attn'].kv_cache[0] is kv_cache[0]
+        assert ctx['decoder.layers.0.self_attn.attn'].kv_cache[0] is kv_cache[0]
 
 
 def test_bind_kv_cache_pp():
