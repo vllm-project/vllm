@@ -174,6 +174,7 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 0
 
+
 @create_new_process_for_each_test()
 def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
     """
