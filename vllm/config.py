@@ -1960,13 +1960,13 @@ class SpeculativeConfig:
                         == "deepseek_v3":
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
-            elif "ngram" in self.proposer:
+            elif self.proposer in ("ngram", "[ngram]"):
                 self.model = self.proposer
             else:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
 
-        if "ngram" in self.proposer:
+        if self.proposer in ("ngram", "[ngram]"):
             if self.ngram_prompt_lookup_min is None:
                 self.ngram_prompt_lookup_min = 1
             if (self.ngram_prompt_lookup_max is None
