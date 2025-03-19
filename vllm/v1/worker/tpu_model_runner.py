@@ -883,18 +883,17 @@ def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
 
 def _get_slot_slices(block_numbers, block_offsets, num_scheduled_tokens_per_req: list, page_size: int):
     res = []
-    token_start_idx = torch.cumsum(torch.tensor([0] + num_scheduled_tokens_per_req, dtype=torch.int32), dim=0)
-    token_idx = 0
-    for i, num_scheduled_tokens in enumerate(num_scheduled_tokens_per_req):
-        num_pages = cdiv(num_scheduled_tokens, page_size)
-        next_seq_start_idx = token_start_idx[i+1]
-        for j in range(num_pages):
-            physical_page_idx = block_numbers[token_idx]
-            size = (next_seq_start_idx-token_idx) if j == num_pages-1 else page_size
-            # print(f'xw32 _get_slot_slices={[block_offsets[token_idx], size, physical_page_idx]=}')
-            res.append(torch.tensor([block_offsets[token_idx], size, physical_page_idx], dtype=torch.int64))
-            token_idx += size
-    # print(f'xw32 {res=}')
+    token_start_ids = torch.cumsum(torch.tensor([0] + num_scheduled_tokens_per_req, dtype=torch.int32), dim=0)
+    token_id = 0
+    for seq_id, _ in enumerate(num_scheduled_tokens_per_req):
+        next_seq_token_start_id = token_start_ids[seq_id+1]
+        while token_id < next_seq_token_start_id:
+            starting_offset = block_offsets[token_id]
+            physical_block_id = block_numbers[token_id]
+            size = min(page_size-starting_offset, next_seq_token_start_id-token_id)
+            res.append(torch.tensor([starting_offset, size, physical_block_id], dtype=torch.int64))
+            token_id += size
+
     return torch.stack(res)
 
 

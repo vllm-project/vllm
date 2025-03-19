@@ -30,13 +30,4 @@ def test_creating_write_to_kvcache_slices2():
   assert torch.equal(slot_slices[3], torch.tensor([0, 14, 12]))
   assert torch.equal(slot_slices[4], torch.tensor([0, 16, 15]))
   assert torch.equal(slot_slices[5], torch.tensor([0, 10, 16]))
-  # assert slot_slices[0] == torch.tensor([7, 1, 5]) # (start, size, physical_page_id)
-  # assert slot_slices[1] == torch.tensor([9, 7, 10])
-  # assert slot_slices[2] == torch.tensor([0, 16, 11])
-  # assert slot_slices[3] == torch.tensor([0, 14, 12])
-  # assert slot_slices[4] == torch.tensor([0, 16, 15])
-  # assert slot_slices[5] == torch.tensor([0, 10, 16])
-  
-  
-
 
