@@ -29,7 +29,7 @@ with tracer.start_as_current_span("client-span", kind=SpanKind.CLIENT) as span:
         "prompt": prompt,
         "max_tokens": 10,
         # "n": 3,
-        "use_beam_search": "false", # true can cause break the trace link
+        "use_beam_search": "false",# true can cause break the trace link
         "temperature": 0.0,
         # "stream": True,
     }
