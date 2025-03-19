@@ -14,7 +14,6 @@ os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
 # see https://github.com/vllm-project/vllm/issues/10619
 # torch._inductor.config.compile_threads = 1
 
-# 定义对外暴露的 API 列表
 __all__ = [
     "__version__",
     "__version_tuple__",
