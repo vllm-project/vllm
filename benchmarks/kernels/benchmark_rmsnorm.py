@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 import triton
@@ -22,7 +22,7 @@ class HuggingFaceRMSNorm(nn.Module):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         orig_dtype = x.dtype
         x = x.to(torch.float32)
         if residual is not None:
@@ -139,7 +139,7 @@ def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
 
     print(f"Naive output={output_naive}")
     print(f"FlashInfer output={output_flashinfer}")
-    print(f"VLLM output={output_vllm}")
+    print(f"vLLM output={output_vllm}")
 
     if torch.allclose(output_naive, output_flashinfer, atol=1e-2,
                       rtol=1e-2) and torch.allclose(

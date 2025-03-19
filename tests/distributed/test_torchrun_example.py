@@ -25,7 +25,8 @@ llm = LLM(model="facebook/opt-125m",
           tensor_parallel_size=2,
           distributed_executor_backend="external_launcher",
           gpu_memory_utilization=random.uniform(0.7, 0.9),
-          swap_space=random.randint(1, 4))
+          swap_space=random.randint(1, 4),
+          seed=0)
 
 outputs = llm.generate(prompts, sampling_params)
 
@@ -47,6 +48,12 @@ test_consistent_across_ranks(
     llm.llm_engine.vllm_config.cache_config.num_cpu_blocks)
 test_consistent_across_ranks(
     llm.llm_engine.vllm_config.cache_config.num_gpu_blocks)
+
+# make sure we can access the model parameters from the calling process
+# of the `LLM` instance.
+params = list(llm.llm_engine.model_executor.driver_worker.worker.model_runner.
+              model.parameters())
+test_consistent_across_ranks(len(params))
 
 # all ranks should have the same outputs
 for output in outputs:

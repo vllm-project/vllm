@@ -15,7 +15,8 @@ from vllm_hpu_extension.utils import (Matmul, ModuleFusedSDPA, Softmax,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionMetadata, AttentionType,
+                                              is_quantized_kv_cache)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.hpu_paged_attn import (HPUPagedAttention,
                                                HPUPagedAttentionMetadata)
@@ -118,12 +119,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         self.matmul_av = Matmul()
         self.batch2block_matmul = Matmul()
         self.block2batch_matmul = Matmul()
-        # NOTE(kzawora): Contiguous PA is off until model runner supports it
         self.k_cache = VLLMKVCache()
-        self.k_cache.use_contiguous_pa = False
         self.v_cache = VLLMKVCache()
-        self.v_cache.use_contiguous_pa = False
-        # NOTE(kzawora): Pipelined PA is off until model runner supports it
         ops.pa_impl = ops.pa
 
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
@@ -161,6 +158,10 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "HPUAttentionImpl")
+
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError(
+                "HPUAttention with FP8 KV cache not yet supported")
 
     def forward(
         self,
@@ -249,7 +250,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 block_mapping=attn_metadata.block_mapping,
                 block_bias=attn_metadata.attn_bias,
                 block_scales=attn_metadata.block_scales,
-                block_groups=None,
+                block_groups=attn_metadata.block_groups,
                 scale=self.scale,
                 matmul_qk_op=self.matmul_qk,
                 matmul_av_op=self.matmul_av,
