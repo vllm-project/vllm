@@ -26,7 +26,7 @@ from vllm.utils import GiB_bytes, flatten_2d_lists, full_groupby
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                      MultiModalFieldConfig, MultiModalInputs, MultiModalKwargs,
-                     MultiModalKwargsItem, PlaceholderRange)
+                     MultiModalKwargsItem, NestedTensors, PlaceholderRange)
 from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
 
@@ -853,33 +853,62 @@ class ProcessingCache:
 
     @staticmethod
     def get_lru_cache(
-        capacity_gb: int,
+        capacity_gb: float,
         value_type: type[_V],
+        *,
+        debug: bool = False,
     ) -> LRUCache[str, _V]:
 
-        def get_size(leaf: object) -> int:
+        def get_leaf_size(leaf: object) -> int:
+            # MultiModalKwargs is not a subclass of dict
+            if isinstance(leaf, MultiModalKwargs):
+                return get_item_size(leaf.data)
+
+            # MultiModalKwargsItem is not a subclass of dict
+            if isinstance(leaf, MultiModalKwargsItem):
+                leaf_data = {k: v.data for k, v in leaf.items()}
+                return get_item_size(leaf_data)
+
+            # sys.getsizeof doesn't work for tensors
             if isinstance(leaf, torch.Tensor):
-                return leaf.nbytes  # sys.getsizeof doesn't work for tensors
+                return leaf.nbytes
 
             return sys.getsizeof(leaf)
 
-        return LRUCache[str, _V](
-            GiB_bytes * capacity_gb,
-            getsizeof=lambda x: json_reduce_leaves(
+        def get_item_size(
+            value: Union[MultiModalKwargs, MultiModalKwargsItem,
+                         Mapping[str, NestedTensors]]
+        ) -> int:
+            size = json_reduce_leaves(
                 lambda a, b: a + b,
-                json_map_leaves(get_size, x),
-            ),
-        )
+                json_map_leaves(get_leaf_size, value),
+            )
 
-    def __init__(self, capacity_gb: int) -> None:
+            if debug:
+                logger.debug("Calculated size of %s to be %.2f GiB",
+                             type(value), size / GiB_bytes)
+
+            return size
+
+        return LRUCache(GiB_bytes * capacity_gb, getsizeof=get_item_size)
+
+    def __init__(
+        self,
+        capacity_gb: float,
+        *,
+        debug_cache_hit_ratio_steps: Optional[int] = None,
+    ) -> None:
         super().__init__()
 
-        # DEBUG: Set to None to disable
-        self.debug_cache_hit_ratio_steps: Optional[int] = None
+        self.debug_cache_hit_ratio_steps = debug_cache_hit_ratio_steps
         self.debug_cache_hits = 0
         self.debug_cache_total = 0
 
-        self._cache = self.get_lru_cache(capacity_gb, MultiModalKwargsItem)
+        self._cache = self.get_lru_cache(
+            capacity_gb,
+            MultiModalKwargsItem,
+            debug=bool(debug_cache_hit_ratio_steps),
+        )
 
     def _maybe_log_cache_stats(self) -> None:
         steps = self.debug_cache_hit_ratio_steps
@@ -890,6 +919,9 @@ class ProcessingCache:
         if total > 0 and total % steps == 0:
             logger.debug("ProcessingCache: hit_ratio = %.2f",
                          self.debug_cache_hits / total)
+            logger.debug("ProcessingCache: size = %.2f / %.2f GiB",
+                         self._cache.currsize / GiB_bytes,
+                         self._cache.maxsize / GiB_bytes)
 
     def get(
         self,
