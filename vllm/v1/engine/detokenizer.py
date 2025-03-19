@@ -40,11 +40,14 @@ class IncrementalDetokenizer:
     ) -> "IncrementalDetokenizer":
 
         if tokenizer is None:
+            # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
 
         if isinstance(tokenizer, PreTrainedTokenizerFast):
+            # Fast tokenizer => use tokenizers library DecodeStream.
             return FastIncrementalDetokenizer(tokenizer, request)
 
+        # Fall back to slow python-based incremental detokenization.
         return SlowIncrementalDetokenizer(tokenizer, request)
 
 
@@ -163,6 +166,8 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             or sampling_params.spaces_between_special_tokens)
 
         if not self.spaces_between_special_tokens:
+            # Store dict of added token ids so that we can suppress
+            # the spaces between them.
             if (added_token_ids := getattr(self.tokenizer, "added_token_ids",
                                            None)) is None:
                 self.tokenizer.added_token_ids = added_token_ids = {
@@ -184,7 +189,8 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         if not self.spaces_between_special_tokens:
             special_token = self.added_token_ids.get(next_token_id)
             is_special = special_token is not None
-            if self.last_special and is_special:
+            if is_special and self.last_special:
+                # Return raw token string without any prefixes spaces.
                 token = special_token
             self.last_special = is_special
 
