@@ -156,6 +156,7 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        dtype=("bfloat16" if current_platform.is_hpu() else "half")
     ),
     #### Extended model tests
     "aria": VLMTestInfo(
