@@ -8,10 +8,10 @@ https://arxiv.org/abs/2310.18547
 
 from typing import List
 
-import torch
 import triton
 import triton.language as tl
 
+import torch
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr
 from vllm.utils import direct_register_custom_op
@@ -136,6 +136,7 @@ def _lora_expand(
     num_tokens_per_lora: torch.Tensor,  # shape [max-loras + 1]
     lora_token_start_loc: torch.Tensor,  # shape [max-loras + 2]
     lora_ids: torch.Tensor,  # shape [max-loras + 1]
+    no_lora_flag_cpu: torch.Tensor,  # shape [1] 
     offset_start: int = 0,
     add_inputs: bool = False,
 ) -> None:
@@ -162,6 +163,11 @@ def _lora_expand(
         add_inputs (bool, optional): Whether to add the input tensor to the 
             output tensor. Defaults to False.
     """
+
+    if no_lora_flag_cpu.item():
+        # None of the inputs require LoRA.
+        return
+
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
     for weight in lora_b_weights:
         assert weight.dtype in [torch.float16, torch.bfloat16]
@@ -170,6 +176,8 @@ def _lora_expand(
     assert output_tensor.is_contiguous()
 
     # metadata sanity check.
+    M = inputs.size(1)
+    assert token_lora_mapping.size(0) == M
     assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(
         0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
@@ -181,7 +189,6 @@ def _lora_expand(
                                            inputs.device)
 
     K = lora_b_weights[0].shape[-1]  # K= rank
-    M = inputs.size(1)
     ADD_INPUTS = add_inputs
     MAX_LORAS = lora_ids.size(0)
     CAST_TYPE = False
@@ -263,6 +270,7 @@ def _lora_expand_fake(
     num_tokens_per_lora: torch.Tensor,
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
+    no_lora_flag_cpu: torch.Tensor,
     offset_start: int = 0,
     add_inputs: bool = False,
 ) -> None:
