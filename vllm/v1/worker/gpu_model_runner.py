@@ -3,7 +3,7 @@
 import gc
 import time
 import weakref
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 import torch
@@ -17,6 +17,7 @@ from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
@@ -24,13 +25,15 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, cdiv, is_pin_memory_available)
+                        LayerBlockType, LazyLoader, cdiv,
+                        is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
+                             ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -39,7 +42,11 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 if TYPE_CHECKING:
+    import xgrammar as xgr
+
     from vllm.v1.core.scheduler_output import SchedulerOutput
+else:
+    xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
 
@@ -135,9 +142,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
-        self.kv_caches: List[torch.Tensor] = []
+        self.kv_caches: list[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
-        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
+        self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
 
         # Set up speculative decoding.
         self.use_spec_decode = False
@@ -158,7 +165,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         # Request states.
-        self.requests: Dict[str, CachedRequestState] = {}
+        self.requests: dict[str, CachedRequestState] = {}
         # Persistent batch.
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
@@ -274,7 +281,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # then resubmitted with the same ID. In this case, we treat them as two
         # distinct requests - clearing the cached states for the first request
         # and handling the second as a new request.
-        removed_req_indices: List[int] = []
+        removed_req_indices: list[int] = []
         for req_id in scheduler_output.finished_req_ids:
             req_index = self.input_batch.remove_request(req_id)
             if req_index is not None:
@@ -305,7 +312,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert req_index is not None
             removed_req_indices.append(req_index)
 
-        req_ids_to_add: List[str] = []
+        req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
@@ -446,7 +453,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Tuple[FlashAttentionMetadata, torch.Tensor]:
+    ) -> tuple[FlashAttentionMetadata, torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -455,8 +462,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Some attention backends (namely MLA) may want to separate requests
         # based on if the attention computation will be compute-bound or
         # memory-bound. This gives them a hook to do that.
-        self.attn_metadata_builder.reorder_batch(self.input_batch,
-                                                 scheduler_output)
+        modified_batch = self.attn_metadata_builder.reorder_batch(
+            self.input_batch, scheduler_output)
+        if modified_batch:
+            self.input_batch.refresh_sampling_metadata()
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -774,8 +783,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return
 
         # Batch the multi-modal inputs.
-        mm_inputs: List[MultiModalKwargs] = []
-        req_input_ids: List[Tuple[str, int]] = []
+        mm_inputs: list[MultiModalKwargs] = []
+        req_input_ids: list[tuple[str, int]] = []
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
             for input_id in encoder_input_ids:
@@ -819,8 +828,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _gather_encoder_outputs(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> List[torch.Tensor]:
-        encoder_outputs: List[torch.Tensor] = []
+    ) -> list[torch.Tensor]:
+        encoder_outputs: list[torch.Tensor] = []
         for req_id in self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
@@ -857,6 +866,53 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
+    def apply_grammar_bitmask(
+        self,
+        scheduler_output: "SchedulerOutput",
+        logits: torch.Tensor,
+    ):
+        # Serialization of np.ndarray is much more efficient than a tensor,
+        # so we receive it in that format.
+        grammar_bitmask = scheduler_output.grammar_bitmask
+        if grammar_bitmask is None:
+            return
+
+        # We receive the structured output bitmask from the scheduler, but the
+        # indices of the requests in the batch may not match the indices of
+        # the bitmask since the scheduler doesn't know how the gpu runner is
+        # ordering the requests in the batch. We need to sort the bitmask to
+        # match the order of the requests used here.
+        struct_out_req_batch_indices: dict[str, int] = {}
+        indices_match = True
+        for req_id in self.input_batch.req_ids:
+            mask_index = scheduler_output.structured_output_request_ids.get(
+                req_id)
+            if mask_index is None:
+                # not a structured output request
+                continue
+            batch_index = self.input_batch.req_id_to_index[req_id]
+            if batch_index != mask_index:
+                indices_match = False
+            struct_out_req_batch_indices[req_id] = batch_index
+
+        if not indices_match:
+            # Sort the bitmask to match the order of the requests
+            sorted_bitmask = np.zeros_like(grammar_bitmask)
+            for req_id, batch_index in struct_out_req_batch_indices.items():
+                orig_index = scheduler_output.structured_output_request_ids[
+                    req_id]
+                sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
+            grammar_bitmask = sorted_bitmask
+
+        grammar_bitmask = torch.from_numpy(grammar_bitmask)
+
+        # TODO: compatibility with spec decode
+        xgr.apply_token_bitmask_inplace(
+            logits,
+            grammar_bitmask.to(self.device, non_blocking=True),
+            indices=list(struct_out_req_batch_indices.values()),
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -864,6 +920,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
         self._update_states(scheduler_output)
+        if not scheduler_output.total_num_scheduled_tokens:
+            # Return empty ModelRunnerOuptut if there's no work to do.
+            return EMPTY_MODEL_RUNNER_OUTPUT
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -942,6 +1001,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
 
+        # Apply structured output bitmasks if present
+        if scheduler_output.grammar_bitmask is not None:
+            self.apply_grammar_bitmask(scheduler_output, logits)
+
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         if not self.use_spec_decode:
@@ -1010,7 +1073,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids = self.generate_draft_token_ids(
                 valid_sampled_token_ids)
 
-        model_runner_output = ModelRunnerOutput(
+        return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
@@ -1018,14 +1081,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
-        return model_runner_output
 
     def generate_draft_token_ids(
         self,
-        sampled_token_ids: List[List[int]],
-    ) -> List[List[int]]:
+        sampled_token_ids: list[list[int]],
+    ) -> list[list[int]]:
         # TODO(woosuk): Optimize.
-        draft_token_ids: List[List[int]] = []
+        draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
@@ -1061,7 +1123,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                                   self.device)
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB and %.6f seconds",
+        logger.info("Model loading took %.4f GB and %.6f seconds",
                     self.model_memory_usage / float(2**30),
                     time_after_load - time_before_load)
 
@@ -1069,12 +1131,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         hidden_states: torch.Tensor,
         scheduler_output: "SchedulerOutput",
-    ) -> Dict[str, Optional[LogprobsTensors]]:
+    ) -> dict[str, Optional[LogprobsTensors]]:
         num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
             return {}
 
-        prompt_logprobs_dict: Dict[str, Optional[LogprobsTensors]] = {}
+        prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
         # maintainable loop over optimal performance.
@@ -1313,6 +1375,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     min_tokens={},
                     logit_bias=[None for _ in range(num_reqs)],
                     allowed_token_ids_mask=None,
+                    bad_words_token_ids={},
                 )
                 sampler_output = self.model.sample(
                     logits=logits, sampling_metadata=dummy_metadata)
@@ -1357,7 +1420,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
-            kv_cache_config: Configuration for the KV cache, including the KV 
+            kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
         if len(kv_cache_config.groups) > 1:
@@ -1365,7 +1428,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
 
-        kv_caches: Dict[str, torch.Tensor] = {}
+        kv_caches: dict[str, torch.Tensor] = {}
 
         for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
             tensor_config = kv_cache_config.tensors[layer_name]
@@ -1389,19 +1452,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def get_kv_cache_spec(self) -> KVCacheSpec:
         """
-        Generates the KVCacheSpec by parsing the kv cache format from each 
+        Generates the KVCacheSpec by parsing the kv cache format from each
         Attention module in the static forward context.
         Returns:
-            KVCacheSpec: A dictionary mapping layer names to their KV cache 
+            KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
 
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
+        use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: KVCacheSpec = {}
         for layer_name, attn_module in forward_ctx.items():
+            if isinstance(attn_module, FusedMoE):
+                continue
+
             # TODO: Support other attention modules, e.g., sliding window,
-            # cross-attention, MLA.
+            # cross-attention
             assert isinstance(attn_module, Attention)
             if attn_module.attn_type == AttentionType.DECODER:
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -1409,7 +1476,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=attn_module.dtype,
-                )
+                    use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.

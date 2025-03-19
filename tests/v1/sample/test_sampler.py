@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Optional
 
 import numpy as np
 import pytest
@@ -32,7 +32,7 @@ def _create_penalty_tensor(batch_size: int, penalty_value: float,
 
 
 def _create_prompt_tokens_tensor(
-    prompt_token_ids: List[List[int]],
+    prompt_token_ids: list[list[int]],
     vocab_size: int,
     device: torch.device,
 ) -> torch.Tensor:
@@ -49,8 +49,8 @@ def _create_logit_bias(
     batch_size: int,
     vocab_size: int,
     bias_value: float,
-) -> List[Optional[Dict[int, float]]]:
-    res: List[Optional[Dict[int, float]]] = []
+) -> list[Optional[dict[int, float]]]:
+    res: list[Optional[dict[int, float]]] = []
     for i in range(batch_size):
         logit_bias = {min(i, vocab_size - 1): bias_value}
         res.append(logit_bias)
@@ -77,14 +77,57 @@ def _create_allowed_token_ids(
     return mask
 
 
+def _create_bad_words_token_ids(
+        batch_size: int, vocab_size: int,
+        bad_words_lengths: list[tuple[int]]) -> dict[int, list[list[int]]]:
+    bad_words_token_ids = {}
+    for batch_idx in range(batch_size):
+        token_ids_single_batch = []
+        for bad_words_length in bad_words_lengths:
+            token_ids = np.random.choice(vocab_size,
+                                         size=bad_words_length,
+                                         replace=True).tolist()
+            token_ids_single_batch.append(token_ids)
+        bad_words_token_ids[batch_idx] = token_ids_single_batch
+    if batch_size >= 2:
+        # Test no bad_words for some batch
+        no_bad_words_batch_idx = np.random.choice(batch_size)
+        bad_words_token_ids.pop(no_bad_words_batch_idx, None)
+    return bad_words_token_ids
+
+
+def _update_output_token_ids_for_bad_words(
+        metadata: SamplingMetadata, vocab_size: int) -> dict[int, list[int]]:
+    bad_words_last_tokens = {}
+    for batch_idx, bad_words_token_ids in metadata.bad_words_token_ids.items():
+        output_token_ids = metadata.output_token_ids[batch_idx]
+        bad_words_last_token: list[int] = []
+        for i, bad_word_token_ids in enumerate(bad_words_token_ids):
+            if len(bad_word_token_ids) == 1:
+                # Single token id always affects logits
+                bad_words_last_token.append(bad_word_token_ids[0])
+            else:
+                prefix_length = len(bad_word_token_ids) - 1
+                has_bad_words = np.random.choice([True, False])
+                if has_bad_words:
+                    output_token_ids[-prefix_length:] = bad_word_token_ids[:-1]
+                    bad_words_last_token.append(bad_word_token_ids[-1])
+                    break  # Maximum one update to output_token_ids
+                else:  # Make sure no accidental match to bad words
+                    output_token_ids[-1] = (bad_word_token_ids[-2] +
+                                            1) % vocab_size
+        bad_words_last_tokens[batch_idx] = bad_words_last_token
+    return bad_words_last_tokens
+
+
 def _create_default_sampling_metadata(
     num_output_tokens: int,
     batch_size: int,
     vocab_size: int,
     device: torch.device,
 ) -> SamplingMetadata:
-    output_token_ids: List[List[int]] = []
-    prompt_token_ids: List[List[int]] = []
+    output_token_ids: list[list[int]] = []
+    prompt_token_ids: list[list[int]] = []
     for _ in range(batch_size):
         output_token_ids.append(
             np.random.randint(0, vocab_size, size=num_output_tokens).tolist())
@@ -112,14 +155,15 @@ def _create_default_sampling_metadata(
         min_tokens={},
         logit_bias=[None] * batch_size,
         allowed_token_ids_mask=None,
+        bad_words_token_ids={},
     )
     return fake_sampling_metadata
 
 
 def _generate_min_token_penalties_and_stop_tokens(
     num_output_tokens: int, batch_size: int, vocab_size: int,
-    batch_indices_for_min_token_penalty: List[int]
-) -> Dict[int, Tuple[int, Set[int]]]:
+    batch_indices_for_min_token_penalty: list[int]
+) -> dict[int, tuple[int, set[int]]]:
     """
     Generates and returns a dict of minimum token penalties and
     corresponding stop token IDs (`min_tokens`, `stop_token_ids`) for each
@@ -130,7 +174,7 @@ def _generate_min_token_penalties_and_stop_tokens(
     and a random set of stop token IDs is created. Otherwise, a lower
     `min_tokens` value is assigned, and the stop token IDs set is empty.
     """
-    min_tokens: Dict[int, Tuple[int, Set[int]]] = {}
+    min_tokens: dict[int, tuple[int, set[int]]] = {}
     for index in range(batch_size):
         if index in batch_indices_for_min_token_penalty:
             min_tokens[index] = (
@@ -147,7 +191,7 @@ def _generate_min_token_penalties_and_stop_tokens(
 
 def _create_weighted_output_token_list(
         batch_size: int,
-        vocab_size: int) -> Tuple[List[List[int]], List[List[int]]]:
+        vocab_size: int) -> tuple[list[list[int]], list[list[int]]]:
     """
     Creates an output token list where each token occurs a distinct
     number of times.
@@ -157,7 +201,7 @@ def _create_weighted_output_token_list(
     list, each with a different frequency.
 
     Returns:
-        Tuple[List[List[int]], List[List[int]]]:
+        tuple[list[list[int]], list[list[int]]]:
             - The first element is the output token list, where each sublist
               corresponds to a batch and contains tokens with weighted
               frequencies.
@@ -165,8 +209,8 @@ def _create_weighted_output_token_list(
               batch, ordered by their frequency in the corresponding output
               list.
     """
-    output_token_ids: List[List[int]] = []
-    sorted_token_ids_in_output: List[List[int]] = []
+    output_token_ids: list[list[int]] = []
+    sorted_token_ids_in_output: list[list[int]] = []
     for _ in range(batch_size):
         distinct_token_ids = np.random.choice(vocab_size,
                                               size=np.random.randint(1, 10),
@@ -465,5 +509,37 @@ def test_sampler_allowed_token_ids(device: str, batch_size: int,
             if token_id >= start and token_id < end:
                 assert logits_for_req[token_id] == -float(
                     "inf"), f"{batch_idx}, {token_id}"
+            else:
+                assert logits_for_req[token_id] != -float("inf")
+
+
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("batch_size", [1, 2, 32])
+@pytest.mark.parametrize("bad_words_lengths", [(1, ), (1, 3), (2, 2)])
+def test_sampler_bad_words(device: str, batch_size: int,
+                           bad_words_lengths: list[tuple[int]]):
+    """
+    Test to verify that when the bad words restriction is present, tokens
+    are penalized based on their match with the bad words.
+    """
+    torch.set_default_device(device)
+    # Create fake logits where each token is assigned the same
+    # logit value.
+    fake_logits = _create_fake_logits(batch_size, VOCAB_SIZE)
+    sampling_metadata = _create_default_sampling_metadata(
+        NUM_OUTPUT_TOKENS, batch_size, VOCAB_SIZE, torch.device(device))
+    sampling_metadata.bad_words_token_ids = _create_bad_words_token_ids(
+        batch_size, VOCAB_SIZE, bad_words_lengths)
+    bad_words_last_tokens = _update_output_token_ids_for_bad_words(
+        sampling_metadata, VOCAB_SIZE)
+    sampler = Sampler()
+    logits = sampler.apply_bad_words(fake_logits, sampling_metadata)
+    logits = logits.cpu()
+    for batch_idx in range(batch_size):
+        logits_for_req = logits[batch_idx]
+        for token_id in range(VOCAB_SIZE):
+            if (batch_idx in bad_words_last_tokens
+                    and token_id in bad_words_last_tokens[batch_idx]):
+                assert logits_for_req[token_id] == -float("inf")
             else:
                 assert logits_for_req[token_id] != -float("inf")

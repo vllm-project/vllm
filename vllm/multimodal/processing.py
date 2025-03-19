@@ -14,7 +14,6 @@ from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
 from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
 from typing_extensions import assert_never
 
-import vllm.envs as envs
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
@@ -985,10 +984,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         before passing them to :meth:`_get_hf_mm_data`.
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
+        mm_config = self.info.ctx.get_mm_config()
 
-        mm_limits = self.info.ctx.get_mm_config().limit_per_prompt
         for modality, items in mm_items.items():
-            limit = mm_limits.get(modality, 1)
+            limit = mm_config.get_limit_per_prompt(modality)
             if len(items) > limit:
                 raise ValueError(
                     f"You set {modality}={limit} (or defaulted to 1) in "
@@ -1435,6 +1434,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1451,11 +1451,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         mm_items = self._to_mm_items(mm_data)
 
-        # Create MM hashes (only used in V1)
+        # Create MM hashes to be returned (only used in V1)
         # TODO: Use these hash keys for caching operations in apply_hf_processor
         # instead of rehashing.
 
-        if envs.VLLM_USE_V1:
+        if return_mm_hashes:
             model_id = self.info.model_id
             mm_hashes = {
                 modality: [
@@ -1554,6 +1554,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalEncDecInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1567,6 +1568,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             encoder_prompt,
             mm_data,
             hf_processor_mm_kwargs,
+            return_mm_hashes,
         )
 
         tokenizer = self.info.get_tokenizer()

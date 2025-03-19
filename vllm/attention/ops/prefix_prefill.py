@@ -64,7 +64,9 @@ if triton.__version__ >= "2.1.0":
         BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
         BLOCK_N: tl.constexpr,
         SLIDING_WINDOW: tl.constexpr,
+        SKIP_DECODE: tl.constexpr,
     ):
+
         cur_batch = tl.program_id(0)
         cur_head = tl.program_id(1)
         start_m = tl.program_id(2)
@@ -77,6 +79,9 @@ if triton.__version__ >= "2.1.0":
         cur_batch_query_len = (cur_batch_in_all_stop_index -
                                cur_batch_in_all_start_index)
         cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
+
+        if SKIP_DECODE and cur_batch_query_len == 1:
+            return
 
         # start position inside of the query
         # generally, N goes over kv, while M goes over query_len
@@ -264,6 +269,10 @@ if triton.__version__ >= "2.1.0":
                  (offs_m[:, None] < cur_batch_query_len))
         return
 
+    # On triton versions lower 3.2 the assertion:
+    # Assertion `!(srcMmaLayout && dstMmaLayout && !srcMmaLayout.isAmpere()) &&
+    #  "mma -> mma layout conversion is only supported on Ampere"' failed.
+    # is observed
     if triton.__version__ >= "3.2.0":
         @triton.autotune(
             configs=[
@@ -294,7 +303,7 @@ if triton.__version__ >= "2.1.0":
                 BLOCK_DMODEL: tl.constexpr, BLOCK_DMODEL_PADDED: tl.constexpr,
                 BLOCK_SIZE: tl.constexpr, BLOCK_N: tl.constexpr,
                 SLIDING_WINDOW: tl.constexpr, num_unroll_cache: tl.constexpr,
-                num_unroll_request: tl.constexpr):
+                num_unroll_request: tl.constexpr, SKIP_DECODE: tl.constexpr):
 
             cur_batch = tl.program_id(0)
             cur_head = tl.program_id(1)
@@ -308,6 +317,9 @@ if triton.__version__ >= "2.1.0":
             cur_batch_query_len = (cur_batch_in_all_stop_index -
                                    cur_batch_in_all_start_index)
             cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
+
+            if SKIP_DECODE and cur_batch_query_len == 1:
+                return
 
             # start position inside of the query
             # generally, N goes over kv, while M goes over query_len
@@ -356,10 +368,6 @@ if triton.__version__ >= "2.1.0":
                          ((start_n + offs_bs_n[None, :]) % BLOCK_SIZE) *
                          stride_k_cache_bl +
                          (offs_d[:, None] % x) * stride_k_cache_x)
-                # off_k = (bn[None, :] * stride_k_cache_bs +
-                #          cur_kv_head * stride_k_cache_h +
-                #          offs_d[:, None] * stride_k_cache_d +
-                #          offs_bs_n[None, :])
 
                 # [BLOCK_SIZE,D]
                 off_v = (bn[:, None] * stride_v_cache_bs +
@@ -394,12 +402,11 @@ if triton.__version__ >= "2.1.0":
                                   (start_n + offs_bs_n[None, :])
                                   < SLIDING_WINDOW, qk, -10000)
 
-                # -- compute m_ij, p, l_ij
-                m_ij = tl.maximum(m_i, tl.max(qk, 1))
-                p = tl.math.exp2(qk - m_ij[:, None])
-
-                l_ij = tl.sum(p, 1)
-                alpha = tl.math.exp2(m_i - m_ij)
+                # compute running maximum
+                m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+                p = tl.exp(qk - m_ij[:, None])
+                l_ij = tl.sum(p, axis=1)
+                alpha = tl.exp(m_i - m_ij)
                 acc = acc * alpha[:, None]
 
                 # update acc
@@ -449,13 +456,13 @@ if triton.__version__ >= "2.1.0":
                         offs_m[:, None] - (start_n + offs_n[None, :])
                         < SLIDING_WINDOW, qk, -10000)
 
-                # -- compute m_ij, p, l_ij
-                m_ij = tl.maximum(m_i, tl.max(qk, 1))
-                p = tl.math.exp2(qk - m_ij[:, None])
-
-                l_ij = tl.sum(p, 1)
-                alpha = tl.math.exp2(m_i - m_ij)
+                # compute running maximum
+                m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+                p = tl.exp(qk - m_ij[:, None])
+                l_ij = tl.sum(p, axis=1)
+                alpha = tl.exp(m_i - m_ij)
                 acc = acc * alpha[:, None]
+
                 # update acc
                 v = tl.load(
                     v_ptrs +
@@ -466,12 +473,12 @@ if triton.__version__ >= "2.1.0":
                 p = p.to(v.dtype)
 
                 acc = tl.dot(p, v, acc=acc, input_precision=IN_PRECISION)
-
                 # update m_i and l_i
                 l_i = l_i * alpha + l_ij
                 m_i = m_ij
 
             acc = acc / l_i[:, None]
+
             # initialize pointers to output
             off_o = (
                 (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs +
@@ -719,6 +726,7 @@ if triton.__version__ >= "2.1.0":
         BLOCK_DMODEL: tl.constexpr,  # head size
         BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
         BLOCK_N: tl.constexpr,
+        SKIP_DECODE: tl.constexpr,
     ):
         # attn_bias[]
         cur_batch = tl.program_id(0)
@@ -736,6 +744,9 @@ if triton.__version__ >= "2.1.0":
         cur_batch_query_len = (cur_batch_in_all_stop_index -
                                cur_batch_in_all_start_index)
         cur_batch_ctx_len = cur_batch_seq_len - cur_batch_query_len
+
+        if SKIP_DECODE and cur_batch_query_len == 1:
+            return
 
         block_start_loc = BLOCK_M * start_m
 
@@ -940,7 +951,8 @@ if triton.__version__ >= "2.1.0":
                               v_scale: torch.Tensor,
                               alibi_slopes=None,
                               sliding_window=None,
-                              sm_scale=None):
+                              sm_scale=None,
+                              skip_decode=False):
 
         q_dtype_is_f32 = q.dtype is torch.float32
 
@@ -1043,6 +1055,7 @@ if triton.__version__ >= "2.1.0":
                 BLOCK_DMODEL=Lk,
                 BLOCK_DMODEL_PADDED=Lk_padded,
                 BLOCK_N=BLOCK,
+                SKIP_DECODE=skip_decode,
                 num_warps=NUM_WARPS,
                 num_stages=1,
             )
@@ -1097,6 +1110,7 @@ if triton.__version__ >= "2.1.0":
                 BLOCK_DMODEL=Lk,
                 BLOCK_DMODEL_PADDED=Lk_padded,
                 SLIDING_WINDOW=sliding_window,
+                SKIP_DECODE=skip_decode,
             )
             return
 
@@ -1153,6 +1167,7 @@ if triton.__version__ >= "2.1.0":
             BLOCK_DMODEL_PADDED=Lk_padded,
             BLOCK_N=BLOCK,
             SLIDING_WINDOW=sliding_window,
+            SKIP_DECODE=skip_decode,
             num_warps=NUM_WARPS,
             num_stages=1,
         )

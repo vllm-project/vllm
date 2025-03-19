@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List
-
 import numpy as np
 import torch
 
@@ -40,7 +38,7 @@ class BlockTable:
 
     def append_row(
         self,
-        block_ids: List[int],
+        block_ids: list[int],
         row_idx: int,
     ) -> None:
         if not block_ids:
@@ -50,7 +48,7 @@ class BlockTable:
         self.num_blocks_per_row[row_idx] += num_blocks
         self.block_table_np[row_idx, start:start + num_blocks] = block_ids
 
-    def add_row(self, block_ids: List[int], row_idx: int) -> None:
+    def add_row(self, block_ids: list[int], row_idx: int) -> None:
         self.num_blocks_per_row[row_idx] = 0
         self.append_row(block_ids, row_idx)
 

@@ -2,7 +2,7 @@
 
 import os
 import tempfile
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -60,19 +60,19 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
-    VLLM_TEST_FORCE_FP8_MARLIN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
-    VLLM_PLUGINS: Optional[List[str]] = None
+    VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
-    VLLM_DISABLED_KERNELS: List[str] = []
+    VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
@@ -86,7 +86,6 @@ if TYPE_CHECKING:
     VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
     VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
     VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
-    VLLM_TEST_ENABLE_EP: bool = False
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -96,6 +95,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
+    VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
 
 
 def get_default_cache_root():
@@ -123,7 +123,7 @@ def maybe_convert_int(value: Optional[str]) -> Optional[int]:
 
 # begin-env-vars-definition
 
-environment_variables: Dict[str, Callable[[], Any]] = {
+environment_variables: dict[str, Callable[[], Any]] = {
 
     # ================== Installation Time Env Vars ==================
 
@@ -148,6 +148,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
         os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
 
+    # Whether to force using nightly wheel in python build.
+    # This is used for testing the nightly wheel in python build.
+    "VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL":
+    lambda: bool(int(os.getenv("VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL", "0"))
+                 ),
+
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
     # Available options: "Debug", "Release", "RelWithDebInfo"
@@ -158,7 +164,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VERBOSE":
     lambda: bool(int(os.getenv('VERBOSE', '0'))),
 
-    # Root directory for VLLM configuration files
+    # Root directory for vLLM configuration files
     # Defaults to `~/.config/vllm` unless `XDG_CONFIG_HOME` is set
     # Note that this not only affects how vllm finds its configuration files
     # during runtime, but also affects how vllm installs its configuration
@@ -172,7 +178,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # ================== Runtime Env Vars ==================
 
-    # Root directory for VLLM cache files
+    # Root directory for vLLM cache files
     # Defaults to `~/.cache/vllm` unless `XDG_CACHE_HOME` is set
     "VLLM_CACHE_ROOT":
     lambda: os.path.expanduser(
@@ -254,7 +260,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENGINE_ITERATION_TIMEOUT_S":
     lambda: int(os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60")),
 
-    # API key for VLLM API server
+    # API key for vLLM API server
     "VLLM_API_KEY":
     lambda: os.environ.get("VLLM_API_KEY", None),
 
@@ -315,6 +321,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # - "XFORMERS": use XFormers
     # - "ROCM_FLASH": use ROCmFlashAttention
     # - "FLASHINFER": use flashinfer
+    # - "FLASHMLA": use FlashMLA
     "VLLM_ATTENTION_BACKEND":
     lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
 
@@ -572,12 +579,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON", "0"))
                  ),
 
-    # If set, vLLM will use the experimental expert parallel implementation on
-    # the FusedMoE layer, using tensor parallelism size as expert parallelism
-    # size.
-    "VLLM_TEST_ENABLE_EP":
-    lambda: bool(int(os.getenv("VLLM_TEST_ENABLE_EP", "0"))),
-
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
     # so that users can colocate other actors on the same GPUs as vLLM.
@@ -630,6 +631,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3":
     lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
+
+    # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
+    "VLLM_MARLIN_USE_ATOMIC_ADD":
+    lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
 }
 
 # end-env-vars-definition

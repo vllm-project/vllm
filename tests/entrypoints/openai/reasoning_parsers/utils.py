@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage)
@@ -33,10 +33,10 @@ class StreamingReasoningReconstructor:
 
 def run_reasoning_extraction(
     reasoning_parser: ReasoningParser,
-    model_output: List[str],
+    model_output: list[str],
     request: Union[ChatCompletionRequest, None] = None,
     streaming: bool = False,
-) -> Tuple[Optional[str], Optional[str]]:
+) -> tuple[Optional[str], Optional[str]]:
     if streaming:
         reconstructor = run_reasoning_extraction_streaming(
             reasoning_parser,
@@ -55,9 +55,9 @@ def run_reasoning_extraction(
 
 def run_reasoning_extraction_nonstreaming(
     reasoning_parser: ReasoningParser,
-    model_output: List[str],
+    model_output: list[str],
     request: Union[ChatCompletionRequest, None] = None,
-) -> Tuple[Optional[str], Optional[str]]:
+) -> tuple[Optional[str], Optional[str]]:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     return reasoning_parser.extract_reasoning_content(
         model_output=''.join(model_output), request=request)
@@ -65,13 +65,13 @@ def run_reasoning_extraction_nonstreaming(
 
 def run_reasoning_extraction_streaming(
     reasoning_parser: ReasoningParser,
-    model_deltas: List[str],
+    model_deltas: list[str],
     request: Union[ChatCompletionRequest, None] = None,
 ) -> StreamingReasoningReconstructor:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     reconstructor = StreamingReasoningReconstructor()
     previous_text = ""
-    previous_tokens: List[int] = []
+    previous_tokens: list[int] = []
     for delta in model_deltas:
         token_delta = [
             reasoning_parser.vocab.get(token)
