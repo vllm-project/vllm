@@ -823,6 +823,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         embeddings_flat = self._video_pixels_to_features(
             self.vision_tower, video_pixels_flat)
+        embeddings = torch.split(embeddings_flat, frames_per_video)
 
         return [
             self._add_image_newline(
@@ -830,8 +831,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                 videos=1,
                 frames=len(embeddings_one),
                 strategy="one_token",
-            ).squeeze(0) for embeddings_one in torch.split(
-                embeddings_flat, frames_per_video)
+            ).squeeze(0) for embeddings_one in embeddings
         ]
 
     def apply_pooling(self, image_features: torch.Tensor, stride: int = 2):
