@@ -1804,7 +1804,8 @@ class SpeculativeConfig:
             tokens, if provided. It will default to the number in the draft
             model config if present, otherwise, it is required.
         - proposer (Optional[str]): The name of the speculative method to use.
-            Defaults to the model name if not provided.
+            If not provided, it assumes the speculative method is a model-based
+            method by default.
         - acceptance_method (str): The method to use for accepting draft
             tokens. This can take two possible values: 'rejection_sampler' and
             'typical_acceptance_sampler' for RejectionSampler and

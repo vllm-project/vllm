@@ -1195,7 +1195,19 @@ class EngineArgs:
         enable_chunked_prefill: bool,
         disable_log_stats: bool,
     ) -> Optional["SpeculativeConfig"]:
+        """Initializes and returns a SpeculativeConfig object based on
+        `speculative_config`.
 
+        This function utilizes `speculative_config` to create a
+        SpeculativeConfig object. The `speculative_config` can either be
+        provided as a JSON string input via CLI arguments or directly as a
+        dictionary from the engine. If `speculative_config` is not set, this
+        function will attempt to construct a configuration dictionary using
+        certain parameters, which are scheduled for deprecation in the next
+        release. Note that in next releases, `speculative_config` must be
+        provided, and the deprecated standalone speculative-related parameters
+        will be removed.
+        """
         if self.speculative_config is None:
             if (self.speculative_model is None
                     and self.num_speculative_tokens is None):
