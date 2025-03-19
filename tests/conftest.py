@@ -341,7 +341,7 @@ class HfRunner:
                 **model_kwargs,
             )
 
-            if (getattr(model, "quantization_method", None) is None
+            if (getattr(model, "quantization_method", None) != "bitsandbytes"
                     and len({p.device
                              for p in model.parameters()}) < 2):
                 model = model.to(self.device)
