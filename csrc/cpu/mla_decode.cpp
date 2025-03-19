@@ -49,6 +49,119 @@ struct KernelVecType<c10::BFloat16> {
 };
 #endif
 
+template <int HEAD_DIM, int V_HEAD_DIM, int BLOCK_SIZE, int HEAD_UNROLL,
+          typename qk_vec_type>
+void mla_decode_block_head(
+    const qk_vec_type* __restrict__ q_vecs,          // [HEAD_UNROLL, head_dim]
+    const qk_vec_type* __restrict__ k_vecs,          // [block_size, head_dim]
+    const vec_op::FP32Vec16* __restrict v_vecs_f32,  // [block_size, v_head_dim]
+    float* __restrict__ acc_out,  // [HEAD_UNROLL, v_head_dim]
+    float* __restrict__ acc_lse,  // [HEAD_UNROLL]
+    const float scale, const int num_tokens) {
+  using f32_vec_type = vec_op::FP32Vec16;
+  constexpr int QK_NUM_ELEM = qk_vec_type::VEC_ELEM_NUM;
+  constexpr int V_NUM_ELEM = f32_vec_type::VEC_ELEM_NUM;
+
+  float logits[BLOCK_SIZE][HEAD_UNROLL] = {};  // initialize to zeros
+  float max_val[HEAD_UNROLL];
+  std::fill(max_val, max_val + HEAD_UNROLL, -FLT_MAX);
+
+  f32_vec_type acc_vec[BLOCK_SIZE][HEAD_UNROLL];
+  for (int i = 0; i < HEAD_DIM; i += QK_NUM_ELEM) {
+    // load to registers
+    qk_vec_type q_vec[HEAD_UNROLL];
+
+#pragma unroll
+    for (int unroll = 0; unroll < HEAD_UNROLL; ++unroll)
+      q_vec[unroll] =
+          qk_vec_type{q_vecs[(i + unroll * HEAD_DIM) / QK_NUM_ELEM]};
+
+    for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
+      qk_vec_type k_vec(k_vecs[(block_offset * HEAD_DIM + i) / QK_NUM_ELEM]);
+
+#pragma unroll
+      for (int unroll = 0; unroll < HEAD_UNROLL; ++unroll)
+        vec_op::fma(acc_vec[block_offset][unroll], q_vec[unroll], k_vec);
+    }
+  }
+
+  for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
+#pragma unroll
+    for (int unroll = 0; unroll < HEAD_UNROLL; ++unroll) {
+      const float acc = acc_vec[block_offset][unroll].reduce_sum() * scale;
+      logits[block_offset][unroll] = acc;
+      max_val[unroll] = std::max(max_val[unroll], acc);
+    }
+  }
+
+  float sum_exp[HEAD_UNROLL] = {};
+  for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
+#pragma unroll
+    for (int unroll = 0; unroll < HEAD_UNROLL; ++unroll) {
+      const float val =
+          std::exp(logits[block_offset][unroll] - max_val[unroll]);
+      logits[block_offset][unroll] = val;
+      sum_exp[unroll] += val;
+    }
+  }
+
+  f32_vec_type this_out[V_HEAD_DIM / V_NUM_ELEM][HEAD_UNROLL];
+
+  for (int block_offset = 0; block_offset < BLOCK_SIZE; ++block_offset) {
+    // load to registers
+    f32_vec_type scale_[HEAD_UNROLL];
+
+#pragma unroll
+    for (int unroll = 0; unroll < HEAD_UNROLL; ++unroll)
+      scale_[unroll] =
+          f32_vec_type{logits[block_offset][unroll] / sum_exp[unroll]};
+
+    for (int i = 0; i < V_HEAD_DIM; i += V_NUM_ELEM) {
+      f32_vec_type v_vec(
+          v_vecs_f32[(block_offset * HEAD_DIM + i) / V_NUM_ELEM]);
+
+#pragma unroll
+      for (int unroll = 0; unroll < HEAD_UNROLL; ++unroll)
+        vec_op::fma(this_out[i / V_NUM_ELEM][unroll], v_vec, scale_[unroll]);
+    }
+  }
+
+  // merge attention state
+  // section 2.2 in https://arxiv.org/pdf/2501.01005
+  f32_vec_type prev_scale[HEAD_UNROLL];
+  f32_vec_type curr_scale[HEAD_UNROLL];
+
+#pragma unroll
+  for (int unroll = 0; unroll < HEAD_UNROLL; ++unroll) {
+    const float prev_lse = acc_lse[unroll];
+    const float curr_lse = std::log(sum_exp[unroll]) +
+                           max_val[unroll];  // add back max_val to get true lse
+    // softmax trick
+    const float max_lse = std::max(prev_lse, curr_lse);
+    const float prev_sum_exp = std::exp(prev_lse - max_lse);
+    const float curr_sum_exp = std::exp(curr_lse - max_lse);
+
+    const float new_sum_exp = prev_sum_exp + curr_sum_exp;
+    acc_lse[unroll] = std::log(new_sum_exp) + max_lse;
+
+    prev_scale[unroll] = f32_vec_type{prev_sum_exp / new_sum_exp};
+    curr_scale[unroll] = f32_vec_type{curr_sum_exp / new_sum_exp};
+  }
+
+  for (int i = 0; i < V_HEAD_DIM; i += V_NUM_ELEM) {
+#pragma unroll
+    for (int unroll = 0; unroll < HEAD_UNROLL; ++unroll) {
+      f32_vec_type o_vec(acc_out + i + V_HEAD_DIM * unroll);
+      o_vec = o_vec * prev_scale[unroll] +
+              this_out[i / V_NUM_ELEM][unroll] * curr_scale[unroll];
+      o_vec.save(acc_out + i + V_HEAD_DIM * unroll);
+    }
+  }
+
+  q_vecs += HEAD_DIM / QK_NUM_ELEM * HEAD_UNROLL;
+  acc_out += V_HEAD_DIM * HEAD_UNROLL;
+}
+
 template <typename scalar_t, int HEAD_DIM, int V_HEAD_DIM, int BLOCK_SIZE,
           typename qk_vec_type>
 void mla_decode_block(
@@ -104,69 +217,21 @@ void mla_decode_block(
     v_vecs_f32 = reinterpret_cast<const f32_vec_type*>(kv_cache);
   }
 
-  for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
-    float logits[BLOCK_SIZE] = {};  // initialize to zeros
-    float max_val = -FLT_MAX;
+  // compute 2 heads at the same time to improve ILP and
+  // take advantage of register cache for K and V.
+  for (int iter2 = 0; iter2 < num_heads / 2; ++iter2) {
+    mla_decode_block_head<HEAD_DIM, V_HEAD_DIM, BLOCK_SIZE, 2>(
+        q_vecs, k_vecs, v_vecs_f32, acc_out, acc_lse, scale, num_tokens);
 
-    f32_vec_type acc_vec[BLOCK_SIZE];
-    for (int i = 0; i < HEAD_DIM; i += QK_NUM_ELEM) {
-      qk_vec_type q_vec(q_vecs[i / QK_NUM_ELEM]);
-      for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
-        qk_vec_type k_vec(k_vecs[(block_offset * HEAD_DIM + i) / QK_NUM_ELEM]);
-        vec_op::fma(acc_vec[block_offset], q_vec, k_vec);
-      }
-    }
-
-    for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
-      const float acc = acc_vec[block_offset].reduce_sum() * scale;
-      logits[block_offset] = acc;
-      max_val = std::max(max_val, acc);
-    }
-
-    float sum_exp = 0.0f;
-    for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
-      const float val = std::exp(logits[block_offset] - max_val);
-      logits[block_offset] = val;
-      sum_exp += val;
-    }
-
-    f32_vec_type this_out[V_HEAD_DIM / V_NUM_ELEM];
-    float inv_sum = 1.0f / sum_exp;
-
-    for (int block_offset = 0; block_offset < BLOCK_SIZE; ++block_offset) {
-      f32_vec_type scale_(logits[block_offset] * inv_sum);
-
-      for (int i = 0; i < V_HEAD_DIM; i += V_NUM_ELEM) {
-        f32_vec_type v_vec(
-            v_vecs_f32[(block_offset * HEAD_DIM + i) / V_NUM_ELEM]);
-        vec_op::fma(this_out[i / V_NUM_ELEM], v_vec, scale_);
-      }
-    }
-
-    // merge attention state
-    // section 2.2 in https://arxiv.org/pdf/2501.01005
-    const float prev_lse = acc_lse[head_idx];
-    const float curr_lse =
-        std::log(sum_exp) + max_val;  // add back max_val to get true lse
-    // softmax trick
-    max_val = std::max(prev_lse, curr_lse);
-    const float prev_sum_exp = std::exp(prev_lse - max_val);
-    const float curr_sum_exp = std::exp(curr_lse - max_val);
-
-    const float new_sum_exp = prev_sum_exp + curr_sum_exp;
-    f32_vec_type prev_scale(prev_sum_exp / new_sum_exp);
-    f32_vec_type curr_scale(curr_sum_exp / new_sum_exp);
-
-    acc_lse[head_idx] = std::log(new_sum_exp) + max_val;
-    for (int i = 0; i < V_HEAD_DIM; i += V_NUM_ELEM) {
-      f32_vec_type o_vec(acc_out + i);
-      o_vec = o_vec * prev_scale + this_out[i / V_NUM_ELEM] * curr_scale;
-      o_vec.save(acc_out + i);
-    }
-
-    q_vecs += HEAD_DIM / QK_NUM_ELEM;
-    acc_out += V_HEAD_DIM;
+    q_vecs += 2 * HEAD_DIM / QK_NUM_ELEM;
+    acc_out += 2 * V_HEAD_DIM;
+    acc_lse += 2;
   }
+
+  // handle the case when num_heads is odd
+  if (num_heads % 2 == 1)
+    mla_decode_block_head<HEAD_DIM, V_HEAD_DIM, BLOCK_SIZE, 1>(
+        q_vecs, k_vecs, v_vecs_f32, acc_out, acc_lse, scale, num_tokens);
 
   if (kv_cache_f32 != nullptr) {
     std::free(kv_cache_f32);
