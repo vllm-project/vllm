@@ -2,15 +2,13 @@
 """
 This module defines a framework for sampling benchmark requests from various
 datasets. Each dataset subclass of BenchmarkDataset must implement sample
-generation.
-
-Supported dataset types include:
-  - ShareGPT: Chat conversations from ShareGPT dataset
-  - Random: Synthetic data for benchmarking
-  - Sonnet: Poetry-based dataset
-  - BurstGPT: Dataset filtered for GPT-4 outputs
-  - HuggingFace: Generic HuggingFace dataset support
-  - VisionArena: Vision-language dataset
+generation. Supported dataset types include:
+  - ShareGPT
+  - Random (synthetic)
+  - Sonnet
+  - BurstGPT
+  - HuggingFace
+  - VisionArena
 
 TODO: Implement CustomDataset to parse a JSON file and convert its contents into
 SampleRequest instances, similar to the approach used in ShareGPT.
@@ -69,9 +67,6 @@ class SampleRequest:
 
 class BenchmarkDataset(ABC):
     DEFAULT_SEED = 0
-
-    # num_requests has default 1000 in both the benchmark_serving.py and
-    # benchmark_throughput.py
 
     def __init__(
         self,
@@ -578,14 +573,8 @@ class BurstGPTDataset(BenchmarkDataset):
 
 class HuggingFaceDataset(BenchmarkDataset):
     """
-    A dataset class for processing HuggingFace datasets containing conversation
-    data, with optional image data. It assumes that the dataset contains a
-    "conversations" column with at least two conversation entries per example.
-
-    Attributes:
-        dataset_split (str): The dataset split to use (e.g., "train",
-        "validation").  dataset_subset (Optional[str]): An optional subset name
-        of the dataset.  data: The loaded dataset.
+    Dataset class for processing a HuggingFace dataset with conversation data
+    and optional images.
     """
 
     def __init__(
@@ -597,19 +586,12 @@ class HuggingFaceDataset(BenchmarkDataset):
         super().__init__(**kwargs)
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
+
         self.load_data()
 
     def load_data(self) -> None:
-        """
-        Loads the dataset using the HuggingFace `load_dataset` function.
-
-        Raises:
-            ValueError: If `dataset_path` is not provided or if the dataset
-                        does not have a "conversations" column.
-        """
         if not self.dataset_path:
-            raise ValueError(
-                "`dataset_path` must be provided for loading data.")
+            raise ValueError("dataset_path must be provided for loading data.")
 
         self.data = load_dataset(
             self.dataset_path,
@@ -617,98 +599,56 @@ class HuggingFaceDataset(BenchmarkDataset):
             split=self.dataset_split,
             streaming=True,
         )
-
-        if (self.data.features is None
-                or "conversations" not in self.data.features):
+        if self.data.features is None or "conversations" \
+            not in self.data.features:
             raise ValueError(
-                "HuggingFaceDataset currently only supports datasets "
-                "with a 'conversations' column "
-                "(e.g., lmms-lab/LLaVA-OneVision-Data). "
-                "Please consider contributing if you would "
-                "like to add support for additional dataset formats.")
-
-        # Shuffle the dataset and filter out examples with fewer than 2
-        # conversation entries.
+                "HuggingFaceDataset currently only supports datasets with "
+                "a 'conversations' column like lmms-lab/LLaVA-OneVision-Data. "
+                "Please consider contributing if you would like to add "
+                "support for additional dataset formats.")
+        # Shuffle and filter examples with at least 2 conversations.
         self.data = self.data.shuffle(seed=self.random_seed).filter(
-            lambda item: len(item["conversations"]) >= 2)
+            lambda x: len(x["conversations"]) >= 2)
 
-    def sample(
-        self,
-        tokenizer: PreTrainedTokenizerBase,
-        num_requests: int,
-        output_len: Optional[int] = None,
-        enable_multimodal_chat: bool = False,
-        **kwargs,
-    ) -> list[SampleRequest]:
-        """
-        Samples a list of requests from the dataset. For each example, it
-        extracts the first two conversation turns as prompt and completion,
-        tokenizes them, and applies optional multimodal transformations.
-
-        Args:
-            tokenizer (PreTrainedTokenizerBase): Tokenizer to convert text to
-            token IDs.  num_requests (int): Desired number of requests to
-            sample.  output_len (Optional[int], optional): Expected output
-            length. If not provided,
-                it is determined dynamically based on the tokenized completion.
-            enable_multimodal_chat (bool, optional): If True, applies a
-            multimodal chat transformation
-                to the prompt.
-
-        Returns:
-            List[SampleRequest]: A list of sampled requests.
-        """
-        sampled_requests: list[SampleRequest] = []
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               num_requests: int,
+               output_len: Optional[int] = None,
+               enable_multimodal_chat: bool = False,
+               **kwargs) -> list:
+        sampled_requests = []
         dynamic_output = output_len is None
 
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
+            conv = item["conversations"]
+            prompt, completion = conv[0]["value"], conv[1]["value"]
 
-            conversations = item.get("conversations", [])
-            if len(conversations) < 2:
-                continue
-
-            # Extract prompt and completion from the first two conversation
-            # turns.
-            prompt = conversations[0]["value"]
-            completion = conversations[1]["value"]
-
-            # Tokenize prompt and completion.
             prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
-            prompt_length = len(prompt_ids)
-            completion_length = len(completion_ids)
-
-            # Determine the expected output length.
-            curr_output_len = (completion_length
-                               if dynamic_output else output_len)
-            if not isinstance(curr_output_len, int) or curr_output_len <= 0:
-                raise ValueError("`output_len` must be a positive integer.")
-
-            # When using dynamic output, filter out sequences that don't meet
-            # specific criteria.
+            prompt_len = len(prompt_ids)
+            completion_len = len(completion_ids)
+            output_len = completion_len if dynamic_output else output_len
+            assert isinstance(output_len, int) and output_len > 0
             if dynamic_output and not is_valid_sequence(
-                    prompt_length, completion_length):
+                    prompt_len, completion_len):
                 continue
-
-            # Process image data if available.
-            multimodal_content = (process_image(item["image"])
-                                  if "image" in item else None)
-
-            # Apply multimodal transformation if enabled.
+            mm_content = process_image(
+                item["image"]) if "image" in item else None
             if enable_multimodal_chat:
+                # Note: when chat is enabled the request prompt_len is no longer
+                # accurate and we will be using request output to count the
+                # actual prompt len and output len
                 prompt = self.apply_multimodal_chat_transformation(
-                    prompt, multimodal_content)
-
+                    prompt, mm_content)
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
-                    prompt_len=prompt_length,
-                    expected_output_len=curr_output_len,
-                    multi_modal_data=multimodal_content,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
                 ))
-
         self.oversample_requests(sampled_requests, num_requests)
         return sampled_requests
 
