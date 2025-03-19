@@ -2,7 +2,7 @@
 
 import warnings
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 
@@ -254,9 +254,9 @@ def check_logprobs_close(
 def build_model_context(
     model_id: str,
     task: TaskOption = "auto",
-    dtype: Optional[Union[str, torch.dtype]] = None,
-    mm_processor_kwargs: Optional[dict] = None,
-    limit_mm_per_prompt: Optional[dict] = None,
+    dtype: Union[str, torch.dtype] = "auto",
+    mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    limit_mm_per_prompt: Optional[dict[str, int]] = None,
     disable_mm_preprocessor_cache: bool = True,
 ):
     """Creates an InputContext for a given model.
@@ -273,9 +273,6 @@ def build_model_context(
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
-
-    if dtype is None:
-        dtype = "half"
 
     model_config = ModelConfig(
         model_id,
