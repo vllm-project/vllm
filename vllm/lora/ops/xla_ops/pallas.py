@@ -102,17 +102,13 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
 
     jax_import_guard()
 
-    TOKEN_BLOCK = 16
+    TOKEN_BLOCK = get_bounded_value(16, next_multiple_of(T, 16), 128)
     if is_expand: # Expand
         LORA_BLOCK = 1024
         DIM_BLOCK = 256
     else: # Shrink
         LORA_BLOCK = 256
         DIM_BLOCK = 1024
-
-    TOKEN_BLOCK = min(max(TOKEN_BLOCK, pl.next_power_of_2(T)), 128)
-    LORA_BLOCK = min(max(LORA_BLOCK, pl.next_power_of_2(L)), 4096)
-    DIM_BLOCK = min(max(DIM_BLOCK, pl.next_power_of_2(D)), 4096)
 
     kernel = make_kernel_from_pallas(
         functools.partial(
@@ -128,15 +124,15 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
     # register. This has to happen in pytorch, doing it in Jax will lead to NaNs
     pad_L = 0
     if LORA_BLOCK > L or L % LORA_BLOCK != 0:
-        pad_L = (L // LORA_BLOCK + 1) * LORA_BLOCK - L
+        pad_L = next_multiple_of(L, LORA_BLOCK) - L
 
     pad_D = 0
     if DIM_BLOCK > D or D % DIM_BLOCK != 0:
-        pad_D = (D // DIM_BLOCK + 1) * DIM_BLOCK - D
+        pad_D = next_multiple_of(D, DIM_BLOCK) - D
 
     pad_T = 0
     if TOKEN_BLOCK > T or T % TOKEN_BLOCK != 0:
-        pad_T = (T // TOKEN_BLOCK + 1) * TOKEN_BLOCK - T
+        pad_T = next_multiple_of(T, TOKEN_BLOCK) - T
 
     if pad_D != 0 or pad_L != 0:
         loras = torch.nn.functional.pad(loras, (0, pad_D, 0, pad_L, 0, 0))
@@ -159,3 +155,12 @@ def bgmv_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
     _, L, _ = loras.shape
 
     return torch.empty((T, L), device=inputs.device)
+
+
+def next_multiple_of(n: int, mult: int) -> int:
+    if n % mult == 0:
+        return n
+    return (n // mult + 1) * mult
+
+def get_bounded_value(_min: int, val: int, _max: int) -> int:
+    return min(max(_min, val), _max)
