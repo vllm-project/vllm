@@ -1473,7 +1473,7 @@ class ParallelConfig:
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
-        ray_only_devices = ["tpu"]
+        ray_only_devices: list[str] = []
         from vllm.platforms import current_platform
         if (current_platform.device_type in ray_only_devices
                 and self.world_size > 1):
