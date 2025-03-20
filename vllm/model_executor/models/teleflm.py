@@ -41,7 +41,9 @@ class TeleFLMModel(LlamaModel):
         prefix: str = "",
         layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer,
     ):
-        super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
+        super().__init__(vllm_config=vllm_config,
+                         prefix=prefix,
+                         layer_type=layer_type)
         """
         This implementation is based on the µScaling paper presented at  
         the ICLR 2025 Workshop:  
