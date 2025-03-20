@@ -61,8 +61,8 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("static", [True, False])
 @pytest.mark.parametrize("cutlass_fp8_enabled",
                          [True, False] if CUTLASS_FP8_SUPPORTED else [False])
-@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
-                    reason="Only test on CUDA")
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
+                    reason="Only test on CUDA and ROCm")
 def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
                               cutlass_fp8_enabled):
     torch.set_default_device("cuda")
