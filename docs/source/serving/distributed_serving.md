@@ -83,7 +83,7 @@ Since this is a ray cluster of **containers**, all the following commands should
 
 Then, on any node, use `docker exec -it node /bin/bash` to enter the container, execute `ray status` and `ray list nodes` to check the status of the Ray cluster. You should see the right number of nodes and GPUs.
 
-After that, on any node, use `docker exec -it node /bin/bash` to enter the container again. **In the container**, you can use vLLM as usual, just as you have all the GPUs on one node. The common practice is to set the tensor parallel size to the number of GPUs in each node, and the pipeline parallel size to the number of nodes. For example, if you have 16 GPUs in 2 nodes (8 GPUs per node), you can set the tensor parallel size to 8 and the pipeline parallel size to 2:
+After that, on any node, use `docker exec -it node /bin/bash` to enter the container again. **In the container**, you can use vLLM as usual, just as you have all the GPUs on one node: vLLM will be able to leverage GPU resources of all nodes in the Ray cluster, and therefore, only run the `vllm` command on this node but not other nodes. The common practice is to set the tensor parallel size to the number of GPUs in each node, and the pipeline parallel size to the number of nodes. For example, if you have 16 GPUs in 2 nodes (8 GPUs per node), you can set the tensor parallel size to 8 and the pipeline parallel size to 2:
 
 ```console
  vllm serve /path/to/the/model/in/the/container \
