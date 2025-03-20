@@ -11,7 +11,6 @@ import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
 
-from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.config import CompilationConfig
@@ -43,7 +42,8 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
+from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
+                        is_list_of)
 
 logger = init_logger(__name__)
 
@@ -238,22 +238,14 @@ class LLM:
             compilation_config=compilation_config_instance,
             **kwargs,
         )
-        # Logic to switch between engines is done at runtime instead of import
-        # to avoid import order issues
-        self.engine_class = self.get_engine_class()
-        self.llm_engine = self.engine_class.from_engine_args(
-            engine_args, usage_context=UsageContext.LLM_CLASS)
+
+        # Create the Engine (autoselects V0 vs V1)
+        self.llm_engine = LLMEngine.from_engine_args(
+            engine_args=engine_args, usage_context=UsageContext.LLM_CLASS)
+        self.engine_class = type(self.llm_engine)
 
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
-
-    @staticmethod
-    def get_engine_class() -> type[LLMEngine]:
-        if envs.VLLM_USE_V1:
-            # Lazy import: the v1 package isn't distributed
-            from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
-            return V1LLMEngine  # type: ignore
-        return LLMEngine
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
@@ -1196,8 +1188,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self) -> bool:
-        return self.llm_engine.reset_prefix_cache()
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
+        return self.llm_engine.reset_prefix_cache(device)
 
     def sleep(self, level: int = 1):
         """

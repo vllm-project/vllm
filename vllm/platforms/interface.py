@@ -112,6 +112,8 @@ class Platform:
 
     supported_quantization: list[str] = []
 
+    additional_env_vars: list[str] = []
+
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
@@ -329,6 +331,36 @@ class Platform:
         Get device specific communicator class for distributed communication.
         """
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        """
+        Returns whether the current platform supports FP8 types.
+        """
+        return False
+
+    @classmethod
+    def is_fp8_fnuz(cls) -> bool:
+        """
+        Returns whether the preferred FP8 type is FNUZ on the current platform.
+
+        There are two representations of FP8, OCP FP8 and FNUZ FP8.
+        The OCP specification can be found at https://tinyurl.com/b7jvwpft.
+        The FNUZ specification can be found at https://tinyurl.com/5n6hwwu5.
+
+        AMD's MI300 and MI325 have native hardware support for FNUZ. All other
+        hardware has converged on the OCP FP8 standard.
+        """
+        return False
+
+    @classmethod
+    def fp8_dtype(cls) -> torch.dtype:
+        """
+        Returns the preferred FP8 type on the current platform.
+
+        See the documentation for is_fp8_fnuz for details.
+        """
+        return torch.float8_e4m3fn
 
     @classmethod
     def use_all_gather(cls) -> bool:

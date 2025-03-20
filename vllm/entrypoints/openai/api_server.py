@@ -80,10 +80,12 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.entrypoints.utils import with_cancellation
+from vllm.entrypoints.utils import load_aware_call, with_cancellation
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import (
+    maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
+from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
                         is_valid_ipv6_address, set_ulimit)
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -154,21 +156,47 @@ async def build_async_engine_client_from_engine_args(
     Returns the Client or None if the creation failed.
     """
 
-    # AsyncLLMEngine.
-    if (MQLLMEngineClient.is_unsupported_config(engine_args)
-            or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
+    # Create the EngineConfig (determines if we can use V1).
+    usage_context = UsageContext.OPENAI_API_SERVER
+    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+
+    # V1 AsyncLLM.
+    if envs.VLLM_USE_V1:
+        if disable_frontend_multiprocessing:
+            logger.warning(
+                "V1 is enabled, but got --disable-frontend-multiprocessing. "
+                "To disable frontend multiprocessing, set VLLM_USE_V1=0.")
+
+        from vllm.v1.engine.async_llm import AsyncLLM
+        async_llm: Optional[AsyncLLM] = None
+        try:
+            async_llm = AsyncLLM.from_vllm_config(
+                vllm_config=vllm_config,
+                usage_context=usage_context,
+                disable_log_requests=engine_args.disable_log_requests,
+                disable_log_stats=engine_args.disable_log_stats)
+            yield async_llm
+        finally:
+            if async_llm:
+                async_llm.shutdown()
+
+    # V0 AsyncLLM.
+    elif (MQLLMEngineClient.is_unsupported_config(vllm_config)
+          or disable_frontend_multiprocessing):
 
         engine_client: Optional[EngineClient] = None
         try:
-            engine_client = AsyncLLMEngine.from_engine_args(
-                engine_args=engine_args,
-                usage_context=UsageContext.OPENAI_API_SERVER)
+            engine_client = AsyncLLMEngine.from_vllm_config(
+                vllm_config=vllm_config,
+                usage_context=usage_context,
+                disable_log_requests=engine_args.disable_log_requests,
+                disable_log_stats=engine_args.disable_log_stats)
             yield engine_client
         finally:
             if engine_client and hasattr(engine_client, "shutdown"):
                 engine_client.shutdown()
 
-    # MQLLMEngine.
+    # V0MQLLMEngine.
     else:
         if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
             # Make TemporaryDirectory for prometheus multiprocessing
@@ -195,14 +223,18 @@ async def build_async_engine_client_from_engine_args(
         # so we need to spawn a new process
         context = multiprocessing.get_context("spawn")
 
+        # Ensure we can serialize transformer config before spawning
+        maybe_register_config_serialize_by_value()
+
         # The Process can raise an exception during startup, which may
         # not actually result in an exitcode being reported. As a result
         # we use a shared variable to communicate the information.
         engine_alive = multiprocessing.Value('b', True, lock=False)
-        engine_process = context.Process(target=run_mp_engine,
-                                         args=(engine_args,
-                                               UsageContext.OPENAI_API_SERVER,
-                                               ipc_path, engine_alive))
+        engine_process = context.Process(
+            target=run_mp_engine,
+            args=(vllm_config, UsageContext.OPENAI_API_SERVER, ipc_path,
+                  engine_args.disable_log_stats,
+                  engine_args.disable_log_requests, engine_alive))
         engine_process.start()
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
@@ -217,8 +249,7 @@ async def build_async_engine_client_from_engine_args(
         atexit.register(_cleanup_ipc_path)
 
         # Build RPCClient, which conforms to EngineClient Protocol.
-        engine_config = engine_args.create_engine_config()
-        build_client = partial(MQLLMEngineClient, ipc_path, engine_config,
+        build_client = partial(MQLLMEngineClient, ipc_path, vllm_config,
                                engine_pid)
         mq_engine_client = await asyncio.get_running_loop().run_in_executor(
             None, build_client)
@@ -347,6 +378,24 @@ async def health(raw_request: Request) -> Response:
     return Response(status_code=200)
 
 
+@router.get("/load")
+async def get_server_load_metrics(request: Request):
+    # This endpoint returns the current server load metrics.
+    # It tracks requests utilizing the GPU from the following routes:
+    # - /v1/chat/completions
+    # - /v1/completions
+    # - /v1/audio/transcriptions
+    # - /v1/embeddings
+    # - /pooling
+    # - /score
+    # - /v1/score
+    # - /rerank
+    # - /v1/rerank
+    # - /v2/rerank
+    return JSONResponse(
+        content={'server_load': request.app.state.server_load_metrics})
+
+
 @router.api_route("/ping", methods=["GET", "POST"])
 async def ping(raw_request: Request) -> Response:
     """Ping check. Endpoint required for SageMaker"""
@@ -400,6 +449,7 @@ async def show_version():
 @router.post("/v1/chat/completions",
              dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     handler = chat(raw_request)
@@ -421,6 +471,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
 @router.post("/v1/completions", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
     handler = completion(raw_request)
     if handler is None:
@@ -439,6 +490,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 @router.post("/v1/embeddings", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     handler = embedding(raw_request)
     if handler is None:
@@ -485,6 +537,7 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
 
 @router.post("/pooling", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_pooling(request: PoolingRequest, raw_request: Request):
     handler = pooling(raw_request)
     if handler is None:
@@ -503,6 +556,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
 
 @router.post("/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_score(request: ScoreRequest, raw_request: Request):
     handler = score(raw_request)
     if handler is None:
@@ -521,6 +575,7 @@ async def create_score(request: ScoreRequest, raw_request: Request):
 
 @router.post("/v1/score", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
     logger.warning(
         "To indicate that Score API is not part of standard OpenAI API, we "
@@ -531,10 +586,10 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
 
 @router.post("/v1/audio/transcriptions")
 @with_cancellation
+@load_aware_call
 async def create_transcriptions(request: Annotated[TranscriptionRequest,
                                                    Form()],
                                 raw_request: Request):
-
     handler = transcription(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
@@ -556,6 +611,7 @@ async def create_transcriptions(request: Annotated[TranscriptionRequest,
 
 @router.post("/rerank", dependencies=[Depends(validate_json_request)])
 @with_cancellation
+@load_aware_call
 async def do_rerank(request: RerankRequest, raw_request: Request):
     handler = rerank(raw_request)
     if handler is None:
@@ -621,8 +677,12 @@ if envs.VLLM_SERVER_DEV_MODE:
         Reset the prefix cache. Note that we currently do not check if the
         prefix cache is successfully reset in the API server.
         """
-        logger.info("Resetting prefix cache...")
-        await engine_client(raw_request).reset_prefix_cache()
+        device = None
+        device_str = raw_request.query_params.get("device")
+        if device_str is not None:
+            device = Device[device_str.upper()]
+        logger.info("Resetting prefix cache with specific %s...", str(device))
+        await engine_client(raw_request).reset_prefix_cache(device)
         return Response(status_code=200)
 
     @router.post("/sleep")
@@ -642,6 +702,12 @@ if envs.VLLM_SERVER_DEV_MODE:
         # FIXME: in v0 with frontend multiprocessing, the wake-up command
         # is sent but does not finish yet when we return a response.
         return Response(status_code=200)
+
+    @router.get("/is_sleeping")
+    async def is_sleeping(raw_request: Request):
+        logger.info("check whether the engine is sleeping")
+        is_sleeping = await engine_client(raw_request).is_sleeping()
+        return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
 @router.post("/invocations", dependencies=[Depends(validate_json_request)])
@@ -894,6 +960,9 @@ async def init_app_state(
     ) if model_config.runner_type == "transcription" else None
     state.task = model_config.task
 
+    state.enable_server_load_tracking = args.enable_server_load_tracking
+    state.server_load_metrics = 0
+
 
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     family = socket.AF_INET
@@ -955,8 +1024,10 @@ async def run_server(args, **uvicorn_kwargs) -> None:
                 return '[' + a + ']'
             return a or "0.0.0.0"
 
-        logger.info("Starting vLLM API server on http://%s:%d",
-                    _listen_addr(sock_addr[0]), sock_addr[1])
+        is_ssl = args.ssl_keyfile and args.ssl_certfile
+        logger.info("Starting vLLM API server on http%s://%s:%d",
+                    "s" if is_ssl else "", _listen_addr(sock_addr[0]),
+                    sock_addr[1])
 
         shutdown_task = await serve_http(
             app,
@@ -965,6 +1036,9 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,
+            # NOTE: When the 'disable_uvicorn_access_log' value is True,
+            # no access log will be output.
+            access_log=not args.disable_uvicorn_access_log,
             timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
             ssl_keyfile=args.ssl_keyfile,
             ssl_certfile=args.ssl_certfile,

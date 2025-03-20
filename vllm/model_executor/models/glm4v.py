@@ -28,7 +28,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
+from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, BatchFeature,
@@ -39,7 +39,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
 
 from .chatglm import ChatGLMBaseModel, ChatGLMModel
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
 from .utils import flatten_bn, merge_multimodal_embeddings
 
 
@@ -577,7 +578,7 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         pixel_values = kwargs.pop("pixel_values", None)
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, torch.Tensor):
+            if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
@@ -596,8 +597,7 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         return self.transformer.vision(pixel_values)
 
     def get_multimodal_embeddings(
-        self, **kwargs
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...]]:
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -608,7 +608,7 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.transformer.get_input_embeddings(input_ids)
 
