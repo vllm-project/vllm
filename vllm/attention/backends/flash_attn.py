@@ -633,10 +633,13 @@ class FlashAttentionImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.vllm_flash_attn_version = get_flash_attn_version(
             requires_alibi=self.alibi_slopes is not None)
-        if (is_quantized_kv_cache(self.kv_cache_dtype)
-                and self.vllm_flash_attn_version != 3):
+        if is_quantized_kv_cache(self.kv_cache_dtype) and (
+                not self.kv_cache_dtype.startswith("fp8")
+                or not flash_attn_supports_fp8()):
             raise NotImplementedError(
-                "Only FlashAttention3 supports FP8 KV cache")
+                f"FlashAttention does not support {self.kv_cache_dtype} "
+                "kv-cache on this device "
+                f"(FA supports fp8 = {flash_attn_supports_fp8()}).")
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0

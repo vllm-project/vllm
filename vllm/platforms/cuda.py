@@ -257,7 +257,7 @@ class CudaPlatformBase(Platform):
             try:
                 import vllm.vllm_flash_attn  # noqa: F401
                 from vllm.attention.backends.flash_attn import (  # noqa: F401
-                    FlashAttentionBackend, get_flash_attn_version)
+                    FlashAttentionBackend, flash_attn_supports_fp8)
 
                 supported_sizes = \
                     FlashAttentionBackend.get_supported_head_sizes()
@@ -268,10 +268,9 @@ class CudaPlatformBase(Platform):
                     target_backend = _Backend.XFORMERS
                 fp8_kv_cache = (kv_cache_dtype is not None
                                 and kv_cache_dtype.startswith("fp8"))
-                if (fp8_kv_cache and get_flash_attn_version() != 3):
+                if (fp8_kv_cache and not flash_attn_supports_fp8()):
                     logger.info(
-                        "Cannot use FlashAttention-2 backend for FP8 KV cache."
-                    )
+                        "Cannot use FlashAttention backend for FP8 KV cache.")
                     logger.warning(
                         "Please use FlashInfer backend with FP8 KV Cache for "
                         "better performance by setting environment variable "
