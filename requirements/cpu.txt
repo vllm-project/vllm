@@ -3,7 +3,8 @@
 
 # Dependencies for CPUs
 torch==2.6.0+cpu; platform_machine == "x86_64"
-torch==2.5.1; platform_machine == "ppc64le" or platform_machine == "aarch64" or platform_system == "Darwin"
+torch==2.6.0; platform_system == "Darwin"
+torch==2.5.1; platform_machine == "ppc64le" or platform_machine == "aarch64"
 torch==2.7.0.dev20250304; platform_machine == "s390x"
 
 # required for the image processor of minicpm-o-2_6, this must be updated alongside torch
