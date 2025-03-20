@@ -42,7 +42,8 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
+from vllm.utils import (Counter, Device, deprecate_args, deprecate_kwargs,
+                        is_list_of)
 
 logger = init_logger(__name__)
 
@@ -1187,8 +1188,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self) -> bool:
-        return self.llm_engine.reset_prefix_cache()
+    def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
+        return self.llm_engine.reset_prefix_cache(device)
 
     def sleep(self, level: int = 1):
         """

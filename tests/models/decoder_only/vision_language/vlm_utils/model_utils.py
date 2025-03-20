@@ -6,16 +6,15 @@ typically specific to a small subset of models.
 import re
 import types
 from pathlib import PosixPath
-from typing import Callable, Optional, Union
+from typing import Optional, Union
 
 import torch
 from PIL.Image import Image
-from transformers import (AutoConfig, AutoTokenizer, BatchEncoding,
+from transformers import (AutoConfig, AutoTokenizer, BatchFeature,
                           GenerationConfig)
 
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import patch_padding_side
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from .....conftest import HfRunner, ImageAsset, _ImageAssets
 from .types import RunnerOutput
@@ -211,40 +210,6 @@ def get_llava_embeddings(image_assets: _ImageAssets):
     return [asset.image_embeds for asset in image_assets]
 
 
-####### postprocessors to run on HF BatchEncoding
-def cast_dtype_post_processor(
-        hf_inp_key: str) -> Callable[[BatchEncoding, str], BatchEncoding]:
-    """Gets a handle to a post processor which converts a given key into a
-    target data type."""
-
-    def process(hf_inputs: BatchEncoding, dtype: str):
-        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
-        hf_inputs[hf_inp_key] = hf_inputs[hf_inp_key].to(torch_dtype)
-        return hf_inputs
-
-    return process
-
-
-def ignore_inputs_post_processor(
-        hf_inp_key: str) -> Callable[[BatchEncoding, str], BatchEncoding]:
-    """Gets a handle to a post processor which ignores a given key."""
-
-    def process(hf_inputs: BatchEncoding, dtype: str):
-        del hf_inputs[hf_inp_key]
-        return hf_inputs
-
-    return process
-
-
-def wrap_inputs_post_processor(hf_inputs: BatchEncoding, dtype: str):
-    return {"model_inputs": hf_inputs}
-
-
-def molmo_post_processor(hf_inputs: BatchEncoding, dtype: str):
-    hf_inputs = cast_dtype_post_processor("images")(hf_inputs, dtype)
-    return {k: v.unsqueeze(0) for k, v in hf_inputs.items()}
-
-
 ####### Prompt path encoders for models that need models on disk
 def qwen_prompt_path_encoder(
         tmp_path: PosixPath, prompt: str, assets: Union[list[ImageAsset],
@@ -295,8 +260,7 @@ def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             for k in inputs.keys()  # noqa
             if k not in ("seq_lens", "sft_format")
         }
-        inputs = BatchEncoding(data=inputs, tensor_type="pt")
-        return inputs
+        return BatchFeature(data=inputs, tensor_type="pt")
 
     hf_model.processor = processor
     hf_model.model.get_output_embeddings = lambda: \
@@ -529,10 +493,52 @@ def mantis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
-def minicpmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+def minicpmv_25_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     orig_generate = hf_model.model.generate
 
-    def _generate(self, *args, **kwargs):
+    def _generate(
+        self,
+        *args,
+        input_ids=None,
+        pixel_values=None,
+        image_sizes=None,
+        image_bound=None,
+        tgt_sizes=None,
+        **kwargs,
+    ):
+        model_inputs = {
+            "input_ids": input_ids,
+            "pixel_values": pixel_values,
+            "image_sizes": image_sizes,
+            "image_bound": image_bound,
+            "tgt_sizes": tgt_sizes,
+        }
+        for k in list(model_inputs.keys()):
+            if model_inputs[k] is None:
+                model_inputs.pop(k)
+
+        return orig_generate(model_inputs, *args, decode_text=False, **kwargs)
+
+    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
+
+    return hf_model
+
+
+def minicpmo_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    orig_generate = hf_model.model.generate
+
+    def _generate(self, *args, image_sizes=None, **kwargs):
+        return orig_generate(*args, decode_text=False, **kwargs)
+
+    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
+
+    return hf_model
+
+
+def minicpmv_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    orig_generate = hf_model.model.generate
+
+    def _generate(self, *args, image_sizes=None, **kwargs):
         return orig_generate(*args, decode_text=False, **kwargs)
 
     hf_model.model.generate = types.MethodType(_generate, hf_model.model)
@@ -551,10 +557,11 @@ def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     def _generate(self, max_new_tokens=None, do_sample=None, **kwargs):
         batch = {
-            k: kwargs.pop(k)
+            k: kwargs.pop(k).unsqueeze(0)
             for k in ("input_ids", "images", "image_input_idx", "image_masks")
             if k in kwargs
         }
+        batch = BatchFeature(batch).to(dtype=self.dtype)
 
         return self.generate_from_batch(
             batch,
