@@ -652,7 +652,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 cu_seqlens_now = cu_seqlens
             else:
                 cu_seqlens_now = cu_window_seqlens
-            # pre-compute cu_seqlens for sliding windows
+            # pre-compute cu_seqlens for window attn
             if self.attn_backend == _Backend.FLASH_ATTN:
                 max_seqlen = (cu_seqlens_now[1:] -
                               cu_seqlens_now[:-1]).max().item()
