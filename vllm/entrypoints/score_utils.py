@@ -4,12 +4,10 @@ from typing import Union
 from torch.nn import CosineSimilarity
 
 from vllm.outputs import PoolingRequestOutput
-from vllm.transformers_utils.tokenizer import (PreTrainedTokenizer,
-                                               PreTrainedTokenizerFast)
 
 
 def _cosine_similarity(
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    tokenizer: Union["PreTrainedTokenizer", "PreTrainedTokenizerFast"],
     embed_1: list[PoolingRequestOutput],
     embed_2: list[PoolingRequestOutput],
 ) -> list[PoolingRequestOutput]:

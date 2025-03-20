@@ -7,11 +7,9 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
-import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -55,6 +53,7 @@ try:
 
         def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
             node_id = ray.get_runtime_context().get_node_id()
+            import vllm.platforms
             device_key = vllm.platforms.current_platform.ray_device_key
             if not device_key:
                 raise RuntimeError("current platform %s does not support ray.",

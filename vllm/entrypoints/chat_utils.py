@@ -38,7 +38,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
 from vllm.transformers_utils.processor import cached_get_processor
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 
@@ -1098,7 +1098,7 @@ def apply_hf_chat_template(
 
 
 def apply_mistral_chat_template(
-    tokenizer: MistralTokenizer,
+    tokenizer: "MistralTokenizer",
     messages: list[ChatCompletionMessageParam],
     chat_template: Optional[str] = None,
     **kwargs: Any,

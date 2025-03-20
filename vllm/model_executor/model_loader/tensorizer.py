@@ -18,10 +18,11 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig, set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
+from vllm.entrypoints.cli.utils import FlexibleArgumentParser
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.utils import FlexibleArgumentParser, PlaceholderModule
+from vllm.utils import PlaceholderModule
 
 try:
     from tensorizer import (DecryptionParams, EncryptionParams,

@@ -17,11 +17,7 @@ from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
 from torch import nn
-from transformers import GenerationConfig, PretrainedConfig
-from transformers.models.auto.image_processing_auto import (
-    get_image_processor_config)
-from transformers.models.auto.modeling_auto import (
-    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
+from transformers import PretrainedConfig
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm.envs import VLLM_USE_MODELSCOPE
@@ -327,6 +323,8 @@ def get_config(
 
     # Special architecture mapping check for GGUF models
     if is_gguf:
+        from transformers.models.auto.modeling_auto import (
+            MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(
                 f"Can't get gguf config for {config.model_type}.")
@@ -708,6 +706,8 @@ def get_hf_image_processor_config(
     # Separate model folder from file path for GGUF models
     if check_gguf_file(model):
         model = Path(model).parent
+    from transformers.models.auto.image_processing_auto import (
+        get_image_processor_config)
     return get_image_processor_config(model, revision=revision, **kwargs)
 
 
@@ -729,7 +729,8 @@ def try_get_generation_config(
     model: str,
     trust_remote_code: bool,
     revision: Optional[str] = None,
-) -> Optional[GenerationConfig]:
+) -> Optional["GenerationConfig"]:
+    from transformers import GenerationConfig
     try:
         return GenerationConfig.from_pretrained(
             model,

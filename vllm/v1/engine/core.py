@@ -21,15 +21,11 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import (get_exception_traceback, resolve_obj_by_qualname,
                         zmq_socket_ctx)
-from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
-from vllm.v1.core.scheduler import Scheduler as V1Scheduler
-from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
@@ -76,6 +72,7 @@ class EngineCore:
         # This warning can be removed once the V1 Scheduler interface is
         # finalized and we can maintain support for scheduler classes that
         # implement it
+        from vllm.v1.core.scheduler import Scheduler as V1Scheduler
         if Scheduler is not V1Scheduler:
             logger.warning(
                 "Using configured V1 scheduler class %s. "
@@ -102,6 +99,7 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
+        from vllm.v1.core.scheduler import SchedulerOutput
         self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
                                                      SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
@@ -121,6 +119,7 @@ class EngineCore:
         available_gpu_memory = self.model_executor.determine_available_memory()
 
         # Get the kv cache tensor size
+        from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
         kv_cache_configs = get_kv_cache_configs(vllm_config, kv_cache_specs,
                                                 available_gpu_memory)
         num_gpu_blocks_set = set(config.num_blocks
@@ -141,7 +140,7 @@ class EngineCore:
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
-
+        from vllm.v1.request import Request
         if request.mm_hashes is not None:
             # Here, if hash exists for a multimodal input, then it will be
             # fetched from the cache, else it will be added to the cache.

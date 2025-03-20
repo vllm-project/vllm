@@ -9,8 +9,8 @@ import vllm.entrypoints.cli.benchmark.main
 import vllm.entrypoints.cli.openai
 import vllm.entrypoints.cli.serve
 import vllm.version
+from vllm.entrypoints.cli.utils import FlexibleArgumentParser
 from vllm.logger import init_logger
-from vllm.utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
@@ -64,14 +64,20 @@ def main():
     for cmd_module in CMD_MODULES:
         new_cmds = cmd_module.cmd_init()
         for cmd in new_cmds:
-            cmd.subparser_init(subparsers).set_defaults(
-                dispatch_function=cmd.cmd)
+            cmd.subparser_init(subparsers)
             cmds[cmd.name] = cmd
+
     args = parser.parse_args()
     if args.subparser in cmds:
+        print(args, "======================")
+        cmds[args.subparser].add_cli_args().set_defaults(
+            dispatch_function=cmds[args.subparser].cmd)
+        args = parser.parse_args()
         cmds[args.subparser].validate(args)
 
     if hasattr(args, "dispatch_function"):
+        print("===========================")
+        print(args)
         args.dispatch_function(args)
     else:
         parser.print_help()

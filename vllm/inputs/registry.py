@@ -1,5 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
+from __future__ import annotations
 
+import time
+
+
+def log_import(module_name):
+    print(
+        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Importing {module_name} ...",
+        end=" ",
+        flush=True)
+    start_time = time.time()
+    return start_time
+
+
+def log_import_end(start_time):
+    end_time = time.time()
+    print(f"Done in {end_time - start_time:.6f} sec")
+
+
+start = log_import("vllm.transformers_utils.tokenizer")
+
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               cached_tokenizer_from_config)
+
+log_import_end(start)
 import functools
 from collections import UserDict
 from collections.abc import Mapping
@@ -8,13 +32,11 @@ from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional,
                     Protocol, Union)
 
 from torch import nn
-from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
+# Removed: from transformers import ProcessorMixin
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               cached_tokenizer_from_config)
 from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
                         resolve_mm_processor_kwargs)
 
@@ -30,8 +52,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _T = TypeVar("_T")
-_C = TypeVar("_C", bound=PretrainedConfig, default=PretrainedConfig)
-_P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
+_C = TypeVar("_C", bound="PretrainedConfig", default="PretrainedConfig")
+# Bind _P lazily by using a string reference:
+_P = TypeVar("_P", bound="ProcessorMixin")
 
 
 @dataclass(frozen=True)
@@ -41,22 +64,25 @@ class InputContext:
     modify the inputs.
     """
 
-    model_config: "ModelConfig"
+    model_config: ModelConfig
     """The configuration of the model."""
 
     def get_hf_config(
         self,
-        typ: Union[type[_C], tuple[type[_C], ...]] = PretrainedConfig,
+        typ: Union[type[_C], tuple[type[_C], ...]] = "PretrainedConfig",
         /,
     ) -> _C:
         """
         Get the HuggingFace configuration
-        (:class:`transformers.PretrainedConfig`) of the model,
+        (:class:`transformers."PretrainedConfig"`) of the model,
         additionally checking its type.
 
         Raises:
             TypeError: If the configuration is not of the specified type.
         """
+        if typ is None:
+            from transformers import PretrainedConfig  # 懒加载 PretrainedConfig
+            typ = PretrainedConfig
         hf_config = self.model_config.hf_config
         if not isinstance(hf_config, typ):
             raise TypeError("Invalid type of HuggingFace config. "
@@ -86,18 +112,20 @@ class InputContext:
 
     def get_hf_processor(
         self,
-        typ: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
+        typ: Optional[Union[type[_P], tuple[type[_P], ...]]] = None,
         /,
         **kwargs: object,
     ) -> _P:
         """
-        Get the HuggingFace processor
-        (:class:`transformers.ProcessorMixin`) of the model,
-        additionally checking its type.
+        Get the HuggingFace processor (:class:`transformers.ProcessorMixin`)
+        of the model, additionally checking its type.
 
         Raises:
             TypeError: If the processor is not of the specified type.
         """
+        if typ is None:
+            from transformers import ProcessorMixin  # lazy import
+            typ = ProcessorMixin
         return cached_processor_from_config(
             self.model_config,
             processor_cls=typ,
@@ -130,7 +158,7 @@ class InputProcessingContext(InputContext):
 
     def get_hf_processor(
         self,
-        typ: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
+        typ: Optional[Union[type[_P], tuple[type[_P], ...]]] = None,
         /,
         **kwargs: object,
     ) -> _P:
@@ -142,13 +170,13 @@ class InputProcessingContext(InputContext):
 
     def call_hf_processor(
         self,
-        hf_processor: ProcessorMixin,
+        hf_processor: Callable,  # expected to behave like ProcessorMixin
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
     ) -> BatchFeature:
         """
-        Call :code:`hf_processor` on the prompt :code:`data`
-        (text, image, audio...) with configurable options :code:`kwargs`.
+        Call `hf_processor` on the prompt `data` (text, image, audio...)
+        with configurable options `kwargs`.
         """
         assert callable(hf_processor)
 
@@ -169,7 +197,6 @@ class InputProcessingContext(InputContext):
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={merged_kwargs}")
-
             raise RuntimeError(msg) from exc
 
 
@@ -179,9 +206,9 @@ N = TypeVar("N", bound=type[nn.Module])
 class DummyData(NamedTuple):
     """Dummy data used for profiling."""
 
-    seq_data: "SequenceData"
-    multi_modal_data: Optional["MultiModalDataDict"] = None
-    multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None
+    seq_data: SequenceData
+    multi_modal_data: Optional[MultiModalDataDict] = None
+    multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
 
 
 class DummyDataFactory(Protocol):
@@ -311,9 +338,9 @@ class InputRegistry:
 
     def dummy_data_for_profiling(
         self,
-        model_config: "ModelConfig",
+        model_config: ModelConfig,
         seq_len: int,
-        mm_registry: "MultiModalRegistry",
+        mm_registry: MultiModalRegistry,
         is_encoder_data: bool = False,
     ) -> DummyData:
         """
@@ -432,7 +459,7 @@ class InputRegistry:
         else:
             assert_never(inputs["type"])  # type: ignore[arg-type]
 
-    def process_input(self, model_config: "ModelConfig",
+    def process_input(self, model_config: ModelConfig,
                       inputs: ProcessorInputs) -> ProcessorInputs:
         """
         Apply an input processor to an instance of model inputs.
@@ -472,7 +499,7 @@ class InputRegistry:
 
         return processed_inputs
 
-    def create_input_processor(self, model_config: "ModelConfig"):
+    def create_input_processor(self, model_config: ModelConfig):
         """
         Create an input processor (see :meth:`_process_input`) for a
         specific model.
