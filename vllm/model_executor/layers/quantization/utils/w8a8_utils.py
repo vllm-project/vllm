@@ -146,7 +146,8 @@ class Fp8LinearOp:
         # as it breaks with dynamic shapes.
         if pad_output is None:
             config = get_current_vllm_config().compilation_config
-            pad_output = config.level < CompilationLevel.PIECEWISE
+            pad_output = (not current_platform.is_rocm()
+                          and config.level < CompilationLevel.PIECEWISE)
         self.output_padding = 17 if pad_output else None
 
     def apply(
