@@ -2784,7 +2784,7 @@ class DecodingConfig:
         backend = GuidedDecodingParams(
             backend=self.guided_decoding_backend).backend_name
         if backend not in valid_guided_backends:
-            raise ValueError(f"Invalid guided_decoding_backend '{backend},"
+            raise ValueError(f"Invalid guided_decoding_backend '{backend}',"
                              f" must be one of {valid_guided_backends}")
 
 
