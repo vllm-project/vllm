@@ -1,22 +1,52 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Iterable, Mapping, Optional, Set, Tuple
+from typing import (Any, Iterable, Literal, Mapping, Optional, Set, Tuple,
+                    TypedDict, Union)
 
 import torch
 from torch import nn
+from transformers import GotOcr2ImageProcessor
 from transformers.activations import ACT2FN
 from transformers.models.aya_vision import AyaVisionConfig
 from transformers.models.aya_vision.processing_aya_vision import (
-    AyaVisionProcessor)
+    AyaVisionProcessor, AyaVisionProcessorKwargs)
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal.processing import BaseProcessingInfo
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.parse import ImageSize
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        BaseProcessingInfo)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
-from .siglip import SiglipVisionModel
+from .siglip import SiglipEncoderInfo, SiglipVisionModel
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .vision import get_vision_encoder_info
+
+
+class AyaVisionImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    pixel_values: torch.Tensor
+    """
+    Shape: `(num_patches_total, num_channels, height, width)`
+
+    `num_patches_total` is the total number of patches over each image over each
+    prompt in the batch.
+    """
+
+    num_patches: torch.Tensor
+    """Shape: `(batch_size * num_images)`"""
+
+    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
+    """
+    A boolean mask indicating which image embeddings correspond to patch tokens.
+
+    Shape: `(batch_size, num_images, num_embeds)`
+    """
+
+    num_embeds: Union[torch.Tensor, list[torch.Tensor]]
+    """Shape: `(batch_size, num_images)`"""
 
 
 class AyaVisionMultiModalProjector(nn.Module):
@@ -73,6 +103,107 @@ class AyaVisionMultiModalProjector(nn.Module):
         return image_features
 
 
+class AyaVisionProcessingInfo(BaseProcessingInfo):
+
+    def get_hf_config(self):
+        return self.ctx.get_hf_config(AyaVisionConfig)
+
+    def get_vision_encoder_info(self):
+        return get_vision_encoder_info(self.get_hf_config())
+
+    def get_hf_processor(self, **kwargs: object) -> AyaVisionProcessor:
+        return self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
+
+    def get_image_processor(self) -> GotOcr2ImageProcessor:
+        return self.get_hf_processor().image_processor
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {"image": self.get_max_image_tokens()}
+
+    def get_max_image_tokens(self) -> int:
+        vision_encoder_info: SiglipEncoderInfo = self.get_vision_encoder_info()
+        patch_size: int = vision_encoder_info.get_patch_size()
+        processor: AyaVisionProcessor = self.get_hf_processor()
+        tokenizer = processor.tokenizer
+        image_string = processor._prompt_split_image(patch_size)
+        return len(tokenizer(image_string))
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        # image_processor = self.get_image_processor() height =
+        # image_processor.size['height'] width = image_processor.size['width']
+        # max_pathes = image_processor.max_pathes return ImageSize(height=height
+        # * max_pathes, width=width * max_pathes) It is ok to do so since aya
+        # vision model will do resize
+        return ImageSize(height=9999999, width=9999999)
+
+    def _resolve_image_kwargs(
+        self,
+        processor: AyaVisionProcessor,
+        keys: set[str],
+    ) -> dict[str, Any]:
+        image_processor = processor.image_processor
+        kwargs = processor._merge_kwargs(
+            AyaVisionProcessorKwargs,
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+        )
+
+        images_kwargs = kwargs["images_kwargs"]
+
+        def _resolve_kw(key: str):
+            val = getattr(image_processor, key)
+            if val is None:
+                val = images_kwargs[key]
+
+            return val
+
+        return {k: _resolve_kw(k) for k in keys}
+
+
+class AyaVisionDummyInputsBuilder(
+        BaseDummyInputsBuilder[AyaVisionProcessingInfo]):
+
+    def get_dummy_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> ProcessorInputs:
+        processor = self.info.get_hf_processor()
+        image_token = processor.image_token
+
+        num_images = mm_counts.get("image", 0)
+
+        target_width, target_height = \
+            self.info.get_image_size_with_most_features()
+
+        mm_data = {
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images)
+        }
+
+        return ProcessorInputs(
+            prompt_text=image_token * num_images,
+            mm_data=mm_data,
+        )
+
+
+class AyaVisionModalProcessor(BaseMultiModalProcessor[AyaVisionProcessingInfo]
+                              ):
+    pass
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    AyaVisionModalProcessor,
+    info=AyaVisionProcessingInfo,
+    dummy_inputs=AyaVisionDummyInputsBuilder)
 class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP, SupportsLoRA):
     packed_modules_mapping = {
@@ -101,14 +232,13 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                                               quant_config,
                                               prefix=maybe_prefix(
                                                   prefix, "vision_tower"))
-
+        self.vocab_size = config.text_config.vocab_size
         self.multi_modal_projector = AyaVisionMultiModalProjector(config)
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Cohere2ForCausalLM"],
-        )
+            architectures=["Cohere2ForCausalLM"])
 
     @property
     def dtype(self):
@@ -158,55 +288,3 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             selected_image_feature = selected_image_feature
         image_features = self.multi_modal_projector(selected_image_feature)
         return image_features
-
-
-class AyaVisionProcessingInfo(BaseProcessingInfo):
-
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(AyaVisionConfig)
-
-    def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
-
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
-
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        return {"image": self.get_max_image_tokens()}
-
-    def get_max_image_tokens(self):
-        # TODO
-        return 1
-
-
-class AyaVisionDummyInputsBuilder(
-        BaseDummyInputsBuilder[AyaVisionProcessingInfo]):
-
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
-        processor = self.info.get_hf_processor()
-        image_token = processor.boi_token
-
-        num_images = mm_counts.get("image", 0)
-
-        target_width, target_height = \
-            self.info.get_image_size_with_most_features()
-
-        mm_data = {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images)
-        }
-
-        return ProcessorInputs(
-            prompt_text=image_token * num_images,
-            mm_data=mm_data,
-        )
