@@ -79,6 +79,12 @@ def maybe_backend_fallback(
                     "xgrammar does not support Lark grammars and the "
                     "grammar failed to convert to GBNF.", "outlines")
 
+        elif guided_params.json_object:
+            # https://github.com/mlc-ai/xgrammar/issues/256
+            fallback_or_error(guided_params,
+                              "xgrammar does not support json_object.",
+                              "guidance")
+
         # If the xgrammar module cannot be imported successfully,
         # we should still allow users to use guided decoding with a fallback.
         elif not xgr_installed:
@@ -88,9 +94,9 @@ def maybe_backend_fallback(
 
     if (guided_params.backend_name == "outlines"
             and guided_params.json_object is not None):
-        # outlines doesn't support json_object, fallback to xgrammar
+        # outlines doesn't support json_object, fallback to guidance
         fallback_or_error(guided_params,
-                          "outlines does not support json_object.", "xgrammar")
+                          "outlines does not support json_object.", "guidance")
 
     return guided_params
 
@@ -122,10 +128,15 @@ async def get_guided_decoding_logits_processor(
             get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
             guided_params, tokenizer, model_config, reasoner)
-
+    if guided_params.backend_name == 'guidance':
+        from vllm.model_executor.guided_decoding.guidance_decoding import (
+            get_local_guidance_guided_decoding_logits_processor)
+        return get_local_guidance_guided_decoding_logits_processor(
+            guided_params, tokenizer)
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
-        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar'")
+        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar', 'guidance'"
+    )
 
 
 def get_local_guided_decoding_logits_processor(
@@ -155,7 +166,13 @@ def get_local_guided_decoding_logits_processor(
             get_local_xgrammar_guided_decoding_logits_processor)
         return get_local_xgrammar_guided_decoding_logits_processor(
             guided_params, tokenizer, model_config, reasoner)
+    if guided_params.backend_name == 'guidance':
+        from vllm.model_executor.guided_decoding.guidance_decoding import (
+            get_local_guidance_guided_decoding_logits_processor)
+        return get_local_guidance_guided_decoding_logits_processor(
+            guided_params, tokenizer)
 
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
-        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar'")
+        "Must be one of 'outlines, 'lm-format-enforcer', 'xgrammar', 'guidance'"
+    )
