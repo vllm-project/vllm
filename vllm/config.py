@@ -1982,14 +1982,6 @@ class SpeculativeConfig:
         # not be detected, it will be considered as the draft-model-based
         # method by default.
 
-        if self.method is None and self.model is not None:
-            # Automatically set the method to ensure a smooth transition during
-            # configuration refactoring.
-            if self.model in ("ngram", "[ngram]"):
-                self.method = "ngram"
-            elif "eagle-" in self.model.lower():
-                self.method = "eagle"
-
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
             # mtp acceleration for more models besides deepseek_v3
@@ -2002,6 +1994,12 @@ class SpeculativeConfig:
             else:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
+
+        # Automatically configure the ngram method during configuration
+        # refactoring to ensure a smooth transition.
+        if self.method is None and (self.model is not None
+                                    and self.model in ("ngram", "[ngram]")):
+            self.method = "ngram"
 
         if self.method in ("ngram", "[ngram]"):
             # Unified to "ngram" internally
@@ -2055,7 +2053,10 @@ class SpeculativeConfig:
                     hf_overrides=SpeculativeConfig.hf_config_override,
                 )
 
-                if self.draft_model_config.hf_config.model_type == "medusa":
+                # Automatically detect the method
+                if "eagle-" in self.draft_model_config.model.lower():
+                    self.method = "eagle"
+                elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
                 elif (self.draft_model_config.hf_config.model_type ==
                       "mlp_speculator"):
