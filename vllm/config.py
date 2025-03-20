@@ -670,14 +670,6 @@ class ModelConfig:
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
 
-        MODEL_NOT_SUPPORT_CUDA_GRAPH = ['mllama']
-        if (self.hf_config.model_type in MODEL_NOT_SUPPORT_CUDA_GRAPH
-                and not self.enforce_eager):
-            logger.warning(
-                "CUDA graph is not supported for %s yet, fallback to the eager "
-                "mode.", self.hf_config.model_type)
-            self.enforce_eager = True
-
     def _verify_bnb_config(self) -> None:
         """
         The current version of bitsandbytes (0.44.0) with 8-bit models does not
