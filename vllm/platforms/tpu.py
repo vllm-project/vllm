@@ -29,6 +29,10 @@ class TpuPlatform(Platform):
         "tpu_int8", "compressed-tensors", "compressed_tensors"
     ]
 
+    additional_env_vars: list[str] = [
+        "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
+    ]
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],

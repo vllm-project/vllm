@@ -340,6 +340,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
             and v not in self.non_carry_over_env_vars
         ]
 
+        env_vars_to_copy.extend(current_platform.additional_env_vars)
+
         # Copy existing env vars to each worker's args
         for args in all_args_to_update_environment_variables:
             # TODO: refactor platform-specific env vars
