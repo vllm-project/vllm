@@ -12,8 +12,11 @@ from torch.library import impl
 from torch_xla.experimental.custom_kernel import (XLA_LIB, jax_import_guard,
                                                   make_kernel_from_pallas)
 
+XLA_LIB.define("bgmv_shrink(Tensor inputs, Tensor loras, Tensor idxs) -> Tensor")
+XLA_LIB.define(
+    "bgmv_expand(Tensor inputs, Tensor loras, Tensor idxs) -> Tensor")
 
-def _bgmv_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref,
+def _bgmv_shrink_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref,
                  lora_ref, out_ref, acc_ref, mask_ref):
 
     @pl.when(pl.program_id(2) == 0)
@@ -48,7 +51,7 @@ def _bgmv_kernel(bT: int, bL: int, max_num_loras: int, idx_ref, inp_ref,
 
 @functools.partial(jax.jit,
                    static_argnames=["TOKEN_BLOCK", "LORA_BLOCK", "DIM_BLOCK"])
-def _bgmv(
+def _bgmv_shrink(
         idxs: jax.Array,  # (T, ) int32
         inputs: jax.Array,  # (T, D) model dtype
         loras: jax.Array,  # (N, L, D) model dtype
@@ -60,7 +63,7 @@ def _bgmv(
     N, L, _ = loras.shape
 
     return pl.pallas_call(
-        kernel=functools.partial(_bgmv_kernel, TOKEN_BLOCK, LORA_BLOCK, N),
+        kernel=functools.partial(_bgmv_shrink_kernel, TOKEN_BLOCK, LORA_BLOCK, N),
         out_shape=jax.ShapeDtypeStruct((T, L), dtype=inputs.dtype),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=1,
@@ -81,19 +84,15 @@ def _bgmv(
             dimension_semantics=("parallel", "parallel", "arbitrary")),
         name="bgmv")(idxs, inputs, loras)
 
-
-def bgmv_shape_function(idxs, inputs, loras):
+def bgmv_shrink_shape_function(idxs, inputs, loras):
     T, _ = inputs.shape
     _, L, _ = loras.shape
 
     return [((T, L), inputs.dtype)]
 
 
-XLA_LIB.define("bgmv(Tensor inputs, Tensor loras, Tensor idxs) -> Tensor", )
-
-
-@impl(XLA_LIB, "bgmv", "XLA")
-def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
+@impl(XLA_LIB, "bgmv_shrink", "XLA")
+def bgmv_shrink_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
     inputs = inputs.to(dtype=loras.dtype)
 
     if len(loras.shape) == 4:
@@ -114,10 +113,10 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
         DIM_BLOCK = min(1024, next_multiple_of(D, 256))
 
     kernel = make_kernel_from_pallas(
-        functools.partial(_bgmv,
+        functools.partial(_bgmv_shrink,
                           TOKEN_BLOCK=TOKEN_BLOCK,
                           LORA_BLOCK=LORA_BLOCK,
-                          DIM_BLOCK=DIM_BLOCK), bgmv_shape_function)
+                          DIM_BLOCK=DIM_BLOCK), bgmv_shrink_shape_function)
 
     # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU
     # register. This has to happen in pytorch, doing it in Jax will lead to NaNs
@@ -142,9 +141,8 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
 
     return kernel(idxs, inputs, loras)[:T, :L]
 
-
-@impl(XLA_LIB, "bgmv", "CompositeExplicitAutograd")
-def bgmv_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
+@impl(XLA_LIB, "bgmv_shrink", "CompositeExplicitAutograd")
+def bgmv_shrink_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
                  idxs: torch.IntTensor):
     T, _ = inputs.shape
 
@@ -161,7 +159,7 @@ def bgmv_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
 # transposing.
 # We only need this for the expand op since the LoRA dimensions in the shrink op
 # are small enough that the TPU can gather them without a data copy.
-def _bgmv_pre_transpose_kernel(bT: int, bL: int, max_num_loras: int, idx_ref,
+def _bgmv_expand_kernel(bT: int, bL: int, max_num_loras: int, idx_ref,
                                inp_ref, lora_ref, out_ref, acc_ref, mask_ref):
 
     @pl.when(pl.program_id(2) == 0)
@@ -196,7 +194,7 @@ def _bgmv_pre_transpose_kernel(bT: int, bL: int, max_num_loras: int, idx_ref,
 
 @functools.partial(jax.jit,
                    static_argnames=["TOKEN_BLOCK", "LORA_BLOCK", "DIM_BLOCK"])
-def _bgmv_pre_transpose(
+def _bgmv_expand(
         idxs: jax.Array,  # (T, ) int32
         inputs: jax.Array,  # (T, D) model dtype
         loras: jax.Array,  # (N, L, D) model dtype
@@ -208,7 +206,7 @@ def _bgmv_pre_transpose(
     N, _, L = loras.shape
 
     return pl.pallas_call(
-        kernel=functools.partial(_bgmv_pre_transpose_kernel, TOKEN_BLOCK,
+        kernel=functools.partial(_bgmv_expand_kernel, TOKEN_BLOCK,
                                  LORA_BLOCK, N),
         out_shape=jax.ShapeDtypeStruct((T, L), dtype=inputs.dtype),
         grid_spec=pltpu.PrefetchScalarGridSpec(
@@ -231,19 +229,14 @@ def _bgmv_pre_transpose(
         name="bgmv_pre_transpose")(idxs, inputs, loras)
 
 
-def bgmv_pre_transpose_shape_function(idxs, inputs, loras):
+def bgmv_expand_shape_function(idxs, inputs, loras):
     T, _ = inputs.shape
     _, _, L = loras.shape
 
     return [((T, L), inputs.dtype)]
 
-
-XLA_LIB.define(
-    "bgmv_pre_transpose(Tensor inputs, Tensor loras, Tensor idxs) -> Tensor", )
-
-
-@impl(XLA_LIB, "bgmv_pre_transpose", "XLA")
-def bgmv_pre_transpose_xla(inputs: torch.Tensor, loras: torch.Tensor,
+@impl(XLA_LIB, "bgmv_expand", "XLA")
+def bgmv_expand_xla(inputs: torch.Tensor, loras: torch.Tensor,
                            idxs: torch.IntTensor):
     inputs = inputs.to(dtype=loras.dtype)
 
@@ -260,11 +253,11 @@ def bgmv_pre_transpose_xla(inputs: torch.Tensor, loras: torch.Tensor,
     DIM_BLOCK = 256
 
     kernel = make_kernel_from_pallas(
-        functools.partial(_bgmv_pre_transpose,
+        functools.partial(_bgmv_expand,
                           TOKEN_BLOCK=TOKEN_BLOCK,
                           LORA_BLOCK=LORA_BLOCK,
                           DIM_BLOCK=DIM_BLOCK),
-        bgmv_pre_transpose_shape_function)
+        bgmv_expand_shape_function)
 
     # Pad the loras' rank if it's too low. This is to allow it to fit in a TPU
     # register. This has to happen in pytorch, doing it in Jax will lead to NaNs
@@ -289,9 +282,8 @@ def bgmv_pre_transpose_xla(inputs: torch.Tensor, loras: torch.Tensor,
 
     return kernel(idxs, inputs, loras)[:T, :L]
 
-
-@impl(XLA_LIB, "bgmv_pre_transpose", "CompositeExplicitAutograd")
-def bgmv_pre_transpose_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
+@impl(XLA_LIB, "bgmv_expand", "CompositeExplicitAutograd")
+def bgmv_expand_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
                                idxs: torch.IntTensor):
     T, _ = inputs.shape
 
@@ -302,17 +294,14 @@ def bgmv_pre_transpose_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
 
     return torch.empty((T, L), device=inputs.device)
 
-
 def largest_divisor(n: int, divs: List[int]) -> int:
     for div in sorted(divs, reverse=True):
         if n % div == 0:
             return div
     return max(divs)
 
-
 def next_multiple_of(n: int, mult: int) -> int:
     return math.ceil(n / mult) * mult
-
 
 def get_bounded_value(_min: int, val: int, _max: int) -> int:
     return min(max(_min, val), _max)

@@ -292,8 +292,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                         lora_b_stacked,
                         y,
                         self.sampler_indices,
-                        add_inputs=True,
-                        fused_transpose=True)
+                        add_inputs=True)
         return y.view_as(y_org)
 
     def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:

@@ -75,7 +75,7 @@ def test_bgmv_correctness(T, D, L, N, dtype, op_type, seed):
 
     # Run bgmv
     if op_type == "shrink":
-        output = torch.ops.xla.bgmv(inputs, loras, idxs)
+        output = torch.ops.xla.bgmv_shrink(inputs, loras, idxs)
     else:
         output = torch.ops.xla.bgmv_expand(inputs, loras.transpose(2, 3), idxs)
 
