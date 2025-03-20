@@ -193,17 +193,16 @@ class AsyncLLM(EngineClient):
 
         if n == 1:
             await self._add_request(request, None, 0, queue)
+            return queue
 
-        else:
-            # Fan out child requests (for n>1).
-            parent_req = ParentRequest(request_id, params)
-            for idx in range(n):
-                request_id, params = parent_req.get_child_info(idx)
-                child_req = request if idx == n - 1 else copy(request)
-                child_req.request_id = request_id
-                child_req.sampling_params = params
-                await self._add_request(child_req, parent_req, idx, queue)
-
+        # Fan out child requests (for n>1).
+        parent_request = ParentRequest(request_id, params)
+        for idx in range(n):
+            request_id, params = parent_request.get_child_info(idx)
+            child_request = request if idx == n - 1 else copy(request)
+            child_request.request_id = request_id
+            child_request.sampling_params = params
+            await self._add_request(child_request, parent_request, idx, queue)
         return queue
 
     async def _add_request(self, request: EngineCoreRequest,
