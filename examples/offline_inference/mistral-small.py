@@ -6,7 +6,7 @@ import argparse
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
 
-# This script is an offline demo for running Mistral-Small-3
+# This script is an offline demo for running Mistral-Small-3.1
 #
 # If you want to run a server/client setup, please follow this code:
 #
