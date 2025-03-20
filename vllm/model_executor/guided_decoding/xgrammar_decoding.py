@@ -41,11 +41,12 @@ def get_local_xgrammar_guided_decoding_logits_processor(
         reasoner: ReasoningParser | None,
         speculative_config: Optional[SpeculativeConfig] = None,
         max_threads: int = 8):
-    config = GrammarConfig.from_guided_params(guided_params=guided_params,
-                                              model_config=model_config,
-                                              tokenizer=tokenizer,
-                                              speculative_config=speculative_config,
-                                              max_threads=max_threads)
+    config = GrammarConfig.from_guided_params(
+        guided_params=guided_params,
+        model_config=model_config,
+        tokenizer=tokenizer,
+        speculative_config=speculative_config,
+        max_threads=max_threads)
     return XGrammarLogitsProcessor(config, reasoner)
 
 

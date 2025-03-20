@@ -28,6 +28,10 @@ class MQAScorer(SpeculativeScorer):
                 target_seq_group_metadata_list.append(seq_group_metadata)
                 continue
 
+            assert (seq_group_metadata.sampling_params.logits_processors
+                    is None), ("MQAScorer does not support structured output. "
+                               "Use BatchExpansionTop1Scorer instead.")
+
             seq_data_dict = seq_group_metadata.seq_data
             assert len(seq_data_dict) == 1
             seq_id = next(iter(seq_data_dict.keys()))
