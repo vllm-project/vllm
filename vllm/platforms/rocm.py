@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import subprocess
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, Optional
 
@@ -90,19 +91,19 @@ def with_amdsmi_context(fn):
 
 @cache
 def on_gfx1x() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = get_gcn_arch()
     return any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
 
 
 @cache
 def on_mi3xx() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = get_gcn_arch()
     return any(arch in GPU_ARCH for arch in ["gfx942", "gfx950"])
 
 
 @cache
 def on_gfx9() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = get_gcn_arch()
     return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 
 
@@ -114,8 +115,68 @@ def on_gfx942() -> bool:
 
 @cache
 def on_gfx950() -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = get_gcn_arch()
     return any(arch in GPU_ARCH for arch in ["gfx950"])
+
+
+@cache
+def get_gcn_arch():
+    # Prefer rocminfo over torch.cuda calls to avoid initializing CUDA when
+    # possible; note that the fallback to torch.cuda.get_device_properties()
+    # may still initialize CUDA if rocminfo is unavailable or fails.
+    def run_rocminfo(args: list[str]) -> str:
+        completed = subprocess.run(
+            args,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout
+
+    try:
+        visible_devices = os.environ.get(RocmPlatform.device_control_env_var)
+        output = ""
+        if visible_devices:
+            # rocminfo expects a physical device ID. The first ID in
+            # device_control_env_var corresponds to logical device 0.
+            # In a worker, this is the device we care about.
+            device_id_str = visible_devices.split(",")[0].strip()
+            if device_id_str:
+                output = run_rocminfo(["rocminfo", "-d", device_id_str])
+
+        if not output:
+            # If device_control_env_var is not set, default to querying all devices
+            # and using the first one. This may be incorrect in multi-GPU setups
+            # without device_control_env_var.
+            logger.warning(
+                "No visible devices found for rocminfo, querying all devices."
+            )
+            output = run_rocminfo(["rocminfo"])
+
+        for line in output.splitlines():
+            if "Name:" in line and "gfx" in line:
+                return line.strip().split()[-1]
+        logger.warning(
+            "rocminfo did not report a GCN architecture, falling back to torch."
+        )
+    except FileNotFoundError as e:
+        logger.warning(
+            "rocminfo not found in PATH, falling back to torch. Error: %s", e
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()
+        if stderr:
+            logger.warning("rocminfo stderr: %s", stderr)
+        logger.warning(
+            "Failed to get GCN arch from rocminfo, falling back to torch. Error: %s",
+            e,
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to get GCN arch from rocminfo, falling back to torch. Error: %s",
+            e,
+        )
+    return torch.cuda.get_device_properties("cuda").gcnArchName
 
 
 @cache
@@ -130,7 +191,7 @@ def use_rocm_custom_paged_attention(
     alibi_slopes: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
 ) -> bool:
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    GPU_ARCH = get_gcn_arch()
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
     ON_GFX11_GFX12 = any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
 
@@ -539,18 +600,16 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_mx(cls) -> bool:
-        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        return any(gfx in gcn_arch for gfx in ["gfx95"])
+        return any(gfx in get_gcn_arch() for gfx in ["gfx95"])
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        return any(gfx in gcn_arch for gfx in ["gfx94", "gfx95", "gfx12"])
+        return any(gfx in get_gcn_arch() for gfx in ["gfx94", "gfx95", "gfx12"])
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
         # only device 0 is checked, this assumes MI300 platforms are homogeneous
-        return "gfx94" in torch.cuda.get_device_properties(0).gcnArchName
+        return "gfx94" in get_gcn_arch()
 
     @classmethod
     def fp8_dtype(cls) -> torch.dtype:
@@ -562,9 +621,8 @@ class RocmPlatform(Platform):
     @classmethod
     def use_custom_allreduce(cls) -> bool:
         # We only enable custom allreduce for MI300 series
-        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
         supported_archs = ["gfx94", "gfx95"]
-        return any(gfx in gcn_arch for gfx in supported_archs)
+        return any(gfx in get_gcn_arch() for gfx in supported_archs)
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
@@ -572,7 +630,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def is_navi(cls) -> bool:
-        return "gfx1" in torch.cuda.get_device_properties(0).gcnArchName
+        return "gfx1" in get_gcn_arch()
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
