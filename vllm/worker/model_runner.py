@@ -74,7 +74,6 @@ TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 torch._dynamo.config.cache_size_limit = 128
 torch._dynamo.config.accumulated_cache_size_limit = 128
 
-
 @dataclass(frozen=True)
 class ModelInputForGPU(ModelRunnerInputBase):
     """
@@ -100,6 +99,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     async_callback: Optional[Callable] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
     previous_hidden_states: Optional[torch.Tensor] = None
+    request_ids: Optional[List[str]] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -113,6 +113,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
             "virtual_engine": self.virtual_engine,
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
             "finished_requests_ids": self.finished_requests_ids,
+            "request_ids": self.request_ids,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         return tensor_dict
@@ -163,6 +164,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
             "virtual_engine": self.virtual_engine,
             "request_ids_to_seq_ids": self.request_ids_to_seq_ids,
             "finished_requests_ids": self.finished_requests_ids,
+            "request_ids": self.request_ids,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -878,6 +880,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             for data in self.inter_data_list
         }
 
+        request_ids = [data.request_id for data in self.inter_data_list]
+
         cuda_graph_pad_size = self._get_cuda_graph_pad_size(
             num_seqs=len(seq_lens),
             max_decode_seq_len=max_decode_seq_len,
@@ -991,7 +995,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             request_ids_to_seq_ids=request_ids_to_seq_ids,
             finished_requests_ids=self.finished_requests_ids,
             prompt_adapter_mapping=prompt_adapter_mapping,
-            prompt_adapter_requests=prompt_adapter_requests)
+            prompt_adapter_requests=prompt_adapter_requests,
+            request_ids = request_ids)
 
 
 class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
@@ -1712,6 +1717,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # In KV cache database setting, it will change the model input so that
         # we can skip prefilling on tokens that successfully received KV caches
         # NOTE: The receive operation is blocking
+
+        # print(f"\n 111 !!!!!!! {model_input.request_ids}")
+
         bypass_model_exec = False
         if self.need_recv_kv(model_input, kv_caches):
             hidden_or_intermediate_states, bypass_model_exec, model_input = \
