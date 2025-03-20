@@ -179,16 +179,6 @@ class EngineCore:
                 scheduler_stats=self.scheduler.make_stats(),
             )
         scheduler_output = self.scheduler.schedule()
-
-        # This case may occur when the only unfinished requests are
-        # structured output requests where the grammar has not finished
-        # compiling yet, so there's nothing to run.
-        if scheduler_output.total_num_scheduled_tokens == 0:
-            return EngineCoreOutputs(
-                outputs=[],
-                scheduler_stats=self.scheduler.make_stats(),
-            )
-
         output = self.model_executor.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
