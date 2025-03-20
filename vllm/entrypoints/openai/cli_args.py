@@ -89,6 +89,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default="info",
         choices=['debug', 'info', 'warning', 'error', 'critical', 'trace'],
         help="Log level for uvicorn.")
+    parser.add_argument("--disable-uvicorn-access-log",
+                        action="store_true",
+                        help="Disable uvicorn access log.")
     parser.add_argument("--allow-credentials",
                         action="store_true",
                         help="Allow credentials.")
