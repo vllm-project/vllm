@@ -1036,6 +1036,9 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             host=args.host,
             port=args.port,
             log_level=args.uvicorn_log_level,
+            # NOTE: When the 'disable_uvicorn_access_log' value is True,
+            # no access log will be output.
+            access_log=not args.disable_uvicorn_access_log,
             timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
             ssl_keyfile=args.ssl_keyfile,
             ssl_certfile=args.ssl_certfile,
