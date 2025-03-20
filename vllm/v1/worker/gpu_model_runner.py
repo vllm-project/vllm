@@ -10,7 +10,6 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-from vllm import envs
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
@@ -128,7 +127,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             weakref.proxy(self))
-        self.cascade_attn_enabled = envs.VLLM_USE_CASCADE_ATTN
+        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
