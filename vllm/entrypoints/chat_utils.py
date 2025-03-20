@@ -1072,7 +1072,7 @@ def apply_hf_chat_template(
     **kwargs: Any,
 ) -> str:
     if chat_template is None:
-        chat_template = tokenizer.chat_template
+        chat_template = tokenizer.get_chat_template(tools=kwargs.get("tools"))
 
     # FIXME: Temporary workaround for
     # https://huggingface.co/mistral-community/pixtral-12b/discussions/31
