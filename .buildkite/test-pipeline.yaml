@@ -295,6 +295,7 @@ steps:
   # these tests need to be separated, cannot combine
   - pytest -v -s compile/piecewise/test_simple.py
   - pytest -v -s compile/piecewise/test_toy_llama.py
+  - pytest -v -s compile/test_pass_manager.py
 
 - label: PyTorch Fullgraph Test # 18min
   source_file_dependencies:
