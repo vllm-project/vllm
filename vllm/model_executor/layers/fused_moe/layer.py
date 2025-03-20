@@ -97,7 +97,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-    def add_padding_to_weight(self, weight: torch.Tensor) -> torch.Tensor:
+    def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
         # can benefit from tensors located far enough from one another in memory
         if (envs.VLLM_ROCM_MOE_PADDING and current_platform.is_rocm()
@@ -111,10 +111,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
-        layer.w13_weight = torch.nn.Parameter(self.add_padding_to_weight(
+        layer.w13_weight = torch.nn.Parameter(self._maybe_pad_weight(
             layer.w13_weight.data),
                                               requires_grad=False)
-        layer.w2_weight = torch.nn.Parameter(self.add_padding_to_weight(
+        layer.w2_weight = torch.nn.Parameter(self._maybe_pad_weight(
             layer.w2_weight.data),
                                              requires_grad=False)
 
