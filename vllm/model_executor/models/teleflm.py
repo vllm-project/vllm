@@ -21,16 +21,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
 from typing import Type
 
 import torch
+
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.models.llama import (
-    LlamaForCausalLM,
-    LlamaModel,
-    LlamaDecoderLayer,
-)
+from vllm.model_executor.models.llama import (LlamaDecoderLayer,
+                                              LlamaForCausalLM, LlamaModel)
 
 
 class TeleFLMModel(LlamaModel):
@@ -72,6 +72,6 @@ class TeleFLMForCausalLM(LlamaForCausalLM):
             self.mup_scale_factor = self.config.mup_scale_factor
             self.output_mult = self.config.output_mult / self.mup_scale_factor
             logit_scale = self.output_mult
-            self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, self.config.vocab_size, logit_scale
-            )
+            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                    self.config.vocab_size,
+                                                    logit_scale)
