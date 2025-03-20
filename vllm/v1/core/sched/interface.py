@@ -60,7 +60,11 @@ class SchedulerInterface(ABC):
 
     @abstractmethod
     def add_request(self, request: "Request") -> None:
-        """Add a new request to the scheduler's internal queue."""
+        """Add a new request to the scheduler's internal queue.
+        
+        Args:
+            request: The new request being added.
+        """
         raise NotImplementedError
 
     @abstractmethod
