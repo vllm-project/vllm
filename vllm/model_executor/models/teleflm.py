@@ -45,8 +45,9 @@ class TeleFLMModel(LlamaModel):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         """
         This implementation is based on the µScaling paper presented at  
-        the International Conference on Learning Representations (ICLR) 2025 Workshop:  
-        "NanoLM: An Affordable LLM Study Benchmark via Accurate Loss Prediction across Scales"  
+        the ICLR 2025 Workshop:  
+        NanoLM: An Affordable LLM Study Benchmark \
+        via Accurate Loss Prediction across Scales
         by Yiqun Yao et al.  
         Available at: https://openreview.net/forum?id=IwaPYg1SCA  
         arXiv preprint: https://arxiv.org/abs/2304.06875
