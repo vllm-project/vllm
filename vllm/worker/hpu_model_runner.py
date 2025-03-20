@@ -1793,8 +1793,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         if is_pt_profiler_run and self.is_driver_worker:
             profiler = setup_profiler()
             profiler.start()
-        for _ in range(times):
+        for time_index in range(times):
             inputs = self.prepare_model_input(seqs)
+            if time_index == 0:
+                if self.is_driver_worker:
+                    broadcast_tensor_dict({"input_tokens": inputs.input_tokens}, src=0)
+                else:
+                    broadcast_tensor_dict(src=0)
             is_single_step = \
                 self.vllm_config.scheduler_config.num_scheduler_steps == 1
             if is_prompt or is_single_step:
