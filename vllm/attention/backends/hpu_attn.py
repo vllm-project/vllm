@@ -211,7 +211,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         batch_size, seq_len, hidden_size = query.shape
         _, seq_len_kv, _ = key.shape
 
-        query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
         block_indices = attn_metadata.block_indices
@@ -349,7 +348,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             assert batched_kv_tokens % batch_size == 0
             seq_len = batched_tokens // batch_size
 
-        query = query.view(-1, self.num_heads, self.head_size)
+        query = query.unsqueeze(1)
         if key is not None:
             assert value is not None
             key = key.view(-1, self.num_kv_heads, self.head_size)
