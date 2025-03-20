@@ -30,6 +30,8 @@ if current_platform.is_tpu():
     from .moe_torch_iterative import fused_moe as fused_moe_pallas
 else:
     fused_moe_pallas = None  # type: ignore
+if current_platform.is_hpu():
+    import habana_frameworks.torch as htorch
 logger = init_logger(__name__)
 
 
@@ -125,6 +127,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
         activation: str = "silu",
+        ep_rank: Optional[int] = None,
     ) -> torch.Tensor:
         return self.forward(x=x,
                             layer=layer,
@@ -139,7 +142,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                             custom_routing_function=custom_routing_function,
                             scoring_func=scoring_func,
                             e_score_correction_bias=e_score_correction_bias,
-                            activation=activation)
+                            activation=activation,
+                            ep_rank=ep_rank)
 
     def forward_cuda(
         self,
@@ -189,12 +193,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     renormalize: bool,
                     topk_group: Optional[int] = None,
                     num_expert_group: Optional[int] = None,
+                    global_num_experts: int = -1,
+                    expert_map: Optional[torch.Tensor] = None,
                     custom_routing_function: Optional[Callable] = None,
                     scoring_func: str = "softmax",
-                    e_score_correction_bias: Optional[torch.Tensor] = None):
-        assert len(x.shape) == 2
-        import habana_frameworks.torch as htorch
-        htorch.core.mark_step()
+                    e_score_correction_bias: Optional[torch.Tensor] = None,
+                    activation: str = "silu",
+                    ep_rank: Optional[int] = None):
+        hidden_dim = x.shape[-1]
+        num_experts = layer.w13_weight.shape[0]
+        moe_n_slice = 8 if num_experts > 32 else 1
+        n_expert_slice = num_experts // moe_n_slice
+        assert n_expert_slice * moe_n_slice == num_experts
+        x = x.view(-1, hidden_dim)
         if use_grouped_topk:
             topk_weights, topk_ids = FusedMoE.select_experts(
                 hidden_states=x,
@@ -214,33 +225,34 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(x.dtype)
 
-        final_hidden_states = torch.zeros_like(x)
-        num_experts = layer.w13_weight.data.shape[0]
-        n_expert_slice = layer.w13_weight.data.shape[0] // 8
-        assert n_expert_slice * 8 == num_experts
-
-        for i in range(8):
+        assert ep_rank is not None
+        ep_shift = ep_rank * num_experts
+        for i in range(moe_n_slice):
             min_expert = i * n_expert_slice
             max_expert = (i + 1) * n_expert_slice
             w13_list_slice = [
-                layer.w13_weight[j].data.squeeze().clone()
+                layer.w13_weight[j].data.squeeze()
                 for j in range(min_expert, max_expert)
             ]
             w2_list_slice = [
-                layer.w2_weight[j].data.squeeze().clone()
+                layer.w2_weight[j].data.squeeze()
                 for j in range(min_expert, max_expert)
             ]
-            final_hidden_states += torch.ops.hpu.mixture_of_experts(
+            current_hidden_states = torch.ops.hpu.mixture_of_experts(
                 hidden_states=x,
                 expert_routing_table=topk_ids.to(torch.int64),
                 router_weights=topk_weights.to(x.dtype),
                 w12=w13_list_slice,
                 w3=w2_list_slice,
                 permuted_weights=True,
-                activation="silu",
-                experts_min=min_expert,
-                experts_max=max_expert - 1)
+                activation=activation,
+                experts_min=min_expert + ep_shift,
+                experts_max=max_expert - 1 + ep_shift,)
             htorch.core.mark_step()
+            if i == 0:
+                final_hidden_states = current_hidden_states
+            else:
+                final_hidden_states.add_(current_hidden_states)
         return final_hidden_states.view(-1, x.shape[1])
 
     def forward_cpu(
