@@ -26,26 +26,30 @@ from typing import Type
 import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaModel, LlamaDecoderLayer
+from vllm.model_executor.models.llama import (
+    LlamaForCausalLM,
+    LlamaModel,
+    LlamaDecoderLayer,
+)
+
 
 class TeleFLMModel(LlamaModel):
 
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer,
+    ):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         """
-        Refer to µScaling paper: 
-        @inproceedings{
-            yao2025nanolm,
-            title={Nano{LM}: an Affordable {LLM} Study Benchmark via Accurate Loss Prediction across Scales},
-            author={Yiqun Yao and Siqi Fan and Xiusheng Huang and Xuezhi Fang and Xiang Li and Ziyi Ni and Xin Jiang and Xuying Meng and Peng Han and Shuo Shang and Kang Liu and Aixin Sun and Yequan Wang},
-            booktitle={ICLR 2025 First Workshop on Open Science for Foundation Models},
-            year={2025},
-            url={https://openreview.net/forum?id=IwaPYg1SCA}
-        }
+        This implementation is based on the µScaling paper presented at  
+        the International Conference on Learning Representations (ICLR) 2025 Workshop:  
+        "NanoLM: An Affordable LLM Study Benchmark via Accurate Loss Prediction across Scales"  
+        by Yiqun Yao et al.  
+        Available at: https://openreview.net/forum?id=IwaPYg1SCA  
+        arXiv preprint: https://arxiv.org/abs/2304.06875
         """
         self.use_mup = self.config.use_mup
         if self.use_mup:
@@ -57,6 +61,7 @@ class TeleFLMModel(LlamaModel):
             embedding = embedding * self.input_mult
         return embedding
 
+
 class TeleFLMForCausalLM(LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -66,6 +71,6 @@ class TeleFLMForCausalLM(LlamaForCausalLM):
             self.mup_scale_factor = self.config.mup_scale_factor
             self.output_mult = self.config.output_mult / self.mup_scale_factor
             logit_scale = self.output_mult
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    self.config.vocab_size,
-                                                    logit_scale)
+            self.logits_processor = LogitsProcessor(
+                self.unpadded_vocab_size, self.config.vocab_size, logit_scale
+            )
