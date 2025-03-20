@@ -63,7 +63,7 @@ async def async_request_tgi(
             "temperature": 0.01,  # TGI does not accept 0.0 temperature.
             "top_p": 0.99,  # TGI does not accept 1.0 top_p.
             "truncate": request_func_input.prompt_len,
-            # TGI does not accept ignore_eos flag.
+            "ignore_eos_token": request_func_input.ignore_eos,
         }
         payload = {
             "inputs": request_func_input.prompt,
@@ -71,6 +71,10 @@ async def async_request_tgi(
         }
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
+        if request_func_input.ignore_eos:
+            output.output_tokens = request_func_input.output_len
+        else:
+            output.output_tokens = None
 
         ttft = 0.0
         st = time.perf_counter()
