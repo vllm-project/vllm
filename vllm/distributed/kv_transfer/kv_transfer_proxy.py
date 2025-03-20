@@ -9,6 +9,7 @@ from multiprocessing import Manager
 # Initialize the FastAPI app
 app = FastAPI()
 
+
 # Prefill and Decode vLLM workers
 PREFILL_BASE_URL = "http://localhost:7080/v1"
 DECODE_BASE_URL = "http://localhost:7090/v1"
@@ -20,6 +21,8 @@ app.state.decode_client = None
 # Shared request store using multiprocessing.Manager()
 manager = Manager()
 request_store = manager.dict()  # Stores request_id → request_data
+
+cond = asyncio.Condition() #using interal lock to protect  
 kv_cache_ready_flags = manager.dict()  # Stores request_id → readiness flag
 
 
@@ -63,7 +66,8 @@ async def proxy_request(request: Request):
 
     # Store request in shared memory
     request_store[request_id] = req_data
-    kv_cache_ready_flags[request_id] = False  # KV cache is initially not ready
+    async with cond:
+        kv_cache_ready_flags[request_id] = False  # KV cache is initially not ready
 
     try:
         # Send request to prefill worker
@@ -71,22 +75,13 @@ async def proxy_request(request: Request):
         req_data["request_id"] = request_id
         await send_request_to_vllm(app.state.prefill_client, req_data)
 
-        # Wait for KV cache to be ready, but time out after 60 seconds
-        async def wait_for_kv_cache():
-            for _ in range(600):  # 600 iterations * 0.1s = 60 seconds max wait
-                if kv_cache_ready_flags.get(request_id, False):
-                    return True
-                await asyncio.sleep(0.1)
-            return False  # If it times out
 
-        success = await asyncio.wait_for(wait_for_kv_cache(), timeout=60.0)
 
-        if not success:
-            raise HTTPException(status_code=504, detail="Timeout: KV cache not ready after 60 seconds")
-
-        # Retrieve the original request
-        req_data = request_store.pop(request_id, None)
-        kv_cache_ready_flags.pop(request_id, None)  # Cleanup
+        async with cond:
+            while kv_cache_ready_flags.get(request_id, False) is False:
+                await asyncio.wait_for(cond.wait(), timeout=60)
+            req_data = request_store.pop(request_id, None)
+            kv_cache_ready_flags.pop(request_id, None)  # Cleanup
 
         if req_data is None:
             raise HTTPException(status_code=500, detail="Request lost in memory")
@@ -129,6 +124,10 @@ async def kv_cache_ready(request: Request):
         return JSONResponse(status_code=404, content={"error": "Request not found"})
 
     # Mark KV cache as ready in shared memory
-    kv_cache_ready_flags[request_id] = True
+    async with cond:
+        kv_cache_ready_flags[request_id] = True
+        cond.notify()
+
 
     return JSONResponse({"message": "KV cache ready, starting decode", "request_id": request_id})
+

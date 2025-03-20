@@ -50,6 +50,9 @@ class LMCacheConnector(KVConnectorBase):
         self.cache_config = config.cache_config
         self.lmcache_retrieve_kv = lmcache_retrieve_kv
         self.lmcache_store_kv = lmcache_store_kv
+        self.lmcache_should_store = lmcache_should_store
+        self.store_status = StoreStatus
+        self.retrieve_status = RetrieveStatus
 
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,
@@ -58,15 +61,18 @@ class LMCacheConnector(KVConnectorBase):
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
 
-        # TODO(Jiayi): This shouldn't be none for disagg prefill
-        hidden_or_intermediate_states = None
+        model_input, bypass_model_exec, hidden_or_intermediate_states = \
+            self.lmcache_retrieve_kv(
+                self.model_config,
+                self.parallel_config,
+                self.cache_config,
+                model_executable,
+                model_input,
+                kv_caches
+            )
 
-        # TODO (Jiayi): Only normal prefill is supported for now
-        retrieve_status = [self.retrieve_status.PREFILL]
-
-        model_input, bypass_model_exec, hidden_or_intermediate_states = self.lmcache_retrieve_kv(
-            model_executable, model_input, self.cache_config, kv_caches,
-            retrieve_status)
+        if hidden_or_intermediate_states is None:
+            bypass_model_exec = False
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
@@ -80,7 +86,7 @@ class LMCacheConnector(KVConnectorBase):
     ) -> None:
         # TODO (Jiayi): Only normal prefill is supported for now
         #store_status = [self.store_status.PREFILL] * num_reqs
-        store_status = self.lmcache_should_store(model_input)
+        # store_status = self.lmcache_should_store(model_input, self.engine)
         self.lmcache_store_kv(
             self.model_config,
             self.parallel_config,
@@ -88,7 +94,7 @@ class LMCacheConnector(KVConnectorBase):
             model_executable,
             model_input,
             kv_caches,
-            store_status,
+            # store_status,
             hidden_or_intermediate_states,
             )
 

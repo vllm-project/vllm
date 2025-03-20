@@ -69,7 +69,7 @@ async def proxy_request(request: Request):
 
     # Store request in shared memory
     request_store[request_id] = copy.deepcopy(req_data)  # Deep copy to preserve original data
-    print(f"~~~ Generated request id: {request_id} : req_datat: {request_store[request_id]}")
+    print(f"~~~ Generated request id: {request_id}")
     kv_cache_ready_flags[request_id] = False  # KV cache is initially not ready
 
     try:
@@ -101,7 +101,7 @@ async def proxy_request(request: Request):
             raise HTTPException(status_code=500, detail="Request lost in memory")
 
         # Send request to decode worker and stream response
-        print(f"~~~ send request to decoding : {req_data}")
+        print(f"~~~ send request to decoding : {request_id}")
         return StreamingResponse(stream_vllm_response(app.state.decode_client, req_data), media_type="application/json")
 
     except asyncio.TimeoutError:
@@ -129,17 +129,18 @@ async def kv_cache_ready(request: Request):
 
     request_id = request_id.removeprefix("chatcmpl-")
 
+    print(f"--- Received kv_cache_ready for request id: {request_id}")
+
     if not request_id:
         return JSONResponse(status_code=400, content={"error": "Missing request_id"})
     
     if request_id not in request_store:
-        return JSONResponse(status_code=404, content={"error": "Request not found or already processed"})
-    
-    print(f"--- Received kv_cache_ready for request id: {request_id}")
+        print(f"hit 404 error: {request_id}   \n {request_store.keys()}")
+        return JSONResponse(status_code=404, content={"error": f"Request {request_id} not found or already processed"})
 
     # Print out the contents of both dictionaries (debugging)
-    print("===== request_store Contents =====")
-    print(json.dumps(dict(request_store), indent=4, default=str))  # Convert to JSON-like format
+    # print("===== request_store Contents =====")
+    # print(json.dumps(dict(request_store), indent=4, default=str))  # Convert to JSON-like format
 
     print("===== kv_cache_ready_flags Contents =====")
     print(json.dumps(dict(kv_cache_ready_flags), indent=4, default=str))
