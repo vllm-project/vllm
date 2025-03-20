@@ -223,7 +223,8 @@ class Worker(WorkerBase):
         if get_pp_group().is_last_rank:
             max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                self.scheduler_config.max_num_batched_tokens)
-            hidden_states = self.model_runner._dummy_run(num_tokens=max_num_reqs)
+            hidden_states = self.model_runner._dummy_run(
+                num_tokens=max_num_reqs)
             if hidden_states is not None:
                 self.model_runner._dummy_sampler_run(
                     hidden_states=hidden_states)
