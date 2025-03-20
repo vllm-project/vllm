@@ -76,6 +76,10 @@ class SchedulerInterface(ABC):
         1. When the request is aborted by the client.
         2. When the frontend process detects a stop string of the request after
            de-tokenizing its generated tokens.
+           
+        Args:
+            request_ids: A single or a list of request IDs.
+            finished_status: The finished status of the given requests.
         """
         raise NotImplementedError
 
