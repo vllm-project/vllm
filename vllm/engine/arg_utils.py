@@ -1158,6 +1158,13 @@ class EngineArgs:
         )
 
     def create_load_config(self) -> LoadConfig:
+
+        if(self.qlora_adapter_name_or_path is not None) and \
+            self.quantization != "bitsandbytes":
+            raise ValueError(
+                "QLoRA adapter only support "
+                f"'bitsandbytes' quantization, but got {self.quantization}")
+
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
         return LoadConfig(
