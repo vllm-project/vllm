@@ -111,10 +111,12 @@ def rocm_aiter_topk_softmax(topk_weights: torch.Tensor,
                             topk_indices: torch.Tensor,
                             token_expert_indices: torch.Tensor,
                             gating_output: torch.Tensor,
-                            renormalize: bool) -> None:
+                            renormalize: bool) -> tuple[torch.Tensor, ...]:
     import aiter as rocm_aiter
     rocm_aiter.topk_softmax(topk_weights, topk_indices, token_expert_indices,
                             gating_output, renormalize)
+
+    return topk_weights, topk_indices
 
 
 def shuffle_weights(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
