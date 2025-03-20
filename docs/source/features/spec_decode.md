@@ -108,7 +108,7 @@ llm = LLM(
     model="facebook/opt-6.7b",
     tensor_parallel_size=1,
     speculative_config={
-        "method": "[ngram]",
+        "method": "ngram",
         "num_speculative_tokens": 5,
         "prompt_lookup_max": 4,
     },

@@ -1990,12 +1990,14 @@ class SpeculativeConfig:
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
-                self.model = self.method
+                self.model = "ngram"
             else:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
 
         if self.method in ("ngram", "[ngram]"):
+            # Unified to "ngram" internally
+            self.method = "ngram"
             if self.prompt_lookup_min is None:
                 self.prompt_lookup_min = 1
             if self.prompt_lookup_max is None or self.prompt_lookup_max < 1:
@@ -2263,7 +2265,7 @@ class SpeculativeConfig:
 
     def __repr__(self) -> str:
         if self.prompt_lookup_max is not None and self.prompt_lookup_max > 0:
-            draft_model = "[ngram]"
+            draft_model = "ngram"
         else:
             draft_model = self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
