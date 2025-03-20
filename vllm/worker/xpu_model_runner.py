@@ -150,6 +150,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
     def build(self) -> ModelInputForXPU:
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        input_mrope_positions: List[List[int]] = [[] for _ in range(3)]
         slot_mapping: List[int] = []
 
         seq_lens: List[int] = []
@@ -268,7 +269,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                                 vision_start_token_id=hf_config.vision_start_token_id,
                                 vision_end_token_id=hf_config.vision_end_token_id,
                                 spatial_merge_size=hf_config.vision_config.spatial_merge_size,
-                                context_len=0,
+                                context_len=seq_data.get_num_computed_tokens(),
                             )
                         seq_data.mrope_position_delta = mrope_position_delta
                         if mrope_input_positions is None:
@@ -278,6 +279,16 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                             # for _seq_mrope_input_positions in msections:
                             mrope_input_positions[idx].extend(
                                 temp_mrope_input_positions[idx])
+                else:
+                    if seq_data.mrope_position_delta is not None:
+                        context_len = seq_data.get_num_computed_tokens()
+                        next_pos = MRotaryEmbedding.get_next_input_positions(
+                            seq_data.mrope_position_delta,
+                            context_len,
+                            seq_len,
+                        )
+                        for idx in range(3):
+                            input_mrope_positions[idx].extend(next_pos[idx])
                 if is_prompt:
                     assert len(seq_ids) == 1
                     num_prefills += 1
@@ -328,7 +339,9 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                                            dtype=torch.long,
                                            device=self.device)
 
-        if self.runner.model_is_mrope and mrope_input_positions is not None:
+        if self.runner.model_is_mrope and (mrope_input_positions is not None or any(input_mrope_positions)):
+            if any(input_mrope_positions):
+                mrope_input_positions = input_mrope_positions
             input_positions_tensor = torch.tensor(mrope_input_positions,
                                                   dtype=torch.long,
                                                   device=self.device)
