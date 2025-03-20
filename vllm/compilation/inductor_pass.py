@@ -2,25 +2,55 @@
 
 import hashlib
 import inspect
+import json
 import types
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 import torch
+from packaging.version import Version
 from torch import fx
 
-
-class InductorPass(ABC):
-    """
-    General custom inductor pass interface.
-    """
-
-    @abstractmethod
-    def __call__(self, graph: torch.fx.Graph):
+if Version(torch.__version__) >= Version("2.6"):
+    from torch._inductor.custom_graph_pass import CustomGraphPass
+else:
+    # CustomGraphPass is not present in 2.5 or lower,
+    # and custom passes are pickled when determining the caching key.
+    # Declare CustomGraphPass from 2.6 and add pickling support.
+    class CustomGraphPass(ABC):
         """
-        Execute the pass on the given graph.
+        This class conforms to the 2.6 interface but also supports pickling,
+        as that's what the inductor code cache uses to determine the cache key.
+        Subclasses can just "pretend" that uuid is used.
         """
-        raise NotImplementedError
+
+        @abstractmethod
+        def __call__(self, graph: torch.fx.graph.Graph) -> None:
+            """
+            Implementation of the custom pass.
+            """
+
+        @abstractmethod
+        def uuid(self) -> Optional[Any]:
+            """
+            Return an ID to uniquely identify your custom pass implementation.
+            Return None to skip inductor code caching entirely.
+            """
+
+        def __getstate__(self):
+            return self.uuid()
+
+        def __setstate__(self, state):
+            raise ValueError("Cannot unpickle CustomGraphPass because pickling"
+                             " is used for cache key uuid. Use torch>=2.6 with"
+                             " native uuid support for custom passes.")
+
+
+class InductorPass(CustomGraphPass):
+    """
+    A custom graph pass that uses a hash of its source as the UUID.
+    This is defined as a convenience and should work in most cases.
+    """
 
     def uuid(self) -> Any:
         """
@@ -48,7 +78,16 @@ class InductorPass(ABC):
             else:
                 src_str = inspect.getsource(src.__class__)
             hasher.update(src_str.encode("utf-8"))
-        return hasher.digest()
+        return hasher.hexdigest()
+
+    @staticmethod
+    def hash_dict(dict_: Dict[Any, Any]):
+        """
+        Utility method to hash a dictionary, can alternatively be used for uuid.
+        :return: A sha256 hash of the json rep of the dictionary.
+        """
+        encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
 
 class CallableInductorPass(InductorPass):
@@ -70,16 +109,3 @@ class CallableInductorPass(InductorPass):
 
     def uuid(self) -> Any:
         return self._uuid
-
-    def __getstate__(self):
-        """
-        Pickling occurs in the Inductor code cache if a pass is not given to
-        the pass manager but is instead directly added to config as a pass.
-        See PostGradPassManager for more.
-
-        TODO(torch==2.6), use the `uuid` method in CustomGraphPass instead.
-        """
-        return self._uuid
-
-    def __setstate__(self, state):
-        raise ValueError("Cannot unpickle CallableInductorPass")
