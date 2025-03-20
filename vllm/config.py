@@ -246,6 +246,7 @@ class ModelConfig:
         max_seq_len_to_capture: Optional[int] = None,
         max_logprobs: int = 20,
         disable_sliding_window: bool = False,
+        disable_cascade_attn: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, list[str]]] = None,
         limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
@@ -322,6 +323,7 @@ class ModelConfig:
         self.max_seq_len_to_capture = max_seq_len_to_capture
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
+        self.disable_cascade_attn = disable_cascade_attn
         self.skip_tokenizer_init = skip_tokenizer_init
         self.enable_sleep_mode = enable_sleep_mode
 
