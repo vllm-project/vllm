@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from functools import cache
 
 import torch
 from packaging import version
@@ -19,15 +20,18 @@ from vllm.utils.torch_utils import direct_register_custom_op
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
 TORCH_DEVICE_IDENTITY = None
 
+
 # The condition to determine if it is on a platform that supports
 # torch._scaled_mm rowwise feature.
-# The condition is determined once as the operations
-# are time-consuming.
-USE_ROWWISE_TORCH_SCALED_MM = (
-    current_platform.is_rocm()
-    and version.parse(torch.__version__) >= version.parse("2.7")
-    and current_platform.has_device_capability(94)
-)
+# Cache the result to avoid determining it multiple times, as
+# this is time-consuming.
+@cache
+def use_rowwise_torch_scaled_mm() -> bool:
+    return (
+        current_platform.is_rocm()
+        and version.parse(torch.__version__) >= version.parse("2.7")
+        and current_platform.has_device_capability(94)
+    )
 
 
 def sparse_cutlass_supported() -> bool:
@@ -377,7 +381,7 @@ def dispatch_w8a8_scaled_mm(
     if (
         not per_tensor_weights
         and not per_tensor_activations
-        and USE_ROWWISE_TORCH_SCALED_MM
+        and use_rowwise_torch_scaled_mm()
     ):
         return torch_per_token_w8a8_scaled_mm
     # Normally, torch.scaled_mm supports per tensor weights + activations only
