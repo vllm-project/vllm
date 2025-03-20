@@ -1849,7 +1849,6 @@ class SpeculativeConfig:
             settings in SamplingParams. If not specified, it defaults to True.
 
     - Draft Model Configuration:
-        - model (Optional[str]): The name of the draft model, if provided.
         - quantization (Optional[str]): Quantization method that was used to
             quantize the draft model weights. If None, we assume the
             model weights are not quantized. Note that it only takes effect
