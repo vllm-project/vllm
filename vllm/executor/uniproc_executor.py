@@ -65,8 +65,8 @@ class UniProcExecutor(ExecutorBase):
 
     def shutdown(self):
         if getattr(self, 'shutdown_worker', False):
-            self.collective_rpc("shutdown")
             self.shutdown_worker = False
+            getattr(self.driver_worker, 'shutdown', lambda: None)()
 
 
 UniProcExecutorAsync = UniProcExecutor
