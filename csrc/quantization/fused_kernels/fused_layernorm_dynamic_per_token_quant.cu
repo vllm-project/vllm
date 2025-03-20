@@ -110,10 +110,9 @@ void rms_norm_dynamic_per_token_quant_dispatch(
     min_scaling_factor = std::numeric_limits<float>::epsilon();
   else if (out.dtype() == c10::ScalarType::Float8_e4m3fnuz)
     min_scaling_factor =
-        1.0f / (fp8_e4m3_adjusted_max_v<c10::Float8_e4m3fnuz> * 512.f);
+        1.0f / (quant_type_max_v<c10::Float8_e4m3fnuz> * 512.f);
   else
-    min_scaling_factor =
-        1.0f / (fp8_e4m3_adjusted_max_v<c10::Float8_e4m3fn> * 512.f);
+    min_scaling_factor = 1.0f / (quant_type_max_v<c10::Float8_e4m3fn> * 512.f);
 
   if (residual.has_value()) {
     VLLM_DISPATCH_QUANT_TYPES(
