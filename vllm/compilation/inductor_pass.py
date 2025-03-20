@@ -17,7 +17,7 @@ else:
     # CustomGraphPass is not present in 2.5 or lower,
     # and custom passes are pickled when determining the caching key.
     # Declare CustomGraphPass from 2.6 and add pickling support.
-    class CustomGraphPass(ABC):
+    class CustomGraphPass(ABC):  # noqa (redefinition)
         """
         This class conforms to the 2.6 interface but also supports pickling,
         as that's what the inductor code cache uses to determine the cache key.
