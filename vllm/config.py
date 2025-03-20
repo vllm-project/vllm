@@ -1979,15 +1979,8 @@ class SpeculativeConfig:
             # configuration refactoring.
             if self.model in ("ngram", "[ngram]"):
                 self.method = "ngram"
-            elif "eagle-" in self.draft_model_config.model.lower():
+            elif "eagle-" in self.model.lower():
                 self.method = "eagle"
-            elif self.draft_model_config.hf_config.model_type == "medusa":
-                self.method = "medusa"
-            elif (self.draft_model_config.hf_config.model_type ==
-                  "mlp_speculator"):
-                self.method = "mlp_speculator"
-            else:
-                self.method = "draft_model"
 
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
@@ -2051,6 +2044,14 @@ class SpeculativeConfig:
                     max_logprobs=self.target_model_config.max_logprobs,
                     hf_overrides=SpeculativeConfig.hf_config_override,
                 )
+
+                if self.draft_model_config.hf_config.model_type == "medusa":
+                    self.method = "medusa"
+                elif (self.draft_model_config.hf_config.model_type ==
+                      "mlp_speculator"):
+                    self.method = "mlp_speculator"
+                else:
+                    self.method = "draft_model"
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method == "eagle":
