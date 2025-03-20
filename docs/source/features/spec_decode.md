@@ -108,9 +108,9 @@ llm = LLM(
     model="facebook/opt-6.7b",
     tensor_parallel_size=1,
     speculative_config={
-        "proposer": "[ngram]",  # Or you can also specify "model": "[ngram]",
+        "method": "[ngram]",
         "num_speculative_tokens": 5,
-        "ngram_prompt_lookup_max": 4,
+        "prompt_lookup_max": 4,
     },
 )
 outputs = llm.generate(prompts, sampling_params)

@@ -137,7 +137,7 @@ def test_speculative_model_quantization_config(vllm_runner, common_llm_kwargs,
 def test_mqa_scorer(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
                     baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
                     output_len: int, seed: int):
-    """Verify that ngram speculative decoding generates the same output 
+    """Verify that speculative decoding generates the same output
     with batch expansion scorer and mqa scorer.
     """
     run_equality_correctness_test(vllm_runner,

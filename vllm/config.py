@@ -1803,14 +1803,42 @@ class SpeculativeConfig:
         - num_speculative_tokens (int): The number of speculative
             tokens, if provided. It will default to the number in the draft
             model config if present, otherwise, it is required.
-        - proposer (Optional[str]): The name of the speculative method to use.
-            If not provided, it assumes the speculative method is a model-based
-            method by default.
+        - model (Optional[str]): The name of the draft model, eagle head,
+            or additional weights, if provided.
+        - method (Optional[str]): The name of the speculative method to use.
+            If users provide and set the `model` param, the speculative method
+            type will be detected automatically, if `model` param is not
+            provided, the appropriate method name must be provided.
+            - Possible values:
+                - ngram: A light speculative method without the need for a
+                model, which is based on prompt lookup decoding.
+                    - prompt_lookup_max (Optional[int]):
+                        Maximum size of ngram token window when using Ngram
+                        proposer, if provided.
+                    - prompt_lookup_min (Optional[int]):
+                        Minimum size of ngram token window when using Ngram
+                        proposer, if provided.
+                - eagle
+                - medusa
+                - mlp_speculator
+                - draft_model
         - acceptance_method (str): The method to use for accepting draft
             tokens. This can take two possible values: 'rejection_sampler' and
             'typical_acceptance_sampler' for RejectionSampler and
             TypicalAcceptanceSampler respectively. If not specified, it
             defaults to 'rejection_sampler'.
+            - Possible values:
+                - rejection_sampler
+                - typical_acceptance_sampler
+                    - posterior_threshold (Optional[float]):
+                        A threshold value that sets a lower bound on the
+                        posterior probability of a token in the target model
+                        for it to be accepted. This threshold is used only
+                        when we use the TypicalAcceptanceSampler for token
+                        acceptance.
+                    - posterior_alpha (Optional[float]):
+                        Scaling factor for entropy-based threshold, applied
+                        when using TypicalAcceptanceSampler.
         - draft_tensor_parallel_size (Optional[int]): The degree of the tensor
             parallelism for the draft model. Can only be 1 or the same as the
             target model's tensor parallel size.
@@ -1842,18 +1870,6 @@ class SpeculativeConfig:
         - disable_by_batch_size (Optional[int]): Disable speculative decoding
             for new incoming requests when the number of enqueued requests is
             larger than this value, if provided.
-        - ngram_prompt_lookup_max (Optional[int]): Maximum size of ngram token
-            window when using Ngram proposer, if provided.
-        - ngram_prompt_lookup_min (Optional[int]): Minimum size of ngram token
-            window when using Ngram proposer, if provided.
-        - typical_acceptance_sampler_posterior_threshold (Optional[float]):
-            A threshold value that sets a lower bound on the posterior
-            probability of a token in the target model for it to be accepted.
-            This threshold is used only when we use the
-            TypicalAcceptanceSampler for token acceptance.
-        - typical_acceptance_sampler_posterior_alpha (Optional[float]): Scaling
-            factor for entropy-based threshold, applied when using
-            TypicalAcceptanceSampler.
 
     Non-configurable internal parameters include:
     - Model Configuration:
@@ -1876,7 +1892,7 @@ class SpeculativeConfig:
     # speculative configs from cli args
     num_speculative_tokens: int = field(default=None,
                                         init=True)  # type: ignore
-    proposer: Optional[str] = None
+    method: Optional[str] = None
     acceptance_method: str = "rejection_sampler"
     draft_tensor_parallel_size: Optional[int] = None
     disable_logprobs: bool = True
@@ -1889,10 +1905,10 @@ class SpeculativeConfig:
 
     disable_mqa_scorer: bool = False
     disable_by_batch_size: Optional[int] = None
-    ngram_prompt_lookup_max: Optional[int] = None
-    ngram_prompt_lookup_min: Optional[int] = None
-    typical_acceptance_sampler_posterior_threshold: Optional[float] = None
-    typical_acceptance_sampler_posterior_alpha: Optional[float] = None
+    prompt_lookup_max: Optional[int] = None
+    prompt_lookup_min: Optional[int] = None
+    posterior_threshold: Optional[float] = None
+    posterior_alpha: Optional[float] = None
 
     # required configuration params passed from engine
     target_model_config: ModelConfig = field(default=None,
@@ -1945,14 +1961,28 @@ class SpeculativeConfig:
         return hf_config
 
     def __post_init__(self):
-        if self.proposer is None and self.model is not None:
-            # Note: After next release, the proposer parameter will be used
-            # to specify the speculative method, which helps to extend the
-            # configuration of non-model-based proposers, and the model
-            # parameter will be used when the draft model or head is needed.
-            # If users do not specify the proposer, the speculative method will
-            # be considered as the model-based method by default.
-            self.proposer = self.model
+
+        # Note: After next release, the method parameter will be used to
+        # specify the speculative method, which helps to extend the
+        # configuration of non-model-based proposers, and the model parameter
+        # will be used when the draft model or head is needed.
+        # If users do not specify the method, the speculative method will be
+        # considered as the draft-model-based method by default.
+
+        if self.method is None and self.model is not None:
+            # Automatically set the method to ensure a smooth transition during
+            # configuration refactoring.
+            if self.model in ("ngram", "[ngram]"):
+                self.method = "ngram"
+            elif "eagle-" in self.draft_model_config.model.lower():
+                self.method = "eagle"
+            elif self.draft_model_config.hf_config.model_type == "medusa":
+                self.method = "medusa"
+            elif (self.draft_model_config.hf_config.model_type ==
+                  "mlp_speculator"):
+                self.method = "mlp_speculator"
+            else:
+                self.method = "draft_model"
 
         if self.model is None and self.num_speculative_tokens is not None:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
@@ -1961,27 +1991,25 @@ class SpeculativeConfig:
                         == "deepseek_v3":
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
-            elif self.proposer in ("ngram", "[ngram]"):
-                self.model = self.proposer
+            elif self.method in ("ngram", "[ngram]"):
+                self.model = self.method
             else:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
 
-        if self.proposer in ("ngram", "[ngram]"):
-            if self.ngram_prompt_lookup_min is None:
-                self.ngram_prompt_lookup_min = 1
-            if (self.ngram_prompt_lookup_max is None
-                    or self.ngram_prompt_lookup_max < 1):
-                raise ValueError("ngram_prompt_lookup_max="
-                                 f"{self.ngram_prompt_lookup_max} must be > 0")
-            if self.ngram_prompt_lookup_min < 1:
-                raise ValueError("ngram_prompt_lookup_min="
-                                 f"{self.ngram_prompt_lookup_min} must be > 0")
-            if self.ngram_prompt_lookup_min > self.ngram_prompt_lookup_max:
-                raise ValueError(
-                    f"ngram_prompt_lookup_min={self.ngram_prompt_lookup_min} "
-                    "cannot be larger than ngram_prompt_lookup_max="
-                    f"{self.ngram_prompt_lookup_max}")
+        if self.method in ("ngram", "[ngram]"):
+            if self.prompt_lookup_min is None:
+                self.prompt_lookup_min = 1
+            if self.prompt_lookup_max is None or self.prompt_lookup_max < 1:
+                raise ValueError("prompt_lookup_max="
+                                 f"{self.prompt_lookup_max} must be > 0")
+            if self.prompt_lookup_min < 1:
+                raise ValueError("prompt_lookup_min="
+                                 f"{self.prompt_lookup_min} must be > 0")
+            if self.prompt_lookup_min > self.prompt_lookup_max:
+                raise ValueError(f"prompt_lookup_min={self.prompt_lookup_min} "
+                                 "cannot be larger than prompt_lookup_max="
+                                 f"{self.prompt_lookup_max}")
 
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
@@ -1989,8 +2017,8 @@ class SpeculativeConfig:
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
         else:
-            self.ngram_prompt_lookup_max = 0
-            self.ngram_prompt_lookup_min = 0
+            self.prompt_lookup_max = 0
+            self.prompt_lookup_min = 0
 
             if self.model is not None:
                 self.draft_model_config = ModelConfig(
@@ -2019,10 +2047,8 @@ class SpeculativeConfig:
                     hf_overrides=SpeculativeConfig.hf_config_override,
                 )
 
-                # Detect proposer type or EAGLE prefix to replace hf_config for
-                # EAGLE draft_model
-                if (self.proposer == "eagle"
-                        or "eagle-" in self.draft_model_config.model.lower()):
+                # Replace hf_config for EAGLE draft_model
+                if self.method == "eagle":
                     if self.enable_chunked_prefill:
                         raise ValueError(
                             "Chunked prefill and EAGLE are not compatible.")
@@ -2076,10 +2102,10 @@ class SpeculativeConfig:
                         self.draft_tensor_parallel_size))
 
         if self.acceptance_method == "typical_acceptance_sampler":
-            if self.typical_acceptance_sampler_posterior_threshold is None:
-                self.typical_acceptance_sampler_posterior_threshold = 0.09
-            if self.typical_acceptance_sampler_posterior_alpha is None:
-                self.typical_acceptance_sampler_posterior_alpha = 0.3
+            if self.posterior_threshold is None:
+                self.posterior_threshold = 0.09
+            if self.posterior_alpha is None:
+                self.posterior_alpha = 0.3
 
         self._verify_args()
 
@@ -2203,18 +2229,15 @@ class SpeculativeConfig:
                 f"is {self.acceptance_method}")
 
         if self.acceptance_method == "typical_acceptance_sampler" and (
-            (self.typical_acceptance_sampler_posterior_threshold is not None
-             and self.typical_acceptance_sampler_posterior_threshold < 0) or
-            (self.typical_acceptance_sampler_posterior_alpha is not None
-             and self.typical_acceptance_sampler_posterior_alpha < 0)):
+            (self.posterior_threshold is not None
+             and self.posterior_threshold < 0) or
+            (self.posterior_alpha is not None and self.posterior_alpha < 0)):
             raise ValueError(
-                "Expected typical_acceptance_sampler_posterior_threshold "
-                "and typical_acceptance_sampler_posterior_alpha to be > 0."
-                " Instead found "
-                f"typical_acceptance_sampler_posterior_threshold = "
-                f"{self.typical_acceptance_sampler_posterior_threshold} "
-                f"and typical_acceptance_sampler_posterior_alpha = "
-                f"{self.typical_acceptance_sampler_posterior_alpha}")
+                "Expected the posterior_threshold and posterior_alpha of "
+                "typical_acceptance_sampler to be > 0. "
+                "Instead found posterior_threshold = "
+                f"{self.posterior_threshold} and posterior_alpha = "
+                f"{self.posterior_alpha}")
 
         if (self.disable_by_batch_size is not None
                 and self.disable_by_batch_size < 2):
@@ -2233,8 +2256,7 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        if (self.ngram_prompt_lookup_max is not None
-                and self.ngram_prompt_lookup_max > 0):
+        if self.prompt_lookup_max is not None and self.prompt_lookup_max > 0:
             draft_model = "[ngram]"
         else:
             draft_model = self.draft_model_config.model

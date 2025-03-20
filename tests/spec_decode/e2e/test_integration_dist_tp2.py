@@ -38,7 +38,7 @@ from .conftest import run_equality_correctness_test_tp
         str({
             "model": "[ngram]",
             "num_speculative_tokens": 5,
-            "ngram_prompt_lookup_max": 3,
+            "prompt_lookup_max": 3,
         }),
     ],
 ])

@@ -1232,12 +1232,12 @@ class EngineArgs:
                 "disable_mqa_scorer": self.speculative_disable_mqa_scorer,
                 "disable_by_batch_size":
                 self.speculative_disable_by_batch_size,
-                "ngram_prompt_lookup_max": self.ngram_prompt_lookup_max,
-                "ngram_prompt_lookup_min": self.ngram_prompt_lookup_min,
+                "prompt_lookup_max": self.ngram_prompt_lookup_max,
+                "prompt_lookup_min": self.ngram_prompt_lookup_min,
                 "acceptance_method": self.spec_decoding_acceptance_method,
-                "typical_acceptance_sampler_posterior_threshold":
+                "posterior_threshold":
                 self.typical_acceptance_sampler_posterior_threshold,
-                "typical_acceptance_sampler_posterior_alpha":
+                "posterior_alpha":
                 self.typical_acceptance_sampler_posterior_alpha,
                 "disable_logprobs": self.disable_logprobs_during_spec_decoding,
             }

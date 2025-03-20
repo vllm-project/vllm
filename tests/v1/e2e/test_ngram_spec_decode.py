@@ -73,9 +73,9 @@ def test_ngram_correctness(
         spec_llm = LLM(
             model=model_name,
             speculative_config={
-                "proposer": "[ngram]",
-                "ngram_prompt_lookup_max": 5,
-                "ngram_prompt_lookup_min": 3,
+                "method": "[ngram]",
+                "prompt_lookup_max": 5,
+                "prompt_lookup_min": 3,
                 "num_speculative_tokens": 3,
             },
             max_model_len=1024,

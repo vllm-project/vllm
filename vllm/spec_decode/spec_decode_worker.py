@@ -92,8 +92,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     # Override draft-model specific worker args.
     draft_worker_kwargs.update(
         vllm_config=draft_worker_config,
-        ngram_prompt_lookup_max=speculative_config.ngram_prompt_lookup_max,
-        ngram_prompt_lookup_min=speculative_config.ngram_prompt_lookup_min,
+        ngram_prompt_lookup_max=speculative_config.prompt_lookup_max,
+        ngram_prompt_lookup_min=speculative_config.prompt_lookup_min,
     )
 
     spec_decode_worker = SpecDecodeWorker.create_worker(
@@ -103,9 +103,9 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         disable_by_batch_size=speculative_config.disable_by_batch_size,
         draft_token_acceptance_method=speculative_config.acceptance_method,
         typical_acceptance_sampler_posterior_threshold=speculative_config.
-        typical_acceptance_sampler_posterior_threshold,
+        posterior_threshold,
         typical_acceptance_sampler_posterior_alpha=speculative_config.
-        typical_acceptance_sampler_posterior_alpha,
+        posterior_alpha,
         disable_logprobs=speculative_config.disable_logprobs,
         disable_log_stats=speculative_config.disable_log_stats,
         num_speculative_tokens=speculative_config.num_speculative_tokens,
