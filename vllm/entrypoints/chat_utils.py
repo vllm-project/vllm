@@ -5,6 +5,7 @@ import json
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Iterable
+from contextlib import suppress
 from functools import cache, lru_cache, partial
 from pathlib import Path
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
@@ -305,6 +306,32 @@ def _detect_content_format(
         return "openai"
 
 
+def _resolve_hf_chat_template(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    chat_template: Optional[str],
+    *,
+    trust_remote_code: bool,
+) -> Optional[str]:
+    # 1st priority: The given chat template
+    if chat_template is not None:
+        return chat_template
+
+    # 2nd priority: AutoProcessor chat template
+    with suppress(Exception):
+        processor = cached_get_processor(
+            tokenizer.name_or_path,
+            trust_remote_code=trust_remote_code,
+        )
+        if processor.chat_template is not None:
+            return processor.chat_template
+
+    # 3rd priority: AutoTokenizer chat template
+    with suppress(Exception):
+        return tokenizer.get_chat_template(chat_template)
+
+    return None
+
+
 def _resolve_chat_template_content_format(
     chat_template: Optional[str],
     given_format: ChatTemplateContentFormatOption,
@@ -313,24 +340,16 @@ def _resolve_chat_template_content_format(
     trust_remote_code: bool,
 ) -> _ChatTemplateContentFormat:
     if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
-        try:
-            # Prioritize processor's chat template for multi-modal models
-            processor = cached_get_processor(tokenizer.name_or_path,
-                                             trust_remote_code=trust_remote_code)
-            hf_chat_template = processor.chat_template
-        except Exception:
-            hf_chat_template = tokenizer.chat_template
+        hf_chat_template = _resolve_hf_chat_template(
+            tokenizer,
+            chat_template=chat_template,
+            trust_remote_code=trust_remote_code,
+        )
     else:
         hf_chat_template = None
 
-    jinja_text: Optional[str]
-    if isinstance(hf_chat_template, str) and chat_template is None:
-        jinja_text = hf_chat_template
-    elif (isinstance(hf_chat_template, dict)
-            and chat_template in hf_chat_template):
-        jinja_text = hf_chat_template[chat_template]
-    else:
-        jinja_text = load_chat_template(chat_template, is_literal=True)
+    jinja_text = (hf_chat_template if isinstance(hf_chat_template, str)
+                  else load_chat_template(chat_template, is_literal=True))
 
     detected_format = ("string" if jinja_text is None else
                        _detect_content_format(jinja_text, default="string"))
@@ -1082,16 +1101,13 @@ def apply_hf_chat_template(
     tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
 ) -> str:
-    if chat_template is None:
-        try:
-            # Prioritize processor's chat template for multi-modal models
-            processor = cached_get_processor(tokenizer.name_or_path,
-                                             trust_remote_code=trust_remote_code)
-            chat_template = processor.chat_template
-        except Exception:
-            chat_template = tokenizer.chat_template
+    hf_chat_template = _resolve_hf_chat_template(
+        tokenizer,
+        chat_template=chat_template,
+        trust_remote_code=trust_remote_code,
+    )
 
-    if chat_template is None:
+    if hf_chat_template is None:
         raise ValueError(
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
@@ -1099,7 +1115,7 @@ def apply_hf_chat_template(
 
     return tokenizer.apply_chat_template(
         conversation=conversation,  # type: ignore[arg-type]
-        chat_template=chat_template,
+        chat_template=hf_chat_template,
         tokenize=tokenize,
         **kwargs,
     )
