@@ -5,6 +5,7 @@ import pickle
 import signal
 import sys
 import time
+import traceback
 import weakref
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -370,6 +371,9 @@ class WorkerProc:
                     func = partial(cloudpickle.loads(method), self.worker)
                 output = func(*args, **kwargs)
             except Exception as e:
+                # Notes have been introduced in python 3.11
+                if hasattr(e, "add_note"):
+                    e.add_note(traceback.format_exc())
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))
                 logger.exception("WorkerProc hit an exception: %s", exc_info=e)
