@@ -1799,7 +1799,7 @@ class SpeculativeConfig:
     """
     Configuration for speculative decoding.
     Configurable parameters include:
-    - Top-level Speculative Decoding Control:
+    - General Speculative Decoding Control:
         - num_speculative_tokens (int): The number of speculative
             tokens, if provided. It will default to the number in the draft
             model config if present, otherwise, it is required.
@@ -1807,17 +1807,17 @@ class SpeculativeConfig:
             or additional weights, if provided.
         - method (Optional[str]): The name of the speculative method to use.
             If users provide and set the `model` param, the speculative method
-            type will be detected automatically, if `model` param is not
-            provided, the appropriate method name must be provided.
+            type will be detected automatically if possible, if `model` param
+            is not provided, the method name must be provided.
             - Possible values:
-                - ngram: A light speculative method without the need for a
-                model, which is based on prompt lookup decoding.
+                - ngram
+                    Related additional configuration:
                     - prompt_lookup_max (Optional[int]):
                         Maximum size of ngram token window when using Ngram
-                        proposer, if provided.
+                        proposer, required when method is set to ngram.
                     - prompt_lookup_min (Optional[int]):
                         Minimum size of ngram token window when using Ngram
-                        proposer, if provided.
+                        proposer, if provided. Defaults to 1.
                 - eagle
                 - medusa
                 - mlp_speculator
@@ -1830,6 +1830,7 @@ class SpeculativeConfig:
             - Possible values:
                 - rejection_sampler
                 - typical_acceptance_sampler
+                    Related additional configuration:
                     - posterior_threshold (Optional[float]):
                         A threshold value that sets a lower bound on the
                         posterior probability of a token in the target model
@@ -1870,6 +1871,9 @@ class SpeculativeConfig:
         - disable_by_batch_size (Optional[int]): Disable speculative decoding
             for new incoming requests when the number of enqueued requests is
             larger than this value, if provided.
+
+    Although the parameters above are structured hierarchically, there is no
+    need to nest them during configuration.
 
     Non-configurable internal parameters include:
     - Model Configuration:
