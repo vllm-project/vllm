@@ -103,9 +103,9 @@ class SchedulerInterface(ABC):
         NOTE: This is different from `not self.has_unfinished_requests()`.
 
         The scheduler maintains an internal list of the requests finished in the
-        previous step. This list is returned from the next call to schedule(), to
-        be sent to the model runner in the next step to clear cached states for
-        these finished requests.
+        previous step. This list is returned from the next call to schedule(),
+        to be sent to the model runner in the next step to clear cached states
+        for these finished requests.
 
         This method checks if this internal list of finished requests is
         non-empty. This information is useful for DP attention.
