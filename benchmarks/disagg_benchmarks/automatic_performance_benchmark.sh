@@ -87,7 +87,7 @@ start_chunked() {
         ports+=("$port")
         
         CUDA_VISIBLE_DEVICES="$card" python3 -m vllm.entrypoints.openai.api_server \
-            --model "/workspace/deepseek/zer/DeepSeek-V2-Lite/" \
+            --model "meta-llama/Meta-Llama-3.1-8B-Instruct" \
             --port "$port" \
             --max-model-len 4096 \
             --trust-remote-code \
@@ -147,7 +147,7 @@ start_disagg() {
         '{kv_connector: $kv_connector, kv_role: $kv_role, kv_rank: ($kv_rank | tonumber), kv_parallel_size: ($kv_parallel_size | tonumber), kv_buffer_size: ($kv_buffer_size | tonumber)}')
             
         CUDA_VISIBLE_DEVICES="$card" python3 -m vllm.entrypoints.openai.api_server \
-            --model "/workspace/deepseek/zer/DeepSeek-V2-Lite/" \
+            --model "meta-llama/Meta-Llama-3.1-8B-Instruct" \
             --port "$p_port" \
             --max-model-len 4096 \
             --trust-remote-code \
@@ -172,7 +172,7 @@ start_disagg() {
         '{kv_connector: $kv_connector, kv_role: $kv_role, kv_rank: ($kv_rank | tonumber), kv_parallel_size: ($kv_parallel_size | tonumber), kv_buffer_size: ($kv_buffer_size | tonumber)}')
         
         CUDA_VISIBLE_DEVICES="$card" python3 -m vllm.entrypoints.openai.api_server \
-            --model "/workspace/deepseek/zer/DeepSeek-V2-Lite/" \
+            --model "meta-llama/Meta-Llama-3.1-8B-Instruct" \
             --port "$d_port" \
             --max-model-len 4096 \
             --trust-remote-code \
