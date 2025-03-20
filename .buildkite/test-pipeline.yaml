@@ -136,6 +136,10 @@ steps:
   - examples/offline_inference/rlhf_colocate.py
   - tests/examples/offline_inference/data_parallel.py
   commands:
+  # test with tp=2 and external_dp=2
+  - VLLM_USE_V1=0 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
+  - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
+  # test with internal dp
   - python3 ../examples/offline_inference/data_parallel.py
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
@@ -512,8 +516,6 @@ steps:
   - entrypoints/llm/test_collective_rpc.py
   commands:
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - VLLM_USE_V1=1 torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
-  - torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
