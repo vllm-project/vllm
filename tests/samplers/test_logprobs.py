@@ -10,6 +10,15 @@ from ..conftest import VllmRunner
 MODELS = ["distilbert/distilgpt2"]
 
 
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    This module is V0 only since it uses dtype=float, so
+    set VLLM_USE_V1=0 for all tests in the module.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype",
                          ["float"])  # needed for comparing logprobs with HF
