@@ -526,11 +526,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
     lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
-    # Divisor for dynamic key scale factor calculation for FP8 KV Cache
 
     # Pad the weights for the moe kernel
     "VLLM_ROCM_MOE_PADDING":
-    lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "0"))),
+    lambda: bool(int(os.getenv("VLLM_ROCM_MOE_PADDING", "1"))),
+
+    # Divisor for dynamic key scale factor calculation for FP8 KV Cache
     "K_SCALE_CONSTANT":
     lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
 
