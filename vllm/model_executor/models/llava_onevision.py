@@ -810,10 +810,20 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         embeddings_flat = self._video_pixels_to_features(
             self.vision_tower, video_pixels_flat)
 
-        image_newline = self.image_newline[None, :]
+        image_newline = self.image_newline[None, None, :]
+
         return [
-            torch.cat((embeds, image_newline), dim=0)
-            for embeds in torch.split(embeddings_flat, frames_per_video)
+            torch.cat(
+                (
+                    embeds.reshape(1, num_frame * embeddings_flat.shape[1],
+                                   -1),
+                    image_newline,
+                ),
+                dim=1,
+            ) for num_frame, embeds in zip(
+                frames_per_video,
+                torch.split(embeddings_flat, frames_per_video),
+            )
         ]
 
     def apply_pooling(self, image_features: torch.Tensor, stride: int = 2):
