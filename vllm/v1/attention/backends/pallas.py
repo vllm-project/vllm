@@ -63,12 +63,12 @@ class PallasMetadata:
     #                                   |-- query_len ---|
 
     # Used in the PallasAttentionBackendImpl
-    # slot_mapping: torch.Tensor
     block_tables: torch.Tensor
     context_lens: torch.Tensor
     query_start_loc: torch.Tensor
     num_seqs: int
     slot_slices: torch.Tensor | None
+    num_slot_slices: torch.Tensor | None
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
@@ -186,28 +186,25 @@ def write_to_kv_cache(
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
     slot_slices: torch.Tensor,
+    num_slot_slices: torch.Tensor,
 ) -> None:
     """ Write the key and values to the KV cache.
 
     Args:
         key: shape = [num_tokens, num_kv_heads * head_size]
         value: shape = [num_tokens, num_kv_heads * head_size]
-        k_cache = [num_blocks, block_size, num_kv_heads * head_size]
-        v_cache = [num_blocks, block_size, num_kv_heads * head_size]
+        k_cache: shape = [num_blocks, block_size, num_kv_heads * head_size]
+        v_cache: shape = [num_blocks, block_size, num_kv_heads * head_size]
+        slot_slices: shape = [3, num_slices]. 
+            slot_slices[:, i]: shape = [physical_page_ids, token_start_id,  slice_size]
+        num_slot_slices: shape = [1]
 
     """
-    # change kv_cache layout from [num_blocks, block_size, num_kv_heads, head_size] to [num_blocks, block_size, num_kv_heads*head_size]
-    # remove the reshape op on kv.
     # Create slices as as in https://github.com/pytorch/xla/blob/4584a2134259d1f9074ef690315de1d541211f52/torch_xla/experimental/pallas_kernels/kv_insertion.py#L83
     torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
     torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
 
     key_cache = key_cache.flatten(0, 1)
     value_cache = value_cache.flatten(0, 1)
-    # key_cache.index_copy_(0, slot_mapping, key)
-    # value_cache.index_copy_(0, slot_mapping, value)
-    # key_cache.index_copy_(0, slot_mapping, key)
-    # value_cache.index_copy_(0, slot_mapping, value)
-    # TODO(xw32): once the write_to_kv_cache kernel is ready, update the torch_xla wheel and
-    # call it here
-    # torch.ops.xla.kv_insertion(key, value, key_cache, value_cache, slot_slices)
+    # torch.ops.xla.write_to_kv_cache(key, value, key_cache, value_cache, slot_slices, num_slot_slices)
+    

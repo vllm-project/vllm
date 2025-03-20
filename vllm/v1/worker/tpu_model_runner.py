@@ -134,8 +134,7 @@ class TPUModelRunner:
                                          device="cpu")
         self.positions_np = self.positions_cpu.numpy()
         
-        self.slot_slices_cpu = torch.full((self.max_num_tokens, NUM_SLOT_INFO),
-                                          -1,
+        self.slot_slices_cpu = torch.zeros((NUM_SLOT_INFO, self.max_num_tokens),
                                           dtype=torch.int32,
                                           device="cpu")
         self.slot_slices_np = self.slot_mapping_cpu.numpy()
@@ -396,7 +395,8 @@ class TPUModelRunner:
         block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
         block_offsets = positions_np % self.block_size
         slot_slices = _get_slot_slices(block_numbers, block_offsets, num_scheduled_tokens_per_req, self.block_size)
-        self.slot_slices_cpu[:slot_slices.shape[0]] = slot_slices
+        num_slot_slices = slot_slices.shape[1]
+        self.slot_slices_cpu[:, :num_slot_slices] = slot_slices
 
 
         # Prepare the attention metadata.
@@ -421,7 +421,7 @@ class TPUModelRunner:
         self.position_ids = self.positions_cpu[:
                                                padded_total_num_scheduled_tokens].to(
                                                    self.device)
-        slot_slices = self.slot_slices_cpu[:padded_total_num_scheduled_tokens].to(self.device)
+        slot_slices = self.slot_slices_cpu[:, :padded_total_num_scheduled_tokens].to(self.device)
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
@@ -438,6 +438,9 @@ class TPUModelRunner:
                                   dtype=torch.int32,
                                   device=self.device),
             slot_slices=slot_slices,
+            num_slot_slices=torch.tensor([num_slot_slices],
+                                         dtype=torch.int32,
+                                         device=self.device),
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -709,16 +712,19 @@ class TPUModelRunner:
         num_seqs = torch.tensor([actual_num_reqs],
                                 dtype=torch.int32,
                                 device=self.device)
-        num_slot_info = 3
-        slot_slices = torch.zeros((num_tokens, num_slot_info),
-                                   dtype=torch.int64,
+        slot_slices = torch.zeros((NUM_SLOT_INFO, num_tokens),
+                                   dtype=torch.int32,
                                    device=self.device)
+        num_slot_slices = torch.tensor([slot_slices.shape[1]],
+                                       dtype=torch.int32,
+                                       device=self.device)
         attn_metadata = PallasMetadata(
             block_tables=block_tables,
             context_lens=context_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
-            slot_slices=slot_slices
+            slot_slices=slot_slices,
+            num_slot_slices=num_slot_slices,
         )
 
         if self.is_multimodal_model:
@@ -880,19 +886,27 @@ def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
     return min(res, upper_limit)
 
 def _get_slot_slices(block_numbers, block_offsets, num_scheduled_tokens_per_req: list, page_size: int):
-    res = []
-    token_start_ids = torch.cumsum(torch.tensor([0] + num_scheduled_tokens_per_req, dtype=torch.int32), dim=0)
+    physical_page_ids = []
+    token_start_ids = []
+    slice_sizes = []
+
+    token_start_ids_per_seq = torch.cumsum(torch.tensor([0] + num_scheduled_tokens_per_req, dtype=torch.int32), dim=0)
     token_id = 0
     for seq_id, _ in enumerate(num_scheduled_tokens_per_req):
-        next_seq_token_start_id = token_start_ids[seq_id+1]
+        next_seq_token_start_id = token_start_ids_per_seq[seq_id+1]
         while token_id < next_seq_token_start_id:
             starting_offset = block_offsets[token_id]
             physical_block_id = block_numbers[token_id]
             size = min(page_size-starting_offset, next_seq_token_start_id-token_id)
-            res.append(torch.tensor([starting_offset, size, physical_block_id], dtype=torch.int64))
+            physical_page_ids.append(physical_block_id)
+            token_start_ids.append(starting_offset)
+            slice_sizes.append(size)
             token_id += size
 
-    return torch.stack(res)
+    physical_page_ids = torch.tensor(physical_page_ids, dtype=torch.int32)
+    token_start_ids = torch.tensor(token_start_ids, dtype=torch.int32)
+    slice_sizes = torch.tensor(slice_sizes, dtype=torch.int32)
+    return torch.stack([physical_page_ids, token_start_ids, slice_sizes])
 
 
 

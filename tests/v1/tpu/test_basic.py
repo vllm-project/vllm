@@ -71,9 +71,11 @@ def test_creating_write_to_kvcache_slices1():
   slot_slices = _get_slot_slices(block_numbers, block_offsets, num_scheduled_tokens_per_req, page_size)
 
   assert slot_slices.shape[0] == 3
-  assert torch.equal(slot_slices[0], torch.tensor([9, 1, 0])) # (start, size, physical_page_id)
-  assert torch.equal(slot_slices[1], torch.tensor([0, 12, 5]))
-  assert torch.equal(slot_slices[2], torch.tensor([0, 11, 10]))
+  assert slot_slices.shape[1] == 3
+  assert torch.equal(slot_slices[0], torch.tensor([0, 5, 10]))  # physical_page_ids
+  assert torch.equal(slot_slices[1], torch.tensor([9, 0, 0]))  # token_start_ids
+  assert torch.equal(slot_slices[2], torch.tensor([1, 12, 11]))  # slice_size
+
   
 def test_creating_write_to_kvcache_slices2():
   block_numbers = torch.tensor([ 5, 10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16])
@@ -83,10 +85,8 @@ def test_creating_write_to_kvcache_slices2():
 
   slot_slices = _get_slot_slices(block_numbers, block_offsets, num_scheduled_tokens_per_req, page_size)
 
-  assert slot_slices.shape[0] == 6
-  assert torch.equal(slot_slices[0], torch.tensor([7, 1, 5])) # (start, size, physical_page_id)
-  assert torch.equal(slot_slices[1], torch.tensor([9, 7, 10]))
-  assert torch.equal(slot_slices[2], torch.tensor([0, 16, 11]))
-  assert torch.equal(slot_slices[3], torch.tensor([0, 14, 12]))
-  assert torch.equal(slot_slices[4], torch.tensor([0, 16, 15]))
-  assert torch.equal(slot_slices[5], torch.tensor([0, 10, 16]))
+  assert slot_slices.shape[0] == 3
+  assert slot_slices.shape[1] == 6
+  assert torch.equal(slot_slices[0], torch.tensor([5, 10, 11, 12, 15, 16]))  # physical_page_ids
+  assert torch.equal(slot_slices[1], torch.tensor([7, 9, 0, 0, 0, 0]))  # token_start_ids
+  assert torch.equal(slot_slices[2], torch.tensor([1, 7, 16, 14, 16, 10]))  # slice_size
