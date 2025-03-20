@@ -740,51 +740,6 @@ async def test_named_tool_use(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-async def test_required_tool_use_not_yet_supported(client: openai.AsyncOpenAI,
-                                                   sample_json_schema):
-    messages = [{
-        "role": "system",
-        "content": "you are a helpful assistant"
-    }, {
-        "role":
-        "user",
-        "content":
-        f"Give an example JSON for an employee profile that "
-        f"fits this schema: {sample_json_schema}"
-    }]
-
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_completion_tokens=1000,
-            tools=[{
-                "type": "function",
-                "function": {
-                    "name": "dummy_function_name",
-                    "description": "This is a dummy function",
-                    "parameters": sample_json_schema
-                }
-            }],
-            tool_choice="required")
-
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            max_completion_tokens=1000,
-            tools=[{
-                "type": "function",
-                "function": {
-                    "name": "dummy_function_name",
-                    "description": "This is a dummy function",
-                    "parameters": sample_json_schema
-                }
-            }],
-            tool_choice="auto")
-
-
-@pytest.mark.asyncio
 async def test_inconsistent_tool_choice_and_tools(client: openai.AsyncOpenAI,
                                                   sample_json_schema):
     messages = [{
