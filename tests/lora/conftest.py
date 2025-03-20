@@ -170,7 +170,11 @@ def sql_lora_huggingface_id():
 
 @pytest.fixture(scope="session")
 def sql_lora_files(sql_lora_huggingface_id):
-    return snapshot_download(repo_id=sql_lora_huggingface_id)
+    path = snapshot_download(repo_id=sql_lora_huggingface_id)
+    print (f"sql lora files - download path {path}")
+    import os
+    print (f"ls {path} => {os.listdir(path)}")
+    return path
 
 
 @pytest.fixture(scope="session")
