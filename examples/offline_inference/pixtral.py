@@ -13,7 +13,9 @@ from vllm.sampling_params import SamplingParams
 # - Server:
 #
 # ```bash
-# vllm serve mistralai/Mistral-Small-3.1-24B-Instruct-2503 --tokenizer-mode mistral --limit-mm-per-prompt 'image=4' --max-model-len 16384
+# vllm serve mistralai/Mistral-Small-3.1-24B-Instruct-2503 \
+#   --tokenizer-mode mistral --config-format mistral --load-format mistral \
+#   --limit-mm-per-prompt 'image=4' --max-model-len 16384
 # ```
 #
 # - Client:
@@ -51,6 +53,8 @@ def run_simple_demo(args: argparse.Namespace):
     llm = LLM(
         model=model_name,
         tokenizer_mode="mistral",
+        config_format="mistral",
+        load_format="mistral",
         max_model_len=4096,
         max_num_seqs=2,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
@@ -91,6 +95,8 @@ def run_advanced_demo(args: argparse.Namespace):
     llm = LLM(
         model=model_name,
         tokenizer_mode="mistral",
+        config_format="mistral",
+        load_format="mistral",
         limit_mm_per_prompt={"image": max_img_per_msg},
         max_model_len=max_img_per_msg * max_tokens_per_img,
         disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
