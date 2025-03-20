@@ -44,6 +44,7 @@ repos:
   rev: 0.6.2
   hooks:
     - id: pip-compile
+      language_version: python3.12 # The Python version used by the vLLM Docker image
       args: [requirements/test.in, -o, requirements/test.txt]
       files: ^requirements/test\.(in|txt)$
 - repo: local
