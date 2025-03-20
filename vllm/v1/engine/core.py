@@ -15,6 +15,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -366,6 +367,7 @@ class EngineCoreProc(EngineCore):
         while not self.global_unfinished_reqs and not (
                 self.scheduler.has_requests()):
             if self.input_queue.empty():
+                # TODO change to debug
                 logger.info("EngineCore waiting for work.")
             req = self.input_queue.get()
             self._handle_client_request(*req)
@@ -394,6 +396,7 @@ class EngineCoreProc(EngineCore):
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.START_DP:
             if not self.global_unfinished_reqs:
+                # TODO change to debug
                 logger.info("EngineCore starting idle loop.")
                 self.global_unfinished_reqs = True
         elif request_type == EngineCoreRequestType.UTILITY:
@@ -506,6 +509,11 @@ class DPEngineCoreProc(EngineCoreProc):
 
         self.counter = 0
 
+    def shutdown(self):
+        super().shutdown()
+        if dp_group := getattr(self, "dp_group", None):
+            stateless_destroy_torch_distributed_process_group(dp_group)
+
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
@@ -551,9 +559,9 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
 
-        # Optimization - only perform finish-sync all-reduce every 32 steps.
+        # Optimization - only perform finish-sync all-reduce every 16 steps.
         self.counter += 1
-        if self.counter != 32:
+        if self.counter != 16:
             return True
         self.counter = 0
 

@@ -98,5 +98,11 @@ async def test_load(monkeypatch, output_kind: RequestOutputKind):
 
         # testing internals here which may break
         core_client: DPAsyncMPClient = engine.engine_core
+        # the engines only synchronize stopping every N steps so
+        # allow a small amount of time here.
+        for _ in range(10):
+            if core_client.num_engines_running == 0:
+                break
+            await asyncio.sleep(0.5)
         assert core_client.num_engines_running == 0
         assert not core_client.reqs_in_flight

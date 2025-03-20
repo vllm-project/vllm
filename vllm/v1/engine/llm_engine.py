@@ -7,6 +7,7 @@ from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
@@ -272,3 +273,7 @@ class LLMEngine:
     def pin_lora(self, lora_id: int) -> bool:
         """Prevent an adapter from being evicted."""
         return self.engine_core.pin_lora(lora_id)
+
+    def __del__(self):
+        if dp_group := getattr(self, "dp_group", None):
+            stateless_destroy_torch_distributed_process_group(dp_group)
