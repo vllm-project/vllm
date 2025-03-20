@@ -7,6 +7,7 @@ import threading
 import time
 from concurrent.futures import Future
 from inspect import isclass, signature
+from logging import DEBUG
 from typing import Any, Optional
 
 import msgspec
@@ -366,9 +367,8 @@ class EngineCoreProc(EngineCore):
 
         while not self.global_unfinished_reqs and not (
                 self.scheduler.has_requests()):
-            if self.input_queue.empty():
-                # TODO change to debug
-                logger.info("EngineCore waiting for work.")
+            if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
+                logger.debug("EngineCore waiting for work.")
             req = self.input_queue.get()
             self._handle_client_request(*req)
 
@@ -396,8 +396,7 @@ class EngineCoreProc(EngineCore):
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.START_DP:
             if not self.global_unfinished_reqs:
-                # TODO change to debug
-                logger.info("EngineCore starting idle loop.")
+                logger.debug("EngineCore starting idle loop.")
                 self.global_unfinished_reqs = True
         elif request_type == EngineCoreRequestType.UTILITY:
             call_id, method_name, args = request

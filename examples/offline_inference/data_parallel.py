@@ -64,6 +64,7 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
         print(f"DP rank {dp_rank}, Prompt: {prompt!r}, "
               f"Generated text: {generated_text!r}")
 
+    # Give engines time to pause their processing loops before exiting.
     sleep(1)
 
 

@@ -650,7 +650,7 @@ class Scheduler:
             scheduler_stats=self.make_stats(),
         )
         if self.include_finished_set:
-            #TODO currently sending duplicates here, fix this
+            #TODO currently sending duplicates here, improve this
             engine_core_outputs.finished_requests = (
                 scheduler_output.finished_req_ids | self.finished_req_ids)
 
