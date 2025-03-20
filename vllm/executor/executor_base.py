@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from typing import (Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple,
                     Union)
 
+import torch
 import torch.nn as nn
 from typing_extensions import TypeVar
 
@@ -208,12 +209,12 @@ class ExecutorBase(ABC):
         logger.info("It took %.6f seconds to fall asleep.",
                     time_after_sleep - time_before_sleep)
 
-    def wake_up(self):
-        if not self.is_sleeping:
+    def wake_up(self, tags: Optional[list[str]] = None):
+        if not self.is_sleeping and tags is None:
             logger.warning("Executor is not sleeping.")
             return
         time_before_wakeup = time.perf_counter()
-        self.collective_rpc("wake_up")
+        self.collective_rpc("wake_up", kwargs=dict(tags=tags))
         time_after_wakeup = time.perf_counter()
         self.is_sleeping = False
         logger.info("It took %.6f seconds to wake up.",

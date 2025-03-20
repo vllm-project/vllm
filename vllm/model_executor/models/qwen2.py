@@ -404,7 +404,6 @@ class Qwen2Model(nn.Module):
             loaded_params.add(name)
         return loaded_params
 
-
 class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [

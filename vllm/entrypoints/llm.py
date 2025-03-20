@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from typing import Any, Callable, ClassVar, Optional, Union, cast, overload
 
 import cloudpickle
+import torch
 import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
@@ -1212,11 +1213,11 @@ class LLM:
         self.reset_prefix_cache()
         self.llm_engine.sleep(level=level)
 
-    def wake_up(self):
+    def wake_up(self, tags: Optional[list[str]] = None):
         """
         Wake up the engine from sleep mode. See the :meth:`sleep` method
         for more details."""
-        self.llm_engine.wake_up()
+        self.llm_engine.wake_up(tags)
 
     # LEGACY
     def _convert_v1_inputs(
