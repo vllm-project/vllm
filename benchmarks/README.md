@@ -42,7 +42,7 @@ become available.
     </tr>
     <tr>
       <td><strong>HuggingFace</strong></td>
-      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">🟡</td>
       <td style="text-align: center;">🟡</td>
       <td>Specify your dataset path on HuggingFace</td>
     </tr>
@@ -60,8 +60,8 @@ become available.
 🚧: to be supported
 
 🟡: Partial support. Currently, HuggingFaceDataset only supports dataset formats
-similar to `lmms-lab/LLaVA-OneVision-Data`. If you need support for other dataset
-formats, please consider contributing.
+similar to `lmms-lab/LLaVA-OneVision-Data` and `Aeala/ShareGPT_Vicuna_unfiltered`.
+If you need support for other dataset formats, please consider contributing.
 
 **Note**: VisionArena’s `dataset-name` should be set to `hf`
 
@@ -137,6 +137,57 @@ python3 vllm/benchmarks/benchmark_serving.py \
   --dataset-path "${DATASET_PATH}" \
   --hf-split "${DATASET_SPLIT}" \
   --num-prompts "${NUM_PROMPTS}"
+```
+
+### HuggingFaceDataset Examples
+
+Currently, HuggingFaceDataset only supports dataset formats
+similar to `lmms-lab/LLaVA-OneVision-Data` and `Aeala/ShareGPT_Vicuna_unfiltered`. If you need support for other dataset
+formats, please consider contributing.
+
+```bash
+# need a model with vision capability here
+vllm serve Qwen/Qwen2-VL-7B-Instruct --disable-log-requests
+```
+
+**`lmms-lab/LLaVA-OneVision-Data`**
+
+```bash
+MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
+NUM_PROMPTS=10
+BACKEND="openai-chat"
+DATASET_NAME="hf"
+DATASET_PATH="lmms-lab/LLaVA-OneVision-Data"
+DATASET_SPLIT='train'
+DATASET_SUBSET='chart2text(cauldron)'
+python3 vllm/benchmarks/benchmark_serving.py \
+  --backend "${BACKEND}" \
+  --model "${MODEL_NAME}" \
+  --endpoint "/v1/chat/completions" \
+  --dataset-name "${DATASET_NAME}" \
+  --dataset-path "${DATASET_PATH}" \
+  --hf-split "${DATASET_SPLIT}" \
+  --num-prompts "${NUM_PROMPTS}" \
+  --hf-subset "${DATASET_SUBSET}"
+```
+
+**`Aeala/ShareGPT_Vicuna_unfiltered`**
+
+```bash
+MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
+NUM_PROMPTS=10
+BACKEND="openai-chat"
+DATASET_NAME="hf"
+DATASET_PATH="Aeala/ShareGPT_Vicuna_unfiltered"
+DATASET_SPLIT='train'
+python3 vllm/benchmarks/benchmark_serving.py \
+  --backend "${BACKEND}" \
+  --model "${MODEL_NAME}" \
+  --endpoint "/v1/chat/completions" \
+  --dataset-name "${DATASET_NAME}" \
+  --dataset-path "${DATASET_PATH}" \
+  --hf-split "${DATASET_SPLIT}" \
+  --num-prompts "${NUM_PROMPTS}" \
 ```
 
 ---
