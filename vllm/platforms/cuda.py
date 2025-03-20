@@ -14,6 +14,7 @@ from typing_extensions import ParamSpec
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 import vllm.envs as envs
+from vllm.fa_utils import get_flash_attn_version
 from vllm.logger import init_logger
 from vllm.utils import import_pynvml
 
@@ -240,15 +241,6 @@ class CudaPlatformBase(Platform):
                 "Cannot use FlashAttention-2 backend for dtype other than "
                 "torch.float16 or torch.bfloat16.")
             target_backend = _Backend.XFORMERS
-        elif kv_cache_dtype is not None and \
-            kv_cache_dtype.startswith("fp8"):
-            logger.info(
-                "Cannot use FlashAttention-2 backend for FP8 KV cache.")
-            logger.warning(
-                "Please use FlashInfer backend with FP8 KV Cache for "
-                "better performance by setting environment variable "
-                "VLLM_ATTENTION_BACKEND=FLASHINFER")
-            target_backend = _Backend.XFORMERS
         elif block_size % 16 != 0:
             logger.info(
                 "Cannot use FlashAttention-2 backend for block size not "
@@ -269,6 +261,17 @@ class CudaPlatformBase(Platform):
                     logger.info(
                         "Cannot use FlashAttention-2 backend for head size %d.",
                         head_size)
+                    target_backend = _Backend.XFORMERS
+                fp8_kv_cache = (kv_cache_dtype is not None
+                                and kv_cache_dtype.startswith("fp8"))
+                if (fp8_kv_cache and get_flash_attn_version() != 3):
+                    logger.info(
+                        "Cannot use FlashAttention-2 backend for FP8 KV cache."
+                    )
+                    logger.warning(
+                        "Please use FlashInfer backend with FP8 KV Cache for "
+                        "better performance by setting environment variable "
+                        "VLLM_ATTENTION_BACKEND=FLASHINFER")
                     target_backend = _Backend.XFORMERS
             except ImportError:
                 logger.info(
