@@ -22,12 +22,13 @@ from vllm.attention.backends.utils import (
     compute_slot_mapping_start_idx, get_num_prefill_decode_query_kv_tokens,
     get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
     is_all_encoder_attn_metadata_set, is_block_tables_empty)
-from vllm.fa_utils import get_flash_attn_version
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
+from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_fp8,
+                                           get_flash_attn_version)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -703,6 +704,10 @@ class FlashAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[torch.Tensor] = self.alibi_slopes
         logits_soft_cap: Optional[float] = self.logits_soft_cap
         fp8_attention = kv_cache_dtype.startswith("fp8")
+
+        if fp8_attention and not flash_attn_supports_fp8():
+            raise NotImplementedError(
+                "FlashAttention does not support FP8 kv-cache on this device.")
 
         if kv_cache.numel() > 0:
             key_cache = kv_cache[0]

@@ -14,7 +14,6 @@ from typing_extensions import ParamSpec
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 import vllm.envs as envs
-from vllm.fa_utils import get_flash_attn_version
 from vllm.logger import init_logger
 from vllm.utils import import_pynvml
 
@@ -258,7 +257,7 @@ class CudaPlatformBase(Platform):
             try:
                 import vllm.vllm_flash_attn  # noqa: F401
                 from vllm.attention.backends.flash_attn import (  # noqa: F401
-                    FlashAttentionBackend)
+                    FlashAttentionBackend, get_flash_attn_version)
 
                 supported_sizes = \
                     FlashAttentionBackend.get_supported_head_sizes()
