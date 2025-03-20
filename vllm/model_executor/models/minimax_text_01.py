@@ -905,6 +905,8 @@ class MiniMaxText01Model(nn.Module):
                 intermediate_tensors=None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs) -> torch.Tensor:
+        if attn_metadata is None:
+            return None
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         if "request_ids_to_seq_ids" not in kwargs:

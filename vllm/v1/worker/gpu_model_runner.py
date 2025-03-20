@@ -1304,6 +1304,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
+                if hidden_states is None:
+                    return None
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         return hidden_states[logit_indices]
@@ -1463,7 +1465,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         hidden_states = self._dummy_run(self.max_num_tokens)
         if get_pp_group().is_last_rank:
-            sampler_output = self._dummy_sampler_run(hidden_states)
+            if hidden_states is not None:
+                sampler_output = self._dummy_sampler_run(hidden_states)
+            else:
+                sampler_output = None
         else:
             sampler_output = None
         torch.cuda.synchronize()
