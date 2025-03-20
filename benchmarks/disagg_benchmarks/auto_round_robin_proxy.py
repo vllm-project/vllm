@@ -63,4 +63,8 @@ if __name__ == '__main__':
     parser.add_argument("--proxy_port", type=int, default=8001, help="Proxy server port")
     args = parser.parse_args()
 
-    asyncio.run(main(args.ports, args.proxy_port))
+    try:
+        args = parser.parse_args()
+        asyncio.run(main(args.ports, args.proxy_port))
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
