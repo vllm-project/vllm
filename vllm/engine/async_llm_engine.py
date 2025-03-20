@@ -538,10 +538,13 @@ class _AsyncLLMEngine(LLMEngine):
 
 
 async def build_guided_decoding_logits_processor_async(
-        sampling_params: SamplingParams, tokenizer: AnyTokenizer,
-        default_guided_backend: str, reasoning_backend: Optional[str],
+        sampling_params: SamplingParams,
+        tokenizer: AnyTokenizer,
+        default_guided_backend: str,
+        reasoning_backend: Optional[str],
         model_config: ModelConfig,
-        speculative_config: Optional[SpeculativeConfig] = None) -> SamplingParams:
+        speculative_config: Optional[SpeculativeConfig] = None
+) -> SamplingParams:
     """Constructs logits processors based on the guided_decoding,
     logits_bias, and allowed_token_ids fields in sampling_params. Deletes
     those fields and adds the constructed logits processors to the
