@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
-import importlib.util
 from functools import partial
 from io import BytesIO
 from pathlib import Path
@@ -146,7 +145,6 @@ class OpenCVVideoBackend(VideoLoader):
         if not cap.isOpened():
             raise ValueError("Could not open video stream")
 
-        frames = []
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         full_read = num_frames == -1 or total_frames_num < num_frames
         if full_read:
@@ -158,37 +156,23 @@ class OpenCVVideoBackend(VideoLoader):
                                                  dtype=int)
             frame_idx = uniform_sampled_frames.tolist()
 
-        for i in frame_idx:
-            if not full_read:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-            ret, frame = cap.read()
-            if ret:
-                frames.append(frame)
-        return np.stack(frames)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = np.empty((len(frame_idx), height, width, 3), dtype=np.uint8)
 
-
-class DecordVideoBackend(VideoLoader):
-
-    @classmethod
-    def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
-        import decord
-
-        vr = decord.VideoReader(BytesIO(data), num_threads=1)
-        total_frame_num = len(vr)
-
-        if num_frames == -1:
-            return vr.get_batch(list(range(total_frame_num))).asnumpy()
-
-        if total_frame_num > num_frames:
-            uniform_sampled_frames = np.linspace(0,
-                                                 total_frame_num - 1,
-                                                 num_frames,
-                                                 dtype=int)
-            frame_idx = uniform_sampled_frames.tolist()
-        else:
-            frame_idx = list(range(0, total_frame_num))
-
-        return vr.get_batch(frame_idx).asnumpy()
+        i = 0
+        for idx in range(total_frames_num):
+            ok = cap.grab()  # next img
+            if not ok:
+                break
+            if idx in frame_idx:  # only decompress needed
+                ret, frame = cap.retrieve()
+                if ret:
+                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    i += 1
+        # we expect all frames loaded
+        assert i == num_frames
+        return frames
 
 
 class VideoMediaIO(MediaIO[npt.NDArray]):
@@ -203,10 +187,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
 
         self.image_io = image_io
         self.num_frames = num_frames
-
-        decord_available = importlib.util.find_spec("decord") is not None
-        self.video_loader = (DecordVideoBackend
-                             if decord_available else OpenCVVideoBackend)
+        self.video_loader = OpenCVVideoBackend
 
     def load_bytes(self, data: bytes) -> npt.NDArray:
         return self.video_loader.load_bytes(data, self.num_frames)
