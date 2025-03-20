@@ -94,6 +94,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
+    VLLM_USE_CASCADE_ATTN: bool = True
 
 
 def get_default_cache_root():
@@ -618,6 +619,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # an environment with potentially malicious users.
     "VLLM_V0_USE_OUTLINES_CACHE":
     lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
+
+    # Whether to turn on the cascade attention for V1
+    # When this is set to 0, vLLM will never use cascade attention.
+    # When this is set to 1, vLLM will use cascade attention when possible and
+    # the heuristic tells that it's beneficial.
+    "VLLM_USE_CASCADE_ATTN":
+    lambda: os.environ.get("VLLM_USE_CASCADE_ATTN", "1") == "1",
 }
 
 # end-env-vars-definition
