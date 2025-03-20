@@ -2,7 +2,7 @@
 """Inference-only PLaMo2 model."""
 import enum
 import math
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Iterable, Optional, Tuple
 
 import torch
 from torch import nn
@@ -39,8 +39,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class LinearType(str, enum.Enum):
@@ -153,12 +151,6 @@ class PlamoConfig(PretrainedConfig):  # type: ignore
 
 class PlamoPreTrainedModel(PreTrainedModel):  # type: ignore
     config_class = PlamoConfig
-    _no_split_modules: List[str]
-    base_model_prefix = "model"
-    supports_gradient_checkpointing = True
-    _no_split_modules = ["PlamoDecoderLayer"]
-    _skip_keys_device_placement = "past_key_values"
-    _keys_to_ignore_on_load_unexpected = [r"decoder\.version"]
 
     def _init_weights(self, module: torch.nn.Module) -> None:
         std = 0.02
