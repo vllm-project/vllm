@@ -3,7 +3,6 @@
 
 Run `pytest tests/kernels/test_moe.py`.
 """
-import os
 
 import pytest
 import torch
@@ -212,8 +211,6 @@ def test_mixtral_moe(dtype: torch.dtype, use_rocm_aiter: bool, monkeypatch):
     huggingface."""
 
     if use_rocm_aiter:
-        if os.getenv("SKIP_ROCM_ATIER_MODEL_TEST_CASES") == "true":
-            pytest.skip("Skipping test suite for ROCM AITER")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     # Instantiate our and huggingface's MoE blocks

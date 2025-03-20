@@ -5,8 +5,6 @@ Run `pytest tests/models/test_granite.py`.
 """
 import pytest
 
-from tests.utils import maybe_test_rocm_aiter
-
 from ...utils import check_logprobs_close
 
 MODELS = [
@@ -20,7 +18,6 @@ MODELS = [
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
-@maybe_test_rocm_aiter
 def test_models(
     hf_runner,
     vllm_runner,
