@@ -44,6 +44,11 @@ We currently support the following OpenAI APIs:
 - [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
   - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
 
+:::{tip}
+vLLM supports some parameters that are not supported by OpenAI, `top_k` for example.
+You can pass these parameters to vLLM using the OpenAI client in the `extra_body` parameter of your requests, i.e. `extra_body={"top_k": 50}` for `top_k`.
+:::
+
 In addition, we have the following custom APIs:
 
 - [Tokenizer API](#tokenizer-api) (`/tokenize`, `/detokenize`)
