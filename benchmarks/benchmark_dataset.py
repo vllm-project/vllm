@@ -175,8 +175,8 @@ class BenchmarkDataset(ABC):
         """
         raise NotImplementedError("sample must be implemented in subclasses.")
 
-    def oversample_requests(self, requests: list[SampleRequest],
-                            num_requests: int) -> None:
+    def maybe_oversample_requests(self, requests: list[SampleRequest],
+                                  num_requests: int) -> None:
         """
         Oversamples the list of requests if its size is less than the desired
         number.
@@ -406,7 +406,7 @@ class ShareGPTDataset(BenchmarkDataset):
                     expected_output_len=new_output_len,
                     lora_request=lora_request,
                 ))
-        self.oversample_requests(samples, num_requests)
+        self.maybe_oversample_requests(samples, num_requests)
         return samples
 
 
@@ -644,7 +644,7 @@ class HuggingFaceDataset(BenchmarkDataset):
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
                 ))
-        self.oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
 
 
@@ -713,5 +713,5 @@ class VisionArenaDataset(HuggingFaceDataset):
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
                 ))
-        self.oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
