@@ -693,6 +693,7 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         self._cached_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
+        self.finished_req_ids.add(request.request_id)
 
     def get_num_unfinished_requests(self) -> int:
         return len(self.waiting) + len(self.running)
