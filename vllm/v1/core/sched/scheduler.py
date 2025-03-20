@@ -15,11 +15,10 @@ from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.sched.common import CommonSchedulerStates
 from vllm.v1.core.sched.interface import SchedulerInterface
-from vllm.v1.core.sched.logging import (record_preempted, record_queued,
-                                        record_scheduled)
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.utils import check_stop
-from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
+                            EngineCoreOutputs)
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -174,7 +173,8 @@ class Scheduler(SchedulerInterface):
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
-                        record_preempted(preempted_req, scheduled_timestamp)
+                        preempted_req.record_event(
+                            EngineCoreEventType.PREEMPTED, scheduled_timestamp)
 
                     self.waiting.appendleft(preempted_req)
                     preempted_reqs.append(preempted_req)
@@ -317,7 +317,8 @@ class Scheduler(SchedulerInterface):
                 self.running.append(request)
                 self.scheduled_req_ids.add(request.request_id)
                 if self.log_stats:
-                    record_scheduled(request, scheduled_timestamp)
+                    request.record_event(EngineCoreEventType.SCHEDULED,
+                                         scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -617,7 +618,7 @@ class Scheduler(SchedulerInterface):
         self.waiting.append(request)
         self.requests[request.request_id] = request
         if self.log_stats:
-            record_queued(request)
+            request.record_event(EngineCoreEventType.QUEUED)
 
     def finish_requests(
         self,

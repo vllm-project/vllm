@@ -221,21 +221,11 @@ class Worker(WorkerBase):
         # NOTE: This is called after `capture_model` on purpose to prevent
         # memory buffers from being cleared by `torch.cuda.empty_cache`.
         if get_pp_group().is_last_rank:
-            try:
-                max_num_reqs = min(
-                    self.scheduler_config.max_num_seqs,
-                    self.scheduler_config.max_num_batched_tokens)
-                self.model_runner._dummy_sampler_run(
-                    hidden_states=self.model_runner._dummy_run(
-                        num_tokens=max_num_reqs))
-            except RuntimeError as e:
-                if 'out of memory' in str(e):
-                    raise RuntimeError(
-                        "CUDA out of memory occurred when warming up sampler. "
-                        "Please try lowering `gpu_memory_utilization` when "
-                        "initializing the engine.") from None
-                else:
-                    raise e
+            max_num_reqs = min(self.scheduler_config.max_num_seqs,
+                               self.scheduler_config.max_num_batched_tokens)
+            self.model_runner._dummy_sampler_run(
+                hidden_states=self.model_runner._dummy_run(
+                    num_tokens=max_num_reqs))
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

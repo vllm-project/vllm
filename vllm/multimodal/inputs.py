@@ -16,7 +16,8 @@ from PIL.Image import Image
 from transformers import BatchFeature
 from typing_extensions import NotRequired, TypeAlias
 
-from vllm.utils import JSONTree, full_groupby, is_list_of, json_map_leaves
+from vllm.jsontree import JSONTree, json_map_leaves
+from vllm.utils import full_groupby, is_list_of
 
 if TYPE_CHECKING:
     from .hasher import MultiModalHashDict
@@ -432,6 +433,10 @@ class MultiModalFieldConfig:
         See also:
             :func:`MultiModalFieldConfig.flat`
         """
+
+        if size_per_item.ndim != 1:
+            raise ValueError("size_per_item should be a 1-D tensor, "
+                             f"but found shape: {size_per_item.shape}")
 
         slice_idxs = [0, *accumulate(size_per_item)]
         slices = [
