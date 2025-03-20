@@ -160,7 +160,7 @@ class TPUModelRunner:
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
-        self.paddings = _get_paddings(
+        self.num_tokens_paddings = _get_paddings(
             16, self.max_num_tokens,
             self.compilation_config.tpu_bucket_padding_gap)
 
@@ -414,7 +414,7 @@ class TPUModelRunner:
 
         # Do the padding and copy the tensors to the TPU.
         padded_total_num_scheduled_tokens = _get_padded_token_len(
-            self.paddings, total_num_scheduled_tokens)
+            self.num_tokens_paddings, total_num_scheduled_tokens)
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
@@ -563,7 +563,7 @@ class TPUModelRunner:
 
         # Prepare inputs
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
-
+        print("logits_indices: ", logits_indices)
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -767,7 +767,7 @@ class TPUModelRunner:
         logger.info("Compiling the model with different input shapes.")
 
         start = time.perf_counter()
-        for num_tokens in self.paddings:
+        for num_tokens in self.num_tokens_paddings:
             self._dummy_run(self.kv_caches, num_tokens)
             logger.info("  -- num_tokens: %d", num_tokens)
             xm.mark_step()
@@ -876,9 +876,10 @@ def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
 
 
 def _get_paddings(min_token_size, max_token_size, padding_gap) -> list[int]:
-    """Generate a list of padding size, starting from 16, 
+    """Generate a list of padding size, starting from min_token_size, 
+    ending with a number that can cover max_token_size
     first increase the size to twice, 
-    then increase the padding size by bucket_padding_gap.
+    then increase the padding size by padding_gap.
     """
     paddings = []
     num = min_token_size
@@ -887,8 +888,8 @@ def _get_paddings(min_token_size, max_token_size, padding_gap) -> list[int]:
         num *= 2
     num //= 2
     while num < max_token_size:
-        paddings.append(num + padding_gap)
         num += padding_gap
+        paddings.append(num)
     return paddings
 
 
