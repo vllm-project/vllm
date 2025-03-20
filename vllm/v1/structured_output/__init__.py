@@ -9,7 +9,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar)
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
 if TYPE_CHECKING:
     import numpy as np
@@ -47,6 +46,9 @@ class StructuredOutputManager:
         if self.backend is None:
             backend_name = request.sampling_params.guided_decoding.backend_name
             if backend_name == "xgrammar":
+                from vllm.v1.structured_output.backend_xgrammar import (
+                    XgrammarBackend)
+
                 self.backend = XgrammarBackend(self.vllm_config)
             else:
                 raise ValueError(
