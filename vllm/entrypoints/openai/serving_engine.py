@@ -383,6 +383,7 @@ class OpenAIServing:
 
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
+            tool_dicts,
             chat_template_content_format,
             tokenizer,
             trust_remote_code=model_config.trust_remote_code,

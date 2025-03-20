@@ -308,6 +308,7 @@ def _detect_content_format(
 def _resolve_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     chat_template: Optional[str],
+    tools: Optional[list[dict[str, Any]]],
     *,
     trust_remote_code: bool,
 ) -> Optional[str]:
@@ -315,21 +316,22 @@ def _resolve_hf_chat_template(
     if chat_template is not None:
         return chat_template
 
-    # 2nd priority: AutoProcessor chat template
-    try:
-        processor = cached_get_processor(
-            tokenizer.name_or_path,
-            trust_remote_code=trust_remote_code,
-        )
-        if processor.chat_template is not None:
-            return processor.chat_template
-    except Exception:
-        logger.debug("Failed to load AutoProcessor chat template for %s",
-                     tokenizer.name_or_path, exc_info=True)
+    # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
+    if tools is None:
+        try:
+            processor = cached_get_processor(
+                tokenizer.name_or_path,
+                trust_remote_code=trust_remote_code,
+            )
+            if processor.chat_template is not None:
+                return processor.chat_template
+        except Exception:
+            logger.debug("Failed to load AutoProcessor chat template for %s",
+                        tokenizer.name_or_path, exc_info=True)
 
     # 3rd priority: AutoTokenizer chat template
     try:
-        return tokenizer.get_chat_template(chat_template)
+        return tokenizer.get_chat_template(chat_template, tools=tools)
     except Exception:
         logger.debug("Failed to load AutoTokenizer chat template for %s",
                      tokenizer.name_or_path, exc_info=True)
@@ -339,6 +341,7 @@ def _resolve_hf_chat_template(
 
 def _resolve_chat_template_content_format(
     chat_template: Optional[str],
+    tools: Optional[list[dict[str, Any]]],
     given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
     *,
@@ -349,6 +352,7 @@ def _resolve_chat_template_content_format(
             tokenizer,
             chat_template=chat_template,
             trust_remote_code=trust_remote_code,
+            tools=tools,
         )
     else:
         hf_chat_template = None
@@ -363,20 +367,11 @@ def _resolve_chat_template_content_format(
 
 
 @lru_cache
-def resolve_chat_template_content_format(
+def _log_chat_template_content_format(
     chat_template: Optional[str],
     given_format: ChatTemplateContentFormatOption,
-    tokenizer: AnyTokenizer,
-    *,
-    trust_remote_code: bool = False,
-) -> _ChatTemplateContentFormat:
-    detected_format = _resolve_chat_template_content_format(
-        chat_template,
-        given_format,
-        tokenizer,
-        trust_remote_code=trust_remote_code,
-    )
-
+    detected_format: ChatTemplateContentFormatOption,
+):
     logger.info(
         "Detected the chat template content format to be '%s'. "
         "You can set `--chat-template-content-format` to override this.",
@@ -393,6 +388,29 @@ def resolve_chat_template_content_format(
             given_format,
             detected_format,
         )
+
+
+def resolve_chat_template_content_format(
+    chat_template: Optional[str],
+    tools: Optional[list[dict[str, Any]]],
+    given_format: ChatTemplateContentFormatOption,
+    tokenizer: AnyTokenizer,
+    *,
+    trust_remote_code: bool = False,
+) -> _ChatTemplateContentFormat:
+    detected_format = _resolve_chat_template_content_format(
+        chat_template,
+        tools,
+        given_format,
+        tokenizer,
+        trust_remote_code=trust_remote_code,
+    )
+
+    _log_chat_template_content_format(
+        chat_template,
+        given_format=given_format,
+        detected_format=detected_format,
+    )
 
     return detected_format
 
@@ -745,7 +763,7 @@ def validate_chat_template(chat_template: Optional[Union[Path, str]]):
             f"{type(chat_template)} is not a valid chat template type")
 
 
-def load_chat_template(
+def _load_chat_template(
     chat_template: Optional[Union[Path, str]],
     *,
     is_literal: bool = False,
@@ -776,7 +794,18 @@ def load_chat_template(
 
         # If opening a file fails, set chat template to be args to
         # ensure we decode so our escape are interpreted correctly
-        return load_chat_template(chat_template, is_literal=True)
+        return _load_chat_template(chat_template, is_literal=True)
+
+
+_cached_load_chat_template = lru_cache(_load_chat_template)
+
+
+def load_chat_template(
+    chat_template: Optional[Union[Path, str]],
+    *,
+    is_literal: bool = False,
+) -> Optional[str]:
+    return _cached_load_chat_template(chat_template, is_literal=is_literal)
 
 
 # TODO: Let user specify how to insert multimodal tokens into prompt
@@ -1101,6 +1130,7 @@ def apply_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     conversation: list[ConversationMessage],
     chat_template: Optional[str],
+    tools: Optional[list[dict[str, Any]]],
     *,
     trust_remote_code: bool = False,
     tokenize: bool = False,  # Different from HF's default
@@ -1109,6 +1139,7 @@ def apply_hf_chat_template(
     hf_chat_template = _resolve_hf_chat_template(
         tokenizer,
         chat_template=chat_template,
+        tools=tools,
         trust_remote_code=trust_remote_code,
     )
 
@@ -1129,7 +1160,8 @@ def apply_hf_chat_template(
 def apply_mistral_chat_template(
     tokenizer: MistralTokenizer,
     messages: list[ChatCompletionMessageParam],
-    chat_template: Optional[str] = None,
+    chat_template: Optional[str],
+    tools: Optional[list[dict[str, Any]]],
     **kwargs: Any,
 ) -> list[int]:
     if chat_template is not None:
@@ -1146,5 +1178,6 @@ def apply_mistral_chat_template(
 
     return tokenizer.apply_chat_template(
         messages=messages,
+        tools=tools,
         **kwargs,
     )

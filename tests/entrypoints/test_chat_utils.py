@@ -707,6 +707,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
         trust_remote_code=model_config.trust_remote_code,
         conversation=conversation,
         chat_template=None,
+        tools=None,
         add_generation_prompt=True,
     )
 
@@ -743,6 +744,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
 
     resolved_format = resolve_chat_template_content_format(
         None,  # Test detecting the tokenizer's chat_template
+        None,
         "auto",
         tokenizer,
         trust_remote_code=True,

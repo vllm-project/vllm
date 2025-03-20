@@ -110,6 +110,7 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
         trust_remote_code=True,
         conversation=mock_request.messages,
         chat_template=mock_request.chat_template or template_content,
+        tools=None,
         add_generation_prompt=mock_request.add_generation_prompt,
         continue_final_message=mock_request.continue_final_message,
     )
