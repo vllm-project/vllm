@@ -671,14 +671,6 @@ class ModelConfig:
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
 
-        MODEL_NOT_SUPPORT_CUDA_GRAPH = ['mllama']
-        if (self.hf_config.model_type in MODEL_NOT_SUPPORT_CUDA_GRAPH
-                and not self.enforce_eager):
-            logger.warning(
-                "CUDA graph is not supported for %s yet, fallback to the eager "
-                "mode.", self.hf_config.model_type)
-            self.enforce_eager = True
-
     def _verify_bnb_config(self) -> None:
         """
         The current version of bitsandbytes (0.44.0) with 8-bit models does not
@@ -2791,12 +2783,14 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        valid_guided_backends = ['outlines', 'lm-format-enforcer', 'xgrammar']
+        valid_guided_backends = [
+            'outlines', 'lm-format-enforcer', 'xgrammar', 'guidance'
+        ]
 
         backend = GuidedDecodingParams(
             backend=self.guided_decoding_backend).backend_name
         if backend not in valid_guided_backends:
-            raise ValueError(f"Invalid guided_decoding_backend '{backend},"
+            raise ValueError(f"Invalid guided_decoding_backend '{backend}',"
                              f" must be one of {valid_guided_backends}")
 
 
