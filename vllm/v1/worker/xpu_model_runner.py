@@ -309,7 +309,10 @@ class XPUModelRunner(GPUModelRunner):
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return attn_metadata, logits_indices
+
+        # FIXME:xpu spec decode not support now.
+        spec_decode_metadata = None
+        return attn_metadata, logits_indices, spec_decode_metadata
 
     def profile_run(self) -> None:
         # Trigger compilation for general shape.
