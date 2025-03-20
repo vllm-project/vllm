@@ -22,14 +22,14 @@ correctess for the target model outputs.
 
 import pytest
 
+from ..utils import maybe_enable_chunked_prefill
 from .conftest import run_equality_correctness_test
 
 # main model
 MAIN_MODEL = "luccafong/deepseek_mtp_main_random"
 
-# max. number of speculative tokens: this corresponds to
-# num_nextn_predict_layers in the config.json of the speculator model.
-MAX_SPEC_TOKENS = 1
+# max. number of speculative tokens
+MAX_SPEC_TOKENS = 3
 
 # precision
 PRECISION = "bfloat16"
@@ -65,12 +65,13 @@ PRECISION = "bfloat16"
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 32])
 def test_mtp_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
                                     per_test_common_llm_kwargs,
                                     baseline_llm_kwargs, test_llm_kwargs,
                                     batch_size: int, output_len: int,
-                                    seed: int):
-
+                                    seed: int, prefill_chunk_size: bool):
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner, common_llm_kwargs,
                                   per_test_common_llm_kwargs,
                                   baseline_llm_kwargs, test_llm_kwargs,
@@ -113,12 +114,13 @@ def test_mtp_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seed", [1])
 @pytest.mark.parametrize("logprobs", [1, 6])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 32])
 def test_mtp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
                                  per_test_common_llm_kwargs,
                                  baseline_llm_kwargs, test_llm_kwargs,
                                  batch_size: int, output_len: int, seed: int,
-                                 logprobs: int):
-
+                                 logprobs: int, prefill_chunk_size: int):
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
@@ -160,14 +162,14 @@ def test_mtp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-def test_mtp_e2e_greedy_correctness_cuda_graph(vllm_runner, common_llm_kwargs,
-                                               per_test_common_llm_kwargs,
-                                               baseline_llm_kwargs,
-                                               test_llm_kwargs,
-                                               batch_size: int,
-                                               output_len: int, seed: int):
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 32])
+def test_mtp_e2e_greedy_correctness_cuda_graph(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        seed: int, prefill_chunk_size: int):
     """Verify greedy equality with cuda graph enabled and different
     batch sizes."""
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner, common_llm_kwargs,
                                   per_test_common_llm_kwargs,
                                   baseline_llm_kwargs, test_llm_kwargs,
@@ -209,13 +211,15 @@ def test_mtp_e2e_greedy_correctness_cuda_graph(vllm_runner, common_llm_kwargs,
     ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 32])
 def test_mtp_e2e_greedy_correctness_with_preemption(
         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-        seed: int):
+        seed: int, prefill_chunk_size: int):
     """Verify greedy equality, even when some sequences are preempted mid-
     generation.
     """
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner, common_llm_kwargs,
                                   per_test_common_llm_kwargs,
                                   baseline_llm_kwargs, test_llm_kwargs,
@@ -246,7 +250,7 @@ def test_mtp_e2e_greedy_correctness_with_preemption(
             "num_speculative_tokens": k,
         }
         # Try a range of num. speculative tokens
-        for k in range(1, 1 + MAX_SPEC_TOKENS)
+        for k in range(1, 3)
     ])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(
@@ -256,13 +260,15 @@ def test_mtp_e2e_greedy_correctness_with_preemption(
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 32])
 def test_mtp_different_k(vllm_runner, common_llm_kwargs,
                          per_test_common_llm_kwargs, baseline_llm_kwargs,
                          test_llm_kwargs, batch_size: int, output_len: int,
-                         seed: int):
+                         seed: int, prefill_chunk_size: int):
     """Verify that mtp speculative decoding produces exact equality
     to without spec decode with different values of num_speculative_tokens.
     """
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner, common_llm_kwargs,
                                   per_test_common_llm_kwargs,
                                   baseline_llm_kwargs, test_llm_kwargs,
@@ -299,14 +305,16 @@ def test_mtp_different_k(vllm_runner, common_llm_kwargs,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 32])
 def test_mtp_disable_queue(vllm_runner, common_llm_kwargs,
                            per_test_common_llm_kwargs, baseline_llm_kwargs,
                            test_llm_kwargs, batch_size: int, output_len: int,
-                           seed: int):
+                           seed: int, prefill_chunk_size: int):
     """Verify that mtp speculative decoding produces exact equality
     to without spec decode when speculation is disabled for large
     batch sizes.
     """
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
     run_equality_correctness_test(vllm_runner, common_llm_kwargs,
                                   per_test_common_llm_kwargs,
                                   baseline_llm_kwargs, test_llm_kwargs,
