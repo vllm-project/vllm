@@ -158,6 +158,22 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 0
 
+        # Sending duplicate requests with same request_id
+        req0 = make_request()
+        req1 = make_request()
+        req0.request_id = req1.request_id = "test"
+        engine_core.add_request(req0)
+
+        while len(engine_core.step().outputs) > 0:
+            pass
+
+        engine_core.add_request(req1)
+        while len(engine_core.step().outputs) > 0:
+            pass
+
+        assert len(engine_core.scheduler.waiting) == 0
+        assert len(engine_core.scheduler.running) == 0
+
 
 @create_new_process_for_each_test()
 def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
