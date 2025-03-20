@@ -13,7 +13,7 @@ from vllm.utils import merge_async_iterators
 
 MODEL_PATH = "THUDM/chatglm3-6b"
 LORA_RANK = 64
-DEFAULT_MAX_LORAS = 16 * 3
+DEFAULT_MAX_LORAS = 4 * 3
 
 
 @pytest.fixture(autouse=True)
