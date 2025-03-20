@@ -1,4 +1,5 @@
-al# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 
 import gc
 import time
@@ -224,9 +225,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = (hasattr(model_config, "hf_config")
-                           and hasattr(model_config.hf_config, "attn_config")
-                             and model_config.hf_config.attn_config.get(
-                                 "alibi", False))
+                          and hasattr(model_config.hf_config, "attn_config")
+                          and model_config.hf_config.attn_config.get(
+                              "alibi", False))
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
@@ -691,7 +692,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_lens=num_scheduled_tokens,
             num_query_heads=self.num_query_heads,
             num_kv_heads=self.num_kv_heads,
-            use_alibi=self.use_alibi
+            use_alibi=self.use_alibi,
             use_sliding_window=self.window_size is not None,
             num_sms=self.num_sms,
         )
