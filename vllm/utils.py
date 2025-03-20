@@ -411,6 +411,11 @@ async def merge_async_iterators(
     When it yields, it yields a tuple (i, item) where i is the index of the
     iterator that yields the item.
     """
+    if len(iterators) == 1:
+        # Fast-path single iterator case.
+        async for item in iterators[0]:
+            yield 0, item
+        return
 
     loop = asyncio.get_running_loop()
 
