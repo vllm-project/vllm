@@ -9,7 +9,7 @@ Compared to other quantization methods, BitsAndBytes eliminates the need for cal
 Below are the steps to utilize BitsAndBytes with vLLM.
 
 ```console
-pip install bitsandbytes>=0.45.0
+pip install bitsandbytes>=0.45.3
 ```
 
 vLLM reads the model's config file and supports both in-flight quantization and pre-quantized checkpoint.
