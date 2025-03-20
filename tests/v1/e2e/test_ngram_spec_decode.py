@@ -73,7 +73,7 @@ def test_ngram_correctness(
         spec_llm = LLM(
             model=model_name,
             speculative_config={
-                "method": "[ngram]",
+                "method": "ngram",
                 "prompt_lookup_max": 5,
                 "prompt_lookup_min": 3,
                 "num_speculative_tokens": 3,

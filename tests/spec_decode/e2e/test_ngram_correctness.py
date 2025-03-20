@@ -49,7 +49,7 @@ from .conftest import run_equality_correctness_test
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
         "speculative_config": {
-            "method": "[ngram]",
+            "method": "ngram",
             "num_speculative_tokens": 5,
             "prompt_lookup_max": 3,
             "disable_mqa_scorer": False,
@@ -57,7 +57,7 @@ from .conftest import run_equality_correctness_test
     },
     {
         "speculative_config": {
-            "method": "[ngram]",
+            "method": "ngram",
             "num_speculative_tokens": 5,
             "prompt_lookup_max": 3,
             "disable_mqa_scorer": True,
@@ -106,7 +106,7 @@ def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
         "speculative_config": {
-            "method": "[ngram]",
+            "method": "ngram",
             "num_speculative_tokens": 5,
             "prompt_lookup_max": 3,
             "disable_logprobs": False,
@@ -114,7 +114,7 @@ def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
     },
     {
         "speculative_config": {
-            "method": "[ngram]",
+            "method": "ngram",
             "num_speculative_tokens": 5,
             "prompt_lookup_max": 3,
             "disable_logprobs": True,
@@ -169,7 +169,7 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
         "speculative_config": {
-            "method": "[ngram]",
+            "method": "ngram",
             "num_speculative_tokens": 5,
             "prompt_lookup_max": 3,
         },
@@ -177,7 +177,7 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
     },
     {
         "speculative_config": {
-            "method": "[ngram]",
+            "method": "ngram",
             "num_speculative_tokens": 5,
             "prompt_lookup_max": 3,
             "disable_mqa_scorer": True,
@@ -228,7 +228,7 @@ def test_ngram_e2e_greedy_correctness_with_preemption(
     [
         {
             "speculative_config": {
-                "method": "[ngram]",
+                "method": "ngram",
                 "num_speculative_tokens": k,
                 "prompt_lookup_max": 3,
             },
@@ -238,7 +238,7 @@ def test_ngram_e2e_greedy_correctness_with_preemption(
     ] + [
         {
             "speculative_config": {
-                "method": "[ngram]",
+                "method": "ngram",
                 "num_speculative_tokens": k,
                 "prompt_lookup_max": 1,
             },
@@ -285,14 +285,14 @@ def test_ngram_different_k(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{
     "speculative_config": {
-        "method": "[ngram]",
+        "method": "ngram",
         "num_speculative_tokens": 5,
         "prompt_lookup_max": 3,
         "disable_by_batch_size": 4
     },
 }, {
     "speculative_config": {
-        "method": "[ngram]",
+        "method": "ngram",
         "num_speculative_tokens": 5,
         "prompt_lookup_max": 3,
         "disable_by_batch_size": 4,
@@ -341,7 +341,7 @@ def test_ngram_disable_queue(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{
     "speculative_config": {
-        "method": "[ngram]",
+        "method": "ngram",
         "num_speculative_tokens": 5,
         "prompt_lookup_max": 3,
         "disable_mqa_scorer": True,

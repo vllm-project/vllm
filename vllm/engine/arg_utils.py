@@ -1614,7 +1614,7 @@ class EngineArgs:
         if (self.speculative_model is not None
                 or self.num_speculative_tokens is not None):
             # This is supported but experimental (handled below).
-            if self.speculative_model == "[ngram]":
+            if self.speculative_model in ("ngram", "[ngram]"):
                 pass
             else:
                 _raise_or_fallback(feature_name="Speculative Decoding",
@@ -1654,7 +1654,8 @@ class EngineArgs:
             return False
 
         # ngram is supported on V1, but off by default for now.
-        if self.speculative_model == "[ngram]" and _warn_or_fallback("ngram"):
+        if self.speculative_model in (
+                "ngram", "[ngram]") and _warn_or_fallback("ngram"):
             return False
 
         # Non-CUDA is supported on V1, but off by default for now.
