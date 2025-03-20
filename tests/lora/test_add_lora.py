@@ -33,7 +33,7 @@ def download_and_prepare_lora_module() -> Path:
     Returns the path to the downloaded LoRA module.
     """
     # So we don't disturb the model cache that other tests might be using.
-    local_download_dir = Path(f"./{LORA_MODULE_HF_PATH.replace('/', '-')}")
+    local_download_dir = Path(f"/tmp/{LORA_MODULE_HF_PATH.replace('/', '-')}")
     local_lora_path = Path(
         snapshot_download(repo_id=LORA_MODULE_HF_PATH,
                           local_dir=local_download_dir))
