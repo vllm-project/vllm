@@ -4,6 +4,7 @@
 # we need to have a launcher to create multiple data parallel
 # ranks. And each rank will create a vLLM instance to process its own prompts.
 import os
+from time import sleep
 
 from vllm import LLM, SamplingParams
 from vllm.utils import get_open_port
@@ -62,6 +63,8 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, GPUs_per_dp_rank):
         generated_text = output.outputs[0].text
         print(f"DP rank {dp_rank}, Prompt: {prompt!r}, "
               f"Generated text: {generated_text!r}")
+
+    sleep(1)
 
 
 if __name__ == "__main__":
