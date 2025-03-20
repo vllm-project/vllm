@@ -136,7 +136,7 @@ class TPUModelRunner:
         
         self.slot_slices_cpu = torch.full((self.max_num_tokens, NUM_SLOT_INFO),
                                           -1,
-                                          dtype=torch.int64,
+                                          dtype=torch.int32,
                                           device="cpu")
         self.slot_slices_np = self.slot_mapping_cpu.numpy()
 
@@ -395,8 +395,8 @@ class TPUModelRunner:
         block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
         block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
         block_offsets = positions_np % self.block_size
-        slot_slices = _get_slot_slices(block_numbers, block_offsets)
-        self.slot_slices_cpu[:num_slot_slices] = slot_slices
+        slot_slices = _get_slot_slices(block_numbers, block_offsets, num_scheduled_tokens_per_req, self.block_size)
+        self.slot_slices_cpu[:slot_slices.shape[0]] = slot_slices
 
 
         # Prepare the attention metadata.
@@ -421,8 +421,6 @@ class TPUModelRunner:
         self.position_ids = self.positions_cpu[:
                                                padded_total_num_scheduled_tokens].to(
                                                    self.device)
-        # TODO(xw32): create a num_slot_slices
-        num_slot_slices = slot_slices.shape[0]
         slot_slices = self.slot_slices_cpu[:padded_total_num_scheduled_tokens].to(self.device)
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
