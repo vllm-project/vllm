@@ -8,10 +8,13 @@ import torch.distributed
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+
+logger = init_logger(__name__)
 
 
 class XPUWorker(Worker):
@@ -63,7 +66,13 @@ class XPUWorker(Worker):
         torch.xpu.empty_cache()
         torch.xpu.reset_peak_memory_stats()
 
-        _, total_gpu_memory = torch.xpu.mem_get_info()
+        free_gpu_memory, total_gpu_memory = torch.xpu.mem_get_info()
+        current_allocated_bytes = torch.xpu.memory_allocated()
+        msg = ("Before memory profiling run, "
+               f"total GPU memory: {total_gpu_memory / 1024**2:.2f} MB, "
+               f"model load takes {current_allocated_bytes / 1024**2:.2f} MB, "
+               f"free gpu memory is {free_gpu_memory / 1024**2:.2f} MB.")
+        logger.info(msg)
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         self.model_runner.profile_run()
@@ -71,7 +80,6 @@ class XPUWorker(Worker):
         free_gpu_memory, _ = self.xpu_get_mem_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        peak_memory = self.init_gpu_memory - free_gpu_memory
         assert self.init_gpu_memory > free_gpu_memory, (
             "Error in memory profiling. "
             f"Initial free memory {self.init_gpu_memory}, current free memory"
@@ -93,6 +101,13 @@ class XPUWorker(Worker):
         available_kv_cache_memory = (
             total_gpu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
+
+        msg = ("After memory profiling run, "
+               f"peak memory usage is {peak_memory / 1024**2:.2f} MB,"
+               f"torch mem is {torch_allocated_bytes / 1024**2:.2f} MB, "
+               f"non-torch mem is {non_torch_allocations / 1024**2:.2f} MB, "
+               f"free gpu memory is {free_gpu_memory / 1024**2:.2f} MB.")
+        logger.info(msg)
 
         return int(available_kv_cache_memory)
 
