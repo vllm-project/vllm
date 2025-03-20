@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
@@ -52,6 +53,11 @@ from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
+import logging
+import os
+logger = logging.getLogger(__name__)
+logger.setLevel(os.environ["VLLM_LOGGING_LEVEL"])
+
 try:
     from xformers import ops as xops
     USE_XFORMERS_OPS = True
@@ -82,6 +88,7 @@ class PixtralProcessorAdapter:
         super().__init__()
 
         self.tokenizer = tokenizer
+        self.logger: logging.Logger = logger
 
     @property
     def image_processor(self) -> ImageEncoder:
@@ -146,6 +153,10 @@ class PixtralProcessorAdapter:
             image_inputs = self.image_processor(ImageChunk(image=image))
             image_processed = torch.tensor(image_inputs.image)
             image_tokens = torch.tensor(image_inputs.tokens)
+
+            self.logger.debug(f"Image processed shape: {image_processed.shape}")
+            self.logger.debug(f"Image processed sample (first 15x15 pixels, channel 0): {image_processed[0, :15, :15]}")
+            self.logger.debug(f"Image tokens: {image_tokens.shape}, first few: {image_tokens[:28]}")
 
             images_processed.append(image_processed)
             images_tokens.append(image_tokens)
@@ -334,12 +345,15 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         raise ValueError("Only image modality is supported")
 
+    packed_modules_mapping = {}
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
+        
+        self.logger: logging.Logger = logger
 
         dataclass_fields = {field.name for field in fields(VisionEncoderArgs)}
         vision_args = {
@@ -364,17 +378,27 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                  eps=1e-5)
 
         if self.vision_args.mm_projector_id == PATCH_MERGE:
+            self.logger.debug("PatchMerger initalizing ...")
             self.patch_merger = PatchMerger(
                 vision_encoder_dim=self.vision_args.hidden_size,
                 spatial_merge_size=self.vision_args.spatial_merge_size,
                 use_mlp_bias=False,
             )
+            self.logger.debug("PatchMerger:\n\t%s", self.patch_merger)
 
         self.vision_language_adapter = VisionLanguageAdapter(
             self.vision_args, dim=config.text_config.hidden_size)
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
+
+        logger.debug("Pixtral model layout:")
+        import rich
+        from rich.console import Console
+        from rich.pretty import Pretty
+        cons = Console()
+        cons.print("[bold on dark_green] Pixtral model layout")
+        cons.print(Pretty(self))
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[PixtralImagePixelInputs]:
@@ -480,8 +504,45 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    # Reverse mapping from HF to original Pixtral format
+    MISTRAL3_REVERSE_MAPPING = {
+        r"^language_model\.lm_head\.weight": r"output.weight",
+        r"^language_model\.model\.norm\.weight": r"norm.weight",
+        r"^language_model\.model\.embed_tokens\.weight": r"tok_embeddings.weight",
+        r"^language_model\.model\.layers\.(\d+)\.input_layernorm\.weight": r"layers.\1.attention_norm.weight",
+        r"^language_model\.model\.layers\.(\d+)\.post_attention_layernorm\.weight": r"layers.\1.ffn_norm.weight",
+        r"^language_model\.model\.layers\.(\d+)\.self_attn\.(q|k|v|o)_proj\.weight": r"layers.\1.attention.w\2.weight",
+        r"^language_model\.model\.layers\.(\d+)\.mlp\.gate_proj\.weight": r"layers.\1.feed_forward.w1.weight",
+        r"^language_model\.model\.layers\.(\d+)\.mlp\.down_proj\.weight": r"layers.\1.feed_forward.w2.weight",
+        r"^language_model\.model\.layers\.(\d+)\.mlp\.up_proj\.weight": r"layers.\1.feed_forward.w3.weight",
+        r"^vision_tower\.transformer\.layers\.(\d+)\.attention_norm\.weight": r"vision_encoder.transformer.layers.\1.attention_norm.weight",
+        r"^vision_tower\.transformer\.layers\.(\d+)\.ffn_norm\.weight": r"vision_encoder.transformer.layers.\1.ffn_norm.weight",
+        r"^vision_tower\.transformer\.layers\.(\d+)\.attention\.(q|k|v|o)_proj\.weight": r"vision_encoder.transformer.layers.\1.attention.w\2.weight",
+        r"^vision_tower\.transformer\.layers\.(\d+)\.feed_forward\.gate_proj\.weight": r"vision_encoder.transformer.layers.\1.feed_forward.w1.weight",
+        r"^vision_tower\.transformer\.layers\.(\d+)\.feed_forward\.down_proj\.weight": r"vision_encoder.transformer.layers.\1.feed_forward.w2.weight",
+        r"^vision_tower\.transformer\.layers\.(\d+)\.feed_forward\.up_proj\.weight": r"vision_encoder.transformer.layers.\1.feed_forward.w3.weight",
+        r"^multi_modal_projector\.linear_1": r"vision_language_adapter.w_in",
+        r"^multi_modal_projector\.linear_2": r"vision_language_adapter.w_out",
+        r"^vision_tower\.ln_pre\.weight": r"vision_encoder.ln_pre.weight",
+        r"^vision_tower\.patch_conv\.weight": r"vision_encoder.patch_conv.weight",
+        r"^multi_modal_projector\.patch_merger\.merging_layer\.weight": r"patch_merger.merging_layer.weight",
+        r"^multi_modal_projector\.norm\.weight": r"pre_mm_projector_norm.weight",
+        r"^language_model\.model\.layers\.(\d+)\.(.+)\.(g_idx|zp|scales|zeros|qweight|qzeros)$": r"layers.\1.\2.\3"
+    }
 
+    def maybe_remap_mistral3(self, name: str, tensor: torch.Tensor) -> Tuple[str, torch.Tensor]:
+        """Remap HF-style weight names back to original Pixtral format."""
+        self.logger.debug(f"Considering {name}")
+
+        for pattern, replacement in self.MISTRAL3_REVERSE_MAPPING.items():
+            new_name, n_replace = re.subn(pattern, replacement, name)
+            if n_replace > 0:
+                self.logger.debug(f"Remapped {name} to {new_name}")
+                return new_name, tensor
+        return name, tensor  # Return unchanged if no match
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    
         def is_vision_encoder_weights(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("vision_encoder")
 
@@ -504,13 +565,30 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_lang_adapter_dict = dict(
             self.vision_language_adapter.named_parameters())
 
+        def inverse_permute_for_rope(tensor, n_heads, dim1, dim2):
+            """Reverse the permutation applied for ROPE in HF format."""
+            tensor = tensor.view(n_heads, 2, dim1 // n_heads // 2, dim2)
+            tensor = tensor.transpose(1, 2)
+            tensor = tensor.reshape(dim1, dim2)
+            return tensor
+
         def llm_weights_generator():
             # Single pass over weights
-            for name, w in weights:
+            remapped_weights = (self.maybe_remap_mistral3(name, w) for name, w in weights)
+            for name, w in remapped_weights:
                 if is_vision_encoder_weights((name, w)):
                     # Load vision encoder weights directly
                     trimmed_name = '.'.join(name.split(".")[1:])
                     param = vision_encoder_dict[trimmed_name]
+                    if trimmed_name.startswith("ln_pre"):
+                        logger.debug("loading ln_pre weight now ...")
+                        logger.debug(f"ln_pre weight load sample: {w[:5]}")
+                    if "wq.weight" in trimmed_name or "wk.weight" in trimmed_name:
+                        n_heads = self.vision_args.num_attention_heads
+                        dim1 = param.shape[0]  # num_heads * head_dim
+                        dim2 = param.shape[1]  # hidden_size
+                        w = inverse_permute_for_rope(w, n_heads, dim1, dim2)
+                        logger.debug(f"Reversed permute_for_rope for {name}, sample: {w[:5, :5]}")
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 elif is_patch_merger((name, w)):
@@ -534,6 +612,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                 else:
                     # LLM weights: yield them to be loaded
                     # by language_model.load_weights
+                    # self.logger.debug(f"Yielding weight {name}; shape {w.shape}")
                     yield (name, w)
 
         # Now we call the language model load with the generator
@@ -786,9 +865,12 @@ class VisionTransformer(nn.Module):
                 all tokens of all images of shape (N_toks, D)
         """
         # pass images through initial convolution independently
+        logger.debug(f"patch_conv weights sample (first filter, channel 0): {self.patch_conv.weight[0, 0, :5, :5]}")
         patch_embeds_list = [
             self.patch_conv(img.unsqueeze(0).to(self.dtype)) for img in images
         ]
+        logger.debug(f"Raw patch conv output shape: {patch_embeds_list[0].shape}")
+        logger.debug(f"Raw patch conv output sample: {patch_embeds_list[0][0, :5, 0, :5]}")
 
         patch_embeds = [
             p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list
@@ -797,7 +879,13 @@ class VisionTransformer(nn.Module):
 
         # flatten to a single sequence
         patch_embeds = torch.cat(patch_embeds, dim=1)
+        # _ = self.ln_pre.weight.data.fill_(1.0)
+        logger.debug(f"ln_pre weight sample: {self.ln_pre.weight[:5]}")
+        # logger.debug("Skipping ln_pre for now ...")
         patch_embeds = self.ln_pre(patch_embeds)
+
+        logger.debug(f"Patch embeddings shape after conv: {patch_embeds.shape}")
+        logger.debug(f"Patch embeddings sample: {patch_embeds[0, :5, :5]}")
 
         # positional embeddings
         positions = position_meshgrid(patch_embeds_list).to(self.device)
@@ -847,6 +935,9 @@ class PatchMerger(nn.Module):
         super().__init__()
 
         mlp_input_dim = vision_encoder_dim * (spatial_merge_size**2)
+
+        print("mlp_input_dim = {vision_encoder_dim} * ({spatial_merge_size}**2)")
+        print(f"mlp_input_dim = {vision_encoder_dim} * ({spatial_merge_size}**2)")
 
         self.spatial_merge_size = spatial_merge_size
         self.mlp_input_dim = mlp_input_dim
