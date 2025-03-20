@@ -5,7 +5,6 @@ import json
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Iterable
-from contextlib import suppress
 from functools import cache, lru_cache, partial
 from pathlib import Path
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
@@ -317,17 +316,23 @@ def _resolve_hf_chat_template(
         return chat_template
 
     # 2nd priority: AutoProcessor chat template
-    with suppress(Exception):
+    try:
         processor = cached_get_processor(
             tokenizer.name_or_path,
             trust_remote_code=trust_remote_code,
         )
         if processor.chat_template is not None:
             return processor.chat_template
+    except Exception:
+        logger.debug("Failed to load AutoProcessor chat template for %s",
+                     tokenizer.name_or_path, exc_info=True)
 
     # 3rd priority: AutoTokenizer chat template
-    with suppress(Exception):
+    try:
         return tokenizer.get_chat_template(chat_template)
+    except Exception:
+        logger.debug("Failed to load AutoTokenizer chat template for %s",
+                     tokenizer.name_or_path, exc_info=True)
 
     return None
 
