@@ -1,11 +1,11 @@
 #pragma once
 
 /**
- * quantization utilities.
+ * Quantization utilities including:
+ *   Adjusted maximum values for qtypes.
  */
 
 #include <cmath>
-#include <torch/all.h>
 
 #ifndef USE_ROCM
   #include <c10/util/Float8_e4m3fn.h>
