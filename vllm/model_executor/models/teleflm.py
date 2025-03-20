@@ -22,7 +22,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 from typing import Type
 
 import torch
@@ -64,6 +63,7 @@ class TeleFLMModel(LlamaModel):
 
 
 class TeleFLMForCausalLM(LlamaForCausalLM):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         # mup
