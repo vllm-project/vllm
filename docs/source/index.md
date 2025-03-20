@@ -62,11 +62,13 @@ For more information, check out the following:
 :caption: Getting Started
 :maxdepth: 1
 
-getting_started/installation/index
+getting_started/installation
 getting_started/quickstart
 getting_started/examples/examples_index
 getting_started/troubleshooting
 getting_started/faq
+getting_started/v1_user_guide
+
 :::
 
 % What does vLLM support?
