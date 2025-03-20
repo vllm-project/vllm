@@ -277,11 +277,12 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
-        r = lora_b_stacked.size(-1)
+
+        rank = lora_b_stacked.size(-1)
         if buffer is None:
             # We set the buffer to be float32 by default, consistent with the
             # triton op
-            buffer = torch.zeros((x.size(0), r),
+            buffer = torch.zeros((x.size(0), rank),
                                  dtype=torch.float32,
                                  device=x.device)
 
@@ -291,7 +292,8 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                         lora_b_stacked,
                         y,
                         self.sampler_indices,
-                        add_inputs=True)
+                        add_inputs=True,
+                        fused_transpose=True)
         return y.view_as(y_org)
 
     def _update_prefill_metada(self, token_lora_tensor: torch.Tensor) -> None:

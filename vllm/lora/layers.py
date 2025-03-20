@@ -1049,6 +1049,9 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
+        
+        self.lora_b_stacked = torch.transpose(self.lora_b_stacked, 2, 3)
+        
         self.embeddings_tensors = torch.full(
             (max_loras, lora_config.lora_extra_vocab_size, self.hidden_size),
             fill_value=float("-inf"),
@@ -1081,8 +1084,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                             0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
                                 lora_a.T, non_blocking=True)
         self.lora_b_stacked[index,
-                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-                                lora_b.T, non_blocking=True)
+                            0, :lora_b.shape[0], :lora_b.shape[1]].copy_(
+                                lora_b, non_blocking=True)
         if embeddings_tensor is not None:
             self.embeddings_tensors[
                 index,
