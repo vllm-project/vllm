@@ -183,7 +183,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         processor: Optional[Gemma3Processor],
-    ) -> PromptUpdateDetails:
+    ) -> PromptUpdateDetails[str]:
         if processor is None:
             processor = self.get_hf_processor()
 

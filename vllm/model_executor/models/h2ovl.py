@@ -249,20 +249,15 @@ class H2OVLProcessor(BaseInternVLProcessor):
     def image_token_id(self) -> int:
         return self.tokenizer.get_vocab()[IMG_CONTEXT]
 
-    def get_image_repl_features(
+    def get_image_repl(
         self,
         feature_size: int,
         num_patches: Optional[int],
-    ) -> str:
-        return IMG_CONTEXT * feature_size
+    ) -> PromptUpdateDetails[str]:
+        repl_features = IMG_CONTEXT * feature_size
+        repl_full = IMG_START + repl_features + IMG_END
 
-    def get_image_repl_full(
-        self,
-        feature_size: int,
-        num_patches: Optional[int],
-    ) -> str:
-        features = self.get_image_repl_features(feature_size, num_patches)
-        return IMG_START + features + IMG_END
+        return PromptUpdateDetails(full=repl_full, features=repl_features)
 
     def resolve_min_max_num(
         self,
@@ -501,12 +496,7 @@ class H2OVLMultiModalProcessor(InternVLMultiModalProcessor[H2OVLProcessingInfo]
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            return PromptUpdateDetails(
-                full=hf_processor.get_image_repl_full(feature_size,
-                                                      num_patches),
-                features=hf_processor.get_image_repl_features(
-                    feature_size, num_patches),
-            )
+            return hf_processor.get_image_repl(feature_size, num_patches)
 
         return [
             PromptReplacement(

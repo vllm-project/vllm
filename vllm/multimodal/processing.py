@@ -103,13 +103,13 @@ The token sequence or text to update.
 
 
 @dataclass
-class PromptUpdateDetails:
+class PromptUpdateDetails(Generic[_S]):
     """Details about the token sequence or text that are part of the update."""
 
-    full: PromptSeq
+    full: _S
     """The full content."""
 
-    features: PromptSeq
+    features: _S
     """
     The part of the content that corresponds to feature placeholders;
     this will be replaced by the output of the vision encoder during model
@@ -117,7 +117,7 @@ class PromptUpdateDetails:
     """
 
     @staticmethod
-    def from_seq(seq: PromptSeq) -> "PromptUpdateDetails":
+    def from_seq(seq: _S) -> "PromptUpdateDetails[_S]":
         return PromptUpdateDetails(full=seq, features=seq)
 
 
