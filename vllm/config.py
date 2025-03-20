@@ -1969,8 +1969,10 @@ class SpeculativeConfig:
         # specify the speculative method, which helps to extend the
         # configuration of non-model-based proposers, and the model parameter
         # will be used when the draft model or head is needed.
-        # If users do not specify the method, the speculative method will be
-        # considered as the draft-model-based method by default.
+        # If users do not specify the method, the speculative method will
+        # be detected automatically if possible. If the speculative method can
+        # not be detected, it will be considered as the draft-model-based
+        # method by default.
 
         if self.method is None and self.model is not None:
             # Automatically set the method to ensure a smooth transition during
