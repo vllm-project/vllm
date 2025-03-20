@@ -10,7 +10,7 @@ Easy, fast, and cheap LLM serving for everyone
 </h3>
 
 <p align="center">
-| <a href="https://docs.vllm.ai"><b>Documentation</b></a> | <a href="https://vllm.ai"><b>Blog</b></a> | <a href="https://arxiv.org/abs/2309.06180"><b>Paper</b></a> | <a href="https://x.com/vllm_project"><b>Twitter/X</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> |
+| <a href="https://docs.vllm.ai"><b>Documentation</b></a> | <a href="https://vllm.ai"><b>Blog</b></a> | <a href="https://arxiv.org/abs/2309.06180"><b>Paper</b></a> | <a href="https://x.com/vllm_project"><b>Twitter/X</b></a> | <a href="https://discuss.vllm.ai"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> |
 </p>
 
 ---
@@ -151,10 +151,11 @@ If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs
 
 ## Contact Us
 
-- For technical questions and feature requests, please use GitHub issues or discussions.
-- For discussing with fellow users and coordinating contributions and development, please use Slack.
-- For security disclosures, please use GitHub's security advisory feature.
-- For collaborations and partnerships, please contact us at vllm-questions AT lists.berkeley.edu.
+- For technical questions and feature requests, please use GitHub [Issues](https://github.com/vllm-project/vllm/issues) or [Discussions](https://github.com/vllm-project/vllm/discussions)
+- For discussing with fellow users, please use the [vLLM Forum](https://discuss.vllm.ai)
+- coordinating contributions and development, please use [Slack](https://slack.vllm.ai)
+- For security disclosures, please use GitHub's [Security Advisories](https://github.com/vllm-project/vllm/security/advisories) feature
+- For collaborations and partnerships, please contact us at [vllm-questions@lists.berkeley.edu](mailto:vllm-questions@lists.berkeley.edu)
 
 ## Media Kit
 
