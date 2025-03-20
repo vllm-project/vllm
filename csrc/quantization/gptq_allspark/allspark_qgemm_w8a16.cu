@@ -99,7 +99,7 @@ struct GmemTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
   #pragma unroll
     for (int i = 0; i < (Ntile + N_SIZE_ONE_LOAD - 1) / N_SIZE_ONE_LOAD; ++i) {
       auto n_idx = blockIdx.y * Ntile + (Bldg_row_base_idx / 8) * 32 +
-                  i * N_SIZE_ONE_LOAD;
+                   i * N_SIZE_ONE_LOAD;
       if (n_idx < N_padded) {
         B_ldg_guard |= (1u << i);
       }
@@ -581,8 +581,8 @@ __global__ void __launch_bounds__(BLOCK)
   int lds_stage_idx = 0;
 
   auto tb_k_slice = blockIdx.z * params.SplitK + params.SplitK <= params.K
-                       ? params.SplitK
-                       : params.K - blockIdx.z * params.SplitK;
+                        ? params.SplitK
+                        : params.K - blockIdx.z * params.SplitK;
   int k_tiles = (tb_k_slice + 31) / 32;
   int first_k_tile = tb_k_slice - (k_tiles - 1) * 32;
 
