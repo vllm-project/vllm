@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Inference-only PLaMo2 model."""
-import enum
 import math
-from typing import Any, Iterable, Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 import torch
 from torch import nn
@@ -41,116 +40,29 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
 
 
-class LinearType(str, enum.Enum):
-    Normal = "normal"
-    Fp8 = "fp8"
-    Fp8Retain = "fp8-retain"
-
-
-# Only used for type hinting and PlamoPreTrainedModel.config_class.
+# Only used for type hinting.
 class PlamoConfig(PretrainedConfig):  # type: ignore
     model_type: str = "plamo"
 
-    def __init__(
-        self,
-        hidden_size: int = 4096,
-        num_hidden_layers: int = 32,
-        rms_norm_eps: float = 1e-6,
-        tie_word_embeddings: bool = False,
-        # Attention
-        num_attention_heads: int = 32,
-        num_key_value_heads: int = 4,
-        hidden_size_per_head: int = 128,
-        max_position_embeddings: int = 2048,
-        attention_window_size: int = 2048,
-        # Mamba
-        mamba_d_state: int = 64,
-        mamba_d_conv: int = 4,
-        mamba_num_heads: int = 64,
-        mamba_step: int = 2,
-        mamba_chunk_size: int = 256,
-        # MLP
-        intermediate_size: int = 13312,
-        # Tokenizer
-        vocab_size: int = 32000,
-        tokenizer_class: str = "PlamoTokenizer",
-        pad_token_id: Optional[int] = None,
-        bos_token_id: int = 1,
-        eos_token_id: int = 2,
-        # MoE
-        n_expert: Optional[int] = None,
-        k_expert: Optional[int] = None,
-        expert_dropout: float = 0.0,
-        capacity_factor: float = 1.0,
-        group_size: int = 1024,
-        sparse_step: Optional[int] = None,
-        sparse_intermediate_size: Optional[int] = None,
-        shared_intermediate_size: Optional[int] = None,
-        # FP8
-        linear_type: LinearType = LinearType.Normal,
-        fp8_accum_dtype: Optional[str] = None,
-        # Evaluation
-        eval_attention_n_bit: Optional[int] = None,
-        eval_mlp_n_bit: Optional[int] = None,
-        eval_offload_moe: bool = False,
-        use_cache: bool = True,
-        use_predefined_initial_state: bool = False,
-        **kwargs: Any,
-    ) -> None:
-        # max_position_embeddings is often used to determine the max length
-        # during inference, but samba should have extrapolation abilities
-        self.max_position_embeddings = max(10 * 1024 * 1024,
-                                           max_position_embeddings)
-        self.hidden_size = hidden_size
-        self.rms_norm_eps = rms_norm_eps
-
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-        self.hidden_size_per_head = hidden_size_per_head
-        self.num_key_value_heads = num_key_value_heads
-        self.attention_window_size = attention_window_size
-
-        self.mamba_d_state = mamba_d_state
-        self.mamba_d_conv = mamba_d_conv
-        self.mamba_num_heads = mamba_num_heads
-        self.mamba_step = mamba_step
-        self.mamba_chunk_size = mamba_chunk_size
-
-        self.intermediate_size = intermediate_size
-
-        self.vocab_size = vocab_size
-
-        self.n_expert = n_expert
-        self.k_expert = k_expert
-        self.sparse_intermediate_size = sparse_intermediate_size
-        self.shared_intermediate_size = shared_intermediate_size
-        self.expert_dropout = expert_dropout
-        self.capacity_factor = capacity_factor
-        self.group_size = group_size
-        self.sparse_step = sparse_step
-
-        self.linear_type = linear_type
-        self.fp8_accum_dtype = fp8_accum_dtype
-
-        self.eval_attention_n_bit = eval_attention_n_bit
-        self.eval_mlp_n_bit = eval_mlp_n_bit
-        self.eval_offload_moe = eval_offload_moe
-        self.use_cache = use_cache
-
-        self.use_predefined_initial_state = use_predefined_initial_state
-
-        super().__init__(
-            tokenizer_class=tokenizer_class,
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
-            **kwargs,
-        )
+    hidden_size: int
+    num_hidden_layers: int
+    rms_norm_eps: float
+    # Attention
+    num_attention_heads: int
+    hidden_size_per_head: int
+    num_key_value_heads: int
+    # Mamba
+    mamba_d_state: int
+    mamba_d_conv: int
+    mamba_num_heads: int
+    mamba_step: int
+    # MLP
+    intermediate_size: int
+    # Tokenizer
+    vocab_size: int
 
 
 class PlamoPreTrainedModel(PreTrainedModel):  # type: ignore
-    config_class = PlamoConfig
 
     def _init_weights(self, module: torch.nn.Module) -> None:
         std = 0.02
@@ -641,8 +553,7 @@ class Plamo2Model(PlamoPreTrainedModel):
                     max_model_len=vllm_config.scheduler_config.max_model_len,
                     prefix=f"{prefix}.decoder_layers.{i}"))
         self.layers = nn.ModuleList(decoder_layers)
-        self.norm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_init()
 
     def forward(
