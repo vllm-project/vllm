@@ -13,6 +13,7 @@ import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
@@ -1051,13 +1052,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # For mid-pipeline stages, return the hidden states.
             return hidden_states
 
+        if enable_sequence_parallel:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states,
+                                                             dim=0)
         hidden_states = hidden_states[:num_scheduled_tokens]
         sample_hidden_states = hidden_states[logits_indices]
-        with set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                enable_sequence_parallel=enable_sequence_parallel):
-            logits = self.model.compute_logits(sample_hidden_states, None)
+        logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
@@ -1235,15 +1235,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             offset = self.query_start_loc_np[req_idx].item()
             prompt_hidden_states = hidden_states[offset:offset + num_logits]
 
-            enable_sequence_parallel = (
-                self.vllm_config.parallel_config.enable_sequence_parallel
-                and num_tokens %
-                self.vllm_config.parallel_config.tensor_parallel_size == 0)
-            with set_forward_context(
-                    None,
-                    self.vllm_config,
-                    enable_sequence_parallel=enable_sequence_parallel):
-                logits = self.model.compute_logits(prompt_hidden_states, None)
+            logits = self.model.compute_logits(prompt_hidden_states, None)
 
             # Get the "target" tokens for each index. For prompt at index i,
             # the token at prompt index i+1 is the "sampled" token we want
@@ -1337,6 +1329,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                 )
+            if get_pp_group().is_last_rank and enable_sequence_parallel:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states,
+                                                                 dim=0)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         return hidden_states[logit_indices]
@@ -1347,15 +1342,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
 
-        enable_sequence_parallel = (
-            self.vllm_config.parallel_config.enable_sequence_parallel
-            and hidden_states.size()[0] %
-            self.vllm_config.parallel_config.tensor_parallel_size == 0)
-        with set_forward_context(
-                None,
-                self.vllm_config,
-                enable_sequence_parallel=enable_sequence_parallel):
-            logits = self.model.compute_logits(hidden_states, None)
+        logits = self.model.compute_logits(hidden_states, None)
         num_reqs = logits.size(0)
 
         dummy_tensors = lambda v: torch.full(
