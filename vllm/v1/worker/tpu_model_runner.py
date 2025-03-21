@@ -32,7 +32,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput, SamplerOutput)
-from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
+from vllm.v1.sample.tpu.metadata import (TPUSupportedSamplingMetadata,
+                                         make_sampling_metadata)
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -302,7 +303,10 @@ class TPUModelRunner:
 
         # TODO This slices tensors to copy to device, triggering recompilation.
         if batch_changed:
-            self.input_batch.refresh_sampling_metadata()
+            padded_num_reqs = _get_padded_num_reqs_with_upper_limit(
+                self.input_batch.num_reqs, self.max_num_reqs)
+            self.input_batch.sampling_metadata = make_sampling_metadata(
+                self.input_batch, padded_num_reqs)
         return len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
 
     def get_model(self) -> nn.Module:
@@ -604,7 +608,7 @@ class TPUModelRunner:
         # of the code thus far. Forward graph remains untouched.
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_sampling_metadata(sampling_metadata, logits_indices,
-                                    num_reqs, self.device)
+                                   self.device)
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
@@ -799,19 +803,20 @@ class TPUModelRunner:
             while True:
                 # Default metadata is an all_greedy setup. But since the
                 # `do_argmax` flag is a tensor, we still compile the full graph
-                meta = self.input_batch.sampling_metadata
+                meta = make_sampling_metadata(self.input_batch,
+                                              num_reqs_to_sample)
                 indices = torch.zeros(
                     num_reqs_to_sample,
                     dtype=torch.int32,
                     device=device,
                 )
                 sampling_meta = TPUSupportedSamplingMetadata.\
-                    from_sampling_metadata(meta, indices,
-                                           num_reqs_to_sample, device)
+                    from_sampling_metadata(meta, indices, device)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
                             num_reqs_to_sample)
-                self.model.sample_from_hidden(dummy_hidden, sampling_meta)
-                xm.mark_step()
+                out = self.model.sample_from_hidden(dummy_hidden,
+                                                    sampling_meta)
+                out = out.cpu()
                 if num_reqs_to_sample >= self.max_num_reqs:
                     break
                 num_reqs_to_sample *= 2
@@ -910,6 +915,7 @@ class ModelWrapperV1(nn.Module):
 
         return hidden_states
 
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_hidden(
         self,
         hidden_states: torch.Tensor,

@@ -8,116 +8,86 @@ import torch_xla.core.xla_model as xm
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
-def copy_slice(cpu_tensor: torch.Tensor, tpu_tensor: torch.Tensor, real_len: int,
-               padded_len: int) -> torch.Tensor:
-    """
-    Copy the first length elements of a tensor into another tensor in a
-    non-blocking manner.
-
-    Used to copy pinned CPU tensor data to pre-allocated GPU tensors.
-
-    Returns the sliced target tensor.
-    """
-    # Zero out explicitely on CPU and then just copy to TPU *later*
-    # tpu_tensor[:] = cpu_tensor[:]
-    # TODO use actual default values
-    cpu_tensor[real_len:padded_len] = 0
-    return cpu_tensor[:padded_len]
-
-    # TODO either this and fix from_sampling_metadata as they'll receive a padded tensor len not num_do_sample anymore
-    # or simply do everthing on cpu
-    # return cpu_tensor[:length]
-    # return to_tensor[:length].copy_(from_tensor[:length], non_blocking=True)
-    # tpu_tensor[:length] = cpu_tensor[:length]
-    # return tpu_tensor
-    # return from_tensor.to(to_tensor.device)
 
 # TODO make it return a TPUSamplingMetadata and refactor
-def make_sampling_metadata(input_batch: InputBatch, padded_num_reqs: int) -> SamplingMetadata:
+def make_sampling_metadata(input_batch: InputBatch,
+                           padded_num_reqs: int) -> SamplingMetadata:
+    """
+    `InputBatch._make_sampling_metadata` causes recompilation on XLA as it 
+    slices dynamic shapes on device tensors. This impl moves the dynamic ops
+    to CPU and produces tensors of fixed `padded_num_reqs` size.
+    """
     num_reqs = input_batch.num_reqs
-    # num_reqs = padded_num_reqs
+
+    def pad_and_slice(cpu_tensor: torch.Tensor) -> torch.Tensor:
+        # Zero-out padding explicitly on CPU and slice.
+        # TODO use actual default values
+        cpu_tensor[num_reqs:padded_num_reqs] = 0
+        return cpu_tensor[:padded_num_reqs]
+
     if not input_batch.all_greedy:
-        # temperature = copy_slice(input_batch.temperature_cpu_tensor,
-                                    # input_batch.temperature, num_reqs, padded_num_reqs)
+        # Make temperature non-optional
         temperature = input_batch.temperature_cpu_tensor[:padded_num_reqs]
         temperature[num_reqs:] = -1.0
     else:
         temperature = input_batch.temperature_cpu_tensor[:padded_num_reqs]
         temperature[:] = -1.0
-    if not input_batch.no_top_p:
-        copy_slice(input_batch.top_p_cpu_tensor, input_batch.top_p, num_reqs, padded_num_reqs)
-    if not input_batch.no_top_k:
-        copy_slice(input_batch.top_k_cpu_tensor, input_batch.top_k, num_reqs, padded_num_reqs)
-    if not input_batch.no_min_p:
-        copy_slice(input_batch.min_p_cpu_tensor, input_batch.min_p, num_reqs, padded_num_reqs)
 
-    if not input_batch.no_penalties:
-        # Since syncing these tensors is expensive only copy them
-        # if necessary i.e. if there are requests which require
-        # penalties to be applied during sampling.
-        copy_slice(input_batch.frequency_penalties_cpu_tensor,
-                    input_batch.frequency_penalties, num_reqs, padded_num_reqs)
-        copy_slice(input_batch.presence_penalties_cpu_tensor,
-                    input_batch.presence_penalties, num_reqs, padded_num_reqs)
-        copy_slice(input_batch.repetition_penalties_cpu_tensor,
-                    input_batch.repetition_penalties, num_reqs, padded_num_reqs)
+    # TODO (NickLucche) all the pre-allocated on-device tensors are wasted here
+    # if not input_batch.no_penalties:
+    # Since syncing these tensors is expensive only copy them
+    # if necessary i.e. if there are requests which require
+    # penalties to be applied during sampling.
+    # copy_slice(input_batch.frequency_penalties_cpu_tensor,
+    #             input_batch.frequency_penalties, num_reqs, padded_num_reqs)
+    # copy_slice(input_batch.presence_penalties_cpu_tensor,
+    #             input_batch.presence_penalties, num_reqs, padded_num_reqs)
+    # copy_slice(input_batch.repetition_penalties_cpu_tensor,
+    #             input_batch.repetition_penalties, num_reqs, padded_num_reqs)
 
-        # The prompt tokens are used only for applying penalties during
-        # the sampling process. Hence copy these tensors only when
-        # there are requests which need penalties to be applied.
-        prompt_token_ids = input_batch._make_prompt_token_ids_tensor()
-    else:
-        prompt_token_ids = None
+    # The prompt tokens are used only for applying penalties during
+    # the sampling process. Hence copy these tensors only when
+    # there are requests which need penalties to be applied.
+    # prompt_token_ids = input_batch._make_prompt_token_ids_tensor()
+    prompt_token_ids = None
 
     allowed_token_ids_mask: Optional[torch.Tensor] = None
-    if not input_batch.no_allowed_token_ids:
-        assert input_batch.allowed_token_ids_mask is not None
-        copy_slice(input_batch.allowed_token_ids_mask_cpu_tensor,
-                    input_batch.allowed_token_ids_mask, num_reqs, padded_num_reqs)
-        allowed_token_ids_mask = input_batch.allowed_token_ids_mask[:padded_num_reqs]
+    # if not input_batch.no_allowed_token_ids:
+    #     assert input_batch.allowed_token_ids_mask is not None
+    #     copy_slice(input_batch.allowed_token_ids_mask_cpu_tensor,
+    #                 input_batch.allowed_token_ids_mask, num_reqs,
+    #                   padded_num_reqs)
+    #     allowed_token_ids_mask = input_batch.\
+    #           allowed_token_ids_mask[:padded_num_reqs]
 
-    # every slice is done on CPU now 
+    # Every slice is done on CPU now
     return SamplingMetadata(
         temperature=temperature,
         all_greedy=input_batch.all_greedy,
         all_random=input_batch.all_random,
-        top_p=None if input_batch.no_top_p else input_batch.top_p_cpu_tensor[:padded_num_reqs],
-        top_k=None if input_batch.no_top_k else input_batch.top_k_cpu_tensor[:padded_num_reqs],
         # TODO do not allow Nones here
-        min_p=input_batch.min_p_cpu_tensor[:padded_num_reqs],
+        top_p=None if input_batch.no_top_p else pad_and_slice(
+            input_batch.top_p_cpu_tensor),
+        top_k=None if input_batch.no_top_k else pad_and_slice(
+            input_batch.top_k_cpu_tensor),
+        min_p=pad_and_slice(input_batch.min_p_cpu_tensor),
         generators=input_batch.generators,
         max_num_logprobs=input_batch.max_num_logprobs,
         prompt_token_ids=prompt_token_ids,
-        frequency_penalties=input_batch.frequency_penalties_cpu_tensor[:padded_num_reqs],
-        presence_penalties=input_batch.presence_penalties_cpu_tensor[:padded_num_reqs],
-        repetition_penalties=input_batch.repetition_penalties_cpu_tensor[:padded_num_reqs],
-        output_token_ids=cast(list[list[int]], input_batch.req_output_token_ids),
+        frequency_penalties=
+        None,  #pad_and_slice(input_batch.frequency_penalties_cpu_tensor),
+        presence_penalties=
+        None,  #pad_and_slice(input_batch.presence_penalties_cpu_tensor),
+        repetition_penalties=
+        None,  #pad_and_slice(input_batch.repetition_penalties_cpu_tensor),
+        output_token_ids=cast(list[list[int]],
+                              input_batch.req_output_token_ids),
         min_tokens=input_batch.min_tokens,
         no_penalties=input_batch.no_penalties,
         logit_bias=input_batch.logit_bias[:padded_num_reqs],
         allowed_token_ids_mask=allowed_token_ids_mask,
         bad_words_token_ids=input_batch.bad_words_token_ids,
     )
-    # return SamplingMetadata(
-    #     temperature=temperature,
-    #     all_greedy=input_batch.all_greedy,
-    #     all_random=input_batch.all_random,
-    #     top_p=None if input_batch.no_top_p else input_batch.top_p[:num_reqs],
-    #     top_k=None if input_batch.no_top_k else input_batch.top_k[:num_reqs],
-    #     min_p=None if input_batch.no_min_p else input_batch.min_p[:num_reqs],
-    #     generators=input_batch.generators,
-    #     max_num_logprobs=input_batch.max_num_logprobs,
-    #     prompt_token_ids=prompt_token_ids,
-    #     frequency_penalties=input_batch.frequency_penalties[:num_reqs],
-    #     presence_penalties=input_batch.presence_penalties[:num_reqs],
-    #     repetition_penalties=input_batch.repetition_penalties[:num_reqs],
-    #     output_token_ids=cast(list[list[int]], input_batch.req_output_token_ids),
-    #     min_tokens=input_batch.min_tokens,
-    #     no_penalties=input_batch.no_penalties,
-    #     logit_bias=input_batch.logit_bias[:num_reqs],
-    #     allowed_token_ids_mask=allowed_token_ids_mask,
-    #     bad_words_token_ids=input_batch.bad_words_token_ids,
-    # )
 
 
 @dataclass
@@ -180,13 +150,11 @@ class TPUSupportedSamplingMetadata:
     @classmethod
     def from_sampling_metadata(
             cls, metadata: SamplingMetadata,
-            padded_do_sample_indices: torch.Tensor, num_do_sample: int,
+            padded_do_sample_indices: torch.Tensor,
             device: torch.device) -> "TPUSupportedSamplingMetadata":
         """
-        Create an XLA-frienly SamplingMetadata structure. Do so by first 
-        instantiating an object with fixed-sized tensors and then writing the
-        values in input `metadata`. Do that only for non-None values so that 
-        recompilation is not triggered for optional values (None/torch.Tensor).
+        Create an XLA-frienly SamplingMetadata structure. Move sampling params
+        tensors from host to device.
         
         In order to handle different sizes for the params that range from 1 up 
         to `max_num_seqs`, pad tensors to the closest pre-compiled shape.
@@ -196,44 +164,23 @@ class TPUSupportedSamplingMetadata:
         Eg. pad to 4 temperature: [0.7, 0.2]=>[0.7, 0.2, 0.0, 0.0]
             do_sample_indices: [4, 10]=>padded_do_sample_indices: [4, 10, 0, 0]
         """
-        # metadata = cls._validate_sampling_metadata(metadata)
-        # NOTE we have to initialize default tensor-based params first and
-        # skip None values altogether to produce the same xla graph.
-        num_samples = len(padded_do_sample_indices)
         do_argmax = torch.tensor(metadata.all_greedy,
                                  dtype=torch.bool,
                                  device=device)
-        # new_metadata = cls.get_default_sampling_params(num_samples, device,
-        #                                             indices_do_sample=\
-        #                                             padded_do_sample_indices,
-        #                                             do_argmax=do_argmax
-        #                                             )
         supported_params = \
             TPUSupportedSamplingMetadata._get_default_params_values()
-        # Copy input non-None values into `new_metadata` fixed-sized tensors.
-        # All sizes we get here are now padded!
-        kwargs=dict()
+
+        # All tensors we get here are already padded, just move them to TPU.
+        kwargs = dict()
         for p_name in supported_params:
             old_val = getattr(metadata, p_name)
             if isinstance(old_val, torch.Tensor):
                 kwargs[p_name] = old_val.to(device)
         xm.mark_step()
         xm.wait_device_ops()
-        return cls(**kwargs, indices_do_sample=padded_do_sample_indices,
+        return cls(**kwargs,
+                   indices_do_sample=padded_do_sample_indices,
                    do_argmax=do_argmax)
-        # for p_name in supported_params:
-        #     old_val = getattr(metadata, p_name)
-        #     new_val = getattr(new_metadata, p_name)
-        #     if isinstance(old_val, torch.Tensor):
-        #         # new_val[:num_do_sample] = old_val
-        #         # CPU->TPU copy of pre-compiled padded size 
-        #         new_val[:] = old_val
-        #         # new_val[:p] = old_val
-        #     setattr(new_metadata, p_name, new_val)
-
-        xm.mark_step()
-        xm.wait_device_ops()
-        return new_metadata
 
     @classmethod
     def get_default_sampling_params(
