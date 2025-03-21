@@ -31,18 +31,20 @@ class BenchmarkConfig(TypedDict):
     num_stages: int
 
 
-def benchmark_config(config: BenchmarkConfig,
-                     num_tokens: int,
-                     num_experts: int,
-                     shard_intermediate_size: int,
-                     hidden_size: int,
-                     topk: int,
-                     dtype: torch.dtype,
-                     use_fp8_w8a8: bool,
-                     use_int8_w8a16: bool,
-                     num_iters: int = 100,
-                     block_quant_shape: List[int] = None,
-                     use_deep_gemm: bool = False) -> float:
+def benchmark_config(
+    config: BenchmarkConfig,
+    num_tokens: int,
+    num_experts: int,
+    shard_intermediate_size: int,
+    hidden_size: int,
+    topk: int,
+    dtype: torch.dtype,
+    use_fp8_w8a8: bool,
+    use_int8_w8a16: bool,
+    num_iters: int = 100,
+    block_quant_shape: List[int] = None,
+    use_deep_gemm: bool = False
+) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
     if use_int8_w8a16:
