@@ -309,7 +309,7 @@ class TPUModelRunner:
         assert self.model is not None
         return self.model
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
         Generates the KVCacheSpec by parsing the kv cache format from each
         Attention module in the static forward context.
@@ -320,7 +320,7 @@ class TPUModelRunner:
 
         forward_ctx = self.vllm_config.compilation_config.static_forward_context
         block_size = self.vllm_config.cache_config.block_size
-        kv_cache_spec: KVCacheSpec = {}
+        kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in forward_ctx.items():
             # TODO: Support other attention modules, e.g., sliding window,
             # cross-attention, MLA.
@@ -837,31 +837,33 @@ class TPUModelRunner:
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        if len(kv_cache_config.groups) > 1:
+        if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
                 "supported yet.")
 
         kv_caches: dict[str, torch.Tensor] = {}
 
-        for layer_name, layer_spec in kv_cache_config.kv_cache_spec.items():
-            tensor_config = kv_cache_config.tensors[layer_name]
-            assert tensor_config.size % layer_spec.page_size_bytes == 0
-            num_blocks = tensor_config.size // layer_spec.page_size_bytes
-            if isinstance(layer_spec, FullAttentionSpec):
-                kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
-                    num_blocks, layer_spec.block_size, layer_spec.num_kv_heads,
-                    layer_spec.head_size)
-                dtype = layer_spec.dtype
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            for layer_name in kv_cache_group.layer_names:
+                tensor_config = kv_cache_config.tensors[layer_name]
+                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
+                if isinstance(kv_cache_spec, FullAttentionSpec):
+                    kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    dtype = kv_cache_spec.dtype
 
-                tpu_k_cache = torch.zeros(kv_cache_shape,
-                                          dtype=dtype,
-                                          device=self.device)
-                tpu_v_cache = torch.zeros_like(tpu_k_cache)
+                    tpu_k_cache = torch.zeros(kv_cache_shape,
+                                              dtype=dtype,
+                                              device=self.device)
+                    tpu_v_cache = torch.zeros_like(tpu_k_cache)
 
-                kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
-            else:
-                raise NotImplementedError
+                    kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
+                else:
+                    raise NotImplementedError
 
         bind_kv_cache(
             kv_caches,
