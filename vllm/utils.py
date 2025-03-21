@@ -468,7 +468,7 @@ def get_ip() -> str:
     # try ipv4
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
+        s.connect(("208.67.222.222", 80))  # using OpenDNS ip due to google's rate limiting Doesn't need to be reachable
         return s.getsockname()[0]
     except Exception:
         pass
@@ -476,9 +476,8 @@ def get_ip() -> str:
     # try ipv6
     try:
         s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-        # Google's public DNS server, see
-        # https://developers.google.com/speed/public-dns/docs/using#addresses
-        s.connect(("2001:4860:4860::8888", 80))  # Doesn't need to be reachable
+        # OpenDNS's public DNS server, see
+        s.connect(("2620:119:35::35", 80))  # Doesn't need to be reachable
         return s.getsockname()[0]
     except Exception:
         pass
