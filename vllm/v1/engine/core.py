@@ -22,8 +22,8 @@ from vllm.transformers_utils.config import (
 from vllm.utils import (get_exception_traceback, resolve_obj_by_qualname,
                         zmq_socket_ctx)
 from vllm.v1.core.kv_cache_utils import get_kv_cache_configs
-from vllm.v1.core.scheduler import Scheduler as V1Scheduler
-from vllm.v1.core.scheduler import SchedulerOutput
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MMInputCacheServer
@@ -179,16 +179,6 @@ class EngineCore:
                 scheduler_stats=self.scheduler.make_stats(),
             )
         scheduler_output = self.scheduler.schedule()
-
-        # This case may occur when the only unfinished requests are
-        # structured output requests where the grammar has not finished
-        # compiling yet, so there's nothing to run.
-        if scheduler_output.total_num_scheduled_tokens == 0:
-            return EngineCoreOutputs(
-                outputs=[],
-                scheduler_stats=self.scheduler.make_stats(),
-            )
-
         output = self.model_executor.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)  # type: ignore
