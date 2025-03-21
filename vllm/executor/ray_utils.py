@@ -284,8 +284,9 @@ def initialize_ray_cluster(
     assert_ray_available()
     from vllm.platforms import current_platform
 
-    # Connect to a ray cluster.
-    if current_platform.is_rocm() or current_platform.is_xpu():
+    if ray.is_initialized():
+        logger.info("Ray is already initialized. Skipping Ray initialization.")
+    elif current_platform.is_rocm() or current_platform.is_xpu():
         # Try to connect existing ray instance and create a new one if not found
         try:
             ray.init("auto", ignore_reinit_error=True)
@@ -299,19 +300,21 @@ def initialize_ray_cluster(
     else:
         ray.init(address=ray_address, ignore_reinit_error=True)
 
-    if parallel_config.placement_group:
-        # Placement group is already set.
-        return
-
     device_str = current_platform.ray_device_key
     if not device_str:
         raise ValueError(
             f"current platform {current_platform.device_name} does not "
             "support ray.")
 
-    # Create placement group for worker processes
-    current_placement_group = ray.util.get_current_placement_group()
+    # Create or get the placement group for worker processes
+    if parallel_config.placement_group:
+        current_placement_group = parallel_config.placement_group
+    else:
+        current_placement_group = ray.util.get_current_placement_group()
+
     if current_placement_group:
+        logger.info("Using the existing placement group")
+
         # We are in a placement group
         bundles = current_placement_group.bundle_specs
         # Verify that we can use the placement group.
@@ -331,6 +334,8 @@ def initialize_ray_cluster(
                 f"Required number of devices: {parallel_config.world_size}. "
                 f"Total number of devices: {device_bundles}.")
     else:
+        logger.info("No current placement group found. "
+                    "Creating a new placement group.")
         num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
         # Log a warning message and delay resource allocation failure response.
         # Avoid immediate rejection to allow user-initiated placement group
