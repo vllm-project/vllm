@@ -17,7 +17,7 @@ from vllm.platforms import current_platform
 from vllm.utils import cdiv
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
