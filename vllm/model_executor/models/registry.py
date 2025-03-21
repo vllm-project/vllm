@@ -73,7 +73,6 @@ _TEXT_GENERATION_MODELS = {
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
-    "TeleFLMModel": ("teleflm", "TeleFLMForCausalLM"),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
@@ -105,6 +104,7 @@ _TEXT_GENERATION_MODELS = {
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
+    "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     # [Encoder-decoder]
     "BartModel": ("bart", "BartForConditionalGeneration"),
