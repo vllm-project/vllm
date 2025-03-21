@@ -438,6 +438,7 @@ class _AsyncLLMEngine(LLMEngine):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        verbose: bool = False,
     ) -> None:
         ...
 
@@ -452,6 +453,8 @@ class _AsyncLLMEngine(LLMEngine):
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
+        *,
+        verbose: bool = False,
     ) -> None:
         ...
 
@@ -460,17 +463,18 @@ class _AsyncLLMEngine(LLMEngine):
         additional_message="Please use the 'prompt' parameter instead.",
     )
     async def add_request_async(
-            self,
-            request_id: str,
-            prompt: Optional[PromptType] = None,
-            params: Optional[Union[SamplingParams, PoolingParams]] = None,
-            arrival_time: Optional[float] = None,
-            lora_request: Optional[LoRARequest] = None,
-            trace_headers: Optional[Mapping[str, str]] = None,
-            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-            priority: int = 0,
-            *,
-            inputs: Optional[PromptType] = None,  # DEPRECATED
+        self,
+        request_id: str,
+        prompt: Optional[PromptType] = None,
+        params: Optional[Union[SamplingParams, PoolingParams]] = None,
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
+        *,
+        inputs: Optional[PromptType] = None,  # DEPRECATED
+        verbose: bool = False,
     ) -> None:
         """Async version of :meth:`add_request`."""
         if inputs is not None:
@@ -509,7 +513,9 @@ class _AsyncLLMEngine(LLMEngine):
                 default_guided_backend=self.decoding_config.
                 guided_decoding_backend,
                 reasoning_backend=self.decoding_config.reasoning_backend,
-                model_config=self.model_config)
+                model_config=self.model_config,
+                verbose=verbose,
+            )
 
         self._add_processed_request(
             request_id=request_id,
@@ -531,7 +537,7 @@ class _AsyncLLMEngine(LLMEngine):
 async def build_guided_decoding_logits_processor_async(
         sampling_params: SamplingParams, tokenizer: AnyTokenizer,
         default_guided_backend: str, reasoning_backend: Optional[str],
-        model_config: ModelConfig) -> SamplingParams:
+        model_config: ModelConfig, *, verbose: bool) -> SamplingParams:
     """Constructs logits processors based on the guided_decoding,
     logits_bias, and allowed_token_ids fields in sampling_params. Deletes
     those fields and adds the constructed logits processors to the
@@ -545,11 +551,12 @@ async def build_guided_decoding_logits_processor_async(
     sampling_params = copy.copy(sampling_params)
     guided_decoding = sampling_params.guided_decoding
 
-    logger.info(
-        "Building guided decoding logits processor. "
-        "guided_decoding: %s%s", guided_decoding,
-        f", reasoning_backend: {reasoning_backend}"
-        if reasoning_backend is not None else "")
+    if verbose:
+        logger.info(
+            "Building guided decoding logits processor. "
+            "guided_decoding: %s%s", guided_decoding,
+            f", reasoning_backend: {reasoning_backend}"
+            if reasoning_backend is not None else "")
 
     guided_decoding.backend = guided_decoding.backend or default_guided_backend
 
@@ -764,7 +771,8 @@ class AsyncLLMEngine(EngineClient):
         for new_request in new_requests:
             # Add the request into the vLLM engine's waiting queue.
             try:
-                await self.engine.add_request_async(**new_request)
+                await self.engine.add_request_async(**new_request,
+                                                    verbose=self.log_requests)
             except ValueError as e:
                 # TODO: use a vLLM specific error for failed validation
                 self._request_tracker.process_exception(
