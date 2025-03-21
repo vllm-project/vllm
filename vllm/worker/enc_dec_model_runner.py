@@ -105,8 +105,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
     def _maybe_force_supported_attention_backend(self):
         '''
-        Force vLLM to use the XFormers attention backend,
-        which is currently the only supported option.
+        Force vLLM to use XFormers,
+        FLASH_ATTN or ROCM_FLASH(for ROCm) attention backend,
         '''
 
         def raise_backend_err():
@@ -122,13 +122,13 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             # Backend override enforced by global variable takes
             # precedence over vLLM backend environment variable.
             if maybe_global_forced_backend not in\
-                 [_Backend.XFORMERS, _Backend.FLASH_ATTN]:
+                 [_Backend.XFORMERS, _Backend.FLASH_ATTN, _Backend.ROCM_FLASH]:
                 raise_backend_err()
         elif is_forced_by_env_var:  # noqa: SIM102
             # Backend override enforced by vLLM backend
             # environment variable
             if maybe_env_var_forced_backend not in\
-                 [_Backend.XFORMERS, _Backend.FLASH_ATTN]:
+                 [_Backend.XFORMERS, _Backend.FLASH_ATTN, _Backend.ROCM_FLASH]:
                 raise_backend_err()
 
     def _list_to_int32_tensor(
