@@ -722,14 +722,6 @@ def test_chat_template_hf(model):
         return [
             {"role": "system", "content": "You are a helpful assistant."},
             {'role': 'user','content': 'Hello, how are you?'}]
-    # Build a config for the model
-    model_config = ModelConfig(model,
-                               task="generate",
-                               tokenizer=model,
-                               tokenizer_mode="auto",
-                               trust_remote_code=True,
-                               dtype="auto",
-                               seed=0)
     # Build the tokenizer group and grab the underlying tokenizer
     tokenizer_group = TokenizerGroup(
         model,
@@ -741,7 +733,7 @@ def test_chat_template_hf(model):
     apply_hf_chat_template(
         tokenizer,
         conversation=get_conversation(),
-        # test that chat_template is None. use default chat_template.
+        # chat_template is None. use default chat_template.
         chat_template=None,
         add_generation_prompt=True
     )
