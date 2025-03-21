@@ -1794,6 +1794,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 return []
 
             if self._fake_sample_output is not None:
+                if model_input.async_callback is not None:
+                    model_input.async_callback()
                 return [self._fake_sample_output]
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
@@ -1882,6 +1884,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         """
 
         if self.vllm_config.kv_transfer_config is None:
+            return False
+        
+        if not self.vllm_config.kv_transfer_config.is_kv_producer:
             return False
 
         return self.vllm_config.kv_transfer_config.get_from_extra_config("skip_sampling", False)
