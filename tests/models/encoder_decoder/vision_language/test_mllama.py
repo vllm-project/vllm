@@ -691,3 +691,26 @@ def test_get_full_text_row_masked_out_mask(input_indices) -> None:
                 f"full_text_row_masked_out_mask[{idx}] must be " \
                 f"'{must_be_masked}' "
             idx += 1
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("encoder_seq_lens, num_tiles, expected", [
+    ([6404], [[4]], [6404]),
+    ([0, 6404], [[4]], [6404]),
+    ([0, 1601, 8005], [[1], [4, 1]], [1601, 8005]),
+    ([0, 19212, 0, 3202], [[4, 4, 4], [2]], [19212, 3202]),
+])
+def test_parse_and_validate_encoder_lens(encoder_seq_lens, num_tiles,
+                                         expected) -> None:
+
+    dummy = DummyModel()
+    num_tokens_per_tile = 1601
+    actual_encoder_seq_lens = MllamaForConditionalGeneration \
+        ._get_and_validate_encoder_lens(
+            dummy,
+            encoder_seq_lens,
+            num_tiles,
+            num_tokens_per_tile,
+        )
+    assert actual_encoder_seq_lens == expected, \
+        f"Expected {expected} but got {actual_encoder_seq_lens}"
