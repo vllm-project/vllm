@@ -13,10 +13,9 @@ from vllm.logger import init_logger
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-from vllm.v1.core.sched.common import CommonSchedulerStates
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-from vllm.v1.core.sched.utils import check_stop
+from vllm.v1.core.sched.utils import CommonSchedulerStates, check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.metrics.stats import SchedulerStats
