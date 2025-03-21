@@ -184,7 +184,6 @@ For example:
 ```yaml
 # config.yaml
 
-model: meta-llama/Llama-3.1-8B-Instruct
 host: "127.0.0.1"
 port: 6379
 uvicorn-log-level: "info"
@@ -193,13 +192,12 @@ uvicorn-log-level: "info"
 To use the above config file:
 
 ```bash
-vllm serve --config config.yaml
+vllm serve SOME_MODEL --config config.yaml
 ```
 
 :::{note}
 In case an argument is supplied simultaneously using command line and the config file, the value from the command line will take precedence.
 The order of priorities is `command line > config file values > defaults`.
-e.g. `vllm serve SOME_MODEL --config config.yaml`, SOME_MODEL takes precedence over `model` in config file.
 :::
 
 ## API Reference

@@ -21,16 +21,14 @@ class ServeSubcommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        # If model is specified in CLI (as positional arg), it takes precedence
-        if hasattr(args, 'model_tag') and args.model_tag is not None:
-            args.model = args.model_tag
-        # Otherwise use model from config (already in args.model)
-
-        # Check if we have a model specified somewhere
-        if args.model == EngineArgs.model:  # Still has default value
+        # The default value of `--model`
+        if args.model != EngineArgs.model:
             raise ValueError(
-                "With `vllm serve`, you should provide the model either as a "
-                "positional argument or in config file.")
+                "With `vllm serve`, you should provide the model as a "
+                "positional argument instead of via the `--model` option.")
+
+        # EngineArgs expects the model name to be passed as --model.
+        args.model = args.model_tag
 
         uvloop.run(run_server(args))
 
@@ -43,12 +41,10 @@ class ServeSubcommand(CLISubcommand):
         serve_parser = subparsers.add_parser(
             "serve",
             help="Start the vLLM OpenAI Compatible API server",
-            usage="vllm serve [model_tag] [options]")
+            usage="vllm serve <model_tag> [options]")
         serve_parser.add_argument("model_tag",
                                   type=str,
-                                  nargs='?',
-                                  help="The model tag to serve "
-                                  "(optional if specified in config)")
+                                  help="The model tag to serve")
         serve_parser.add_argument(
             "--config",
             type=str,
