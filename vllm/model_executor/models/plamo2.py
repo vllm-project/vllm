@@ -641,7 +641,7 @@ class Plamo2Model(PlamoPreTrainedModel):
                     max_model_len=vllm_config.scheduler_config.max_model_len,
                     prefix=f"{prefix}.decoder_layers.{i}"))
         self.layers = nn.ModuleList(decoder_layers)
-        self.final_layernorm = RMSNorm(config.hidden_size,
+        self.norm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_init()
 
@@ -670,7 +670,7 @@ class Plamo2Model(PlamoPreTrainedModel):
                 hidden_states=hidden_states,
                 residual=residual,
                 mamba_cache_params=layer_mamba_cache_params)
-        hidden_states, _ = self.final_layernorm(hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
@@ -810,8 +810,6 @@ class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
                 ".layers.layers": ".layers",
                 # Skip PlmoDecoderLayer.
                 ".mixer": "",
-                # Rename the final layernorm of the model.
-                "model.norm.weight": "model.final_layernorm.weight",
 
                 # Rename each mamba layer's components.
                 ".A_log": ".mamba.A",
@@ -851,7 +849,7 @@ class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
                 loaded_weight += 1.0
             elif ".post_mlp_norm" in name:
                 loaded_weight += 1.0 / (5**1.5)
-            elif "model.final_layernorm.weight" in name:
+            elif "model.norm.weight" in name:
                 loaded_weight += 1.0
 
             param = params_dict[name]
