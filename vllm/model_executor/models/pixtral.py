@@ -633,7 +633,7 @@ class VisionEncoderArgs:
     image_token_id: int
     adapter_bias: bool = True
     spatial_merge_size: int = 1
-    add_pre_mm_projector_layer_norm: bool = False
+    add_pre_mm_projector_layer_norm: bool = True
     mm_projector_id: str = ""
 
 
