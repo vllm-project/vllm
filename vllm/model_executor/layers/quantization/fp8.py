@@ -343,7 +343,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     logical_widths=layer.logical_widths,
                 )
 
-            weight = self.add_padding_to_weight(weight)
+            weight = self._maybe_pad_weight(weight)
             # Update layer with new values.
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
