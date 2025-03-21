@@ -27,6 +27,7 @@ MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 LLAMA_GUARD_MODEL_ID = "meta-llama/Llama-Guard-3-1B"
 CohereForAI_MODEL_ID = "CohereForAI/c4ai-command-r7b-12-2024"
 
+
 @pytest.fixture(scope="function")
 def phi3v_model_config():
     return ModelConfig(PHI3V_MODEL_ID,
@@ -716,18 +717,19 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     [
         QWEN2VL_MODEL_ID,  # chat_template is of type str.
         CohereForAI_MODEL_ID,  # chat_template is of type dict.
-     ])
+    ])
 def test_chat_template_hf(model, sample_json_schema):
     """checks that chat_template is a dict type for HF models."""
 
     def get_conversation():
         return [{
-            "role": "system", 
+            "role": "system",
             "content": "You are a helpful assistant."
         }, {
             'role': 'user',
             'content': 'Hello, how are you?'
         }]
+
     # Build the tokenizer group and grab the underlying tokenizer
     tokenizer_group = TokenizerGroup(
         model,
