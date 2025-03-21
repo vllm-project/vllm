@@ -7,6 +7,7 @@ from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock, PrefixCachingMetrics,
+                                         _block_hash, _none_hash,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
                                          hash_request_tokens,
@@ -38,6 +39,28 @@ def make_request(request_id,
         arrival_time=0,
         lora_request=None,
     )
+
+
+@pytest.mark.parametrize("input", [(), ("abc", ), (None, ),
+                                   (None, bool, [1, 2, 3])])
+@pytest.mark.parametrize("output", [0, 1, 2])
+def test_block_hash(input: list, output: int):
+    hash = _block_hash(input)
+    assert hash is not None
+    assert isinstance(hash, int)
+    assert hash != 0
+
+    # hashing again, returns the same value
+    assert hash == _block_hash(input)
+
+    # hashing different input, returns different value
+    assert hash != _block_hash(input + (1, ))
+
+
+def test_none_hash():
+    assert _none_hash is not None
+    assert isinstance(_none_hash, int)
+    assert _none_hash != 0
 
 
 def test_kv_cache_block():
@@ -198,7 +221,7 @@ def test_hash_block_tokens():
     block_hash = hash_block_tokens(parent_block_hash, curr_block_token_ids,
                                    extra_keys)
     assert isinstance(block_hash, BlockHashType)
-    assert block_hash.hash_value == hash(
+    assert block_hash.hash_value == _block_hash(
         (parent_block_hash, curr_block_token_ids, extra_keys))
     assert block_hash.token_ids == curr_block_token_ids
     assert block_hash.extra_keys == extra_keys
