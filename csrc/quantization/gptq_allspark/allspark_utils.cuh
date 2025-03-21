@@ -62,7 +62,7 @@ template <typename FType, int BLOCK, int N_MATRIX>
 __global__ void f16_gemm_splitk_reduce_kernel(const FType* C_split, FType* C,
                                               uint32_t n, uint32_t n_matrix,
                                               uint32_t matrix_size) {
-  int idx = blockIdx.x * BLOCK + threadIdx.x;
+  auto idx = blockIdx.x * BLOCK + threadIdx.x;
 
   if (idx >= matrix_size) {
     return;
