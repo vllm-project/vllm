@@ -36,16 +36,17 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
-    VLLM_USE_FLASHINFER_REJECTION_SAMPLER: bool = False
     VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
+    VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
@@ -56,7 +57,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
-    VLLM_MM_INPUT_CACHE_SIZE: int = 256
+    VLLM_MM_INPUT_CACHE_GIB: int = 8
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -74,19 +75,17 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
-    VLLM_USE_V1: bool = False
+    VLLM_USE_V1: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
     V_SCALE_CONSTANT: int = 100
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
-    VLLM_MLA_PERFORM_MATRIX_ABSORPTION: bool = True
-    VLLM_MLA_DISABLE_REQUANTIZATION: bool = False
-    VLLM_MLA_CUDA_MEM_ALIGN_KV_CACHE: bool = True
     VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -97,6 +96,8 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
+    VLLM_V0_USE_OUTLINES_CACHE: bool = False
+    VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
 
 
 def get_default_cache_root():
@@ -354,6 +355,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CPU_OMP_THREADS_BIND":
     lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
 
+    # (CPU backend only) whether to use prepack for MoE layer. This will be
+    # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
+    # need to set this to "0" (False).
+    "VLLM_CPU_MOE_PREPACK":
+    lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
+
     # OpenVINO device selection
     # default is CPU
     "VLLM_OPENVINO_DEVICE":
@@ -432,11 +439,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
-    # Cache size for multimodal feature/input cache for multimodal models
-    # in unit of number of multimodal data items (e.g. image, video, audio).
-    # Default is 256 multimodal data items.
-    "VLLM_MM_INPUT_CACHE_SIZE":
-    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_SIZE", "256")),
+    # Cache size (in GiB) for multimodal input cache
+    # Default is 8GiB
+    "VLLM_MM_INPUT_CACHE_GIB":
+    lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "8")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
@@ -446,6 +452,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "VLLM_XLA_CACHE_PATH",
             os.path.join(get_default_cache_root(), "vllm", "xla_cache"),
         )),
+
+    # If set, assert on XLA recompilation after each execution step.
+    "VLLM_XLA_CHECK_RECOMPILATION":
+    lambda: bool(int(os.getenv("VLLM_XLA_CHECK_RECOMPILATION", "0"))),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
 
@@ -521,18 +531,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, use the V1 code path.
     "VLLM_USE_V1":
-    lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
+    lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
     lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
+
+    # Divisor for dynamic query scale factor calculation for FP8 KV Cache
+    "Q_SCALE_CONSTANT":
+    lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
     # Divisor for dynamic key scale factor calculation for FP8 KV Cache
     "K_SCALE_CONSTANT":
     lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
-
     # Divisor for dynamic value scale factor calculation for FP8 KV Cache
     "V_SCALE_CONSTANT":
     lambda: int(os.getenv("V_SCALE_CONSTANT", "100")),
+
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING":
     lambda: bool(int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))),
@@ -561,23 +575,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MLA_DISABLE":
     lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
 
-    # Flag that can control whether or not we perform matrix-absorption for MLA
-    # decode, i.e. absorb W_UK into W_Q/W_UK and W_UV into W_O, absorbing the
-    # matrices reduces the runtime FLOPs needed to compute MLA but requires
-    # storing more weights, W_Q_UK and W_UV_O, so can increase memory usage,
-    # the is enabled by default
-    "VLLM_MLA_PERFORM_MATRIX_ABSORPTION":
-    lambda: bool(int(os.getenv("VLLM_MLA_PERFORM_MATRIX_ABSORPTION", "1"))),
-
-    # When running MLA with matrix-absorption enabled and fp8 quantized weights
-    # we perform the matrix-absorption in float32 precision, after the matrices
-    # are absorbed we requantize the weights back to fp8, this flag can be used
-    # to disable the requantization step, and instead convert the absorbed
-    # matrices to match the activation type. This can lead to higher memory and
-    # compute usage but better preserves the accuracy of the original model.
-    "VLLM_MLA_DISABLE_REQUANTIZATION":
-    lambda: bool(int(os.getenv("VLLM_MLA_DISABLE_REQUANTIZATION", "0"))),
-
     # If set, vLLM will use the Triton implementation of moe_align_block_size,
     # i.e. moe_align_block_size_triton in fused_moe.py.
     "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON":
@@ -595,15 +592,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Format: comma-separated list of integers, e.g. "0,1,2,3"
     "VLLM_RAY_BUNDLE_INDICES":
     lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
-
-    # When on a Nvidia GPU aligns single entries (within a page) so they are 256
-    # byte aligned for better performance, this increases the memory usage of
-    # the cache. Currently this only affects MLA that results in non-256
-    # byte aligned entries. This matches the alignment the CUDA runtime uses
-    # for all allocations. Currently this primarily affects MLA, for most other
-    # models the alignment is already naturally aligned to 256 bytes.
-    "VLLM_CUDA_MEM_ALIGN_KV_CACHE":
-    lambda: bool(int(os.getenv("VLLM_CUDA_MEM_ALIGN_KV_CACHE", "1"))),
 
     # In some system, find_loaded_library() may not work. So we allow users to
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
@@ -640,6 +628,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
     "VLLM_MARLIN_USE_ATOMIC_ADD":
     lambda: os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1",
+
+    # Whether to turn on the outlines cache for V0
+    # This cache is unbounded and on disk, so it's not safe to use in
+    # an environment with potentially malicious users.
+    "VLLM_V0_USE_OUTLINES_CACHE":
+    lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
+
+    # If set, disables TPU-specific optimization for top-k & top-p sampling
+    "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION":
+    lambda: bool(int(os.environ["VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION"]))
+    if "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION" in os.environ else None,
 }
 
 # end-env-vars-definition
@@ -654,3 +653,19 @@ def __getattr__(name: str):
 
 def __dir__():
     return list(environment_variables.keys())
+
+
+def is_set(name: str):
+    """Check if an environment variable is explicitly set."""
+    if name in environment_variables:
+        return name in os.environ
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def set_vllm_use_v1(use_v1: bool):
+    if is_set("VLLM_USE_V1"):
+        raise ValueError(
+            "Should not call set_vllm_use_v1() if VLLM_USE_V1 is set "
+            "explicitly by the user. Please raise this as a Github "
+            "Issue and explicitly set VLLM_USE_V1=0 or 1.")
+    os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
