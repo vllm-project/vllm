@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+import torch
 
 from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
@@ -8,7 +9,10 @@ from vllm.v1.core.kv_cache_utils import (BlockHashType, FreeKVCacheBlockQueue,
                                          KVCacheBlock, PrefixCachingMetrics,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens,
-                                         hash_request_tokens)
+                                         hash_request_tokens,
+                                         unify_kv_cache_configs)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheGroupSpec, KVCacheTensor)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -314,3 +318,107 @@ def test_metrics():
     assert metrics.aggregated_query_total == 0
     assert metrics.aggregated_query_hit == 0
     assert not metrics.query_queue
+
+
+def test_unify_kv_cache_configs():
+
+    def new_kv_cache_spec(block_size=16,
+                          num_kv_heads=2,
+                          head_size=64,
+                          dtype=torch.float32,
+                          use_mla=False):
+        return FullAttentionSpec(block_size=block_size,
+                                 num_kv_heads=num_kv_heads,
+                                 head_size=head_size,
+                                 dtype=dtype,
+                                 use_mla=use_mla)
+
+    same_kv_cache_config = [
+        KVCacheConfig(
+            num_blocks=10,
+            tensors={
+                "layer1": KVCacheTensor(100),
+                "layer2": KVCacheTensor(100),
+            },
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+                KVCacheGroupSpec(["layer2"],
+                                 new_kv_cache_spec(num_kv_heads=4)),
+            ],
+        ),
+        KVCacheConfig(
+            num_blocks=20,
+            tensors={
+                "layer1": KVCacheTensor(100),
+                "layer2": KVCacheTensor(100),
+            },
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+                KVCacheGroupSpec(["layer2"],
+                                 new_kv_cache_spec(num_kv_heads=4)),
+            ],
+        ),
+    ]
+    unify_kv_cache_configs(same_kv_cache_config)
+    assert same_kv_cache_config[0].num_blocks == 10
+    assert same_kv_cache_config[1].num_blocks == 10
+
+    need_sort_kv_cache_config = [
+        KVCacheConfig(
+            num_blocks=10,
+            tensors={
+                "layer1": KVCacheTensor(100),
+                "layer2": KVCacheTensor(100),
+            },
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+                KVCacheGroupSpec(["layer2"],
+                                 new_kv_cache_spec(num_kv_heads=4)),
+            ],
+        ),
+        KVCacheConfig(
+            num_blocks=20,
+            tensors={
+                "layer1": KVCacheTensor(100),
+                "layer2": KVCacheTensor(100),
+            },
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer2"],
+                                 new_kv_cache_spec(num_kv_heads=4)),
+                KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+            ],
+        ),
+    ]
+
+    unify_kv_cache_configs(need_sort_kv_cache_config)
+    assert need_sort_kv_cache_config[0].num_blocks == 10
+    assert need_sort_kv_cache_config[1].num_blocks == 10
+
+    diff_kv_cache_config = [
+        KVCacheConfig(
+            num_blocks=10,
+            tensors={
+                "layer1": KVCacheTensor(100),
+                "layer2": KVCacheTensor(100),
+            },
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+                KVCacheGroupSpec(["layer2"],
+                                 new_kv_cache_spec(num_kv_heads=4)),
+            ],
+        ),
+        KVCacheConfig(
+            num_blocks=20,
+            tensors={
+                "layer1": KVCacheTensor(100),
+                "layer2": KVCacheTensor(100),
+            },
+            kv_cache_groups=[
+                KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+                KVCacheGroupSpec(["layer2"],
+                                 new_kv_cache_spec(num_kv_heads=8)),
+            ],
+        ),
+    ]
+    with pytest.raises(AssertionError):
+        unify_kv_cache_configs(diff_kv_cache_config)

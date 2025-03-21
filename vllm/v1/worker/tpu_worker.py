@@ -189,7 +189,7 @@ class TPUWorker:
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
