@@ -1368,7 +1368,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
             full_text_row_masked_out_mask = (
                 attn_metadata.encoder_seq_lens_tensor
                 != 0).reshape(-1, 1).to(input_ids.device)
-            skip_cross_attention = max(attn_metadata.encoder_seq_lens) == 0
+            skip_cross_attention = attn_metadata.max_encoder_seq_len == 0
 
         # For image-present prefill.
         else:

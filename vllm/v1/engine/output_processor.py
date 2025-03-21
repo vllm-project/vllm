@@ -18,14 +18,10 @@ from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
 
 
 class RequestOutputCollector:
-    """Collects streamed RequestOutputs.
+    """Collects streamed RequestOutputs."""
 
-    The aggregate arg is set depending on whether they
-    are delta or cumulative.
-    """
-
-    def __init__(self, aggregate: bool):
-        self.aggregate = aggregate
+    def __init__(self, output_kind: RequestOutputKind):
+        self.aggregate = output_kind == RequestOutputKind.DELTA
         self.output: Optional[RequestOutput] = None
         self.ready = asyncio.Event()
 

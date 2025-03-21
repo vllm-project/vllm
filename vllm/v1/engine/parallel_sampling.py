@@ -42,14 +42,6 @@ class ParentRequest:
         self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
 
-    @classmethod
-    def from_params(
-        cls,
-        request_id: str,
-        params: SamplingParams,
-    ) -> Optional['ParentRequest']:
-        return cls(request_id, params) if params.n > 1 else None
-
     def _get_child_sampling_params(
         self,
         index: int,
