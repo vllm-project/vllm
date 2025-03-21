@@ -168,8 +168,9 @@ class TPUModelRunner:
         # Used to initialize positions / context_lens / seq_lens
         self.arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
         self.num_tokens_paddings = _get_paddings(
-            16, self.max_num_tokens,
-            self.compilation_config.tpu_bucket_padding_gap)
+            min_token_size=16,
+            max_token_size=self.max_num_tokens,
+            padding_gap=self.compilation_config.tpu_bucket_padding_gap)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
@@ -579,7 +580,6 @@ class TPUModelRunner:
 
         # Prepare inputs
         attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
-        print("logits_indices: ", logits_indices)
         if self.is_multimodal_model:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -930,7 +930,8 @@ def _get_padded_num_reqs_with_upper_limit(x, upper_limit) -> int:
     return min(res, upper_limit)
 
 
-def _get_paddings(min_token_size, max_token_size, padding_gap) -> list[int]:
+def _get_paddings(min_token_size: int, max_token_size: int,
+                  padding_gap: int) -> list[int]:
     """Generate a list of padding size, starting from min_token_size, 
     ending with a number that can cover max_token_size
     first increase the size to twice, 

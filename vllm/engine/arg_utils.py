@@ -231,6 +231,11 @@ class EngineArgs:
         if isinstance(self.compilation_config, (int, dict)):
             self.compilation_config = CompilationConfig.from_cli(
                 str(self.compilation_config))
+        if self.compilation_config is None:
+            self.compilation_config = CompilationConfig()
+        if self.tpu_bucket_padding_gap is not None:
+            self.compilation_config.tpu_bucket_padding_gap = \
+                self.tpu_bucket_padding_gap
 
         # Setup plugins
         from vllm.plugins import load_general_plugins
