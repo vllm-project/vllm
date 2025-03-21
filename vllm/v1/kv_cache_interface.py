@@ -93,7 +93,10 @@ class SlidingWindowSpec(KVCacheSpec):
     def page_size_bytes(self) -> int:
         # Sliding window does not affect the page size, so reuse the one for
         # full attention.
-        return FullAttentionSpec.page_size_bytes(cast(FullAttentionSpec, self))
+        # Skip the type check due to mypy bug
+        # https://github.com/python/mypy/issues/8085
+        return FullAttentionSpec.page_size_bytes.fget(  # type: ignore
+            cast(FullAttentionSpec, self))
 
     def bytes_for_tokens(self, num_tokens: int) -> int:
         num_tokens = min(num_tokens, self.sliding_window)

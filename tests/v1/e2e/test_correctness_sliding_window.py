@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
-from typing import List, Tuple
 
 import pytest
 
@@ -13,7 +12,7 @@ from ...core.block.e2e.test_correctness_sliding_window import (check_answers,
 @dataclass
 class TestConfig:
     sliding_window: int
-    ln_range: Tuple[int, int]
+    ln_range: tuple[int, int]
 
 
 model_config = {
@@ -65,13 +64,13 @@ def test_sliding_window_retrival(monkeypatch, model, batch_size, seed):
                       accept_rate=1.0)
 
 
-def check_length(prompts: List[str], llm: LLM, sliding_window: int):
+def check_length(prompts: list[str], llm: LLM, sliding_window: int):
     """
     Check if the prompt length is valid, i.e., longer than the sliding window 
     size and shorter than the model's max length.
 
     Args:
-        prompts: List of prompts
+        prompts: list of prompts
         llm: LLM object
         sliding_window: Sliding window size
     """
