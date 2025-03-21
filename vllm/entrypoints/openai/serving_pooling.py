@@ -51,6 +51,7 @@ class OpenAIServingPooling(OpenAIServing):
         model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
+        lora_cache_dir: Optional[str] = None,
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -58,6 +59,7 @@ class OpenAIServingPooling(OpenAIServing):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
+                         lora_cache_dir=lora_cache_dir,
                          request_logger=request_logger)
 
         self.chat_template = chat_template
@@ -100,7 +102,7 @@ class OpenAIServingPooling(OpenAIServing):
             (
                 lora_request,
                 prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            ) = await self._maybe_get_adapters(request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 

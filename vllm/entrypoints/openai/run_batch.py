@@ -330,6 +330,7 @@ async def main(args):
         model_config,
         openai_serving_models,
         args.response_role,
+        lora_cache_dir=None,
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
@@ -339,6 +340,7 @@ async def main(args):
         engine,
         model_config,
         openai_serving_models,
+        lora_cache_dir=None,
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
@@ -347,6 +349,7 @@ async def main(args):
         engine,
         model_config,
         openai_serving_models,
+        lora_cache_dir=None,
         request_logger=request_logger,
     ) if model_config.task == "score" else None)
 

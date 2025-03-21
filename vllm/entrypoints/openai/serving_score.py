@@ -39,11 +39,13 @@ class ServingScores(OpenAIServing):
         model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
+        lora_cache_dir: Optional[str] = None,
         request_logger: Optional[RequestLogger],
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
+                         lora_cache_dir=lora_cache_dir,
                          request_logger=request_logger)
 
     async def _embedding_score(
@@ -239,7 +241,7 @@ class ServingScores(OpenAIServing):
         (
             lora_request,
             prompt_adapter_request,
-        ) = self._maybe_get_adapters(request)
+        ) = await self._maybe_get_adapters(request)
 
         if prompt_adapter_request is not None:
             raise NotImplementedError("Prompt adapter is not supported "
