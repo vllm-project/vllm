@@ -173,7 +173,6 @@ class Processor:
         # 3. Apply prompt adapter to prompt token ids if one exists.
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
-            request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             return_mm_hashes=self.use_hash,
