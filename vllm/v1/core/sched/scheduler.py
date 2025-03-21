@@ -433,6 +433,18 @@ class Scheduler(SchedulerInterface):
             grammar_bitmask=grammar_bitmask,
         )
 
+        # Advance the number of computed tokens for the request AFTER
+        # the request is scheduled.
+        # 1. The scheduler_output of the current step has to include the
+        #    original number of scheduled tokens to determine input IDs.
+        # 2. Advance the number of computed tokens here allowing us to
+        #    schedule the prefill request again immediately in the next
+        #    scheduling step.
+        # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
+        #    computed tokens will be adjusted in update_from_output.
+        for req_id, num_scheduled_token in num_scheduled_tokens.items():
+            self.requests[req_id].num_computed_tokens += num_scheduled_token
+
         self.finished_req_ids = set()
         return scheduler_output
 
@@ -561,28 +573,18 @@ class Scheduler(SchedulerInterface):
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
-            if req_id not in scheduler_output.scheduled_spec_decode_tokens:
-                # When the request's num_computed_tokens catches up
-                # its num_tokens, the request generates output tokens.
-                # Otherwise, we ignore the sampler output for the request.
-                request.num_computed_tokens += num_tokens_scheduled
-                assert request.num_computed_tokens <= request.num_tokens
-            else:
-                # num_computed_tokens_step represents the number of tokens
+            if req_id in scheduler_output.scheduled_spec_decode_tokens:
+                # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
-                # tokens and rejections.
-                # It is calculated as:
-                # num_computed_tokens_step = num_scheduled_tokens -
-                #                            num_tokens_rejected,
-                # where num_tokens_rejected is given by:
+                # tokens and rejections. If some tokens are rejected,
+                # num_computed_tokens is decreased by the number of rejected
+                # tokens, where is given by:
                 # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
                 scheduled_spec_token_ids = (
                     scheduler_output.scheduled_spec_decode_tokens[req_id])
-
-                num_computed_tokens_step = num_scheduled_tokens[req_id] - (
-                    len(scheduled_spec_token_ids) + 1 -
-                    len(generated_token_ids))
-                request.num_computed_tokens += num_computed_tokens_step
+                num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
+                                       len(generated_token_ids))
+                request.num_computed_tokens -= num_tokens_rejected
 
             cached_encoder_input_ids = (
                 self.encoder_cache_manager.get_cached_input_ids(request))
