@@ -1328,6 +1328,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         # We attempt to do this offline in Fp8MoEMethod, in which case these
         # calls will be nops.  Otherwise, they'll be performed every time the
         # layer is executed.
+        print(f"SHAPES {w1_scale.shape}, {w2_scale.shape}")
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 
@@ -1451,19 +1452,20 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
 
+        # is this correct in the loop? TODO: fold in moe_sum?
         if use_dg and not skip_dg:
-            assert inv_perm is not None
-            M = curr_topk_weights.shape[0]
-            out_C = intermediate_cache3[inv_perm, ...]
-            out_C = out_C[:(M * top_k_num), ...]
-            out_C = out_C.view(-1, top_k_num, w2.shape[1])
-            out_C.mul_(curr_topk_weights.view(M, -1, 1))
-            tmp_cache3 = out_C
+            _moe_unpermute(out_hidden_states[begin_chunk_idx:end_chunk_idx],
+                           intermediate_cache3,
+                           inv_perm,
+                           expert_ids,
+                           top_k_num,
+                           global_num_experts,
+                           w2.shape[1],
+                           curr_topk_weights,
+                           curr_topk_ids)
         else:
-            tmp_cache3 = intermediate_cache3.view(*intermediate_cache3.shape)
-
-        ops.moe_sum(tmp_cache3,
-                    out_hidden_states[begin_chunk_idx:end_chunk_idx])
+            ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                        out_hidden_states[begin_chunk_idx:end_chunk_idx])
 
     return out_hidden_states
 
