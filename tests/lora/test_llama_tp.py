@@ -93,6 +93,24 @@ def test_llama_lora(sql_lora_files):
     generate_and_test(llm, sql_lora_files)
 
 
+@create_new_process_for_each_test()
+def test_llama_lora_num_seqs(sql_lora_files):
+    """
+    Test case where max_num_seqs is in between cudagraph capture sizes.
+    """
+    enforce_eager = False
+    max_num_seqs = 13
+
+    llm = vllm.LLM(MODEL_PATH,
+                   enable_lora=True,
+                   enforce_eager=enforce_eager,
+                   max_num_seqs=max_num_seqs,
+                   max_loras=4,
+                   tensor_parallel_size=1,
+                   enable_chunked_prefill=True)
+    generate_and_test(llm, sql_lora_files)
+
+
 # Skipping for v1 as v1 doesn't have a good way to expose the num_gpu_blocks
 # used by the engine yet.
 @pytest.mark.skip_v1
