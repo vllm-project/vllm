@@ -715,3 +715,49 @@ class VisionArenaDataset(HuggingFaceDataset):
                 ))
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# Instruct Coder Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class InstructCoderDataset(HuggingFaceDataset):
+    """
+    InstructCoder Dataset.
+    https://huggingface.co/datasets/likaixin/InstructCoder
+    """
+
+    DEFAULT_OUTPUT_LEN = 1000
+    DEFAULT_NUM_REQUESTS = 1000
+    INSTRUCT_CODER_DATASET_PATH = "likaixin/InstructCoder"
+
+    def load_data(self) -> None:
+        dataset = load_dataset(
+            self.INSTRUCT_CODER_DATASET_PATH,
+            split="train",
+            streaming=True,
+        )
+        self.data = dataset.shuffle(seed=self.random_seed)
+
+    def sample(self,
+               tokenizer: PreTrainedTokenizerBase,
+               num_requests: int,
+               output_len: Optional[int] = None,
+               enable_multimodal_chat: bool = False,
+               **kwargs) -> list:
+        output_len = (output_len
+                      if output_len is not None else self.DEFAULT_OUTPUT_LEN)
+        sampled_requests = []
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = f"{item['instruction']}:\n{item['input']}"
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                ))
+        return sampled_requests

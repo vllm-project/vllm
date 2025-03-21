@@ -13,7 +13,7 @@ import torch
 import uvloop
 from benchmark_dataset import (BurstGPTDataset, HuggingFaceDataset,
                                RandomDataset, SampleRequest, ShareGPTDataset,
-                               SonnetDataset, VisionArenaDataset)
+                               SonnetDataset, VisionArenaDataset, InstructCoderDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -300,7 +300,8 @@ def get_requests(args, tokenizer):
         "input_len": args.input_len,
         "output_len": args.output_len,
     }
-    if args.dataset_path is None or args.dataset_name == "random":
+
+    if args.dataset_name == "random":
         sample_kwargs["range_ratio"] = args.random_range_ratio
         sample_kwargs["prefix_len"] = args.prefix_len
         dataset_cls = RandomDataset
@@ -328,6 +329,10 @@ def get_requests(args, tokenizer):
         common_kwargs['dataset_subset'] = args.hf_subset
         common_kwargs['dataset_split'] = args.hf_split
         sample_kwargs["enable_multimodal_chat"] = True
+    elif args.dataset_name == "instructcoder":
+        dataset_cls = InstructCoderDataset
+        common_kwargs['dataset_subset'] = args.hf_subset
+        common_kwargs['dataset_split'] = args.hf_split
 
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
@@ -447,11 +452,12 @@ def validate_args(args):
 
     # === Dataset Configuration ===
     if not args.dataset and not args.dataset_path:
-        print(
-            "When dataset path is not set, it will default to random dataset")
-        args.dataset_name = 'random'
-        if args.input_len is None:
-            raise ValueError("input_len must be provided for a random dataset")
+        if not args.dataset_name:
+            print(
+                "When dataset name is not set, it will default to random dataset")
+            args.dataset_name = 'random'
+            if args.input_len is None:
+                raise ValueError("input_len must be provided for a random dataset")
 
     # === Dataset Name Specific Checks ===
     # --hf-subset and --hf-split: only used
@@ -515,7 +521,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset-name",
         type=str,
-        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
+        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf", "instructcoder"],
         help="Name of the dataset to benchmark on.",
         default="sharegpt")
     parser.add_argument(
