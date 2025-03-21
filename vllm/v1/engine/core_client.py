@@ -370,8 +370,8 @@ class SyncMPClient(MPClient):
                         # shutdown signal, exit thread.
                         break
 
-                    (frame, ) = out_socket.recv_multipart(copy=False)
-                    outputs = decoder.decode(frame.buffer)
+                    frames = out_socket.recv_multipart(copy=False)
+                    outputs = decoder.decode(frames)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
                                                 utility_results)
@@ -395,7 +395,7 @@ class SyncMPClient(MPClient):
                     request: Any) -> None:
 
         # (RequestType, SerializedRequest)
-        msg = (request_type.value, self.encoder.encode(request))
+        msg = (request_type.value, *self.encoder.encode(request))
         self.input_socket.send_multipart(msg, copy=False)
 
     def _call_utility(self, method: str, *args) -> Any:
@@ -478,8 +478,8 @@ class AsyncMPClient(MPClient):
 
         async def process_outputs_socket():
             while True:
-                (frame, ) = await output_socket.recv_multipart(copy=False)
-                outputs: EngineCoreOutputs = decoder.decode(frame.buffer)
+                frames = await output_socket.recv_multipart(copy=False)
+                outputs: EngineCoreOutputs = decoder.decode(frames)
                 if outputs.utility_output:
                     _process_utility_output(outputs.utility_output,
                                             utility_results)
@@ -498,7 +498,7 @@ class AsyncMPClient(MPClient):
     async def _send_input(self, request_type: EngineCoreRequestType,
                           request: Any) -> None:
 
-        msg = (request_type.value, self.encoder.encode(request))
+        msg = (request_type.value, *self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)
 
         if self.outputs_queue is None:

@@ -419,14 +419,14 @@ class EngineCoreProc(EngineCore):
         with zmq_socket_ctx(input_path, zmq.constants.PULL) as socket:
             while True:
                 # (RequestType, RequestData)
-                type_frame, data_frame = socket.recv_multipart(copy=False)
+                type_frame, *data_frames = socket.recv_multipart(copy=False)
                 request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                 # Deserialize the request data.
                 decoder = add_request_decoder if (
                     request_type
                     == EngineCoreRequestType.ADD) else generic_decoder
-                request = decoder.decode(data_frame.buffer)
+                request = decoder.decode(data_frames)
 
                 # Push to input queue for core busy loop.
                 self.input_queue.put_nowait((request_type, request))
@@ -442,5 +442,5 @@ class EngineCoreProc(EngineCore):
         with zmq_socket_ctx(output_path, zmq.constants.PUSH) as socket:
             while True:
                 outputs = self.output_queue.get()
-                encoder.encode_into(outputs, buffer)
-                socket.send_multipart((buffer, ), copy=False)
+                buffers = encoder.encode_into(outputs, buffer)
+                socket.send_multipart(buffers, copy=False)
