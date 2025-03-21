@@ -351,7 +351,6 @@ class TransformersModel(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             inputs_embeds=inputs_embeds,
             use_cache=False,
             position_ids=positions[None, ...],
-            intermediate_tensors=intermediate_tensors,
             attention_instances=self.attention_instances,
             return_dict=False)[0][0, ...]  # we remove batch dimension for now
 
