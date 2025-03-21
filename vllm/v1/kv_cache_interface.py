@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
-from typing import Dict, List
 
 import torch
 
@@ -24,9 +23,9 @@ class KVCacheSpec:
     def type_id(self) -> str:
         """
         The type identifier of this KV cache.
-        Return different strings for layers with different KV cache type (e.g., 
-        different number of tokens like full attention vs sliding window 
-        attention, different KV cache size per token like layers with different 
+        Return different strings for layers with different KV cache type (e.g.,
+        different number of tokens like full attention vs sliding window
+        attention, different KV cache size per token like layers with different
         number of heads)
 
         Returns:
@@ -60,6 +59,7 @@ class FullAttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
+    use_mla: bool
 
     @property
     def type_id(self) -> str:
@@ -67,7 +67,9 @@ class FullAttentionSpec(KVCacheSpec):
 
     @property
     def page_size_bytes(self) -> int:
-        return  2 * self.block_size * self.num_kv_heads * self.head_size \
+        # For MLA we only store a single latent vector
+        coef = 1 if self.use_mla else 2
+        return coef * self.block_size * self.num_kv_heads * self.head_size \
                 * get_dtype_size(self.dtype)
 
     def bytes_for_tokens(self, num_tokens: int) -> int:
@@ -80,6 +82,7 @@ class SlidingWindowSpec(KVCacheSpec):
     head_size: int
     dtype: torch.dtype
     sliding_window: int
+    use_mla: bool
 
     @property
     def type_id(self) -> str:
@@ -87,7 +90,9 @@ class SlidingWindowSpec(KVCacheSpec):
 
     @property
     def page_size_bytes(self) -> int:
-        return  2 * self.block_size * self.num_kv_heads * self.head_size \
+        # For MLA we only store a single latent vector
+        coef = 1 if self.use_mla else 2
+        return coef * self.block_size * self.num_kv_heads * self.head_size \
                 * get_dtype_size(self.dtype)
 
     def bytes_for_tokens(self, num_tokens: int) -> int:
@@ -106,14 +111,14 @@ class KVCacheTensor:
 
 
 @dataclass
-class VirtualLayer:
+class KVCacheGroupSpec:
     """
-    A dataclass for specifying a virtual layer, which represents multiple layers
-    that can share the same block_table.
+    Represents a group of model layers that share the same KV cache block table.
+    These layers are regarded as one layer in the KV cache manager.
     """
-    # The names of layers represented by this virtual layer
-    layer_names: List[str]
-    # The KV cache spec of this virtual layer
+    # The names of model layers in this group
+    layer_names: list[str]
+    # The KV cache spec of this manager layer
     kv_cache_spec: KVCacheSpec
 
 
@@ -125,22 +130,26 @@ class KVCacheConfig:
     """The number of KV cache blocks"""
     num_blocks: int
     """layer_name -> how to initialize KV cache for that layer"""
-    tensors: Dict[str, KVCacheTensor]
+    tensors: dict[str, KVCacheTensor]
     """
-    The virtual_layers of the model.
+    The kv cache groups of the model.
     The layers in the models are repeated with some patterns, e.g., a model
     with 10 full attention layers and 20 sliding window attention layers can be
-    regarded as repeating the pattern (1 * full, 2 * sw) 10 times. And we regard
-    this pattern as virtual layers (3 virtual layers in this case, each
-    representing 10 layers).
-    The KVCacheManager allocates the blocks for each virtual layer, and the
-    model runner applies the block table of the virtual layer to all layers 
-    represented by it.
+    regarded as repeating the pattern (1 * full, 2 * sw) 10 times. 
+    The KVCacheManager allocates different block tables for each of the 3 layers
+    in the pattern, and repeats each of them 10 times to generate the 
+    block_table for the 30 layers in the model.
+    Therefore, we can group the layers in the model into 3 groups, each of which
+    contains 10 layers in the model.
+    The KVCacheManager allocates the block_table for each group based on its
+    kv_cache spec, and the model runner applies the block table to each layer 
+    in the group.
     For example:
-    1. A model only uses full attention. There is only one virtual layer, 
-    and the block table is shared by all layers.
+    1. A model only uses full attention. The pattern is 
+    (num_hidden_layers * full), so there is only one group and the block table 
+    is shared by all layers.
     2. (WIP) A model with 10 full attention layers and 20 sliding window 
-    attention. There are 3 virtual layers (1 * full, 2 * sw), and the block 
-    table of each virtual layer is shared by 10 layers of the same type.
+    attention layers. There are 3 layers in the pattern (1 * full, 2 * sw), so 
+    there are 3 groups, each of which represents 10 layers in the model.
     """
-    virtual_layers: List[VirtualLayer]
+    kv_cache_groups: list[KVCacheGroupSpec]

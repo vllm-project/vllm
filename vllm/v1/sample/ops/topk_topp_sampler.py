@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Dict, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -22,9 +22,26 @@ class TopKTopPSampler(nn.Module):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda:
+        if current_platform.is_cuda():
             if is_flashinfer_available:
-                if envs.VLLM_USE_FLASHINFER_SAMPLER is not False:
+                flashinfer_version = flashinfer.__version__
+                if flashinfer_version >= "0.2.3":
+                    # FIXME(DefTruth): Currently, we have errors when using
+                    # FlashInfer>=v0.2.3 for top-p & top-k sampling. As a
+                    # workaround, we disable FlashInfer for top-p & top-k
+                    # sampling by default while FlashInfer>=v0.2.3.
+                    # The sampling API removes the success return value
+                    # of all sampling API, which is not compatible with
+                    # earlier design.
+                    # https://github.com/flashinfer-ai/flashinfer/releases/
+                    # tag/v0.2.3
+                    logger.info(
+                        "Currently, FlashInfer top-p & top-k sampling sampler "
+                        "is disabled because FlashInfer>=v0.2.3 is not "
+                        "backward compatible. Falling back to the PyTorch-"
+                        "native implementation of top-p & top-k sampling.")
+                    self.forward = self.forward_native
+                elif envs.VLLM_USE_FLASHINFER_SAMPLER is not False:
                     # NOTE(woosuk): The V0 sampler doesn't use FlashInfer for
                     # sampling unless VLLM_USE_FLASHINFER_SAMPLER=1 (i.e., by
                     # default it is unused). For backward compatibility, we set
@@ -48,13 +65,22 @@ class TopKTopPSampler(nn.Module):
                     "native implementation of top-p & top-k sampling. For the "
                     "best performance, please install FlashInfer.")
                 self.forward = self.forward_native
+        elif current_platform.is_tpu():
+            if envs.VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION:
+                logger.warning(
+                    "TPU-specific optimization for top-k & top-p sampling are "
+                    "disabled, falling back to PyTorch-native implementation "
+                    "which could be very slow.")
+                self.forward = self.forward_native
+            else:
+                self.forward = self.forward_tpu
         else:
             self.forward = self.forward_native
 
     def forward_native(
         self,
         logits: torch.Tensor,
-        generators: Dict[int, torch.Generator],
+        generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
     ) -> torch.Tensor:
@@ -66,7 +92,7 @@ class TopKTopPSampler(nn.Module):
     def forward_cuda(
         self,
         logits: torch.Tensor,
-        generators: Dict[int, torch.Generator],
+        generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
     ) -> torch.Tensor:
@@ -78,6 +104,29 @@ class TopKTopPSampler(nn.Module):
             # CPU-GPU synchronization while `flashinfer_sample` does.
             return random_sample(probs, generators)
         return flashinfer_sample(probs, k, p, generators)
+
+    def forward_tpu(
+        self,
+        logits: torch.Tensor,
+        generators: dict[int, torch.Generator],
+        k: Optional[torch.Tensor],
+        p: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        # If only top-k is specified, use pytorch's builtin topk op. This leads
+        # to significant speed up on TPU compared to using apply_top_k_top_p.
+        if k is not None and p is None:
+            topk_values, topk_indices = torch.topk(logits, k, dim=-1)
+
+            mask = torch.ones_like(logits, dtype=torch.bool)
+            mask.scatter_(-1, topk_indices, False)
+            logits.masked_fill_(mask, float('-inf'))
+        else:
+            # TODO Placeholder for TPU optimized topp kernel
+            # logits = apply_top_k_top_p(logits, k, p)
+            pass
+
+        probs = logits.softmax(dim=-1, dtype=torch.float32)
+        return random_sample(probs, generators)
 
 
 def apply_top_k_top_p(
@@ -95,7 +144,7 @@ def apply_top_k_top_p(
 
     if k is not None:
         # Apply top-k.
-        top_k_mask = logits_sort.size(1) - k.to(torch.long)
+        top_k_mask = logits_sort.size(1) - k.to(torch.long)  # shape: B
         # Get all the top_k values.
         top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
         top_k_mask = logits_sort < top_k_mask
@@ -117,7 +166,7 @@ def apply_top_k_top_p(
 
 def random_sample(
     probs: torch.Tensor,
-    generators: Dict[int, torch.Generator],
+    generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
     """Randomly sample from the probabilities.
 
@@ -143,7 +192,7 @@ def flashinfer_sample(
     probs: torch.Tensor,
     k: Optional[torch.Tensor],
     p: Optional[torch.Tensor],
-    generators: Dict[int, torch.Generator],
+    generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
     """Sample from the probabilities using FlashInfer.
 

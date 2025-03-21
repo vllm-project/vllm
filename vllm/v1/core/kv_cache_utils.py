@@ -3,13 +3,13 @@
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec, KVCacheTensor,
-                                        SlidingWindowSpec, VirtualLayer)
+                                        KVCacheGroupSpec, KVCacheSpec,
+                                        KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -26,7 +26,7 @@ class BlockHashType(NamedTuple):
     # Hash value of the block in an integer.
     hash_value: int
     # Token IDs in the block.
-    token_ids: Tuple[int, ...]
+    token_ids: tuple[int, ...]
     # Extra keys for the block.
     extra_keys: Optional[Any] = None
 
@@ -46,7 +46,7 @@ class PrefixCachingMetrics:
         self.aggregated_query_total = 0
         self.aggregated_query_hit = 0
         # A deque of (requests, queries, hits) for the most recent requests.
-        self.query_queue: deque[Tuple[int, int, int]] = deque()
+        self.query_queue: deque[tuple[int, int, int]] = deque()
 
     def observe(self, stats: PrefixCacheStats):
         """Observe the prefix caching for a set of requests.
@@ -166,7 +166,7 @@ class FreeKVCacheBlockQueue:
         blocks: A list of KVCacheBlock objects.
     """
 
-    def __init__(self, blocks: List[KVCacheBlock]) -> None:
+    def __init__(self, blocks: list[KVCacheBlock]) -> None:
         self.num_free_blocks = len(blocks)
 
         # Initialize the doubly linked list of free blocks.
@@ -235,7 +235,7 @@ class FreeKVCacheBlockQueue:
         block.next_free_block = None
         self.num_free_blocks += 1
 
-    def get_all_free_blocks(self) -> List[KVCacheBlock]:
+    def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
         
         Returns:
@@ -266,7 +266,7 @@ def need_extra_keys(request: Request) -> bool:
 
 def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
                             end_token_idx: int,
-                            start_mm_idx: int) -> Tuple[List[Any], int]:
+                            start_mm_idx: int) -> tuple[list[Any], int]:
     """Generate extra keys related to MultiModal request for block hash
     computation. For multi-modal inputs, the extra keys are
     (mm_hash, start_offset) that indicate a mm input contained in the
@@ -281,7 +281,7 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     Returns:
         A tuple of extra keys and the next multi-modal index.
     """
-    extra_keys: List[Any] = []
+    extra_keys: list[Any] = []
 
     mm_positions, mm_hashes = request.mm_positions, request.mm_hashes
     if not mm_positions:
@@ -333,7 +333,7 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> List[int]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
     """Generate extra keys related to LoRA for block hash computation.
     
     Args:
@@ -350,7 +350,7 @@ def _gen_lora_extra_hash_keys(request: Request) -> List[int]:
 
 def generate_block_hash_extra_keys(
         request: Request, start_token_idx: int, end_token_idx: int,
-        start_mm_idx: int) -> Tuple[Optional[Tuple[Any, ...]], int]:
+        start_mm_idx: int) -> tuple[Optional[tuple[Any, ...]], int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs and request specific metadata (e.g., LoRA ID).
     
@@ -363,12 +363,12 @@ def generate_block_hash_extra_keys(
     Returns:
         A tuple of extra keys and the next multi-modal index.
     """
-    mm_extra_keys: List[Any]
+    mm_extra_keys: list[Any]
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx)
-    lora_extra_keys: List[int] = _gen_lora_extra_hash_keys(request)
+    lora_extra_keys: list[int] = _gen_lora_extra_hash_keys(request)
 
-    extra_keys: List[Any] = lora_extra_keys + mm_extra_keys
+    extra_keys: list[Any] = lora_extra_keys + mm_extra_keys
 
     if not extra_keys:
         return None, new_start_mm_idx
@@ -379,7 +379,7 @@ def generate_block_hash_extra_keys(
 def hash_block_tokens(
         parent_block_hash: Optional[int],
         curr_block_token_ids: Sequence[int],
-        extra_keys: Optional[Tuple[Any, ...]] = None) -> BlockHashType:
+        extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHashType:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
     prefix caching. We use LRU cache for this function to avoid recomputing
@@ -412,7 +412,7 @@ def hash_block_tokens(
 
 
 def hash_request_tokens(block_size: int,
-                        request: Request) -> List[BlockHashType]:
+                        request: Request) -> list[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
@@ -451,7 +451,7 @@ def hash_request_tokens(block_size: int,
 
 
 def check_enough_kv_cache_memory(vllm_config: VllmConfig,
-                                 kv_cache_spec: Dict[str, KVCacheSpec],
+                                 kv_cache_spec: dict[str, KVCacheSpec],
                                  available_memory: int):
     """
     Checks whether `available_memory` is enough for the KV cache to hold at 
@@ -486,37 +486,38 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
             f"`max_model_len` when initializing the engine.")
 
 
-def create_virtual_layer(
-        kv_cache_spec: Dict[str, KVCacheSpec],
-        virtual_layer_map: List[List[str]]) -> List[VirtualLayer]:
+def create_kv_cache_group_specs(
+        kv_cache_spec: dict[str, KVCacheSpec],
+        grouped_layer_names: list[list[str]]) -> list[KVCacheGroupSpec]:
     """
-     Create VirtualLayer object for each virtual layer.
-     The layers represented by the same virtual layer should share the same 
+     Create KVCacheGroupSpec object for each kv cache group layer.
+     The layers in the same group should share the same 
      KVCacheSpec.
 
      Args:
          kv_cache_spec:
              A mapping from each layer name to its corresponding KVCacheSpec.
-         virtual_layer_map:
-             A list of virtual layers, where each element is a list of layer 
-             names that represented by the same virtual layer and should share 
-             the same KVCacheSpec.
+         grouped_layer_names:
+             A list of kv cache groups, where each element is a list of layer 
+             names that belong to the same group and should share the same 
+             KVCacheSpec.
      Returns:
-         A list of VirtualLayer objects, one for each virtual layer.
+         A list of KVCacheGroupSpec objects, one for each group.
      """
-    virtual_layers = []
-    for layer_names in virtual_layer_map:
-        layer_spec = kv_cache_spec[layer_names[0]]
+    kv_cache_groups = []
+    for layer_names_one_group in grouped_layer_names:
+        layer_spec = kv_cache_spec[layer_names_one_group[0]]
         assert all(
             kv_cache_spec[layer_name] == layer_spec
-            for layer_name in layer_names[1:]
-        ), ("All layers represented by one virtual layer must share the same "
-            "KVCacheSpec.")
-        virtual_layers.append(VirtualLayer(layer_names, layer_spec))
-    return virtual_layers
+            for layer_name in layer_names_one_group[1:]), (
+                "All layers in the same KV cache group must share the same "
+                "KVCacheSpec.")
+        kv_cache_groups.append(
+            KVCacheGroupSpec(layer_names_one_group, layer_spec))
+    return kv_cache_groups
 
 
-def is_kv_cache_type_uniform(kv_cache_spec: Dict[str, KVCacheSpec]) -> bool:
+def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     """
     Whether all layers in the given KVCacheSpec have the same type of KV cache.
 
@@ -532,7 +533,7 @@ def is_kv_cache_type_uniform(kv_cache_spec: Dict[str, KVCacheSpec]) -> bool:
 
 
 def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
-                                      kv_cache_spec: Dict[str, KVCacheSpec],
+                                      kv_cache_spec: dict[str, KVCacheSpec],
                                       available_memory: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model with one type of KV cache.
@@ -571,8 +572,9 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
                 max_model_len_str, max_concurrency)
 
     per_layer_size = page_size * num_blocks
-    # All layers can be represented by the same virtual layer.
-    virtual_layer_map = [[layer_name for layer_name in kv_cache_spec]]
+    # All layers have the same KV cache spec, so we create one kv cache group
+    # for all layers.
+    grouped_layer_names = [list(kv_cache_spec.keys())]
 
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
@@ -580,12 +582,13 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
             layer_name: KVCacheTensor(size=per_layer_size)
             for layer_name in kv_cache_spec
         },
-        virtual_layers=create_virtual_layer(kv_cache_spec, virtual_layer_map),
+        kv_cache_groups=create_kv_cache_group_specs(kv_cache_spec,
+                                                    grouped_layer_names),
     )
     return kv_cache_config
 
 
-def make_uniform_kv_cache_type(kv_cache_spec: Dict[str, KVCacheSpec]):
+def make_uniform_kv_cache_type(kv_cache_spec: dict[str, KVCacheSpec]):
     """
     As hybrid models with more than one type of KV cache are not supported yet,
     this function tries it best to make the KV cache type uniform. It will
@@ -608,11 +611,12 @@ def make_uniform_kv_cache_type(kv_cache_spec: Dict[str, KVCacheSpec]):
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
                     dtype=spec.dtype,
+                    use_mla=spec.use_mla,
                 )
 
 
 def get_kv_cache_config(vllm_config: VllmConfig,
-                        kv_cache_spec: Dict[str, KVCacheSpec],
+                        kv_cache_spec: dict[str, KVCacheSpec],
                         available_memory: int) -> KVCacheConfig:
     """
     Generates the KV cache configuration for a model
@@ -638,11 +642,11 @@ def get_kv_cache_config(vllm_config: VllmConfig,
     raise NotImplementedError
 
 
-def make_kv_cache_configs_consistent(kv_cache_configs: List[KVCacheConfig]):
+def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
     """
     Make the KV cache configurations for each worker consistent, so that all 
     workers can be controlled by the same KVCacheManager.
-    This function verifies that the virtual layers of each worker are the same,
+    This function verifies that the layer group of each worker are the same,
     and changes the num_blocks of each worker to the smallest among all workers.
     
     Args:
@@ -650,26 +654,26 @@ def make_kv_cache_configs_consistent(kv_cache_configs: List[KVCacheConfig]):
             in-place modified to make them consistent.
     """
 
-    # Sort the virtual layers by the type_id of the KV cache spec.
-    # This can avoid the inconsistency caused by the order of virtual layers.
+    # Sort the kv cache groups by the type_id of their KV cache spec.
+    # This can avoid the inconsistency caused by the order of groups.
     for kv_cache_config in kv_cache_configs:
-        kv_cache_config.virtual_layers.sort(
+        kv_cache_config.kv_cache_groups.sort(
             key=lambda x: x.kv_cache_spec.type_id)
 
-    # Verify that the virtual layers of each rank are the same.
+    # Verify that the groups of each rank are the same.
     for kv_cache_config in kv_cache_configs[1:]:
-        for virtual_layer1, virtual_layer2 in zip(
-                kv_cache_configs[0].virtual_layers,
-                kv_cache_config.virtual_layers):
-            assert virtual_layer1.kv_cache_spec == virtual_layer2.kv_cache_spec
+        for group_rank_0, group_rank_i in zip(
+                kv_cache_configs[0].kv_cache_groups,
+                kv_cache_config.kv_cache_groups):
+            assert group_rank_0.kv_cache_spec == group_rank_i.kv_cache_spec
 
     # Change the num_blocks of each rank to the smallest among all ranks. We
     # do not need to shrink the tensor size because it is valid to only use the
     # first `num_blocks` blocks of the tensor.
-    num_blocks = min(kv_cache_config.num_blocks
-                     for kv_cache_config in kv_cache_configs)
+    min_num_blocks = min(kv_cache_config.num_blocks
+                         for kv_cache_config in kv_cache_configs)
     for kv_cache_config in kv_cache_configs:
-        kv_cache_config.num_blocks = num_blocks
+        kv_cache_config.num_blocks = min_num_blocks
 
     return kv_cache_configs
 

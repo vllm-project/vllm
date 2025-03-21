@@ -3,8 +3,8 @@
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import (Final, List, Literal, Optional, Protocol, Set, Tuple,
-                    TypedDict, TypeVar, Union)
+from typing import (Final, Literal, Optional, Protocol, Set, Tuple, TypedDict,
+                    TypeVar, Union, cast)
 
 import torch
 import torch.nn as nn
@@ -18,6 +18,7 @@ from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.inputs import InputProcessingContext
+from vllm.jsontree import json_map_leaves
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -26,8 +27,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, MultiModalKwargs,
-                                    NestedTensors)
+                                    MultiModalInputs, MultiModalKwargs)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -35,26 +35,49 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
+from vllm.utils import flatten_2d_lists
 
 from .clip import CLIPVisionModel
-from .interfaces import SupportsMultiModal, SupportsPP
-from .pixtral import (PixtralHFVisionModel,
-                      get_pixtral_hf_image_feature_grid_size)
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
-from .vision import get_vision_encoder_info
+from .vision import (get_vision_encoder_info, scatter_patch_features,
+                     select_patch_features)
 
 
 class LlavaImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
+    pixel_values: torch.Tensor
     """
     Shape: `(batch_size * num_images, num_channels, height, width)`
 
     Note that `height` or `width` may be different per batch and image,
     in which case the data is passed as a list instead of a batched tensor.
     """
+
+
+class PixtralHFImagePixelInputs(TypedDict):
+    type: Literal["pixel_values_pixtral"]
+    pixel_values: Union[torch.Tensor, list[torch.Tensor]]
+    """
+    Shape: `(batch_size * num_images, num_channels, height, width)`
+
+    Note that `height` or `width` may be different per batch and image,
+    in which case the data is passed as a list instead of a batched tensor.
+    """
+
+    embed_is_patch: Union[torch.Tensor, list[torch.Tensor]]
+    """
+    A boolean mask indicating which image embeddings correspond
+    to patch tokens.
+    
+    Shape: `(batch_size, num_images, num_embeds)`
+    """
+
+    num_embeds: Union[torch.Tensor, list[torch.Tensor]]
+    """Shape: `(batch_size, num_images)`"""
 
 
 class LlavaImageEmbeddingInputs(TypedDict):
@@ -66,7 +89,8 @@ class LlavaImageEmbeddingInputs(TypedDict):
     """
 
 
-LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageEmbeddingInputs]
+LlavaImageInputs = Union[LlavaImagePixelInputs, PixtralHFImagePixelInputs,
+                         LlavaImageEmbeddingInputs]
 
 
 class LlavaMultiModalProjector(nn.Module):
@@ -317,6 +341,28 @@ class PixtralHFMultiModalProcessor(
                     for p, (h, w) in zip(pixel_values, image_sizes)
                 ]
 
+            hf_config = self.info.get_hf_config()
+            vision_config = hf_config.vision_config
+            assert isinstance(vision_config, PixtralVisionConfig)
+            encoder_info = PixtralHFEncoderInfo(vision_config)
+
+            tile_sizes = [
+                encoder_info.get_patch_grid_size(
+                    image_width=pixel_value.shape[-1],
+                    image_height=pixel_value.shape[-2],
+                ) for pixel_value in processed_outputs["pixel_values"]
+            ]
+            num_embeds = torch.tensor([(ncols + 1) * nrows
+                                       for ncols, nrows in tile_sizes])
+            # Each image may result to masks of different sizes, so we need to
+            # later use `num_embeds` to get per-image masks.
+            embed_is_patch = [
+                torch.tensor(([True] * ncols + [False]) * nrows)
+                for ncols, nrows in tile_sizes
+            ]
+            processed_outputs["num_embeds"] = num_embeds
+            processed_outputs["embed_is_patch"] = embed_is_patch
+
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -326,6 +372,8 @@ class PixtralHFMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
+            num_embeds=MultiModalFieldConfig.batched("image"),
+            embed_is_patch=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
@@ -346,13 +394,13 @@ class PixtralHFMultiModalProcessor(
 
         vision_config = hf_config.vision_config
         assert isinstance(vision_config, PixtralVisionConfig)
+        encoder_info = PixtralHFEncoderInfo(vision_config)
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
-            ncols, nrows = get_pixtral_hf_image_feature_grid_size(
-                vision_config,
+            ncols, nrows = encoder_info.get_patch_grid_size(
                 image_width=image_size.width,
                 image_height=image_size.height,
             )
@@ -447,7 +495,7 @@ def init_vision_tower_for_llava(
     *,
     require_post_norm: Optional[bool] = None,
     prefix: str = "",
-):
+) -> Union[CLIPVisionModel, SiglipVisionModel, PixtralHFVisionModel]:
     vision_config = hf_config.vision_config
 
     # Initialize the vision tower only up to the deepest required feature layer
@@ -568,14 +616,26 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                                  f"Got type: {type(pixel_values)}")
 
             if self.config.vision_config.model_type == "pixtral":
-                return LlavaImagePixelInputs(
-                    type="pixel_values",
-                    data=flatten_bn(pixel_values),
+                embed_is_patch = kwargs.pop("embed_is_patch")
+                if not isinstance(embed_is_patch, (torch.Tensor, list)):
+                    raise ValueError("Incorrect type of embed_is_patch. "
+                                     f"Got type: {type(embed_is_patch)}")
+
+                num_embeds = kwargs.pop("num_embeds")
+                if not isinstance(num_embeds, (torch.Tensor, list)):
+                    raise ValueError("Incorrect type of num_embeds. "
+                                     f"Got type: {type(num_embeds)}")
+
+                return PixtralHFImagePixelInputs(
+                    type="pixel_values_pixtral",
+                    pixel_values=flatten_bn(pixel_values),
+                    embed_is_patch=embed_is_patch,
+                    num_embeds=num_embeds,
                 )
 
             return LlavaImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(
+                pixel_values=self._validate_pixel_values(
                     flatten_bn(pixel_values, concat=True)),
             )
 
@@ -583,6 +643,9 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             if not isinstance(image_embeds, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
+
+            if self.config.vision_config.model_type == "pixtral":
+                raise ValueError("Pixtral-HF does not support image_embeds.")
 
             return LlavaImageEmbeddingInputs(
                 type="image_embeds",
@@ -605,53 +668,87 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel,
                             PixtralHFVisionModel],
-        pixel_values: torch.Tensor,
-    ) -> torch.Tensor:
-
+        pixel_values: Union[torch.Tensor, list[torch.Tensor]],
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         image_features = vision_tower(pixel_values)
 
-        return self._select_image_features(
-            image_features,
-            strategy=self.config.vision_feature_select_strategy,
+        def select_features(leaf: torch.Tensor):
+            return self._select_image_features(
+                leaf,
+                strategy=self.config.vision_feature_select_strategy,
+            )
+
+        return cast(
+            Union[torch.Tensor, tuple[torch.Tensor, ...]],
+            json_map_leaves(select_features, image_features),
         )
 
-    def _process_image_pixels(self,
-                              inputs: LlavaImagePixelInputs) -> torch.Tensor:
+    def _process_image_pixels(
+        self,
+        inputs: Union[LlavaImagePixelInputs, PixtralHFImagePixelInputs],
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         assert self.vision_tower is not None
 
-        pixel_values = inputs["data"]
+        pixel_values = inputs["pixel_values"]
 
         return self._image_pixels_to_features(self.vision_tower, pixel_values)
 
-    def _process_image_input(self,
-                             image_input: LlavaImageInputs) -> torch.Tensor:
-
+    def _process_image_input(
+        self,
+        image_input: LlavaImageInputs,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
         assert self.vision_tower is not None
         image_features = self._process_image_pixels(image_input)
-        return self.multi_modal_projector(image_features)
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
+        if isinstance(image_features, torch.Tensor):
+            return self.multi_modal_projector(image_features)
+
+        feature_sizes = [
+            image_feature.shape[0] for image_feature in image_features
+        ]
+
+        image_embeds = self.multi_modal_projector(torch.cat(image_features))
+        image_embeds = torch.split(image_embeds, feature_sizes)
+        return image_embeds
+
+    def get_multimodal_embeddings(
+            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
+
         vision_embeddings = self._process_image_input(image_input)
-        return vision_embeddings
+
+        if (kwargs.get("v0_path", False)
+                or image_input["type"] != "pixel_values_pixtral"):
+            # The path is used for pixtral (V0 only) and llava (V0/V1)
+            return vision_embeddings
+
+        return flatten_2d_lists(
+            scatter_patch_features(*args) for args in zip(
+                vision_embeddings,
+                image_input["num_embeds"],
+                image_input["embed_is_patch"],
+            ))
 
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.config.image_token_index)
+                input_ids,
+                inputs_embeds,
+                select_patch_features(multimodal_embeddings),
+                self.config.image_token_index,
+            )
         return inputs_embeds
 
     def forward(
@@ -703,6 +800,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         # NOTE: In v1, inputs_embeds is always generated at model runner, this
         # condition is for v0 compatibility.
         elif inputs_embeds is None:
+            kwargs.update({"v0_path": True})
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
@@ -765,6 +863,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         prompt: Union[str, list[int]],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
@@ -775,7 +874,8 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             image_height=-1,
         )
 
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs)
+        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
+                               return_mm_hashes)
 
         mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()

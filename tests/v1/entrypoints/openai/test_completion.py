@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
-from typing import Dict, List, Optional
+from typing import Optional
 
 import openai  # use the official client for correctness check
 import pytest
@@ -193,7 +193,7 @@ async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
 async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
                                           model_name: str,
                                           prompt_logprobs: Optional[int]):
-    params: Dict = {
+    params: dict = {
         "prompt": ["A robot may not injure another robot", "My name is"],
         "model": model_name,
     }
@@ -237,7 +237,7 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
                                              max_tokens=5,
                                              temperature=0.0,
                                              stream=True)
-    chunks: List[str] = []
+    chunks: list[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         chunks.append(chunk.choices[0].text)
@@ -263,22 +263,24 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
 
     prompt = "What is an LLM?"
     n = 3
-    max_tokens = 5
+    max_tokens = 50  # we want some to finish earlier than others
 
     # High temperature to maximize chance of unique completions.
     completion = await client.completions.create(model=model_name,
                                                  prompt=prompt,
                                                  max_tokens=max_tokens,
                                                  n=n,
-                                                 temperature=0.95,
+                                                 temperature=1.0,
                                                  stream=False,
+                                                 logprobs=0,
                                                  seed=42)
 
     # Assert `n` completions
     num_completions = len(completion.choices)
     assert num_completions == n, (
         f"Num completions {num_completions} but expected {n}.")
-    completion_repeats: Dict[str, int] = {}
+    completion_repeats: dict[str, int] = {}
+    output_token_lengths = set()
     for idx, choice in enumerate(completion.choices):
         # Assert correct completion index & some finish reason.
         assert choice.index == idx, (
@@ -287,6 +289,9 @@ async def test_parallel_no_streaming(client: openai.AsyncOpenAI,
             "None finish_reason is invalid.")
         text = choice.text
         completion_repeats[text] = completion_repeats.get(text, 0) + 1
+        output_token_lengths.add(len(choice.logprobs.tokens))
+    # Assert subrequests finished at different times
+    assert len(output_token_lengths) > 1
     # Assert `n` unique completions
     num_unique = len(completion_repeats)
     if num_unique != n:
@@ -312,16 +317,16 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
 
     prompt = "What is an LLM?"
     n = 3
-    max_tokens = 5
+    max_tokens = 50  # we want some to finish earlier than others
 
     stream = await client.completions.create(model=model_name,
                                              prompt=prompt,
                                              max_tokens=max_tokens,
                                              n=n,
-                                             temperature=0.95,
+                                             temperature=1.0,
                                              stream=True,
                                              seed=42)
-    chunks: List[List[str]] = [[] for i in range(n)]
+    chunks: list[list[str]] = [[] for _ in range(n)]
     finish_reason_count = 0
     async for chunk in stream:
         index = chunk.choices[0].index
@@ -332,15 +337,19 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     # Assert `n` completions with correct finish reasons
     assert finish_reason_count == n, (
         f"Expected {n} completions with valid indices and finish_reason.")
-    completion_repeats: Dict[str, int] = {}
+    completion_repeats: dict[str, int] = {}
+    chunk_lengths = set()
     for chunk in chunks:
         chunk_len = len(chunk)
         # Assert correct number of completion tokens
-        assert chunk_len == max_tokens, (
+        chunk_lengths.add(chunk_len)
+        assert chunk_len <= max_tokens, (
             f"max_tokens={max_tokens} but chunk len is {chunk_len}.")
         text = "".join(chunk)
         completion_repeats[text] = completion_repeats.get(text, 0) + 1
         print(text)
+    # Assert subrequests finished at different times
+    assert len(chunk_lengths) > 1
     # Assert `n` unique completions
     num_unique = len(completion_repeats)
     if num_unique != n:
