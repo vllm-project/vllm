@@ -711,9 +711,10 @@ class FeedForward(nn.Module):
         self.w3 = nn.Linear(args.hidden_size,
                             args.intermediate_size,
                             bias=False)
+        self.act_fn = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        return self.w2(self.act_fn(self.w1(x)) * self.w3(x))
 
 
 class Attention(nn.Module):
