@@ -639,6 +639,7 @@ class Scheduler(SchedulerInterface):
                         stop_reason=request.stop_reason,
                         events=request.take_events()))
             else:
+                # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
 
             self.scheduled_req_ids.remove(request.request_id)

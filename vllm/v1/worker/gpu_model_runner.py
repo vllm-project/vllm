@@ -1215,6 +1215,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     (num_prompt_tokens - 1, num_prompt_logprobs + 1),
                     dtype=torch.int32,
                     device="cpu")
+
                 logprobs_tensors = LogprobsTensors(
                     logprob_token_ids=logprob_token_ids,
                     logprobs=torch.empty_like(logprob_token_ids,
