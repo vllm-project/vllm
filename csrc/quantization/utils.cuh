@@ -3,6 +3,7 @@
 /**
  * Quantization utilities including:
  *   Adjusted maximum values for qtypes.
+ *   Minimum scaling factors for qtypes.
  */
 
 #include <cmath>
