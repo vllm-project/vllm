@@ -605,24 +605,26 @@ class Scheduler(SchedulerInterface):
             new_logprobs = None
             new_token_ids: list[int] = []
 
-            if request.num_computed_tokens >= request.num_tokens:
-                for output_token_id in generated_token_ids:
-                    request.append_output_token_ids(output_token_id)
-                    new_token_ids.append(output_token_id)
+            # Append generated tokens and check for stop. Note that if
+            # a request is still being prefilled, we expect the model runner
+            # to return empty token ids for the request.
+            for output_token_id in generated_token_ids:
+                request.append_output_token_ids(output_token_id)
+                new_token_ids.append(output_token_id)
 
-                    # Check for stop and update request state.
-                    # This must be called before we make the EngineCoreOutput.
-                    stopped = check_stop(request, self.max_model_len)
-                    if stopped:
-                        self._free_request(request)
-                        break
+                # Check for stop and update request state.
+                # This must be called before we make the EngineCoreOutput.
+                stopped = check_stop(request, self.max_model_len)
+                if stopped:
+                    self._free_request(request)
+                    break
 
-                # Extract sample logprobs if needed.
-                if request.sampling_params.logprobs is not None:
-                    assert logprobs is not None
-                    # NOTE: once we support N tokens per step (spec decode),
-                    # the outer lists can be of length > 1.
-                    new_logprobs = logprobs.slice(req_index, req_index + 1)
+            # Extract sample logprobs if needed.
+            if (logprobs is not None
+                    and request.sampling_params.logprobs is not None):
+                # NOTE: once we support N tokens per step (spec decode),
+                # the outer lists can be of length > 1.
+                new_logprobs = logprobs.slice(req_index, req_index + 1)
 
             if new_token_ids and request.use_structured_output:
                 # NOTE: structured_output_request
