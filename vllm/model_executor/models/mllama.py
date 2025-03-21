@@ -1201,51 +1201,28 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def unpack_data(self, image_data: Union[List[List[torch.Tensor]],
-                                            List[torch.Tensor], torch.Tensor]):
+    def unpack_data(self,
+                    image_data: Union[List[List[torch.Tensor]],
+                                      List[torch.Tensor], torch.Tensor],
+                    padding_value=0) -> torch.Tensor:
         if isinstance(image_data, torch.Tensor):
             # torch.Tensor
             return image_data
         elif isinstance(image_data[0], torch.Tensor):
-            bsz = len(image_data)
             # List[torch.Tensor]
-            if image_data[0].ndim == 1:
-                # input: [tensor([6, 6], device='cuda:0'),
-                #         tensor([6], device='cuda:0')]
-                # output: tensor([[6, 6], [6, 0]], device='cuda:0')
-                max_num_elements = max(tensor.numel() for tensor in image_data)
-                output_tensor = torch.zeros(bsz,
-                                            max_num_elements,
-                                            device=image_data[0].device,
-                                            dtype=image_data[0].dtype)
-                for b in range(bsz):
-                    original_data = image_data[b]
-                    num_original = original_data.numel()
-                    output_tensor[b, :num_original] = original_data
-                return output_tensor
-
-            assert image_data[0].ndim == 2
-            # input: [tensor([[1, 1, 1, 1], [1, 1, 1, 1]], device='cuda:0'),
-            #         tensor([[1, 1, 1, 1]], device='cuda:0')]
-            # output:
-            # tensor([[[1, 1, 1, 1],
-            #          [1, 1, 1, 1]],
-            #         [[1, 1, 1, 1],
-            #          [0, 0, 0, 0]]], device='cuda:0')
             bsz = len(image_data)
-            max_num_elements = max(tensor.shape[0] for tensor in image_data)
-            output_tensor = torch.zeros(bsz,
-                                        max_num_elements,
-                                        image_data[0].shape[1],
-                                        device=image_data[0].device,
-                                        dtype=image_data[0].dtype)
-            for b in range(bsz):
-                original_data = image_data[b]
-                num_original = original_data.shape[0]
-                output_tensor[b, :num_original, :] = original_data
+            max_length = max(t.size(0) for t in image_data)
+            trailing_dims = image_data[0].shape[1:]
+            output_tensor = torch.full((bsz, max_length, *trailing_dims),
+                                       padding_value,
+                                       dtype=image_data[0].dtype,
+                                       device=image_data[0].device)
+            for i, t in enumerate(image_data):
+                output_tensor[i, :t.size(0)] = t
             return output_tensor
         else:
-            return image_data
+            # List[List[torch.Tensor]]
+            raise RuntimeError("Image data is not properly batched.")
 
     def unpack_pixel_values(self, pixel_values: Union[List[List[torch.Tensor]],
                                                       List[torch.Tensor],
