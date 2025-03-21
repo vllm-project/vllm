@@ -6,6 +6,7 @@
  */
 
 #include <cmath>
+#include <torch/types.h>
 
 #ifndef USE_ROCM
   #include <c10/util/Float8_e4m3fn.h>
@@ -35,3 +36,17 @@ struct quant_type_max<c10::Float8_e4m3fnuz> {
 template <typename T>
 MAYBE_HOST_DEVICE static constexpr T quant_type_max_v =
     quant_type_max<T>::val();
+
+template <typename T>
+struct min_scaling_factor {
+  C10_DEVICE C10_ALWAYS_INLINE static float val() {
+    return 1.0f / (quant_type_max_v<T> * 512.0f);
+  }
+};
+
+template <>
+struct min_scaling_factor<c10::impl::ScalarTypeToCPPTypeT<torch::kInt8>> {
+  C10_DEVICE C10_ALWAYS_INLINE static float val() {
+    return std::numeric_limits<float>::epsilon();
+  }
+};
