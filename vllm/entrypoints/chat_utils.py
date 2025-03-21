@@ -37,6 +37,7 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
+from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 
 logger = init_logger(__name__)
@@ -403,7 +404,9 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         hf_config = self._model_config.hf_config
         model_type = hf_config.model_type
 
-        if modality in ["image", "image_embeds"]:
+        if modality in ("image", "image_embeds"):
+            if model_type == "chatglm":
+                return "<|begin_of_image|><|endoftext|><|end_of_image|>"
             if model_type == "phi3_v":
                 # Workaround since this token is not defined in the tokenizer
                 return f"<|image_{current_count}|>"
@@ -411,8 +414,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|endoftext10|>"  # 200010 (see vocab.json in hf model)
             if model_type in ("minicpmo", "minicpmv"):
                 return "(<image>./</image>)"
-            if model_type in ("blip-2", "chatglm", "fuyu", "paligemma",
-                              "pixtral"):
+            if model_type in ("blip-2", "fuyu", "paligemma", "pixtral"):
                 # These models do not use image tokens in the prompt
                 return None
             if model_type == "qwen":
@@ -1069,7 +1071,19 @@ def apply_hf_chat_template(
     tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
 ) -> str:
-    if chat_template is None and tokenizer.chat_template is None:
+    if chat_template is None:
+        chat_template = tokenizer.chat_template
+
+    # FIXME: Temporary workaround for
+    # https://huggingface.co/mistral-community/pixtral-12b/discussions/31
+    if chat_template is None:
+        try:
+            processor = cached_get_processor(tokenizer.name_or_path)
+            chat_template = processor.chat_template
+        except Exception:
+            pass
+
+    if chat_template is None:
         raise ValueError(
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "

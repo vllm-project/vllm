@@ -17,7 +17,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               is_quantized_kv_cache)
 # yapf: enable
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.attention.ops.ipex_attn import PagedAttention
+from vllm.attention.ops.ipex_attn import PagedAttention, _use_ipex
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 from vllm.logger import init_logger
 from vllm.utils import make_tensor_with_pad
@@ -431,10 +431,11 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             raise ValueError(
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {supported_head_sizes}.")
-        if is_quantized_kv_cache(kv_cache_dtype):
+
+        if is_quantized_kv_cache(kv_cache_dtype) and not _use_ipex:
             raise NotImplementedError(
-                "Torch SDPA backend does not support FP8 KV cache. "
-                "Please use xFormers backend instead.")
+                "Torch SDPA backend FP8 KV cache requires "
+                "intel_extension_for_pytorch support.")
         self.attn_type = attn_type
 
     def forward(
