@@ -711,17 +711,23 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     assert hf_result == vllm_result
 
 
-@pytest.mark.parametrize("model", [
-    QWEN2VL_MODEL_ID,     # chat_template is of type str.
-    CohereForAI_MODEL_ID, # chat_template is of type dict.
-    ])
+@pytest.mark.parametrize(
+    "model",
+    [
+        QWEN2VL_MODEL_ID,  # chat_template is of type str.
+        CohereForAI_MODEL_ID,  # chat_template is of type dict.
+     ])
 def test_chat_template_hf(model):
     """checks that chat_template is a dict type for HF models."""
 
     def get_conversation():
-        return [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {'role': 'user','content': 'Hello, how are you?'}]
+        return [{
+            "role": "system", 
+            "content": "You are a helpful assistant."
+        }, {
+            'role': 'user',
+            'content': 'Hello, how are you?'
+        }]
     # Build the tokenizer group and grab the underlying tokenizer
     tokenizer_group = TokenizerGroup(
         model,
@@ -735,8 +741,7 @@ def test_chat_template_hf(model):
         conversation=get_conversation(),
         # chat_template is None. use default chat_template.
         chat_template=None,
-        add_generation_prompt=True
-    )
+        add_generation_prompt=True)
 
 
 # yapf: disable
