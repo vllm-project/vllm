@@ -157,8 +157,18 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         self.tokenizer: Tokenizer = tokenizer._tokenizer
 
+        # Find a safe place to start.
+        prompt_suffix = request.prompt_token_ids
+        prompt_len = len(prompt_suffix)
+        if prompt_len > 4:
+            for i in range(4, max(prompt_len + 1, 32)):
+                suffix = request.prompt_token_ids[-i:]
+                if '�' not in self.tokenizer.decode(suffix):
+                    prompt_suffix = suffix
+                    break
+
         # Prime the stream.
-        for tid in request.prompt_token_ids[-4:]:
+        for tid in prompt_suffix:
             self.stream.step(self.tokenizer, tid)
 
         self.spaces_between_special_tokens = (
