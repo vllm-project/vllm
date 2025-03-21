@@ -28,6 +28,7 @@ from .siglip import SiglipEncoderInfo, SiglipVisionModel
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
+from vllm.sequence import IntermediateTensors
 
 
 class AyaVisionImagePixelInputs(TypedDict):
@@ -318,6 +319,8 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
                                                   prefix, "vision_model"))
         self.vocab_size = config.text_config.vocab_size
         self.multi_modal_projector = AyaVisionMultiModalProjector(config)
+        print("$$$$$$$$$")
+        print(vllm_config.model_config.task)
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
@@ -369,7 +372,31 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         return inputs_embeds
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
-                pixel_values: torch.Tensor, **kwargs) -> SamplerOutput:
-        # TODO: Implement this
-        pass
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+       # TODO: Implement this
+        inputs_embeds = None
+        hidden_states = self.language_model.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
+        return hidden_states
+
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        return self.language_model.compute_logits(hidden_states,
+                                                  sampling_metadata)
