@@ -236,6 +236,7 @@ class AttentionLayer(Protocol):
     _k_scale: torch.Tensor
     _v_scale: torch.Tensor
     _k_scale_float: float
+    _v_scale_float: float
     _prob_scale: torch.Tensor
     _fp8_out_scale: torch.Tensor
 
