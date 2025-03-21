@@ -126,7 +126,7 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
     if use_rocm_aiter:
         # this is to ensure that vllm engine
         # has deallocated the memory before running the next
-        # unit tests. On ROCm, the memory might not be
-        # deallocated completely before running the
-        # next test case
+        # unit tests. On ROCm, when using AITER
+        # the memory might not be deallocated completely
+        # before running the next test case
         torch.cuda.synchronize()
