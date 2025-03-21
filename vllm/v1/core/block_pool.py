@@ -27,6 +27,7 @@ class BlockPool:
     """
 
     def __init__(self, num_gpu_blocks: int, enable_caching: bool):
+        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         # All kv-cache blocks.
@@ -236,10 +237,8 @@ class BlockPool:
         """
         for block in ordered_blocks:
             block.decr_ref()
-            if block.ref_cnt == 0:
-                # null_block should not be added to the free list.
-                if block == self._null_block:
-                    continue
+            # null_block should not be added to the free list.
+            if block.ref_cnt == 0 and block != self._null_block:
                 self.free_block_queue.append(block)
 
     def reset_prefix_cache(self) -> bool:
@@ -304,6 +303,4 @@ class BlockPool:
                 "The real null block should be initialized before any other "
                 "blocks are allocated")
             self._null_block = self.free_block_queue.popleft()
-            assert self._null_block.block_id == 0
-        else:
-            assert self._null_block.block_id == 0
+        assert self._null_block.block_id == 0

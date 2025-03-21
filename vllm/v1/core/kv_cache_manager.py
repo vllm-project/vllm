@@ -29,7 +29,7 @@ class KVCacheManager:
     ) -> None:
         assert len(kv_cache_config.kv_cache_groups) == 1, (
             "KVCacheManager does not support hybrid models with more than 1 "
-            "virtual layers")
+            "kv cache group")
         kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
         self.block_size = kv_cache_spec.block_size
         self.num_gpu_blocks = kv_cache_config.num_blocks
@@ -126,7 +126,8 @@ class KVCacheManager:
         if request.sampling_params.prompt_logprobs is None:
             # Check for cache hits
             prefix_length, computed_blocks = \
-                self.specialized_manager.get_possible_cached_prefix(block_hashes)
+                self.specialized_manager.get_possible_cached_prefix(
+                    block_hashes)
             num_computed_tokens = prefix_length[-1].end
             # NOTE(woosuk): Since incomplete blocks are not eligible for
             # sharing, `num_computed_tokens` should always be a multiple of
@@ -139,10 +140,6 @@ class KVCacheManager:
             self.prefix_cache_stats.queries += len(block_hashes)
             self.prefix_cache_stats.hits += len(computed_blocks)
 
-            # NOTE(woosuk): Since incomplete blocks are not eligible for
-            # sharing, `num_computed_tokens` is always a multiple of
-            # `block_size`.
-            num_computed_tokens = len(computed_blocks) * self.block_size
             return computed_blocks, num_computed_tokens
         else:
             # Skip cache hits for prompt logprobs
@@ -342,10 +339,8 @@ class KVCacheManager:
         assert request.status == RequestStatus.RUNNING
         blocks = self.req_to_blocks[request.request_id]
         num_common_blocks = 0
-        null_block_id = self.block_pool.get_null_block().block_id
         for block in blocks:
-            if block.ref_cnt == num_running_requests \
-                    and block.block_id != null_block_id:
+            if block.ref_cnt == num_running_requests:
                 num_common_blocks += 1
             else:
                 break
@@ -363,11 +358,12 @@ class KVCacheManager:
                              num_computed_tokens: int) -> None:
         """
         Frees memory blocks that are not needed. E.g., the blocks that are 
-        outside of the sliding window. The removed blocks will be replaced with
+        outside of the sliding window. The freed blocks will be replaced with
         null blocks in req_blocks.
-        NOTE: Due to the append-only implementation of block_table in model 
-        runner, we don't mark these blocks as removed in model runner. Model 
-        runner is correct as it doesn't access the removed blocks.
+        NOTE: Due to the append-only design of block_table in model 
+        runner, we don't change these blocks into null blocks in model runner.
+        This implementation is correct as model runner doesn't access the 
+        freed blocks.
 
         Args:
             req_blocks: The KV cache blocks of one request.

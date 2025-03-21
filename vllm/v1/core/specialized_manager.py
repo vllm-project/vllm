@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from abc import ABC, abstractmethod
 from itertools import chain
-from typing import Dict, List, Tuple, Type
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
@@ -34,8 +33,8 @@ class SpecializedManager(ABC):
 
     @abstractmethod
     def get_possible_cached_prefix(
-        self, block_hashes: List[BlockHashType]
-    ) -> Tuple[List[PrefixLengthRange], List[KVCacheBlock]]:
+        self, block_hashes: list[BlockHashType]
+    ) -> tuple[list[PrefixLengthRange], list[KVCacheBlock]]:
         """
         Get the possible cached prefixes of a request based on its block hashes.
         If no cached prefixes are found, returns a tuple with a prefix length 
@@ -54,16 +53,14 @@ class SpecializedManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def remove_useless_blocks(self, block_table: List[KVCacheBlock],
-                              num_computed_tokens: int) -> List[KVCacheBlock]:
+    def remove_useless_blocks(self, block_table: list[KVCacheBlock],
+                              num_computed_tokens: int) -> list[KVCacheBlock]:
         """
-        Update the `block_table` in place to remove blocks that are no longer 
-        needed. Replace the removed blocks with null_block and returns the 
-        removed blocks. 
-        The removed blocks should be in the order of the
-        priority to be evicted, where the first block should have the highest
-        priority.
-        
+        Remove the blocks that are no longer needed from `block_table`. The 
+        removed blocks should be replaced by null_blocks. Return the removed 
+        blocks in eviction order, where the first returned block should be 
+        evicted first.
+
         Args:
             block_table: The block table to be updated.
             num_computed_tokens: The number of tokens that have been computed.
@@ -76,9 +73,9 @@ class SpecializedManager(ABC):
 class FullAttentionManager(SpecializedManager):
 
     def get_possible_cached_prefix(
-        self, block_hashes: List[BlockHashType]
-    ) -> Tuple[List[PrefixLengthRange], List[KVCacheBlock]]:
-        computed_blocks: List[KVCacheBlock] = []
+        self, block_hashes: list[BlockHashType]
+    ) -> tuple[list[PrefixLengthRange], list[KVCacheBlock]]:
+        computed_blocks: list[KVCacheBlock] = []
         for block_hash in block_hashes:
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
@@ -91,8 +88,9 @@ class FullAttentionManager(SpecializedManager):
                                   len(computed_blocks) * self.block_size)
                 ], computed_blocks
 
-    def remove_useless_blocks(self, block_table: List[KVCacheBlock],
-                              num_computed_tokens: int) -> List[KVCacheBlock]:
+    def remove_useless_blocks(self, block_table: list[KVCacheBlock],
+                              num_computed_tokens: int) -> list[KVCacheBlock]:
+        # No need to remove blocks for full attention.
         return []
 
 
@@ -106,15 +104,15 @@ class SlidingWindowManager(SpecializedManager):
         self._null_block = block_pool.get_null_block()
 
     def get_possible_cached_prefix(
-        self, block_hashes: List[BlockHashType]
-    ) -> Tuple[List[PrefixLengthRange], List[KVCacheBlock]]:
+        self, block_hashes: list[BlockHashType]
+    ) -> tuple[list[PrefixLengthRange], list[KVCacheBlock]]:
         # TODO: check the hit every num_block_sliding_window blocks, to optimize
         # the time complexity from O(num_block) to
         # O(num_block / num_block_sliding_window) + O(num_computed_block),
         # which is good for low cache hit rate scenarios.
         start = 0
         ranges = []
-        computed_blocks: List[KVCacheBlock] = []
+        computed_blocks: list[KVCacheBlock] = []
 
         dummy_block_hash = BlockHashType(-1, (), -1)
         # Add a dummy block hash to support the case that the last block is
@@ -129,8 +127,8 @@ class SlidingWindowManager(SpecializedManager):
                     # All of them are possible cached prefix.
                     ranges.append(PrefixLengthRange(0, i * self.block_size))
                 elif (i - start) * self.block_size >= self.sliding_window:
-                    # All tokens between [start * block_size,
-                    # i * block_size)] are cached. These tokens except the
+                    # All tokens with index between [start * block_size,
+                    # i * block_size) are cached. These tokens except the
                     # first `self.sliding_window - 1` ones are possible cached
                     # prefix.
                     first_cached_token = start * self.block_size
@@ -146,24 +144,25 @@ class SlidingWindowManager(SpecializedManager):
         computed_blocks = computed_blocks[:-1]  # remove the dummy block
         return ranges, computed_blocks
 
-    def remove_useless_blocks(self, block_table: List[KVCacheBlock],
-                              num_computed_tokens: int) -> List[KVCacheBlock]:
+    def remove_useless_blocks(self, block_table: list[KVCacheBlock],
+                              num_computed_tokens: int) -> list[KVCacheBlock]:
         # Remove the blocks that are no longer be in the sliding window.
         last_useful_token = num_computed_tokens - self.sliding_window
         last_useful_block = last_useful_token // self.block_size
 
-        removed_blocks: List[KVCacheBlock] = []
+        removed_blocks: list[KVCacheBlock] = []
         for i in range(last_useful_block - 1, -1, -1):
             if block_table[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
-                # should also be null blocks.
+                # should also have been set to null blocks by the previous calls
+                # to this function.
                 break
             removed_blocks.append(block_table[i])
             block_table[i] = self._null_block
         return removed_blocks
 
 
-spec_manager_map: Dict[Type[KVCacheSpec], Type[SpecializedManager]] = {
+spec_manager_map: dict[type[KVCacheSpec], type[SpecializedManager]] = {
     FullAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager
 }

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 
@@ -90,14 +91,17 @@ class SlidingWindowSpec(KVCacheSpec):
 
     @property
     def page_size_bytes(self) -> int:
-        # For MLA we only store a single latent vector
-        coef = 1 if self.use_mla else 2
-        return coef * self.block_size * self.num_kv_heads * self.head_size \
-                * get_dtype_size(self.dtype)
+        # Sliding window does not affect the page size, so reuse the one for
+        # full attention.
+        return FullAttentionSpec.page_size_bytes(cast(FullAttentionSpec, self))
 
     def bytes_for_tokens(self, num_tokens: int) -> int:
         num_tokens = min(num_tokens, self.sliding_window)
-        return cdiv(num_tokens, self.block_size) * self.page_size_bytes
+        # +1 here because the sliding window may not start from the beginning
+        # of the block. For example, if the block size is 4 and the sliding
+        # window is 4, we need two blocks [XXCD] [EF] to store the sliding
+        # window [CDEF] of 6 tokens.
+        return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
 
 
 @dataclass

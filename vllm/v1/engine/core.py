@@ -139,23 +139,17 @@ class EngineCore:
         unify_kv_cache_configs(kv_cache_configs)
 
         # All workers have the same kv_cache_config except layer names, so use
-        # an arbitrary one to get the number of blocks.
+        # an arbitrary one to initialize the scheduler.
         assert all([
             cfg.num_blocks == kv_cache_configs[0].num_blocks
             for cfg in kv_cache_configs
         ])
         num_gpu_blocks = kv_cache_configs[0].num_blocks
         num_cpu_blocks = 0
+        scheduler_kv_cache_config = kv_cache_configs[0]
 
         # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
-
-        # All workers have the same kv_cache_config except layer names, so we
-        # can use an arbitrary one to initialize the scheduler.
-        scheduler_kv_cache_config = kv_cache_configs[0]
-        num_gpu_blocks = scheduler_kv_cache_config.num_blocks
-        num_cpu_blocks = 0
-        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
 
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
