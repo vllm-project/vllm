@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
+    VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
@@ -78,6 +79,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
     V_SCALE_CONSTANT: int = 100
     VLLM_SERVER_DEV_MODE: bool = False
@@ -94,6 +96,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
+    VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
 
 
 def get_default_cache_root():
@@ -444,6 +447,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "VLLM_XLA_CACHE_PATH",
             os.path.join(get_default_cache_root(), "vllm", "xla_cache"),
         )),
+
+    # If set, assert on XLA recompilation after each execution step.
+    "VLLM_XLA_CHECK_RECOMPILATION":
+    lambda: bool(int(os.getenv("VLLM_XLA_CHECK_RECOMPILATION", "0"))),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
 
@@ -524,13 +531,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
     lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
+
+    # Divisor for dynamic query scale factor calculation for FP8 KV Cache
+    "Q_SCALE_CONSTANT":
+    lambda: int(os.getenv("Q_SCALE_CONSTANT", "200")),
     # Divisor for dynamic key scale factor calculation for FP8 KV Cache
     "K_SCALE_CONSTANT":
     lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
-
     # Divisor for dynamic value scale factor calculation for FP8 KV Cache
     "V_SCALE_CONSTANT":
     lambda: int(os.getenv("V_SCALE_CONSTANT", "100")),
+
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING":
     lambda: bool(int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))),
@@ -618,6 +629,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # an environment with potentially malicious users.
     "VLLM_V0_USE_OUTLINES_CACHE":
     lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
+
+    # If set, disables TPU-specific optimization for top-k & top-p sampling
+    "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION":
+    lambda: bool(int(os.environ["VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION"]))
+    if "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION" in os.environ else None,
 }
 
 # end-env-vars-definition

@@ -35,7 +35,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import deprecate_kwargs, weak_bind
+from vllm.utils import Device, deprecate_kwargs, weak_bind
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -492,7 +492,6 @@ class _AsyncLLMEngine(LLMEngine):
 
         preprocessed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
-            request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
@@ -1216,8 +1215,9 @@ class AsyncLLMEngine(EngineClient):
     async def stop_profile(self) -> None:
         self.engine.stop_profile()
 
-    async def reset_prefix_cache(self) -> None:
-        self.engine.reset_prefix_cache()
+    async def reset_prefix_cache(self,
+                                 device: Optional[Device] = None) -> None:
+        self.engine.reset_prefix_cache(device)
 
     async def sleep(self, level: int = 1) -> None:
         self.engine.sleep(level)
