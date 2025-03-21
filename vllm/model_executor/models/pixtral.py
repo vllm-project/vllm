@@ -154,10 +154,6 @@ class PixtralProcessorAdapter:
             image_processed = torch.tensor(image_inputs.image)
             image_tokens = torch.tensor(image_inputs.tokens)
 
-            self.logger.debug(f"Image processed shape: {image_processed.shape}")
-            self.logger.debug(f"Image processed sample (first 15x15 pixels, channel 0): {image_processed[0, :15, :15]}")
-            self.logger.debug(f"Image tokens: {image_tokens.shape}, first few: {image_tokens[:28]}")
-
             images_processed.append(image_processed)
             images_tokens.append(image_tokens)
 
@@ -392,14 +388,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-        logger.debug("Pixtral model layout:")
-        import rich
-        from rich.console import Console
-        from rich.pretty import Pretty
-        cons = Console()
-        cons.print("[bold on dark_green] Pixtral model layout")
-        cons.print(Pretty(self))
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[PixtralImagePixelInputs]:
         images = kwargs.pop("images", None)
@@ -582,7 +570,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                     param = vision_encoder_dict[trimmed_name]
                     if trimmed_name.startswith("ln_pre"):
                         logger.debug("loading ln_pre weight now ...")
-                        logger.debug(f"ln_pre weight load sample: {w[:5]}")
                     if "wq.weight" in trimmed_name or "wk.weight" in trimmed_name:
                         n_heads = self.vision_args.num_attention_heads
                         dim1 = param.shape[0]  # num_heads * head_dim
@@ -612,7 +599,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                 else:
                     # LLM weights: yield them to be loaded
                     # by language_model.load_weights
-                    # self.logger.debug(f"Yielding weight {name}; shape {w.shape}")
                     yield (name, w)
 
         # Now we call the language model load with the generator
@@ -866,12 +852,9 @@ class VisionTransformer(nn.Module):
                 all tokens of all images of shape (N_toks, D)
         """
         # pass images through initial convolution independently
-        logger.debug(f"patch_conv weights sample (first filter, channel 0): {self.patch_conv.weight[0, 0, :5, :5]}")
         patch_embeds_list = [
             self.patch_conv(img.unsqueeze(0).to(self.dtype)) for img in images
         ]
-        logger.debug(f"Raw patch conv output shape: {patch_embeds_list[0].shape}")
-        logger.debug(f"Raw patch conv output sample: {patch_embeds_list[0][0, :5, 0, :5]}")
 
         patch_embeds = [
             p.flatten(2).permute(0, 2, 1) for p in patch_embeds_list
@@ -881,12 +864,8 @@ class VisionTransformer(nn.Module):
         # flatten to a single sequence
         patch_embeds = torch.cat(patch_embeds, dim=1)
         # _ = self.ln_pre.weight.data.fill_(1.0)
-        logger.debug(f"ln_pre weight sample: {self.ln_pre.weight[:5]}")
         # logger.debug("Skipping ln_pre for now ...")
         patch_embeds = self.ln_pre(patch_embeds)
-
-        logger.debug(f"Patch embeddings shape after conv: {patch_embeds.shape}")
-        logger.debug(f"Patch embeddings sample: {patch_embeds[0, :5, :5]}")
 
         # positional embeddings
         positions = position_meshgrid(patch_embeds_list).to(self.device)
