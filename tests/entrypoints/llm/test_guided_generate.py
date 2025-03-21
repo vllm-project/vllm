@@ -30,7 +30,6 @@ def llm(request):
         if mode == "autoregressive":
             return {}
         return {
-            # the model with fixed vocabulary size
             "speculative_model": "Qwen/Qwen2.5-0.5B-Instruct",
             "num_speculative_tokens": 3,
         }
