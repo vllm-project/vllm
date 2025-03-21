@@ -29,6 +29,11 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message)
 ```
 
+:::{tip}
+vLLM supports some parameters that are not supported by OpenAI, `top_k` for example.
+You can pass these parameters to vLLM using the OpenAI client in the `extra_body` parameter of your requests, i.e. `extra_body={"top_k": 50}` for `top_k`.
+:::
+
 ## Supported APIs
 
 We currently support the following OpenAI APIs:
