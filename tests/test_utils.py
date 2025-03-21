@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from vllm_test_utils.monitor import monitor
+from vllm_test_utils import monitor
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.utils import (FlexibleArgumentParser, MemorySnapshot,
@@ -140,8 +140,7 @@ def parser():
 def parser_with_config():
     parser = FlexibleArgumentParser()
     parser.add_argument('serve')
-    parser.add_argument('model_tag', nargs='?')
-    parser.add_argument('--model', type=str)
+    parser.add_argument('model_tag')
     parser.add_argument('--served-model-name', type=str)
     parser.add_argument('--config', type=str)
     parser.add_argument('--port', type=int)
@@ -197,29 +196,29 @@ def test_missing_required_argument(parser):
         parser.parse_args([])
 
 
-def test_cli_override_to_config(parser_with_config, cli_config_file):
+def test_cli_override_to_config(parser_with_config):
     args = parser_with_config.parse_args([
-        'serve', 'mymodel', '--config', cli_config_file,
+        'serve', 'mymodel', '--config', './data/test_config.yaml',
         '--tensor-parallel-size', '3'
     ])
     assert args.tensor_parallel_size == 3
     args = parser_with_config.parse_args([
         'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
-        cli_config_file
+        './data/test_config.yaml'
     ])
     assert args.tensor_parallel_size == 3
     assert args.port == 12312
     args = parser_with_config.parse_args([
         'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
-        cli_config_file, '--port', '666'
+        './data/test_config.yaml', '--port', '666'
     ])
     assert args.tensor_parallel_size == 3
     assert args.port == 666
 
 
-def test_config_args(parser_with_config, cli_config_file):
+def test_config_args(parser_with_config):
     args = parser_with_config.parse_args(
-        ['serve', 'mymodel', '--config', cli_config_file])
+        ['serve', 'mymodel', '--config', './data/test_config.yaml'])
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code
     assert not args.multi_step_stream_outputs
@@ -241,9 +240,10 @@ def test_config_file(parser_with_config):
         ])
 
 
-def test_no_model_tag(parser_with_config, cli_config_file):
+def test_no_model_tag(parser_with_config):
     with pytest.raises(ValueError):
-        parser_with_config.parse_args(['serve', '--config', cli_config_file])
+        parser_with_config.parse_args(
+            ['serve', '--config', './data/test_config.yaml'])
 
 
 # yapf: enable
@@ -476,34 +476,3 @@ def test_swap_dict_values(obj, key1, key2):
         assert obj[key1] == original_obj[key2]
     else:
         assert key1 not in obj
-
-
-def test_model_specification(parser_with_config,
-                             cli_config_file,
-                             cli_config_file_with_model):
-    # Test model in CLI takes precedence over config
-    args = parser_with_config.parse_args([
-        'serve', 'cli-model', '--config', cli_config_file_with_model
-    ])
-    assert args.model_tag == 'cli-model'
-    assert args.served_model_name == 'mymodel'
-
-    # Test model from config file works
-    args = parser_with_config.parse_args([
-        'serve', '--config', cli_config_file_with_model
-    ])
-    assert args.model == 'config-model'
-    assert args.served_model_name == 'mymodel'
-
-    # Test no model specified anywhere raises error
-    with pytest.raises(ValueError, match="No model specified!"):
-        parser_with_config.parse_args(['serve', '--config', cli_config_file])
-
-    # Test other config values are preserved
-    args = parser_with_config.parse_args([
-        'serve', 'cli-model', '--config', cli_config_file_with_model
-    ])
-    assert args.tensor_parallel_size == 2
-    assert args.trust_remote_code is True
-    assert args.multi_step_stream_outputs is False
-    assert args.port == 12312
