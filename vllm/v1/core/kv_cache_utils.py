@@ -588,13 +588,13 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     return kv_cache_config
 
 
-def unify_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
+def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     """
-    As hybrid models with more than one type of KV cache are not supported yet,
-    this function tries it best to convert the KV cache spec to one type. It 
-    will convert all SlidingWindowSpec to FullAttentionSpec if both types are 
-    present.
-
+    Only models with one type of KV cache are supported yet. This function tries
+    to convert the KV cache specs to one type if the model is a hybrid model 
+    with multiple type of KV cache. It will convert all SlidingWindowSpec to
+    FullAttentionSpec if both types are present.
+    
     Args:
         kv_cache_spec: The kv cache spec of each attention layer in the model
     """
@@ -631,7 +631,7 @@ def get_kv_cache_config(vllm_config: VllmConfig,
         The generated KVCacheConfigs
     """
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
-    unify_kv_cache_specs(kv_cache_spec)
+    unify_hybrid_kv_cache_specs(kv_cache_spec)
     if is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
