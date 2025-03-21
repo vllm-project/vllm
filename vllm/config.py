@@ -1458,9 +1458,11 @@ class ParallelConfig:
             self.tensor_parallel_size
 
         if self.data_parallel_size > 1:
+            # Data parallel was specified in the engine args.
             self.data_parallel_master_port = get_open_port()
             # TODO multi-node
         else:
+            # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
             self.data_parallel_rank = envs.VLLM_DP_RANK
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP

@@ -63,8 +63,8 @@ class EngineCoreClient(ABC):
         if multiprocess_mode and asyncio_mode:
             if vllm_config.parallel_config.data_parallel_size > 1:
                 return DPAsyncMPClient(vllm_config, executor_class, log_stats)
-            else:
-                return AsyncMPClient(vllm_config, executor_class, log_stats)
+
+            return AsyncMPClient(vllm_config, executor_class, log_stats)
 
         if multiprocess_mode and not asyncio_mode:
             return SyncMPClient(vllm_config, executor_class, log_stats)

@@ -385,7 +385,7 @@ class EngineCoreProc(EngineCore):
             req = self.input_queue.get()
             self._handle_client_request(*req)
 
-        # Handle any client requests.
+        # Handle any more client requests.
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
@@ -519,6 +519,8 @@ class DPEngineCoreProc(EngineCoreProc):
         super().__init__(input_path, output_path, vllm_config, executor_class,
                          log_stats, dp_rank)
 
+        # Counts forward-passes of the model so that we can synchronize
+        # finished with DP peers every N steps.
         self.counter = 0
 
     def shutdown(self):
@@ -536,12 +538,6 @@ class DPEngineCoreProc(EngineCoreProc):
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
 
-            if not local_unfinished_reqs and (
-                    self.scheduler.has_finished_requests()):
-                self._process_engine_step()
-                if not self.global_unfinished_reqs:
-                    continue
-
             if local_unfinished_reqs:
                 # 2) Step the engine core.
                 self._process_engine_step()
@@ -551,10 +547,15 @@ class DPEngineCoreProc(EngineCoreProc):
                     self.scheduler.has_unfinished_requests())
             else:
                 if self.scheduler.has_finished_requests():
-                    # This won't involve a forward-pass.
+                    # There are no unfinished requests, but there are some
+                    # finished requests remaining to be removed from the
+                    # batch state. This engine step won't perform a forward
+                    # pass but will flush the finished requests to ensure
+                    # up-to-date state is returned in the engine outputs.
                     self._process_engine_step()
 
                 if not self.global_unfinished_reqs:
+                    # All engines are idle.
                     continue
 
                 # There must be unfinished requests in DP peers, run a
