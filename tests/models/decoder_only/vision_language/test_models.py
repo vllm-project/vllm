@@ -508,6 +508,19 @@ VLM_TEST_SETTINGS = {
             limit_mm_per_prompt={"image": 4},
         )],
     ),
+    # regression test for https://github.com/vllm-project/vllm/issues/15122
+    "qwen2_5_vl-windows-attention": VLMTestInfo(
+        models=["Qwen/Qwen2.5-VL-3B-Instruct"],
+        test_type=VLMTestType.CUSTOM_INPUTS,
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        custom_test_opts=[CustomTestOptions(
+            inputs=custom_inputs.windows_attention_image_qwen2_5_vl(),
+            limit_mm_per_prompt={"image": 1},
+        )],
+    ),
 }
 # yapf: enable
 
