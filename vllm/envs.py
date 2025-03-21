@@ -523,7 +523,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
 
-    # use aiter ops unless specifically disabled.
+    # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in

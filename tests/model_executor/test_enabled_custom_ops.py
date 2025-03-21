@@ -95,6 +95,8 @@ def test_enabled_ops_invalid(env: str):
 @pytest.mark.parametrize("add_residual", [True, False])
 @pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
 @pytest.mark.parametrize("use_rocm_aiter_norm", ["0", "1"])
+@pytest.mark.skipif(not current_platform.is_rocm(),
+                    reason="AITER is a feature exclusive for ROCm")
 def test_rms_norm_dispatch(add_residual: bool, use_rocm_aiter: str,
                            use_rocm_aiter_norm: str, monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
