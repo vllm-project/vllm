@@ -153,6 +153,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8": torch.uint8,
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
+    "int8": torch.int8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -1264,19 +1265,29 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
         config_args = self._load_config_file(file_path)
 
         # 0th index is for {serve,chat,complete}
-        # followed by model_tag (only for serve)
+        # optionally followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
         if args[0] == "serve":
-            if index == 1:
+            model_in_cli = len(args) > 1 and not args[1].startswith('-')
+            model_in_config = any(arg == '--model' for arg in config_args)
+
+            if not model_in_cli and not model_in_config:
                 raise ValueError(
-                    "No model_tag specified! Please check your command-line"
-                    " arguments.")
-            args = [args[0]] + [
-                args[1]
-            ] + config_args + args[2:index] + args[index + 2:]
+                    "No model specified! Please specify model either in "
+                    "command-line arguments or in config file.")
+
+            if model_in_cli:
+                # Model specified as positional arg, keep CLI version
+                args = [args[0]] + [
+                    args[1]
+                ] + config_args + args[2:index] + args[index + 2:]
+            else:
+                # No model in CLI, use config if available
+                args = [args[0]
+                        ] + config_args + args[1:index] + args[index + 2:]
         else:
             args = [args[0]] + config_args + args[1:index] + args[index + 2:]
 
@@ -1294,9 +1305,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 '--port': '12323',
                 '--tensor-parallel-size': '4'
             ]
-
         """
-
         extension: str = file_path.split('.')[-1]
         if extension not in ('yaml', 'yml'):
             raise ValueError(
@@ -1321,7 +1330,15 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             if isinstance(action, StoreBoolean)
         ]
 
+        # Skip model from config if it's provided as positional argument
+        skip_model = (hasattr(self, '_parsed_args') and self._parsed_args
+                      and len(self._parsed_args) > 1
+                      and self._parsed_args[0] == 'serve'
+                      and not self._parsed_args[1].startswith('-'))
+
         for key, value in config.items():
+            if skip_model and key == 'model':
+                continue
             if isinstance(value, bool) and key not in store_boolean_arguments:
                 if value:
                     processed_args.append('--' + key)
@@ -2388,3 +2405,51 @@ def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
         obj[key1] = v2
     else:
         obj.pop(key1, None)
+
+
+@contextlib.contextmanager
+def cprofile_context(save_file: Optional[str] = None):
+    """Run a cprofile
+
+    Args:
+        save_file: path to save the profile result. "1" or
+          None will result in printing to stdout.
+    """
+    import cProfile
+
+    prof = cProfile.Profile()
+    prof.enable()
+
+    try:
+        yield
+    finally:
+        prof.disable()
+        if save_file and save_file != "1":
+            prof.dump_stats(save_file)
+        else:
+            prof.print_stats(sort="cumtime")
+
+
+def cprofile(save_file: Optional[str] = None, enabled: bool = True):
+    """Decorator to profile a Python method using cProfile.
+
+    Args:
+        save_file: Path to save the profile result.
+            If "1", None, or "", results will be printed to stdout.
+        enabled: Set to false to turn this into a no-op
+    """
+
+    def decorator(func: Callable):
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            if not enabled:
+                # If profiling is disabled, just call the function directly.
+                return func(*args, **kwargs)
+
+            with cprofile_context(save_file):
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
