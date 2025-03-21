@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """KV-Cache Utilities."""
+import hashlib
+import os
+import pickle
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -18,9 +21,8 @@ logger = init_logger(__name__)
 class BlockHashType(NamedTuple):
     """Hash value of a block (int), the token IDs in the block, and extra keys.
     We keep a tuple of token IDs and extra keys to reduce the likelihood of
-    hash collisions when the hash value is the same. But please note that 
-    hash collisions can still theoretically occur, albeit with an extremely 
-    low probability.
+    hash collisions when the hash value is the same. By using SHA256, hash
+    collisions are practically impossible.
     """
     # Hash value of the block in an integer.
     hash_value: int
@@ -28,6 +30,20 @@ class BlockHashType(NamedTuple):
     token_ids: tuple[int, ...]
     # Extra keys for the block.
     extra_keys: Optional[Any] = None
+
+
+_none_hash = int.from_bytes(os.urandom(32), byteorder="big")
+
+
+def _block_hash(input) -> int:
+    """Hash function for a block.
+
+    Args:
+        input: The input tuple to hash.
+    """
+    input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    return int.from_bytes(hashlib.sha256(input_bytes).digest(),
+                          byteorder="big")
 
 
 class PrefixCachingMetrics:
@@ -395,17 +411,12 @@ def hash_block_tokens(
         The entire tuple is used as the hash key of the block.
     """
     if not parent_block_hash:
-        # Note that we use 'None' as a string here instead of None because
-        # as of Python 3.12, hash(None) returns a constant predictable value.
-        # This could possibly make it easier to find and exploit hash
-        # collisions. 'None' as a string will be hashed differently per process,
-        # but consistently within the same process. This is the same as the
-        # behavior of None prior to Python 3.12.
-        parent_block_hash = hash('None')
+        parent_block_hash = _none_hash
 
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
     return BlockHashType(
-        hash((parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
+        _block_hash(
+            (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
         curr_block_token_ids_tuple, extra_keys)
 
 
