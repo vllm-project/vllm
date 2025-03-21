@@ -16,6 +16,7 @@ def test_sliding_window_possible_cached_prefix():
         head_size=1,
         dtype=torch.float32,
         sliding_window=4,
+        use_mla=False,
     )
 
     block_pool = BlockPool(num_gpu_blocks=100, enable_caching=True)
@@ -59,6 +60,7 @@ def test_sliding_window_remove_useless_blocks():
         head_size=1,
         dtype=torch.float32,
         sliding_window=4,
+        use_mla=False,
     )
 
     block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True)

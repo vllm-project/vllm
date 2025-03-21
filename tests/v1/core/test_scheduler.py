@@ -10,7 +10,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        VirtualLayer)
+                                        KVCacheGroupSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
@@ -70,8 +70,9 @@ def create_scheduler(
     kv_cache_config = KVCacheConfig(
         num_blocks=10000,  # A large number of blocks to hold all requests
         tensors={},
-        virtual_layers=[
-            VirtualLayer(['layer'], FullAttentionSpec(16, 1, 1, torch.float32))
+        kv_cache_groups=[
+            KVCacheGroupSpec(['layer'],
+                             FullAttentionSpec(16, 1, 1, torch.float32, False))
         ],
     )
     cache_config.num_gpu_blocks = 10000

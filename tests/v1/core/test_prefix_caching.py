@@ -14,7 +14,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_block_tokens)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        VirtualLayer)
+                                        KVCacheGroupSpec)
 
 
 def make_request(request_id,
@@ -46,9 +46,10 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
     return KVCacheConfig(
         num_blocks=num_blocks,
         tensors={},
-        virtual_layers=[
-            VirtualLayer(['layer'],
-                         FullAttentionSpec(block_size, 1, 1, torch.float32))
+        kv_cache_groups=[
+            KVCacheGroupSpec(['layer'],
+                             FullAttentionSpec(block_size, 1, 1, torch.float32,
+                                               False))
         ],
     )
 
@@ -168,10 +169,8 @@ def test_prefill_plp():
     3. Schedule plp request; no hit should occur; validate blocks
     '''
     manager = KVCacheManager(
-        block_size=16,
-        num_gpu_blocks=10,
+        make_kv_cache_config(16, 10),
         max_model_len=8192,
-        sliding_window=None,
         enable_caching=True,
         num_preallocate_tokens=16,
     )
