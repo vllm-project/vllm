@@ -630,7 +630,8 @@ class FlashAttentionImpl(AttentionImpl):
         self.sliding_window = ((sliding_window - 1,
                                 0) if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
-        self.vllm_flash_attn_version = get_flash_attn_version()
+        self.vllm_flash_attn_version = get_flash_attn_version(
+            requires_alibi=self.alibi_slopes is not None)
         if (is_quantized_kv_cache(self.kv_cache_dtype)
                 and self.vllm_flash_attn_version != 3):
             raise NotImplementedError(
