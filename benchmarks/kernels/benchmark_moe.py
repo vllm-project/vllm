@@ -42,6 +42,7 @@ def benchmark_config(
     use_int8_w8a16: bool,
     num_iters: int = 100,
     block_quant_shape: List[int] = None,
+    use_deep_gemm: bool = False
 ) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
@@ -130,6 +131,7 @@ def benchmark_config(
                 a1_scale=a1_scale,
                 a2_scale=a2_scale,
                 block_shape=block_quant_shape,
+                allow_deep_gemm=use_deep_gemm,
             )
 
     # JIT compilation & warmup
@@ -366,6 +368,7 @@ class BenchmarkWorker:
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
         block_quant_shape: List[int] = None,
+        use_deep_gemm: bool = False,
     ) -> tuple[dict[str, int], float]:
         current_platform.seed_everything(self.seed)
         dtype_str = get_config_dtype_str(dtype,
@@ -396,7 +399,8 @@ class BenchmarkWorker:
                                        use_fp8_w8a8,
                                        use_int8_w8a16,
                                        num_iters=100,
-                                       block_quant_shape=block_quant_shape)
+                                       block_quant_shape=block_quant_shape,
+                                       use_deep_gemm=use_deep_gemm)
         return config, kernel_time
 
     def tune(
@@ -411,6 +415,7 @@ class BenchmarkWorker:
         use_int8_w8a16: bool,
         search_space: list[dict[str, int]],
         block_quant_shape: list[int],
+        use_deep_gemm: bool,
     ) -> dict[str, int]:
         best_config = None
         best_time = float("inf")
@@ -436,7 +441,8 @@ class BenchmarkWorker:
                         use_fp8_w8a8,
                         use_int8_w8a16,
                         num_iters=20,
-                        block_quant_shape=block_quant_shape)
+                        block_quant_shape=block_quant_shape,
+                        use_deep_gemm=use_deep_gemm)
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
                     continue
@@ -550,6 +556,8 @@ def main(args: argparse.Namespace):
     else:
         batch_sizes = [args.batch_size]
 
+    use_deep_gemm = True if args.use_deep_gemm else False
+
     ray.init()
     num_gpus = int(ray.available_resources()["GPU"])
     workers = [BenchmarkWorker.remote(args.seed) for _ in range(num_gpus)]
@@ -574,7 +582,8 @@ def main(args: argparse.Namespace):
         configs = _distribute(
             "tune",
             [(batch_size, E, shard_intermediate_size, hidden_size, topk, dtype,
-              use_fp8_w8a8, use_int8_w8a16, search_space, block_quant_shape)
+              use_fp8_w8a8, use_int8_w8a16, search_space, block_quant_shape,
+              use_deep_gemm)
              for batch_size in batch_sizes])
         best_configs = {
             M: sort_config(config)
@@ -589,7 +598,7 @@ def main(args: argparse.Namespace):
         outputs = _distribute(
             "benchmark",
             [(batch_size, E, shard_intermediate_size, hidden_size, topk, dtype,
-              use_fp8_w8a8, use_int8_w8a16, block_quant_shape)
+              use_fp8_w8a8, use_int8_w8a16, block_quant_shape, use_deep_gemm)
              for batch_size in batch_sizes])
 
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
@@ -611,6 +620,7 @@ if __name__ == "__main__":
                         type=str,
                         choices=["auto", "fp8_w8a8", "int8_w8a16"],
                         default="auto")
+    parser.add_argument("--use-deep-gemm", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, required=False)
     parser.add_argument("--tune", action="store_true")

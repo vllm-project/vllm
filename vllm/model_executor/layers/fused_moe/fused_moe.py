@@ -694,6 +694,21 @@ def valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
             and w2.is_contiguous())
 
 
+def quantize(
+    A: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    block_shape: Optional[List[int]],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if block_shape is None:
+        A, A_scale = ops.scaled_fp8_quant(A, A_scale)
+    else:
+        assert len(block_shape) == 2
+        _, block_k = block_shape[0], block_shape[1]
+        A, A_scale = per_token_group_quant_fp8(A, block_k)
+        assert triton.cdiv(A.shape[-1], block_k) == A_scale.shape[-1]
+    return A, A_scale
+
+
 def invoke_fused_moe_kernel(A: torch.Tensor,
                             B: torch.Tensor,
                             C: torch.Tensor,
@@ -719,30 +734,10 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
 
     if use_fp8_w8a8 or use_dg:
         assert B_scale is not None
-        if block_shape is None:
-            A, A_scale = ops.scaled_fp8_quant(A, A_scale)
-        else:
-            assert len(block_shape) == 2
-            block_n, block_k = block_shape[0], block_shape[1]
-            A, A_scale = per_token_group_quant_fp8(A, block_k)
-            assert triton.cdiv(A.shape[-1], block_k) == A_scale.shape[-1]
-            assert triton.cdiv(B.shape[-2], block_n) == B_scale.shape[
-                -2], f"{B.shape[-2]}/{block_n}, {B_scale.shape[-2]}"
-            assert triton.cdiv(B.shape[-1], block_k) == B_scale.shape[-1]
-
-        if use_dg and not mul_routed_weight:
-            # Replicate activations
-            A = A.view(A.shape[0], -1,
-                       A.shape[1]).repeat(1, top_k, 1).reshape(-1, A.shape[1])
-            A_scale = A_scale.view(A_scale.shape[0], -1,
-                                   A_scale.shape[1]).repeat(
-                                       1, top_k,
-                                       1).reshape(-1, A_scale.shape[1])
-
-            # Permute according to sorted token ids.
-            A = A.view(dtype=torch.uint8)[sorted_token_ids,
-                                          ...].view(dtype=A.dtype)
-            A_scale = A_scale[sorted_token_ids]
+        assert (block_shape is None or
+                triton.cdiv(B.shape[-2], block_shape[0]) == B_scale.shape[-2])
+        assert (block_shape is None or
+                triton.cdiv(B.shape[-1], block_shape[1]) == B_scale.shape[-1])
 
     elif use_int8_w8a16 or use_int4_w4a16:
         assert B_scale is not None
@@ -1137,10 +1132,10 @@ def fused_topk(
                            topk,
                            dtype=torch.int32,
                            device=hidden_states.device)
-    token_expert_indicies = torch.empty(M,
-                                        topk,
-                                        dtype=torch.int32,
-                                        device=hidden_states.device)
+    token_expert_indices = torch.empty(M,
+                                       topk,
+                                       dtype=torch.int32,
+                                       device=hidden_states.device)
 
     gating_output_float = gating_output.float()  # TODO(woosuk): Optimize this.
 
@@ -1403,6 +1398,114 @@ def fused_experts(hidden_states: torch.Tensor,
         allow_deep_gemm=allow_deep_gemm)
 
 
+def fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+    if m.dtype == torch.float8_e4m3fn:
+        return m.view(dtype=torch.uint8)[idx,
+                                         ...].view(dtype=torch.float8_e4m3fn)
+    else:
+        return m[idx, ...]
+
+# TODO: can indices be chunked?
+def _moe_permute(
+    curr_hidden_states: torch.Tensor, a1q_scale: Optional[torch.Tensor],
+    curr_topk_ids: torch.Tensor, curr_topk_weights: torch.Tensor,
+    global_num_experts: int, n_local_experts: int,
+    expert_map: Optional[torch.Tensor], top_k_num: int, block_m: int,
+    use_dg: bool
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor,
+           torch.Tensor, torch.Tensor]:
+    tokens_in_chunk, _ = curr_hidden_states.shape
+
+    sorted_token_ids, expert_ids, num_tokens_post_padded = (
+        moe_align_block_size(curr_topk_ids, block_m, global_num_experts,
+                             expert_map))
+
+    inv_perm: Optional[torch.Tensor] = None
+
+    if use_dg:
+        # Replicate activations
+        max_token_id = top_k_num * tokens_in_chunk
+        pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) *
+                    block_m) - sorted_token_ids.numel()
+        if pad_size > 0:
+            sorted_token_ids = torch.nn.functional.pad(
+                sorted_token_ids, (0, pad_size), "constant", max_token_id)
+
+        sorted_token_ids = sorted_token_ids.clamp(max=max_token_id - 1)
+        expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
+        inv_perm = torch.argsort(sorted_token_ids)[:max_token_id]
+
+        # TODO: better to quantize after permute??
+        curr_hidden_states = curr_hidden_states.view(
+            curr_hidden_states.shape[0], -1,
+            curr_hidden_states.shape[1]).repeat(1, top_k_num, 1).reshape(
+                -1, curr_hidden_states.shape[1])
+
+        # Permute according to sorted token ids.
+        curr_hidden_states = fp8_perm(curr_hidden_states, sorted_token_ids)
+
+        if a1q_scale is not None:
+            a1q_scale = a1q_scale.view(a1q_scale.shape[0], -1,
+                                       a1q_scale.shape[1]).repeat(
+                                           1, top_k_num, 1).reshape(
+                                               -1, a1q_scale.shape[1])
+            a1q_scale = a1q_scale[sorted_token_ids]
+
+    return (curr_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
+            num_tokens_post_padded, inv_perm)
+
+
+def _moe_unpermute(out: torch.Tensor,
+                   curr_hidden: torch.Tensor,
+                   inv_perm: torch.Tensor,
+                   m_indices: torch.Tensor,
+                   topk: int,
+                   num_groups: int,
+                   K: int,
+                   topk_weight: torch.Tensor,
+                   topk_ids: torch.Tensor) -> None:
+    M = topk_weight.shape[0]
+    out_C = curr_hidden[inv_perm, ...]
+    out_C = out_C[:(M * topk), ...]
+    out_C = out_C.view(-1, topk, K)
+    out_C.mul_(topk_weight.view(M, -1, 1))
+    ops.moe_sum(out_C, out)
+
+
+def _resize_caches(intermediate_cache1, intermediate_cache2,
+                   intermediate_cache3, N, K, top_k_num, topk_ids,
+                   tokens_in_chunk, sorted_token_ids, block_m, chunked_dg,
+                   skip_dg):
+    if chunked_dg:
+        slice_size = (
+            (sorted_token_ids.numel() + block_m - 1) // block_m) * block_m
+        slice_topk = 1
+    else:
+        slice_size = tokens_in_chunk
+        slice_topk = topk_ids.shape[1]
+
+    # Adjust the intermediate cache size and config for the last
+    # chunk. Note that in most cases we only have one chunk
+    # so the cache size and config are already set correctly and
+    # do not need to be adjusted.
+    if skip_dg:
+        assert tokens_in_chunk * top_k_num < intermediate_cache1.shape[0]
+        intermediate_cache1 = intermediate_cache1[:(tokens_in_chunk *
+                                                    top_k_num)].view(
+                                                        -1, top_k_num, N)
+        intermediate_cache2 = intermediate_cache2.view(-1, N // 2)
+        intermediate_cache3 = intermediate_cache3[:(tokens_in_chunk *
+                                                    top_k_num)].view(
+                                                        -1, top_k_num, K)
+    else:
+        intermediate_cache1 = intermediate_cache1[:slice_size]
+        intermediate_cache2 = intermediate_cache2[:slice_size * slice_topk]
+        intermediate_cache3 = intermediate_cache3[:slice_size]
+
+    return (intermediate_cache1, intermediate_cache2, intermediate_cache3,
+            slice_size)
+
+
 def fused_experts_impl(hidden_states: torch.Tensor,
                        w1: torch.Tensor,
                        w2: torch.Tensor,
@@ -1498,6 +1601,7 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         # We attempt to do this offline in Fp8MoEMethod, in which case these
         # calls will be nops.  Otherwise, they'll be performed every time the
         # layer is executed.
+        print(f"SHAPES {w1_scale.shape}, {w2_scale.shape}")
         w1_scale = dg.get_col_major_tma_aligned_tensor(w1_scale).contiguous()
         w2_scale = dg.get_col_major_tma_aligned_tensor(w2_scale).contiguous()
 
@@ -1552,62 +1656,33 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(curr_topk_ids, block_m, global_num_experts,
-                                 expert_map))
+        if use_fp8_w8a8 or use_dg:
+            qcurr_hidden_states, a1q_scale = quantize(curr_hidden_states,
+                                                      a1_scale, block_shape)
+        else:
+            qcurr_hidden_states = curr_hidden_states
+            a1q_scale = a1_scale
+
+        (qcurr_hidden_states, a1q_scale, sorted_token_ids, expert_ids,
+         num_tokens_post_padded,
+         inv_perm) = _moe_permute(qcurr_hidden_states, a1q_scale, curr_topk_ids,
+                                  curr_topk_weights, global_num_experts,
+                                  0, expert_map, top_k_num,
+                                  block_m, use_dg and not skip_dg)
 
         if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or chunked_dg:
-            if chunked_dg:
-                slice_size = ((sorted_token_ids.numel() + block_m - 1) //
-                              block_m) * block_m
-                slice_topk = 1
-            else:
-                slice_size = tokens_in_chunk
-                slice_topk = topk_ids.shape[1]
-
-            # Adjust the intermediate cache size and config for the last
-            # chunk. Note that in most cases we only have one chunk
-            # so the cache size and config are already set correctly and
-            # do not need to be adjusted.
-            if skip_dg:
-                assert tokens_in_chunk * top_k_num < intermediate_cache1.shape[
-                    0]
-                intermediate_cache1 = intermediate_cache1[:(tokens_in_chunk *
-                                                            top_k_num)].view(
-                                                                -1, top_k_num,
-                                                                N)
-                intermediate_cache2 = intermediate_cache2.view(-1, N // 2)
-                intermediate_cache3 = intermediate_cache3[:(tokens_in_chunk *
-                                                            top_k_num)].view(
-                                                                -1, top_k_num,
-                                                                w2.shape[1])
-            else:
-                intermediate_cache1 = intermediate_cache1[:slice_size]
-                intermediate_cache2 = intermediate_cache2[:slice_size *
-                                                          slice_topk]
-                intermediate_cache3 = intermediate_cache3[:slice_size]
+            (intermediate_cache1, intermediate_cache2,
+             intermediate_cache3, slice_size) = _resize_caches(
+                 intermediate_cache1, intermediate_cache2, intermediate_cache3,
+                 N, w2.shape[1], top_k_num, topk_ids, tokens_in_chunk,
+                 sorted_token_ids, block_m, chunked_dg, skip_dg)
 
             config = get_config_func(slice_size)
 
-        inv_perm: Optional[torch.Tensor] = None
-
-        if use_dg and not skip_dg:
-            max_token_id = top_k_num * tokens_in_chunk
-            pad_size = (((sorted_token_ids.numel() + block_m - 1) // block_m) *
-                        block_m) - sorted_token_ids.numel()
-            if pad_size > 0:
-                sorted_token_ids = torch.nn.functional.pad(
-                    sorted_token_ids, (0, pad_size), "constant", max_token_id)
-
-            sorted_token_ids = sorted_token_ids.clamp(max=max_token_id - 1)
-            inv_perm = torch.argsort(sorted_token_ids)
-
-            expert_ids = torch.repeat_interleave(expert_ids, block_m, dim=0)
-
-        invoke_fused_moe_kernel(curr_hidden_states,
+        invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
                                 intermediate_cache1,
-                                a1_scale,
+                                a1q_scale,
                                 w1_scale,
                                 w1_zp,
                                 curr_topk_weights,
@@ -1634,10 +1709,18 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
-        invoke_fused_moe_kernel(intermediate_cache2,
+        # move into invoke?
+        if use_fp8_w8a8 or use_dg:
+            qintermediate_cache2, a2q_scale = quantize(intermediate_cache2,
+                                                       a2_scale, block_shape)
+        else:
+            qintermediate_cache2 = intermediate_cache2
+            a2q_scale = a2_scale
+
+        invoke_fused_moe_kernel(qintermediate_cache2,
                                 w2,
                                 intermediate_cache3,
-                                a2_scale,
+                                a2q_scale,
                                 w2_scale,
                                 w2_zp,
                                 curr_topk_weights,
@@ -1655,19 +1738,20 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                 use_dg=use_dg and not skip_dg,
                                 block_shape=block_shape)
 
+        # is this correct in the loop? TODO: fold in moe_sum?
         if use_dg and not skip_dg:
-            assert inv_perm is not None
-            M = curr_topk_weights.shape[0]
-            out_C = intermediate_cache3[inv_perm, ...]
-            out_C = out_C[:(M * top_k_num), ...]
-            out_C = out_C.view(-1, top_k_num, w2.shape[1])
-            out_C.mul_(curr_topk_weights.view(M, -1, 1))
-            tmp_cache3 = out_C
+            _moe_unpermute(out_hidden_states[begin_chunk_idx:end_chunk_idx],
+                           intermediate_cache3,
+                           inv_perm,
+                           expert_ids,
+                           top_k_num,
+                           global_num_experts,
+                           w2.shape[1],
+                           curr_topk_weights,
+                           curr_topk_ids)
         else:
-            tmp_cache3 = intermediate_cache3.view(*intermediate_cache3.shape)
-
-        ops.moe_sum(tmp_cache3,
-                    out_hidden_states[begin_chunk_idx:end_chunk_idx])
+            ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                        out_hidden_states[begin_chunk_idx:end_chunk_idx])
 
     return out_hidden_states
 
