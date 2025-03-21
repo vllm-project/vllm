@@ -15,7 +15,7 @@ class CommonSchedulerStates:
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
         # Request id -> CachedRequestData
-        self._cached_reqs_data: dict[str, CachedRequestData] = {}
+        self.cached_reqs_data: dict[str, CachedRequestData] = {}
 
     def make_cached_request_data(
         self,
@@ -31,7 +31,7 @@ class CommonSchedulerStates:
         num_regular_tokens = num_scheduled_tokens - num_scheduled_spec_tokens
         new_token_ids = request.all_token_ids[
             num_computed_tokens:num_computed_tokens + num_regular_tokens]
-        req_data = self._cached_reqs_data.get(request.request_id)
+        req_data = self.cached_reqs_data.get(request.request_id)
         if req_data is not None:
             req_data.resumed_from_preemption = resumed_from_preemption
             req_data.new_token_ids = new_token_ids
@@ -42,11 +42,11 @@ class CommonSchedulerStates:
                                                       resumed_from_preemption,
                                                       new_token_ids,
                                                       new_block_ids)
-            self._cached_reqs_data[request.request_id] = req_data
+            self.cached_reqs_data[request.request_id] = req_data
         return req_data
 
     def free_request(self, request: Request) -> None:
-        self._cached_reqs_data.pop(request.request_id, None)
+        self.cached_reqs_data.pop(request.request_id, None)
         self.finished_req_ids.add(request.request_id)
 
 
