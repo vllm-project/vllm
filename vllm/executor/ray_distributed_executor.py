@@ -559,6 +559,13 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL)
         logger.info("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM = %s",
                     envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
+        if os.environ.get("RAY_CGRAPH_get_timeout"):  # noqa: SIM112
+            logger.info("RAY_CGRAPH_get_timeout = %s",
+                        os.environ["RAY_CGRAPH_get_timeout"])
+        else:
+            os.environ["RAY_CGRAPH_get_timeout"] = "300"  # noqa: SIM112
+            logger.info(
+                "RAY_CGRAPH_get_timeout is not set, setting to 300 seconds")
         with InputNode() as input_data:
             # Example DAG: PP=2, TP=4
             #
