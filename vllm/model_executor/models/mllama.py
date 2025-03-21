@@ -1235,88 +1235,34 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def unpack_data(self, image_data: Union[List[List[torch.Tensor]],
-                                            List[torch.Tensor], torch.Tensor]):
+    def unpack_data(self,
+                    image_data: Union[List[torch.Tensor], torch.Tensor],
+                    padding_value=0) -> torch.Tensor:
         if isinstance(image_data, torch.Tensor):
             # torch.Tensor
             return image_data
-        elif isinstance(image_data[0], torch.Tensor):
-            bsz = len(image_data)
+        else:
+            assert isinstance(
+                image_data[0],
+                torch.Tensor), "Image data is not properly batched."
             # List[torch.Tensor]
-            if image_data[0].ndim == 1:
-                # input: [tensor([6, 6], device='cuda:0'),
-                #         tensor([6], device='cuda:0')]
-                # output: tensor([[6, 6], [6, 0]], device='cuda:0')
-                max_num_elements = max(tensor.numel() for tensor in image_data)
-                output_tensor = torch.zeros(bsz,
-                                            max_num_elements,
-                                            device=image_data[0].device,
-                                            dtype=image_data[0].dtype)
-                for b in range(bsz):
-                    original_data = image_data[b]
-                    num_original = original_data.numel()
-                    output_tensor[b, :num_original] = original_data
-                return output_tensor
-
-            assert image_data[0].ndim == 2
-            # input: [tensor([[1, 1, 1, 1], [1, 1, 1, 1]], device='cuda:0'),
-            #         tensor([[1, 1, 1, 1]], device='cuda:0')]
-            # output:
-            # tensor([[[1, 1, 1, 1],
-            #          [1, 1, 1, 1]],
-            #         [[1, 1, 1, 1],
-            #          [0, 0, 0, 0]]], device='cuda:0')
             bsz = len(image_data)
-            max_num_elements = max(tensor.shape[0] for tensor in image_data)
-            output_tensor = torch.zeros(bsz,
-                                        max_num_elements,
-                                        image_data[0].shape[1],
-                                        device=image_data[0].device,
-                                        dtype=image_data[0].dtype)
-            for b in range(bsz):
-                original_data = image_data[b]
-                num_original = original_data.shape[0]
-                output_tensor[b, :num_original, :] = original_data
+            max_length = max(t.size(0) for t in image_data)
+            trailing_dims = image_data[0].shape[1:]
+            for data in image_data:
+                cur_trailing_dims = data.shape[1:]
+                assert cur_trailing_dims == trailing_dims
+            output_tensor = torch.full((bsz, max_length, *trailing_dims),
+                                       padding_value,
+                                       dtype=image_data[0].dtype,
+                                       device=image_data[0].device)
+            for i, t in enumerate(image_data):
+                output_tensor[i, :t.size(0)] = t
             return output_tensor
-        else:
-            return image_data
-
-    def unpack_pixel_values(self, pixel_values: Union[List[List[torch.Tensor]],
-                                                      List[torch.Tensor],
-                                                      torch.Tensor]):
-        if isinstance(pixel_values, torch.Tensor):
-            return pixel_values
-        else:
-            pixel_values_unpacked = []
-            for b in range(len(pixel_values)):
-                pixel_values_unpacked_b = []
-                for i in range(len(pixel_values[b])):
-                    pixel_values_unpacked_b.append(pixel_values[b][i])
-                pixel_values_unpacked.append(pixel_values_unpacked_b)
-
-            max_num_images = max([len(x) for x in pixel_values_unpacked])
-            max_num_chunks = max(
-                max([len(x) for x in y]) for y in pixel_values_unpacked)
-            bsz = len(pixel_values_unpacked)
-            out_images = torch.zeros(bsz,
-                                     max_num_images,
-                                     max_num_chunks,
-                                     3,
-                                     self.image_size,
-                                     self.image_size,
-                                     device=pixel_values[0].device,
-                                     dtype=pixel_values[0].dtype)
-            for b in range(len(pixel_values_unpacked)):
-                for i in range(len(pixel_values_unpacked[b])):
-                    img = pixel_values_unpacked[b][i]
-                    out_images[b, i, :img.shape[0]] = img
-            return out_images
 
     def _parse_and_validate_image_input(self, **kwargs: object):
         # tensor with the same shape will be batched together by
         # MultiModalKwargs.batch, so pixel_values here can be:
-        #   - List[List[torch.Tensor]]:
-        #       with shape (num_tiles, 3, image_res, image_res)
         #   - List[torch.Tensor]:
         #       with shape (num_image, num_tiles, 3, image_res, image_res)
         #   - torch.Tensor:
@@ -1351,7 +1297,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
 
             return MllamaImagePixelInputs(
                 type="pixel_values",
-                data=self.unpack_pixel_values(pixel_values),
+                data=self.unpack_data(pixel_values),
                 aspect_ratio_ids=self.unpack_data(aspect_ratio_ids),
                 aspect_ratio_mask=self.unpack_data(aspect_ratio_mask))
 
