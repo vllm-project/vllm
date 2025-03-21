@@ -7,7 +7,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def get_flash_attn_version() -> Optional[int]:
+def get_flash_attn_version(requires_alibi: bool = False) -> Optional[int]:
     # import here to avoid circular dependencies
     from vllm.platforms import current_platform
     try:
@@ -28,8 +28,14 @@ def get_flash_attn_version() -> Optional[int]:
 
         # 3. fallback for unsupported combinations
         if device_capability.major == 10 and fa_version == 3:
-            logger.warning("Cannot use FA version 3 on Blackwell platform",
-                           "defaulting to FA version 2.")
+            logger.warning_once(
+                "Cannot use FA version 3 on Blackwell platform "
+                "defaulting to FA version 2.")
+            fa_version = 2
+
+        if requires_alibi and fa_version == 3:
+            logger.warning_once("Cannot use FA version 3 with ALiBi, "
+                                "defaulting to FA version 2.")
             fa_version = 2
 
         if not is_fa_version_supported(fa_version):
