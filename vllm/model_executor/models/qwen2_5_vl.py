@@ -647,15 +647,17 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         max_seqlen = None
         seqlens = None
-        if self.attn_backend == _Backend.FLASH_ATTN:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
             else:
                 cu_seqlens_now = cu_window_seqlens
+            # pre-compute cu_seqlens for window attn
+            if self.attn_backend == _Backend.FLASH_ATTN:
+                max_seqlen = (cu_seqlens_now[1:] -
+                              cu_seqlens_now[:-1]).max().item()
+            elif self.attn_backend == _Backend.XFORMERS:
+                seqlens = (cu_seqlens_now[1:] - cu_seqlens_now[:-1]).tolist()
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens_now,
