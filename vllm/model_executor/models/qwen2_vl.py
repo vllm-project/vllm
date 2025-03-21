@@ -617,6 +617,16 @@ class Qwen2VisionTransformer(nn.Module):
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
+    def compute_attn_mask_seqlen(
+            self, cu_seqlens: torch.Tensor
+    ) -> tuple[Optional[int], Optional[list[int]]]:
+        max_seqlen, seqlens = None, None
+        if self.attn_backend == _Backend.FLASH_ATTN:
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        elif self.attn_backend == _Backend.XFORMERS:
+            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        return max_seqlen, seqlens
+
     def forward(
         self,
         x: torch.Tensor,
@@ -638,12 +648,8 @@ class Qwen2VisionTransformer(nn.Module):
         # transformers
         x = x.unsqueeze(1)
 
-        max_seqlen = None
-        seqlens = None
-        if self.attn_backend == _Backend.FLASH_ATTN:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        # pre-compute seqlens for attn mask to reduce cuMemcpy operations
+        max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
         for blk in self.blocks:
             x = blk(
                 x,
