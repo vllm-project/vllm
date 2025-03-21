@@ -24,7 +24,7 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   // sum of squares
   float ss = 0.0f;
 
-  for (int32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
       x += static_cast<float>(residual[token_offset + i]);
@@ -58,7 +58,7 @@ __device__ void compute_dynamic_per_token_scales(
   constexpr scalar_out_t qmax{std::numeric_limits<scalar_out_t>::max()};
 
   float block_absmax_val_maybe = 0.0f;
-  for (int32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
       x += static_cast<float>(residual[token_offset + i]);
@@ -103,7 +103,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
   ;
 
-  for (int32_t i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
     if constexpr (has_residual) {
       x += static_cast<float>(residual[token_offset + i]);
@@ -142,7 +142,7 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   int32_t const num_vec_elems = hidden_size >> 2;
 
 #pragma unroll 4
-  for (int32_t i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> in = vec_input[i];
 
     vec4_t<float> x;
@@ -206,7 +206,7 @@ __device__ void compute_dynamic_per_token_scales(
   float block_absmax_val_maybe = 0.0f;
 
 #pragma unroll 4
-  for (int32_t i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> in = vec_input[i];
     vec4_t<scalar_t> const w = vec_weight[i];
 
@@ -286,7 +286,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
 // TODO(luka/varun) extract into type-agnostic vectorized quant function to
 //  replace scaled_fp8_conversion_vec
 #pragma unroll 4
-  for (int32_t i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
+  for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
     vec4_t<scalar_t> const in = vec_input[i];
     vec4_t<scalar_t> const w = vec_weight[i];
 

@@ -101,10 +101,10 @@ static __global__ void dequantize_block(const void * __restrict__ vx, dst_t * __
 template<typename dst_t>
 static __global__ void dequantize_block_q2_K(const void * __restrict__ vx, dst_t * __restrict__ yy) {
 
-    const int i   = blockIdx.x;
+    const auto i   = blockIdx.x;
     const block_q2_K * x = (const block_q2_K *) vx;
 
-    const int tid = threadIdx.x;
+    const auto tid = threadIdx.x;
     const int n   = tid/32;
     const int l   = tid - 32*n;
     const int is  = 8*n + l/16;
@@ -123,10 +123,10 @@ static __global__ void dequantize_block_q2_K(const void * __restrict__ vx, dst_t
 template<typename dst_t>
 static __global__ void dequantize_block_q3_K(const void * __restrict__ vx, dst_t * __restrict__ yy) {
 
-    const int i = blockIdx.x;
+    const auto i = blockIdx.x;
     const block_q3_K * x = (const block_q3_K *) vx;
 
-    const int r = threadIdx.x/4;
+    const auto r = threadIdx.x/4;
     const int tid = r/2;
     const int is0 = r%2;
     const int l0 = 16*is0 + 4*(threadIdx.x%4);
@@ -164,10 +164,10 @@ template<typename dst_t>
 static __global__ void dequantize_block_q4_K(const void * __restrict__ vx, dst_t * __restrict__ yy) {
     const block_q4_K * x = (const block_q4_K *) vx;
 
-    const int i = blockIdx.x;
+    const auto i = blockIdx.x;
 
     // assume 32 threads
-    const int tid = threadIdx.x;
+    const auto tid = threadIdx.x;
     const int il  = tid/8;
     const int ir  = tid%8;
     const int is  = 2*il;
@@ -197,10 +197,10 @@ template<typename dst_t>
 static __global__ void dequantize_block_q5_K(const void * __restrict__ vx, dst_t * __restrict__ yy) {
     const block_q5_K * x = (const block_q5_K *) vx;
 
-    const int i = blockIdx.x;
+    const auto i = blockIdx.x;
 
     // assume 64 threads - this is very slightly better than the one below
-    const int tid = threadIdx.x;
+    const auto tid = threadIdx.x;
     const int il  = tid/16;   // il is in 0...3
     const int ir  = tid%16;   // ir is in 0...15
     const int is  = 2*il;     // is is in 0...6
@@ -231,10 +231,10 @@ template<typename dst_t>
 static __global__ void dequantize_block_q6_K(const void * __restrict__ vx, dst_t * __restrict__ yy) {
     const block_q6_K * x = (const block_q6_K *) vx;
 
-    const int i = blockIdx.x;
+    const auto i = blockIdx.x;
 
     // assume 64 threads - this is very slightly better than the one below
-    const int tid = threadIdx.x;
+    const auto tid = threadIdx.x;
     const int ip  = tid/32;   // ip is 0 or 1
     const int il  = tid - 32*ip; // 0...32
     const int is  = 8*ip + il/16;
@@ -256,10 +256,10 @@ static __global__ void dequantize_block_q6_K(const void * __restrict__ vx, dst_t
 template<typename dst_t>
 static __global__ void dequantize_block_iq2_xxs(const void * __restrict__ vx, dst_t * __restrict__ yy) {
 
-    const int i   = blockIdx.x;
+    const auto i   = blockIdx.x;
     const block_iq2_xxs * x = (const block_iq2_xxs  *) vx;
 
-    const int tid = threadIdx.x;
+    const auto tid = threadIdx.x;
     const int il = tid/8; // 0...3
     const int ib = tid%8; // 0...7
     dst_t * y = yy + i*QK_K + 32*ib + 8*il;
@@ -275,10 +275,10 @@ static __global__ void dequantize_block_iq2_xxs(const void * __restrict__ vx, ds
 template<typename dst_t>
 static __global__ void dequantize_block_iq2_xs(const void * __restrict__ vx, dst_t * __restrict__ yy) {
 
-    const int i   = blockIdx.x;
+    const auto i   = blockIdx.x;
     const block_iq2_xs * x = (const block_iq2_xs *) vx;
 
-    const int tid = threadIdx.x;
+    const auto tid = threadIdx.x;
     const int il = tid/8; // 0...3
     const int ib = tid%8; // 0...7
     dst_t * y = yy + i*QK_K + 32*ib + 8*il;
@@ -293,10 +293,10 @@ static __global__ void dequantize_block_iq2_xs(const void * __restrict__ vx, dst
 template<typename dst_t>
 static __global__ void dequantize_block_iq2_s(const void * __restrict__ vx, dst_t * __restrict__ yy) {
 
-    const int i   = blockIdx.x;
+    const auto i   = blockIdx.x;
     const block_iq2_s * x = (const block_iq2_s *) vx;
 
-    const int tid = threadIdx.x;
+    const auto tid = threadIdx.x;
     const int il = tid/8; // 0...3
     const int ib = tid%8; // 0...7
     dst_t * y = yy + i*QK_K + 32*ib + 8*il;
@@ -309,10 +309,10 @@ static __global__ void dequantize_block_iq2_s(const void * __restrict__ vx, dst_
 template<typename dst_t>
 static __global__ void dequantize_block_iq3_xxs(const void * __restrict__ vx, dst_t * __restrict__ yy) {
 
-    const int i   = blockIdx.x;
+    const auto i   = blockIdx.x;
     const block_iq3_xxs * x = (const block_iq3_xxs  *) vx;
 
-    const int tid = threadIdx.x;
+    const auto tid = threadIdx.x;
     const int il = tid/8; // 0...3
     const int ib = tid%8; // 0...7
     dst_t * y = yy + i*QK_K + 32*ib + 8*il;
@@ -332,10 +332,10 @@ static __global__ void dequantize_block_iq3_xxs(const void * __restrict__ vx, ds
 template<typename dst_t>
 static __global__ void dequantize_block_iq3_s(const void * __restrict__ vx, dst_t * __restrict__ yy) {
 
-    const int i   = blockIdx.x;
+    const auto i   = blockIdx.x;
     const block_iq3_s * x = (const block_iq3_s *) vx;
 
-    const int tid = threadIdx.x;
+    const auto tid = threadIdx.x;
     const int il = tid/8; // 0...3
     const int ib = tid%8; // 0...7
     dst_t * y = yy + i*QK_K + 32*ib + 8*il;
@@ -399,10 +399,10 @@ static __global__ void dequantize_block_iq1_m(const void * __restrict__ vx, dst_
 template<typename dst_t>
 static __global__ void dequantize_block_iq4_nl(const void * __restrict__ vx, dst_t * __restrict__ yy) {
 
-    const int i   = blockIdx.x;
+    const auto i   = blockIdx.x;
     const block_iq4_nl * x = (const block_iq4_nl *) vx + i*(QK_K/QK4_NL);
 
-    const int tid = threadIdx.x;
+    const auto tid = threadIdx.x;
     const int il = tid/8; // 0...3
     const int ib = tid%8; // 0...7
     dst_t * y = yy + i*QK_K + 32*ib + 4*il;
@@ -417,10 +417,10 @@ static __global__ void dequantize_block_iq4_nl(const void * __restrict__ vx, dst
 
 template<typename dst_t>
 static __global__ void dequantize_block_iq4_xs(const void * __restrict__ vx, dst_t * __restrict__ yy) {
-    const int i   = blockIdx.x;
+    const auto i   = blockIdx.x;
     const block_iq4_xs * x = (const block_iq4_xs *)vx;
 
-    const int tid = threadIdx.x;
+    const auto tid = threadIdx.x;
     const int il = tid/8; // 0...3
     const int ib = tid%8; // 0...7
     dst_t * y = yy + i*QK_K + 32*ib + 4*il;
