@@ -107,7 +107,7 @@ void mla_decode_block_head(
 
   f32_vec_type this_out[V_HEAD_DIM / V_NUM_ELEM][HEAD_UNROLL];
 
-  for (int block_offset = 0; block_offset < BLOCK_SIZE; ++block_offset) {
+  for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
     // load to registers
     f32_vec_type scale_[HEAD_UNROLL];
 
