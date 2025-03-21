@@ -377,6 +377,9 @@ class WorkerProc:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.FAILURE, e))
                 logger.exception("WorkerProc hit an exception: %s", exc_info=e)
+                sys.stdout.flush()
+                sys.stderr.flush()
+                signal.raise_signal(signal.SIGKILL)
                 continue
 
             self.worker_response_mq.enqueue(
