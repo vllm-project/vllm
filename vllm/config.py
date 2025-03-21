@@ -3038,7 +3038,7 @@ class CompilationConfig(BaseModel):
 
     # TODO: combine tpu and cuda padding together.
     # The gap between each bucket for padding (in tpu).
-    # For example, the bucket padding is (16, 24, 32, 48, ..., 512),
+    # For example, the bucket padding is (16, 24, 32, 40, 48, ..., 512),
     # then its bucket_padding_gap is 8.
     tpu_bucket_padding_gap: int = 64
 

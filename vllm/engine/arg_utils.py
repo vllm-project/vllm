@@ -583,7 +583,7 @@ class EngineArgs:
             type=int,
             default=EngineArgs.tpu_bucket_padding_gap,
             help='The gap between each bucket for padding. '
-            'For example, the bucket padding is (16, 24, 32, 48, ..., 512), '
+            'For example, the bucket padding is (16, 24, 32, 40, 48, ..., 512),'
             'then its tpu_bucket_padding_gap is 8.')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
