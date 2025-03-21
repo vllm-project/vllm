@@ -377,7 +377,7 @@ class VllmBackend:
                     hash_content.append(f.read())
             import hashlib
             code_hash = hashlib.md5(
-                "\n".join(hash_content).encode()).hexdigest()
+                "\n".join(hash_content).encode(), usedforsecurity=False).hexdigest()
             factors.append(code_hash)
 
             # 3. compiler hash
@@ -385,7 +385,7 @@ class VllmBackend:
             factors.append(compiler_hash)
 
             # combine all factors to generate the cache dir
-            hash_key = hashlib.md5(str(factors).encode()).hexdigest()[:10]
+            hash_key = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
 
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
