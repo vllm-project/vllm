@@ -21,9 +21,9 @@ def get_non_terminal_hidden_states(
         proposer_model_type: Optional[str] = None) -> Optional[HiddenStates]:
     """
     Given prefill hidden states, extract the hidden states of the last token
-    in a non-terminal chunk for speculative decoding methods such as EAGLE. 
+    in a non-terminal chunk for speculative decoding methods such as EAGLE.
     """
-    if proposer_model_type != 'eagle':
+    if proposer_model_type != 'eagle' and proposer_model_type != "deeseek_mtp":
         return None
 
     non_terminal_seq_group_meta = []
@@ -279,7 +279,7 @@ def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,
 
 @contextmanager
 def nvtx_range(msg, *args, **kwargs):
-    """ 
+    """
     Context manager / decorator that pushes an NVTX range at the beginning
     of its scope, and pops it at the end. If extra arguments are given,
     they are passed as arguments to msg.format().

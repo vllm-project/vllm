@@ -163,7 +163,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         allow_zero_draft_token_step = True
         enable_lm_head_weight_load = False
         num_spec_prefill_steps = 1
-        require_prefill_hidden_states = False
         ngram_prompt_lookup_max = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
@@ -206,7 +205,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 if draft_model_config.hf_config.model_type == "deepseek_mtp":
                     num_spec_prefill_steps = \
                         draft_model_config.hf_config.n_predict
-                    require_prefill_hidden_states = True
 
             proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
                 proposer_worker, draft_tp, target_tp)
@@ -349,7 +347,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         self._disable_logprobs = disable_logprobs
         self._disable_log_stats = disable_log_stats
         self._num_spec_prefill_steps = num_spec_prefill_steps
-        self._require_prefill_hidden_states = require_prefill_hidden_states
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -825,7 +822,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             if execute_model_req.seq_group_metadata_list[idx].is_prompt
         ]
         if len(non_spec_indices):
-            if self.proposer_model_type != 'eagle':
+            if self.proposer_model_type != 'eagle' and\
+              self.proposer_model_type != "deepseek_mtp":
                 all_hidden_states = proposal_scores.hidden_states
                 if all_hidden_states is not None:
                     prefill_hidden_states = all_hidden_states[non_spec_indices]
