@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from copy import copy
-from typing import Optional, Union
+from typing import Optional
 
 from vllm.outputs import CompletionOutput
-from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.metrics.stats import IterationStats
 
@@ -42,16 +41,6 @@ class ParentRequest:
             == RequestOutputKind.FINAL_ONLY) else []
         self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
-
-    @classmethod
-    def from_params(
-        cls,
-        request_id: str,
-        params: Union[SamplingParams, PoolingParams],
-    ) -> Optional['ParentRequest']:
-        if not isinstance(params, SamplingParams) or params.n == 1:
-            return None
-        return cls(request_id, params)
 
     def _get_child_sampling_params(
         self,

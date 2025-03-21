@@ -492,7 +492,6 @@ class _AsyncLLMEngine(LLMEngine):
 
         preprocessed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
-            request_id=request_id,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
