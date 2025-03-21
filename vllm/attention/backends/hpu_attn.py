@@ -31,6 +31,8 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.hpu_paged_attn import (HPUPagedAttention,
                                                HPUPagedAttentionMetadata)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    Fp8LinearGenericOp)
 
 
 def forward_quant(self, input, *args, **kwargs):
@@ -164,7 +166,8 @@ class HPUMLAAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> List[Tuple[int, ...]]:
-        return [(num_blocks, block_size, head_size // 9 * 1), (num_blocks, block_size, head_size // 9 * 8)]
+        return [(num_blocks, block_size, head_size // 9 * 1),
+                (num_blocks, block_size, head_size // 9 * 8)]
 
     @staticmethod
     def swap_blocks(
@@ -280,6 +283,7 @@ class HPUMLAImpl(
         self.block2batch_matmul = Matmul()
         self.latent_cache_k = VLLMKVCache()
         self.latent_cache_v = VLLMKVCache()
+        self.fp8_linear_generic = Fp8LinearGenericOp()
         if kv_cache_dtype == 'fp8_inc':
             self.latent_cache_k = initialize_fp8_kv_cache(
                 self.latent_cache_k, self)

@@ -147,6 +147,12 @@ class Fp8LinearGenericOp:
                 weight_scale,
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported)
         else:
+            if current_platform.is_hpu():
+                return apply_fp8_linear_hpu_dynamic(input,
+                                                    weight,
+                                                    weight_scale,
+                                                    input_scale=input_scale,
+                                                    bias=None)
             # Despite having linear in the name it doesn't conform to
             # `torch.nn.functional.linear` which is defined as
             # `input @ weight.T` so we explicitly transpose the weight matrix
@@ -197,7 +203,6 @@ def pad_block_fp8_weight_naive(weight, weight_scale, block_size):
 
 
 def dynamic_quant(data, single_scale=False):
-    #FULL_RANGE = 240.0
     FULL_RANGE = 448.0
     if single_scale:
         scale = ((torch.abs(data)).max() + 1e-8) / FULL_RANGE
@@ -257,7 +262,7 @@ def dequant_block_fp8_weight_naive(weight,
     return dequant_weight
 
 
-def apply_block_fp8_linear_hpu_dynamic(
+def apply_fp8_linear_hpu_dynamic(
     input: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,

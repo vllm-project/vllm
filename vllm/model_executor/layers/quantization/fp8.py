@@ -20,7 +20,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    apply_block_fp8_linear_hpu_dequant, apply_block_fp8_linear_hpu_dynamic,
+    apply_block_fp8_linear_hpu_dequant, apply_fp8_linear_hpu_dynamic,
     dequant_block_fp8_weight_naive, dynamic_quant, pad_block_fp8_weight_naive)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin)
@@ -442,7 +442,7 @@ class Fp8LinearMethod(LinearMethodBase):
                         do_unpad=True,
                     )
                 else:
-                    return apply_block_fp8_linear_hpu_dynamic(
+                    return apply_fp8_linear_hpu_dynamic(
                         input=x,
                         weight=layer.weight,
                         weight_scale=layer.weight_scale_inv,
@@ -460,7 +460,7 @@ class Fp8LinearMethod(LinearMethodBase):
             )
         if current_platform.is_hpu(
         ) and self.quant_config.activation_scheme == "dynamic":
-            return apply_block_fp8_linear_hpu_dynamic(
+            return apply_fp8_linear_hpu_dynamic(
                 input=x,
                 weight=layer.weight,
                 weight_scale=layer.weight_scale_inv,

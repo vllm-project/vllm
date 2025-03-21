@@ -1121,6 +1121,11 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         def get_scale_group_shapes_for_fp8(layer: LinearBase) -> \
             Tuple[Tuple[int, int], Tuple[int, int]]:
             if isinstance(layer.quant_method, Fp8LinearMethod):
+                if layer.quant_method.block_quant and current_platform.is_hpu(
+                ):
+                    # hpu doesn't have block_scale support yet
+                    # using per-tensor.
+                    return (-1, -1), (-1, -1)  # per-tensor, per-tensor
                 if layer.quant_method.block_quant:
                     weight_block_size = \
                         layer.quant_method.quant_config.weight_block_size
