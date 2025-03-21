@@ -325,11 +325,13 @@ def test_unify_kv_cache_configs():
     def new_kv_cache_spec(block_size=16,
                           num_kv_heads=2,
                           head_size=64,
-                          dtype=torch.float32):
+                          dtype=torch.float32,
+                          use_mla=False):
         return FullAttentionSpec(block_size=block_size,
                                  num_kv_heads=num_kv_heads,
                                  head_size=head_size,
-                                 dtype=dtype)
+                                 dtype=dtype,
+                                 use_mla=use_mla)
 
     same_kv_cache_config = [
         KVCacheConfig(
