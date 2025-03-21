@@ -25,6 +25,7 @@ from vllm.attention.backends.utils import (
 from vllm.fa_utils import get_flash_attn_version
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalPlaceholderMap
+from vllm.spec_decode.util import register_attention_metadata
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
@@ -100,6 +101,7 @@ class FlashAttentionBackend(AttentionBackend):
 
 
 @dataclass
+@register_attention_metadata
 class FlashAttentionMetadata(AttentionMetadata):
     """Metadata for FlashAttentionBackend.
 

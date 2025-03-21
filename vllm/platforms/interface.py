@@ -114,6 +114,8 @@ class Platform:
 
     additional_env_vars: list[str] = []
 
+    supports_spec_decoding: bool = False
+
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 

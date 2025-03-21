@@ -75,6 +75,7 @@ class CudaPlatformBase(Platform):
     dispatch_key: str = "CUDA"
     ray_device_key: str = "GPU"
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+    supports_spec_decoding: bool = True
 
     @classmethod
     def get_device_capability(cls,
