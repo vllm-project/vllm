@@ -153,6 +153,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8": torch.uint8,
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
+    "int8": torch.int8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
