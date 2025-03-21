@@ -146,6 +146,7 @@ class ModelConfig:
             decoding draft models.
         quantization: Quantization method that was used to quantize the model
             weights. If None, we assume the model weights are not quantized.
+        torchao_config: Quantization configuration for torchao
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
@@ -242,6 +243,7 @@ class ModelConfig:
         max_model_len: Optional[int] = None,
         spec_target_max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
+        torchao_config: Optional[str] = None,
         enforce_eager: Optional[bool] = None,
         max_seq_len_to_capture: Optional[int] = None,
         max_logprobs: int = 20,
@@ -319,6 +321,7 @@ class ModelConfig:
         else:
             self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
+        self.torchao_config = torchao_config
         self.enforce_eager = enforce_eager
         self.max_seq_len_to_capture = max_seq_len_to_capture
         self.max_logprobs = max_logprobs
@@ -626,6 +629,9 @@ class ModelConfig:
         ]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
+
+        if self.torchao_config is not None:
+            self.torchao_config = self.torchao_config.lower()
 
         # Parse quantization method from the HF model config, if available.
         quant_cfg = self._parse_quant_hf_config()
