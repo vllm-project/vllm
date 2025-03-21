@@ -43,6 +43,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                                                       max_num_batched_tokens,
                                                       device=device)
 
+        # When cudagraph capture size is greater than max_num_seqs (max_batches,
+        # here), V0 captures the graph as if max_num_seqs is set to
+        # the capture size.
+        # V1 doesn't have this problem and always respects max_num_seqs.
         max_num_prompts = (max_batches
                            if envs.VLLM_USE_V1 else max_num_batched_tokens)
         self.prompt_mapping_meta = LoRAKernelMeta.make(self.max_loras,
