@@ -301,7 +301,7 @@ def get_requests(args, tokenizer):
         "output_len": args.output_len,
     }
 
-    if args.dataset_name == "random":
+    if args.dataset_path is None or args.dataset_name == "random":
         sample_kwargs["range_ratio"] = args.random_range_ratio
         sample_kwargs["prefix_len"] = args.prefix_len
         dataset_cls = RandomDataset
@@ -331,8 +331,8 @@ def get_requests(args, tokenizer):
         sample_kwargs["enable_multimodal_chat"] = True
     elif args.dataset_name == "instructcoder":
         dataset_cls = InstructCoderDataset
-        common_kwargs['dataset_subset'] = args.hf_subset
-        common_kwargs['dataset_split'] = args.hf_split
+        common_kwargs['dataset_subset'] = "unused"
+        common_kwargs['dataset_split'] = "unused"
 
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
@@ -451,13 +451,16 @@ def validate_args(args):
         raise ValueError(f"Unsupported backend: {args.backend}")
 
     # === Dataset Configuration ===
+    if args.dataset_name == "instructcoder":
+        args.dataset = "unused"
+        args.dataset_path = "unused"
+
     if not args.dataset and not args.dataset_path:
-        if not args.dataset_name:
-            print(
-                "When dataset name is not set, it will default to random dataset")
-            args.dataset_name = 'random'
-            if args.input_len is None:
-                raise ValueError("input_len must be provided for a random dataset")
+        print(
+            "When dataset path is not set, it will default to random dataset")
+        args.dataset_name = 'random'
+        if args.input_len is None:
+            raise ValueError("input_len must be provided for a random dataset")
 
     # === Dataset Name Specific Checks ===
     # --hf-subset and --hf-split: only used
