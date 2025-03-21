@@ -19,10 +19,10 @@ static __device__ __forceinline__ void moe_q(
 
   const int ncols_dst = ncols_y * top_k;
 
-  const int row_dst_0 = blockIdx.x * mmq_y;
+  const auto row_dst_0 = blockIdx.x * mmq_y;
   const int& row_x_0 = row_dst_0;
 
-  const int col_dst_0 = blockIdx.y * mmq_x;
+  const auto col_dst_0 = blockIdx.y * mmq_x;
 
   int token_offs[mmq_x / nwarps];
   for (int i = 0; i < mmq_x; i += nwarps) {
@@ -56,7 +56,7 @@ static __device__ __forceinline__ void moe_q(
     const int n_per_r = ((qk * blocks_per_warp) / qr);
 #pragma unroll
     for (int ir = 0; ir < qr && ib0 * qk + ir * n_per_r < ncols_x; ++ir) {
-      const int kqs = ir * WARP_SIZE_GGUF + threadIdx.x;
+      const auto kqs = ir * WARP_SIZE_GGUF + threadIdx.x;
       const int kbxd = kqs / QI8_1;
 
 #pragma unroll
@@ -73,7 +73,7 @@ static __device__ __forceinline__ void moe_q(
       }
 
       if (threadIdx.x < n_per_r / QK8_1) {
-        const int kby = threadIdx.x % (WARP_SIZE_GGUF / QI8_1);
+        const auto kby = threadIdx.x % (WARP_SIZE_GGUF / QI8_1);
         const int col_y_eff = token_offs[threadIdx.y] / top_k;
         const int block_x =
             ib0 * (qk / QK8_1) + ir * (WARP_SIZE_GGUF / QI8_1) + kby;
@@ -119,7 +119,7 @@ static __device__ __forceinline__ void moe_q(
 
 #pragma unroll
     for (int i = 0; i < mmq_y; i += WARP_SIZE_GGUF) {
-      const int row_dst = row_dst_0 + threadIdx.x + i;
+      const auto row_dst = row_dst_0 + threadIdx.x + i;
       if (row_dst >= nrows_dst) {
         continue;
       }
