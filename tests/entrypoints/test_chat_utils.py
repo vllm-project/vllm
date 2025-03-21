@@ -717,7 +717,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
         QWEN2VL_MODEL_ID,  # chat_template is of type str.
         CohereForAI_MODEL_ID,  # chat_template is of type dict.
      ])
-def test_chat_template_hf(model):
+def test_chat_template_hf(model, sample_json_schema):
     """checks that chat_template is a dict type for HF models."""
 
     def get_conversation():
@@ -741,7 +741,15 @@ def test_chat_template_hf(model):
         conversation=get_conversation(),
         # chat_template is None. use default chat_template.
         chat_template=None,
-        add_generation_prompt=True)
+        add_generation_prompt=True,
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name",
+                "description": "This is a dummy function",
+                "parameters": sample_json_schema
+            }
+        }])
 
 
 # yapf: disable
