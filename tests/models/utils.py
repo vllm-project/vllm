@@ -2,13 +2,15 @@
 
 import warnings
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 
 from vllm.config import ModelConfig, TaskOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
+
+from .registry import HF_EXAMPLE_MODELS
 
 TokensText = tuple[list[int], str]
 
@@ -250,21 +252,17 @@ def check_logprobs_close(
 
 
 def build_model_context(
-    model_name: str,
+    model_id: str,
     task: TaskOption = "auto",
-    tokenizer_name: Optional[str] = None,
-    trust_remote_code: bool = False,
-    dtype: Optional[Union[str, torch.dtype]] = None,
-    mm_processor_kwargs: Optional[dict] = None,
-    limit_mm_per_prompt: Optional[dict] = None,
+    dtype: Union[str, torch.dtype] = "auto",
+    mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    limit_mm_per_prompt: Optional[dict[str, int]] = None,
     disable_mm_preprocessor_cache: bool = True,
 ):
     """Creates an InputContext for a given model.
 
     Args:
-        model_name: Name of the model being considered.
-        tokenizer_name: Name of the tokenizer being considered.
-        trust_remote_code: Whether or not to allow loading remote code.
+        model_id: ID of the model being considered.
         mm_processor_kwargs: optional processor kwargs for to be leveraged
             in the input processor, mapper, dummy data creation, etc.
         limit_mm_per_prompt: Multimodal limits.
@@ -272,21 +270,21 @@ def build_model_context(
     Returns:
         InputContext for the model being considered.
     """
-    if tokenizer_name is None:
-        tokenizer_name = model_name
-    if dtype is None:
-        dtype = "half"
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
 
     model_config = ModelConfig(
-        model_name,
+        model_id,
         task=task,
-        tokenizer=tokenizer_name,
-        tokenizer_mode="auto",
-        trust_remote_code=trust_remote_code,
+        tokenizer=model_info.tokenizer or model_id,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
         dtype=dtype,
         seed=0,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
         disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+        hf_overrides=model_info.hf_overrides,
     )
     return InputContext(model_config)
