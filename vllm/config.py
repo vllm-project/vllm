@@ -1025,10 +1025,11 @@ class ModelConfig:
             diff_sampling_param = {}
 
         if diff_sampling_param:
-            logger.warning("Default sampling parameters have been overridden "
-                           "by the model's huggingface generation config. "
-                           "Please pass `--generation-config vllm` at server "
-                           "launch if this is not intended.")
+            logger.warning_once(
+                "Default sampling parameters have been overridden "
+                "by the model's huggingface generation config. "
+                "Please pass `--generation-config vllm` at server "
+                "launch if this is not intended.")
         return diff_sampling_param
 
     @property
