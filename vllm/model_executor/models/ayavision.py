@@ -322,22 +322,16 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal):
             vllm_config=vllm_config,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "model"),
-            architectures=["Cohere2ForCausalLM"])
+            architectures=["CohereForCausalLM"])
 
     @property
     def dtype(self):
         return next(self.parameters()).dtype
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
-
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self, skip_prefixes=(['lm_head','rotary_emb']
+                           if self.config.tie_word_embeddings else None))
         return loader.load_weights(weights)
 
     def _process_image_input(
