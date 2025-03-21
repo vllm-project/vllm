@@ -28,7 +28,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
 
 
 class Worker(WorkerBase):
