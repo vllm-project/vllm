@@ -83,7 +83,6 @@ def initialize_engine(model: str, quantization: str,
         engine_args = EngineArgs(model=model,
                                  quantization=quantization,
                                  qlora_adapter_name_or_path=lora_repo,
-                                 load_format="bitsandbytes",
                                  enable_lora=True,
                                  max_lora_rank=64)
     else:

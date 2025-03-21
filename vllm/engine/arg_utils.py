@@ -1170,22 +1170,15 @@ class EngineArgs:
         )
 
     def create_load_config(self) -> LoadConfig:
-        # bitsandbytes quantization needs a specific model loader
-        # so we make sure the quant method and the load format are consistent
-        if (self.quantization == "bitsandbytes" or
-           self.qlora_adapter_name_or_path is not None) and \
-           self.load_format != "bitsandbytes":
-            raise ValueError(
-                "BitsAndBytes quantization and QLoRA adapter only support "
-                f"'bitsandbytes' load format, but got {self.load_format}")
 
-        if (self.load_format == "bitsandbytes" or
-            self.qlora_adapter_name_or_path is not None) and \
+        if(self.qlora_adapter_name_or_path is not None) and \
             self.quantization != "bitsandbytes":
             raise ValueError(
-                "BitsAndBytes load format and QLoRA adapter only support "
+                "QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
 
+        if self.quantization == "bitsandbytes":
+            self.load_format = "bitsandbytes"
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
