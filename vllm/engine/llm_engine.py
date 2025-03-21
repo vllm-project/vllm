@@ -295,6 +295,8 @@ class LLMEngine:
                     str(self.model_config.dtype),
                     "tensor_parallel_size":
                     self.parallel_config.tensor_parallel_size,
+                    "pipeline_parallel_size":
+                    self.parallel_config.pipeline_parallel_size,
                     "block_size":
                     self.cache_config.block_size,
                     "gpu_memory_utilization":
