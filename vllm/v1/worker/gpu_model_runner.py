@@ -223,8 +223,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 pin_memory=self.pin_memory)
 
         # Only relevant for models using ALiBi (e.g, MPT)
-        self.use_alibi = (hasattr(model_config.hf_text_config, "attn_config")
-                                    and model_config.hf_text_config.attn_config.get("alibi", False))
+        self.use_alibi = (
+            (hasattr(model_config.hf_text_config, "alibi")
+             and model_config.hf_text_config.alibi)  # Falcon
+            or (hasattr(model_config.hf_text_config, "architectures")  # Bloom
+                and "BloomForCausalLM"
+                in model_config.hf_text_config.architectures) or
+            (hasattr(model_config.hf_text_config,
+                     "position_encoding_type")  # codellm_1b_alibi
+             and model_config.hf_text_config.position_encoding_type == "alibi")
+            or
+            (hasattr(model_config.hf_text_config, "attn_config")  # MPT
+             and model_config.hf_text_config.attn_config.get("alibi", False)))
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
