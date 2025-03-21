@@ -1337,9 +1337,9 @@ def get_max_shared_memory_per_block_device_attribute(device: int) -> int:
 
 # custom ar
 def init_custom_ar(ipc_tensors: list[torch.Tensor], rank_data: torch.Tensor,
-                   rank: int, full_connected: bool) -> int:
+                   rank: int, fully_connected: bool) -> int:
     return torch.ops._C_custom_ar.init_custom_ar(ipc_tensors, rank_data, rank,
-                                                 full_connected)
+                                                 fully_connected)
 
 
 def all_reduce(fa: int, inp: torch.Tensor, out: torch.Tensor, reg_buffer: int,

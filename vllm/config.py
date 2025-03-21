@@ -1588,7 +1588,7 @@ class ParallelConfig:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
         if current_platform.is_rocm(
-        ) and current_platform.get_device_capability() < (9, 4):
+        ) and current_platform.get_device_capability() < (9, 4):  # noqa
             self.disable_custom_all_reduce = True
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "

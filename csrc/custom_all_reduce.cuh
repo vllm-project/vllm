@@ -371,7 +371,7 @@ class CustomAllreduce {
   int rank_;
   int world_size_;
   // Full NVLink or xGMI connection between GPUs.
-  bool full_connected_;
+  bool fully_connected_;
 
   RankSignals sg_;
   // Stores an map from a pointer to its peer pointers from all ranks.
@@ -411,10 +411,10 @@ class CustomAllreduce {
    * are passed in from the constructor.
    */
   CustomAllreduce(Signal** signals, void* rank_data, size_t rank_data_sz,
-                  int rank, int world_size, bool full_connected = true)
+                  int rank, int world_size, bool fully_connected = true)
       : rank_(rank),
         world_size_(world_size),
-        full_connected_(full_connected),
+        fully_connected_(fully_connected),
         self_sg_(signals[rank]),
         d_rank_data_base_(reinterpret_cast<RankData*>(rank_data)),
         d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)) {
@@ -561,7 +561,7 @@ class CustomAllreduce {
   case ngpus: {                                       \
     if (world_size_ == 2) {                           \
       KL(ngpus, cross_device_reduce_1stage);          \
-    } else if (full_connected_) {                     \
+    } else if (fully_connected_) {                    \
       if ((world_size_ <= 4 && bytes < 512 * 1024) || \
           (world_size_ <= 8 && bytes < 256 * 1024)) { \
         KL(ngpus, cross_device_reduce_1stage);        \

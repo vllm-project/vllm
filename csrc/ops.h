@@ -268,7 +268,7 @@ void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
                       torch::Tensor& rank_data, int64_t rank,
-                      bool full_connected);
+                      bool fully_connected);
 void all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                 fptr_t reg_buffer, int64_t reg_buffer_sz_bytes);
 void dispose(fptr_t _fa);

@@ -136,14 +136,15 @@ class RocmPlatform(Platform):
 
     @classmethod
     @lru_cache(maxsize=8)
-    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+    def get_device_capability(cls,
+                              device_id: int = 0
+                              ) -> Optional[DeviceCapability]:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 
     @staticmethod
     @with_amdsmi_context
-    def is_fully_connected_nvlink_or_xgmi(
-            physical_device_ids: List[int]) -> bool:
+    def is_fully_connected(physical_device_ids: List[int]) -> bool:
         """
         Query if the set of gpus are fully connected by xgmi (1 hop)
         """

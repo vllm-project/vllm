@@ -614,7 +614,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   // Custom all-reduce kernels
   custom_ar.def(
       "init_custom_ar(int[] ipc_tensors, Tensor rank_data, "
-      "int rank, bool full_connected) -> int");
+      "int rank, bool fully_connected) -> int");
   custom_ar.impl("init_custom_ar", torch::kCUDA, &init_custom_ar);
   custom_ar.def(
       "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
