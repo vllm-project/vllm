@@ -49,7 +49,7 @@ def test_env(
                        RocmPlatform()):
                 backend = get_attn_backend(16, torch.float16, torch.float16,
                                            16, False)
-            EXPECTED = "ROCM_ATTN_VLLM_V1" if use_v1 else "ROCM_FLASH"
+            EXPECTED = "TRITON_ATTN_VLLM_V1" if use_v1 else "ROCM_FLASH"
             assert backend.get_name() == EXPECTED
         elif device == "openvino":
             with patch("vllm.attention.selector.current_platform",
