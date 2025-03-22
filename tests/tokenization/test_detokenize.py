@@ -36,9 +36,9 @@ TOKENIZERS = [
     "bigscience/bloom-560m",
     "mosaicml/mpt-7b",
     "tiiuae/falcon-7b",
-    # "meta-llama/Llama-3.2-1B-Instruct",
+    "meta-llama/Llama-3.2-1B-Instruct",
     "codellama/CodeLlama-7b-hf",
-    # "mistralai/Pixtral-12B-2409",
+    "mistralai/Pixtral-12B-2409",
 ]
 
 
