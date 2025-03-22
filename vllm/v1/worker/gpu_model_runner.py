@@ -1114,6 +1114,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
                 sampled_token_ids, self.input_batch.vocab_size)
 
+        # Remove sampled tokens from the requests that are still
+        # being prefilled.
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            if (self.requests[req_id].num_computed_tokens +
+                    scheduler_output.num_scheduled_tokens[req_id]
+                    < self.requests[req_id].num_tokens):
+                valid_sampled_token_ids[i] = []
+
         if not self.use_spec_decode:
             spec_token_ids = None
         else:

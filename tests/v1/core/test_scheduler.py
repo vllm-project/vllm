@@ -242,7 +242,9 @@ def test_schedule_partial_requests():
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[0] for _ in range(len(requests))],
+        # Only the first request has a sampled token id because
+        # the rest requests are still being prefilled.
+        sampled_token_ids=[[0], [], []],
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
