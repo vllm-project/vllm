@@ -219,19 +219,25 @@ void mla_decode_block(
 
   // compute 2 heads at the same time to improve ILP and
   // take advantage of register cache for K and V.
-  for (int iter2 = 0; iter2 < num_heads / 2; ++iter2) {
-    mla_decode_block_head<HEAD_DIM, V_HEAD_DIM, BLOCK_SIZE, 2>(
+  constexpr int HEAD_UNROLL = 2;
+  for (int iter = 0; iter < num_heads / HEAD_UNROLL; ++iter) {
+    mla_decode_block_head<HEAD_DIM, V_HEAD_DIM, BLOCK_SIZE, HEAD_UNROLL>(
         q_vecs, k_vecs, v_vecs_f32, acc_out, acc_lse, scale, num_tokens);
 
-    q_vecs += 2 * HEAD_DIM / QK_NUM_ELEM;
-    acc_out += 2 * V_HEAD_DIM;
-    acc_lse += 2;
+    q_vecs += HEAD_UNROLL * HEAD_DIM / QK_NUM_ELEM;
+    acc_out += HEAD_UNROLL * V_HEAD_DIM;
+    acc_lse += HEAD_UNROLL;
   }
 
-  // handle the case when num_heads is odd
-  if (num_heads % 2 == 1)
+  // take care of the remaining heads
+  for (int iter = 0; iter < num_heads % HEAD_UNROLL; ++iter) {
     mla_decode_block_head<HEAD_DIM, V_HEAD_DIM, BLOCK_SIZE, 1>(
         q_vecs, k_vecs, v_vecs_f32, acc_out, acc_lse, scale, num_tokens);
+
+    q_vecs += HEAD_DIM / QK_NUM_ELEM;
+    acc_out += V_HEAD_DIM;
+    acc_lse += 1;
+  }
 
   if (kv_cache_f32 != nullptr) {
     std::free(kv_cache_f32);

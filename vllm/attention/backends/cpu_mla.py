@@ -84,7 +84,8 @@ class CPUMLAMetadataBuilder(AttentionMetadataBuilder[CPUMLAMetadata]):
     def __init__(self, input_builder: ModelInputForCPUBuilder) -> None:
         self.chunked_prefill = input_builder.chunked_prefill
         self.input_builder = input_builder
-        assert not self.chunked_prefill
+        assert not self.chunked_prefill, \
+            "chunked prefill is currently not supported"
 
     def prepare(self):
         self.input_data = self.input_builder.input_data

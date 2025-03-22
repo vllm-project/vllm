@@ -817,21 +817,4 @@ def test_concat_and_cache_mla_cpu(
 
     ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping,
                              kv_cache_dtype, scale)
-
-    if kv_cache_dtype == "fp8":
-        result_temp = torch.empty_like(kv_cache, dtype=torch.float16)
-        ops.convert_fp8(result_temp,
-                        kv_cache.contiguous(),
-                        scale.item(),
-                        kv_dtype=kv_cache_dtype)
-        expected_temp = torch.empty_like(ref_kv_cache, dtype=torch.float16)
-        ops.convert_fp8(expected_temp,
-                        ref_kv_cache,
-                        scale.item(),
-                        kv_dtype=kv_cache_dtype)
-        torch.testing.assert_close(result_temp,
-                                   expected_temp,
-                                   atol=0.001,
-                                   rtol=0.1)
-    else:
-        torch.testing.assert_close(kv_cache, ref_kv_cache)
+    torch.testing.assert_close(kv_cache, ref_kv_cache)
