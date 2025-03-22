@@ -2438,6 +2438,7 @@ def cprofile(save_file: Optional[str] = None, enabled: bool = True):
 
     return decorator
 
+
 # Only relevant for models using ALiBi (e.g, MPT)
 def check_use_alibi(model_config: ModelConfig) -> bool:
     return (getattr(model_config.hf_text_config, "alibi", False)  # Falcon
