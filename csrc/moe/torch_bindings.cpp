@@ -51,6 +51,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "topk, "
       "int moe_block_size, bool replicate_input, bool apply_weights)"
       " -> Tensor");
+
+  m.def(
+      "moe_permute(Tensor! input, Tensor! topk_weight, Tensor! topk_ids,"
+      "Tensor! token_expert_indicies, Tensor? expert_map, int n_expert,"
+      "int n_local_expert,"
+      "int topk, Tensor! permuted_input, Tensor! expert_first_token_offset, "
+      "Tensor!src_row_id2dst_row_id_map)->()");
+
+  m.def(
+      "moe_unpermute(Tensor! permuted_hidden_states, Tensor! topk_weights,"
+      "Tensor! topk_ids,Tensor! src_row_id2dst_row_id_map, Tensor! "
+      "expert_first_token_offset, int n_expert, int n_local_expert,int "
+      "topk, Tensor! hidden_states)->()");
   // conditionally compiled so impl registration is in source file
 
 #endif

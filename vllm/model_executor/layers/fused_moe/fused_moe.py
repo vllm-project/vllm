@@ -1054,7 +1054,7 @@ def fused_topk(
                            topk,
                            dtype=torch.int32,
                            device=hidden_states.device)
-    token_expert_indicies = torch.empty(M,
+    token_expert_indices = torch.empty(M,
                                         topk,
                                         dtype=torch.int32,
                                         device=hidden_states.device)
@@ -1062,15 +1062,15 @@ def fused_topk(
     ops.topk_softmax(
         topk_weights,
         topk_ids,
-        token_expert_indicies,
+        token_expert_indices,
         gating_output.float(),  # TODO(woosuk): Optimize this.
     )
-    del token_expert_indicies  # Not used. Will be used in the future.
+    # del token_expert_indices  # Not used. Will be used in the future.
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
-    return topk_weights, topk_ids
+    return topk_weights, topk_ids, token_expert_indices
 
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
@@ -1544,8 +1544,9 @@ def fused_moe(
                                               topk, renormalize,
                                               num_expert_group, topk_group)
     elif custom_routing_function is None:
-        topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
-                                            renormalize)
+        topk_weights, topk_ids, token_expert_indices = fused_topk(
+            hidden_states, gating_output, topk, renormalize
+        )
     else:
         topk_weights, topk_ids = custom_routing_function(
             hidden_states, gating_output, topk, renormalize)
