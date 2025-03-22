@@ -31,7 +31,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsSampleV2
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -335,7 +335,8 @@ class QWenBaseModel(nn.Module):
         return loaded_params
 
 
-class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
+class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA,
+                      SupportsSampleV2):
     packed_modules_mapping = {
         "c_attn": ["c_attn"],
         "gate_up_proj": [

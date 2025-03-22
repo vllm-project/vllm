@@ -38,6 +38,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import supports_lora, supports_multimodal
+from vllm.model_executor.models.interfaces import SupportsSampleV2
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
@@ -1785,8 +1786,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     torch.tensor(model_forward_time + orig_model_forward_time))
             return hidden_or_intermediate_states
 
-        logits = self.model.compute_logits(hidden_or_intermediate_states,
-                                           model_input.sampling_metadata)
+        if isinstance(self.model, SupportsSampleV2):
+            logits = self.model.compute_logits_v2(
+                hidden_or_intermediate_states, model_input.sampling_metadata)
+        else:
+            logits = self.model.compute_logits(hidden_or_intermediate_states,
+                                               model_input.sampling_metadata)
 
         if not self.is_driver_worker:
             return []
@@ -1795,10 +1800,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_input.async_callback()
 
         # Sample the next token.
-        output: SamplerOutput = self.model.sample(
-            logits=logits,
-            sampling_metadata=model_input.sampling_metadata,
-        )
+        if isinstance(self.model, SupportsSampleV2):
+            output: SamplerOutput = self.model.samplev2(
+                logits=logits, sampling_metadata=model_input.sampling_metadata)
+        else:
+            output = self.model.sample(
+                logits=logits, sampling_metadata=model_input.sampling_metadata)
+
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
                 and output is not None):
