@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import platform
 
-import uvloop
+if platform.system() == "Windows":
+    import winloop as uvloop_impl
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"  # Windows does not support fork
+    os.environ["USE_LIBUV"] = os.environ.get("USE_LIBUV", "0")  # Disable libuv on Windows by default if no USE_LIBUV is defined previously
+else:
+    import uvloop as uvloop_impl
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
@@ -30,7 +36,7 @@ class ServeSubcommand(CLISubcommand):
         # EngineArgs expects the model name to be passed as --model.
         args.model = args.model_tag
 
-        uvloop.run(run_server(args))
+        uvloop_impl.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
         validate_parsed_serve_args(args)

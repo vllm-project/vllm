@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import platform
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable, Optional
+
+DEFAULT_MP_METHOD = "fork" if platform.system() != "Windows" else "spawn"
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -51,7 +54,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL: bool = True
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
-    VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
+    VLLM_WORKER_MULTIPROC_METHOD: str = DEFAULT_MP_METHOD
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
@@ -407,7 +410,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
-    lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "fork"),
+    lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", DEFAULT_MP_METHOD),
 
     # Path to the cache for storing downloaded assets
     "VLLM_ASSETS_CACHE":
