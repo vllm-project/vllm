@@ -5,7 +5,8 @@ Ensure the v1 LLM Engine exposes a superset of the metrics available in v0.
 ## Objectives
 
 - Achieve parity of metrics between v0 and v1.
-- The priority use case is accessing these metrics via Prometheus as this is what we expect to be used in production environments.
+- The priority use case is accessing these metrics via configurable exporter format defaulting to the Prometheus as this is what we expect to be used in production environments.
+- Ability to export metrics in multiple formats (e.g. Prometheus, OTLP) with delta or cumulative temporality.
 - Logging support - i.e. printing metrics to the info log - is provided for more ad-hoc testing, debugging, development, and exploratory use cases.
 
 ## Background
@@ -82,9 +83,20 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 
 See [the PR which added this Dashboard](gh-pr:2316) for interesting and useful background on the choices made here.
 
-### Prometheus Client Library
+### OpenTelemetry API
 
 Prometheus support was initially added [using the aioprometheus library](gh-pr:1890), but a switch was made quickly to [prometheus_client](gh-pr:2730). The rationale is discussed in both linked PRs.
+
+The OpenTelemetry API/SDK will enable vLLM to use a single instrumentation API for all telemetry data, including, metrics and traces.
+The unified instrumentation API will also make it easy to correlate metrics, traces and logs. For instance by using consistent attributes, exemplars
+or putting trace context into logs.
+
+The OpenTelemetry SDK supports exporting telemetry data in various open-source formats like Prometheus and OpenTelemetry protocol (OTLP).
+Therefore, the OpenTelemetry SDK will enable vLLM to better integrate with other observability tools and platforms.
+
+See:
+* https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/#exporter-selection
+* https://opentelemetry.io/docs/languages/python/exporters/#prometheus
 
 ### Multi-process Mode
 
