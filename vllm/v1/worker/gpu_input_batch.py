@@ -366,6 +366,7 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
+        self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]

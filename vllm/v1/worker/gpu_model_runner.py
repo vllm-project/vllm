@@ -1215,14 +1215,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     (num_prompt_tokens - 1, num_prompt_logprobs + 1),
                     dtype=torch.int32,
                     device="cpu")
-
-                logprobs_tensors = LogprobsTensors(
+                logprobs = torch.empty_like(logprob_token_ids,
+                                            dtype=torch.float32)
+                selected_token_ranks = torch.empty(num_prompt_tokens - 1,
+                                                   dtype=torch.int32,
+                                                   device="cpu")
+                in_progress_dict[req_id] = logprobs_tensors = LogprobsTensors(
                     logprob_token_ids=logprob_token_ids,
-                    logprobs=torch.empty_like(logprob_token_ids,
-                                              dtype=torch.float32),
-                    selected_token_ranks=torch.empty(num_prompt_tokens - 1,
-                                                     dtype=torch.int32,
-                                                     device="cpu"),
+                    logprobs=logprobs,
+                    selected_token_ranks=selected_token_ranks,
                 )
 
             # Determine number of logits to retrieve.
@@ -1235,14 +1236,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # but we want to defer returning them to the next step where we
                 # have new generated tokens to return.
                 num_logits = num_tokens
-                if start_idx == 0:
-                    # Store the tensors for subsequent iterations.
-                    in_progress_dict[req_id] = logprobs_tensors
             else:
                 # This is the last chunk of prompt tokens to return.
                 num_logits = num_remaining_tokens
-                if start_idx != 0:
-                    del in_progress_dict[req_id]
                 completed_prefill_reqs.append(req_id)
                 prompt_logprobs_dict[req_id] = logprobs_tensors
 
@@ -1283,6 +1279,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # num_prompt_logprobs_dict.
         for req_id in completed_prefill_reqs:
             del num_prompt_logprobs_dict[req_id]
+            del in_progress_dict[req_id]
 
         # Must synchronize the non-blocking GPU->CPU transfers.
         if prompt_logprobs_dict:
