@@ -3,6 +3,7 @@
 import asyncio
 import msgspec
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Dict, Mapping, Optional
 
 import uvicorn
@@ -57,6 +58,12 @@ class PDResponse(msgspec.Struct,
     stop_reason: Optional[str] = None
     logprobs = None # TODO
 
+@asynccontextmanager
+def build_pd_engine_client(prefill_addr: str, decode_addr: str,
+                            connector_addr: str):
+    engine = PDEngine(prefill_addr, decode_addr, connector_addr)
+    yield engine
+    engine.shutdown()
 
 class PDEngine:
     """
@@ -68,6 +75,7 @@ class PDEngine:
         * TODO: support more than just text input.
         * TODO: move under vllm/v1/engine one past prototype.
     """
+
     def __init__(self, prefill_addr: str, decode_addr: str, connector_addr: str):
         # Request queues.
         self.queues: Dict[str, asyncio.Queue] = {}
