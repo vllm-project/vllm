@@ -44,18 +44,27 @@ wait_for_disagg_server() {
 
 
 # You can also adjust --kv-ip and --kv-port for distributed inference.
+MODEL=meta-llama/Llama-3.1-8B-Instruct
+CONNECTOR_ADDR=connectoripc
+PREFILL_WORKER_ADDR=prefillipc
+DECODE_WORKER_ADDR=prefillipc
+PORT=8000
 
 # prefilling instance, which is the KV producer
-CUDA_VISIBLE_DEVICES=0 vllm disagg meta-llama/Meta-Llama-3.1-8B-Instruct \
-    --zmq-server-addr testipc0 \
+CUDA_VISIBLE_DEVICES=0 python3 -m vllm.entrypoints.disaggregated.worker \
+    --model $MODEL \
+    --connector-addr $CONNECTOR_ADDR \
+    --worker-addr $PREFILL_WORKER_ADDR \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
     --kv-transfer-config \
     '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}' > vllm_disagg_prefill.log 2>&1 &
 
 # decoding instance, which is the KV consumer
-CUDA_VISIBLE_DEVICES=1 vllm disagg meta-llama/Meta-Llama-3.1-8B-Instruct \
-    --zmq-server-addr testipc1 \
+CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.disaggregated.worker \
+    --model $MODEL \
+    --connector-addr $CONNECTOR_ADDR \
+    --worker-addr $DECODE_WORKER_ADDR \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
     --kv-transfer-config \
@@ -63,16 +72,17 @@ CUDA_VISIBLE_DEVICES=1 vllm disagg meta-llama/Meta-Llama-3.1-8B-Instruct \
 
 # launch a proxy server that opens the service at port 8000
 # the workflow of this proxy:
-# - send the request to prefill vLLM instance (via zmq addr testipc0), change max_tokens
-#   to 1
-# - after the prefill vLLM finishes prefill, send the request to decode vLLM 
-#   instance (via zmq addr testipc1)
-vllm connect --port 8000 \
-    --prefill-addr testipc0 \
-    --decode-addr testipc1 &
+# - Send req to prefill instance, wait until complete.
+# - Send req to decode instance, streaming tokens.
+python3 -m vllm.entrypoints.disaggregated.connector \
+    --port $PORT \
+    --model $MODEL \
+    --connector-addr $CONNECTOR_ADDR \
+    --prefill-addr $PREFILL_WORKER_ADDR \
+    --decode-addr $DECODE_WORKER_ADDR
 
 # wait until prefill, decode instances and proxy are ready
-wait_for_server 8000
+wait_for_server $PORT
 wait_for_disagg_server vllm_disagg_prefill.log
 wait_for_disagg_server vllm_disagg_decode.log 
 
