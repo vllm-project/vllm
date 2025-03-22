@@ -36,6 +36,7 @@ from vllm.benchmarks.endpoint_request_func import (ASYNC_REQUEST_FUNCS,
                                                    RequestFuncOutput)
 from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
                                    write_to_json)
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -823,7 +824,7 @@ def main(args: argparse.Namespace):
     else:
         api_url = f"http://{args.host}:{args.port}{args.endpoint}"
         base_url = f"http://{args.host}:{args.port}"
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+
     tokenizer = get_tokenizer(tokenizer_id,
                               tokenizer_mode=tokenizer_mode,
                               trust_remote_code=args.trust_remote_code)
