@@ -9,6 +9,9 @@ logger.setLevel(logging.DEBUG)
 file_handler = logging.FileHandler('debug.log')
 file_handler.setLevel(logging.DEBUG)
 
+# clear the file
+open('debug.log', 'w').close()
+
 # only print to the file 
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(formatter)

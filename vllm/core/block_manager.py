@@ -15,6 +15,9 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 from vllm.core.logger import logger
 
+from .cpen511_optimize import *
+from math import ceil
+
 SeqId = int
 EncoderSeqId = str
 
@@ -141,7 +144,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         if (self.num_total_gpu_blocks - num_required_blocks
                 < self.watermark_blocks):
             return AllocStatus.NEVER
-        if num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks:
+        if num_free_gpu_blocks - num_required_blocks - leave_free_blocks() >= self.watermark_blocks:
+        # if num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks:
             return AllocStatus.OK
         else:
             return AllocStatus.LATER
@@ -280,6 +284,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         
         # log the freeing with the logger
         logger.debug(f"Freed block for sequence {seq_id} at {block_ids}")
+        decrement_sequence_count(0) # no swap out blocks for freeing
 
     def free_cross(self, seq_group: SequenceGroup) -> None:
         request_id = seq_group.request_id
@@ -409,6 +414,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         cpu_locations = [physical_block_id_mapping[i][0] for i in range(len(physical_block_id_mapping))]
         gpu_locations = [physical_block_id_mapping[i][1] for i in range(len(physical_block_id_mapping))]
         logger.debug(f"Swapped in blocks for sequences {seq_ids} from CPU {cpu_locations} to GPU {gpu_locations}")
+        increment_sequence_count(seq.n_blocks)
 
         return physical_block_id_mapping
 
@@ -468,6 +474,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         gpu_locations = [physical_block_id_mapping[i][0] for i in range(len(physical_block_id_mapping))]
         cpu_locations = [physical_block_id_mapping[i][1] for i in range(len(physical_block_id_mapping))]
         logger.debug(f"Swapped out blocks for sequences {seq_ids} from GPU {gpu_locations} to CPU {cpu_locations}")
+        decrement_sequence_count(seq.n_blocks)
 
         return physical_block_id_mapping
 
@@ -532,7 +539,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
                 device) < num_blocks_touched:
             return AllocStatus.NEVER
         elif self.block_allocator.get_num_free_blocks(
-                device) - num_blocks_touched >= watermark_blocks:
+                device) - num_blocks_touched - leave_free_blocks() >= watermark_blocks:
             return AllocStatus.OK
         else:
             return AllocStatus.LATER

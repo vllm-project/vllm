@@ -10,6 +10,8 @@ from vllm.utils import Device, cdiv, chunk_list
 from vllm.core.logger import logger
 from vllm.sequence import Sequence
 
+from ..cpen511_optimize import *
+
 
 class BlockTable:
     """A class to manage blocks for a specific sequence.
@@ -114,6 +116,7 @@ class BlockTable:
         if seq is not None:
             block_ids = [block.block_id for block in blocks]
             logger.debug(f"Allocate sequence: {seq.seq_id}, in blocks {block_ids}")
+            increment_sequence_count(0) # no swap in blocks for allocation
         
 
     def update(self, blocks: List[Block]) -> None:
