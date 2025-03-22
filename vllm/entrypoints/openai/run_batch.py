@@ -15,7 +15,7 @@ from tqdm import tqdm
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 # yapf: disable
-from vllm.entrypoints.cli.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser
 from vllm.entrypoints.logger import RequestLogger, logger
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,

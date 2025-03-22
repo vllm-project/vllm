@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.entrypoints.cli.utils import FlexibleArgumentParser
+    from vllm.utils import FlexibleArgumentParser
 else:
     VllmConfig = None
     FlexibleArgumentParser = None

@@ -19,7 +19,7 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          ParallelConfig, PoolerConfig, PromptAdapterConfig,
                          SchedulerConfig, SpeculativeConfig, TaskOption,
                          TokenizerPoolConfig, VllmConfig)
-from vllm.entrypoints.cli.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
