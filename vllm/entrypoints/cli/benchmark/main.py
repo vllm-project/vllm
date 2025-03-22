@@ -3,7 +3,7 @@ import argparse
 
 import vllm.entrypoints.cli.benchmark.serve
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.cli.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser
 
 # TODO: Add the rest of the benchmark subcommands here,
 # e.g., throughput, latency, etc.

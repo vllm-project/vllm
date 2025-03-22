@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Commands that act as an interactive OpenAI API client
-from __future__ import annotations
 
 import argparse
 import os
@@ -8,8 +7,11 @@ import signal
 import sys
 from typing import Optional
 
+from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
+
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.cli.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser
 
 
 def _register_signal_handlers():
@@ -22,7 +24,6 @@ def _register_signal_handlers():
 
 
 def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
-    from openai import OpenAI
     _register_signal_handlers()
 
     base_url = args.url
@@ -42,7 +43,6 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
 
 def chat(system_prompt: Optional[str], model_name: str,
          client: OpenAI) -> None:
-    from openai.types.chat import ChatCompletionMessageParam
     conversation: list[ChatCompletionMessageParam] = []
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
@@ -98,8 +98,6 @@ class ChatCommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        from openai.types.chat import ChatCompletionMessageParam
-
         model_name, client = _interactive_cli(args)
         system_prompt = args.system_prompt
         conversation: list[ChatCompletionMessageParam] = []
