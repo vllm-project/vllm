@@ -749,8 +749,8 @@ def test_draft_proposals_mixed_k():
 
     assert proposals.proposal_lens.shape == torch.Size([batch_size])
     assert proposals.proposal_lens.tolist() == [
-        k for _ in range(expected_num_proposal_seqs - 1)
-    ] + [0 for _ in range(expected_num_no_proposal_seqs)] + [k]
+        k for _ in range(expected_num_proposal_seqs)
+    ] + [0 for _ in range(expected_num_no_proposal_seqs)]
 
 
 @torch.inference_mode()
