@@ -7,8 +7,9 @@ from typing import Any, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import (KVCacheConfig, KVCacheGroupSpec,
-                                        KVCacheSpec, KVCacheTensor)
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheGroupSpec, KVCacheSpec,
+                                        KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -95,7 +96,8 @@ class PrefixCachingMetrics:
 @dataclass
 class KVCacheBlock:
     """KV-cache block metadata."""
-    # Block ID, ranging from 0 to num_gpu_blocks - 1.
+    # Block ID, ranging from 0 to num_gpu_blocks - 1, and a special null_block
+    # with block_id = -1.
     block_id: int
     # Reference count.
     ref_cnt: int = 0
@@ -586,6 +588,33 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     return kv_cache_config
 
 
+def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
+    """
+    Only models with one type of KV cache are supported yet. This function tries
+    to convert the KV cache specs to one type if the model is a hybrid model 
+    with multiple type of KV cache. It will convert all SlidingWindowSpec to
+    FullAttentionSpec if both types are present.
+    
+    Args:
+        kv_cache_spec: The kv cache spec of each attention layer in the model
+    """
+
+    has_full_attention = any(
+        isinstance(spec, FullAttentionSpec) for spec in kv_cache_spec.values())
+    has_sliding_window = any(
+        isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
+    if has_full_attention and has_sliding_window:
+        for layer_name, spec in kv_cache_spec.items():
+            if isinstance(spec, SlidingWindowSpec):
+                kv_cache_spec[layer_name] = FullAttentionSpec(
+                    block_size=spec.block_size,
+                    num_kv_heads=spec.num_kv_heads,
+                    head_size=spec.head_size,
+                    dtype=spec.dtype,
+                    use_mla=spec.use_mla,
+                )
+
+
 def get_kv_cache_config(vllm_config: VllmConfig,
                         kv_cache_spec: dict[str, KVCacheSpec],
                         available_memory: int) -> KVCacheConfig:
@@ -602,6 +631,7 @@ def get_kv_cache_config(vllm_config: VllmConfig,
         The generated KVCacheConfigs
     """
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
+    unify_hybrid_kv_cache_specs(kv_cache_spec)
     if is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
@@ -646,3 +676,12 @@ def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
         kv_cache_config.num_blocks = min_num_blocks
 
     return kv_cache_configs
+
+
+@dataclass
+class PrefixLengthRange:
+    """
+    A closed interval [start, end] representing a range of valid prefix lengths.
+    """
+    start: int
+    end: int

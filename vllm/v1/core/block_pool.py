@@ -27,6 +27,7 @@ class BlockPool:
     """
 
     def __init__(self, num_gpu_blocks: int, enable_caching: bool):
+        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         # All kv-cache blocks.
@@ -49,6 +50,16 @@ class BlockPool:
         # block tables are append-only.
         self.cached_block_hash_to_block: dict[BlockHashType, dict[
             int, KVCacheBlock]] = defaultdict(dict)
+
+        # To represent a placeholder block with block_id=-1. No need to allocate
+        # a real block in most cases.
+        # If the attention implementation requires a real block for this,
+        # it should call `init_real_null_block` to allocate a real block for
+        # the _null_block. `init_real_null_block` should be called before
+        # allocating any other blocks.
+        # The ref_cnt of null_block is not correctly maintained. It should never
+        # be freed.
+        self._null_block = KVCacheBlock(-1)
 
     def get_cached_block(self,
                          block_hash: BlockHashType) -> Optional[KVCacheBlock]:
@@ -226,7 +237,8 @@ class BlockPool:
         """
         for block in ordered_blocks:
             block.decr_ref()
-            if block.ref_cnt == 0:
+            # null_block should not be added to the free list.
+            if block.ref_cnt == 0 and block != self._null_block:
                 self.free_block_queue.append(block)
 
     def reset_prefix_cache(self) -> bool:
@@ -270,3 +282,25 @@ class BlockPool:
             The KV cache usage (between 0.0 and 1.0).
         """
         return 1.0 - (self.get_num_free_blocks() / self.num_gpu_blocks)
+
+    def get_null_block(self) -> KVCacheBlock:
+        """Get the null block.
+
+        Returns:
+            The null block.
+        """
+        return self._null_block
+
+    def init_real_null_block(self):
+        """
+        Initialize the null_block with a real block. This function should be
+        called before any other blocks are allocated.
+        """
+        if self._null_block.block_id == -1:
+            logger.debug("Initializing the real null block")
+            assert self.free_block_queue.num_free_blocks ==  \
+                self.num_gpu_blocks, (
+                "The real null block should be initialized before any other "
+                "blocks are allocated")
+            self._null_block = self.free_block_queue.popleft()
+        assert self._null_block.block_id == 0

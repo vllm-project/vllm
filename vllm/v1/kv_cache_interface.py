@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 
@@ -74,6 +75,36 @@ class FullAttentionSpec(KVCacheSpec):
 
     def bytes_for_tokens(self, num_tokens: int) -> int:
         return cdiv(num_tokens, self.block_size) * self.page_size_bytes
+
+
+@dataclass
+class SlidingWindowSpec(KVCacheSpec):
+    num_kv_heads: int
+    head_size: int
+    dtype: torch.dtype
+    sliding_window: int
+    use_mla: bool
+
+    @property
+    def type_id(self) -> str:
+        return f"sliding_window_{self.sliding_window}_{self.block_size}_{self.page_size_bytes}"  # noqa
+
+    @property
+    def page_size_bytes(self) -> int:
+        # Sliding window does not affect the page size, so reuse the one for
+        # full attention.
+        # Skip the type check due to mypy bug
+        # https://github.com/python/mypy/issues/8085
+        return FullAttentionSpec.page_size_bytes.fget(  # type: ignore
+            cast(FullAttentionSpec, self))
+
+    def bytes_for_tokens(self, num_tokens: int) -> int:
+        num_tokens = min(num_tokens, self.sliding_window)
+        # +1 here because the sliding window may not start from the beginning
+        # of the block. For example, if the block size is 4 and the sliding
+        # window is 4, we need two blocks [XXCD] [EF] to store the sliding
+        # window [CDEF] of 6 tokens.
+        return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
 
 
 @dataclass

@@ -9,6 +9,8 @@ from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
                                          hash_request_tokens)
+from vllm.v1.core.specialized_manager import get_specialized_manager
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request, RequestStatus
 
@@ -19,19 +21,21 @@ class KVCacheManager:
 
     def __init__(
         self,
-        block_size: int,
-        num_gpu_blocks: int,
+        kv_cache_config: KVCacheConfig,
         max_model_len: int,
-        sliding_window: Optional[int] = None,
         enable_caching: bool = True,
         num_preallocate_tokens: int = 64,
         log_stats: bool = False,
     ) -> None:
-        self.block_size = block_size
-        self.num_gpu_blocks = num_gpu_blocks
+        assert len(kv_cache_config.kv_cache_groups) == 1, (
+            "KVCacheManager does not support hybrid models with more than 1 "
+            "kv cache group")
+        kv_cache_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        self.block_size = kv_cache_spec.block_size
+        self.num_gpu_blocks = kv_cache_config.num_blocks
         self.max_model_len = max_model_len
-        self.max_num_blocks_per_req = cdiv(max_model_len, block_size)
-        self.sliding_window = sliding_window
+        self.max_num_blocks_per_req = cdiv(max_model_len, self.block_size)
+
         self.enable_caching = enable_caching
         # FIXME: make prefix cache stats conditional on log_stats
         self.log_stats = log_stats
@@ -46,9 +50,15 @@ class KVCacheManager:
         # further allocation. When it uses up all the N empty blocks, it gets
         # N new empty blocks.
         self.num_preallocate_tokens = num_preallocate_tokens
-        self.num_preallocate_blocks = cdiv(num_preallocate_tokens, block_size)
+        self.num_preallocate_blocks = cdiv(num_preallocate_tokens,
+                                           self.block_size)
 
-        self.block_pool = BlockPool(num_gpu_blocks, enable_caching)
+        self.block_pool = BlockPool(self.num_gpu_blocks, enable_caching)
+
+        self.specialized_manager = get_specialized_manager(
+            kv_cache_spec=kv_cache_spec,
+            block_pool=self.block_pool,
+        )
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
@@ -115,24 +125,21 @@ class KVCacheManager:
         self.prefix_cache_stats.requests += 1
         if request.sampling_params.prompt_logprobs is None:
             # Check for cache hits
-            computed_blocks = []
-            for block_hash in block_hashes:
-                # block_hashes is a chain of block hashes. If a block hash
-                # is not in the cached_block_hash_to_id, the following
-                # block hashes are not computed yet for sure.
-                if cached_block := self.block_pool.get_cached_block(
-                        block_hash):
-                    computed_blocks.append(cached_block)
-                else:
-                    break
+            prefix_length, computed_blocks = \
+                self.specialized_manager.get_possible_cached_prefix(
+                    block_hashes)
+            num_computed_tokens = prefix_length[-1].end
+            # NOTE(woosuk): Since incomplete blocks are not eligible for
+            # sharing, `num_computed_tokens` should always be a multiple of
+            # `block_size`.
+            assert num_computed_tokens % self.block_size == 0
+            computed_blocks = computed_blocks[:num_computed_tokens //
+                                              self.block_size]
+            self._free_useless_blocks(computed_blocks, num_computed_tokens)
 
             self.prefix_cache_stats.queries += len(block_hashes)
             self.prefix_cache_stats.hits += len(computed_blocks)
 
-            # NOTE(woosuk): Since incomplete blocks are not eligible for
-            # sharing, `num_computed_tokens` is always a multiple of
-            # `block_size`.
-            num_computed_tokens = len(computed_blocks) * self.block_size
             return computed_blocks, num_computed_tokens
         else:
             # Skip cache hits for prompt logprobs
@@ -180,6 +187,11 @@ class KVCacheManager:
         num_required_blocks = cdiv(num_computed_tokens + num_tokens,
                                    self.block_size)
         req_blocks = self.req_to_blocks[request.request_id]
+        # We can free blocks that are no longer needed even if we cannot
+        # schedule this request due to the limit of free blocks.
+        # Should call this function before allocating new blocks to reduce
+        # the number of evicted blocks.
+        self._free_useless_blocks(req_blocks, request.num_computed_tokens)
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
 
@@ -341,3 +353,22 @@ class KVCacheManager:
         is finished, not when it is preempted.
         """
         self.req_to_block_hashes.pop(request.request_id, None)
+
+    def _free_useless_blocks(self, req_blocks: list[KVCacheBlock],
+                             num_computed_tokens: int) -> None:
+        """
+        Frees memory blocks that are not needed. E.g., the blocks that are 
+        outside of the sliding window. The freed blocks will be replaced with
+        null blocks in req_blocks.
+        NOTE: Due to the append-only design of block_table in model 
+        runner, we don't change these blocks into null blocks in model runner.
+        This implementation is correct as model runner doesn't access the 
+        freed blocks.
+
+        Args:
+            req_blocks: The KV cache blocks of one request.
+            num_computed_tokens: The number of computed tokens.
+        """
+        removed_blocks = self.specialized_manager.remove_useless_blocks(
+            req_blocks, num_computed_tokens)
+        self.block_pool.free_blocks(removed_blocks)
