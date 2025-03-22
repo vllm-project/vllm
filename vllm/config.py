@@ -1274,6 +1274,7 @@ class LoadFormat(str, enum.Enum):
     BITSANDBYTES = "bitsandbytes"
     MISTRAL = "mistral"
     RUNAI_STREAMER = "runai_streamer"
+    FASTSAFETENSORS = "fastsafetensors"
 
 
 @dataclass
