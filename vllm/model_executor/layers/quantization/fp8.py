@@ -255,7 +255,7 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 layer.register_parameter("input_scale", None)
 
-    def add_padding_to_weight(self, weight: torch.Tensor) -> torch.Tensor:
+    def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
         # can benefit from tensors located far enough from one another in memory
         if (envs.VLLM_ROCM_FP8_PADDING and current_platform.is_rocm()
@@ -279,7 +279,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight = layer.weight.data
                 weight_scale_inv = layer.weight_scale_inv.data
 
-            weight = self.add_padding_to_weight(weight)
+            weight = self._maybe_pad_weight(weight)
 
             # Torch.compile cannot use Parameter subclasses.
             layer.weight = Parameter(weight, requires_grad=False)
@@ -343,7 +343,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     logical_widths=layer.logical_widths,
                 )
 
-            weight = self.add_padding_to_weight(weight)
+            weight = self._maybe_pad_weight(weight)
             # Update layer with new values.
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
