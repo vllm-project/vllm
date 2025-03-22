@@ -46,3 +46,9 @@ def get_flash_attn_version(requires_alibi: bool = False) -> Optional[int]:
         return fa_version
     except (ImportError, AssertionError):
         return None
+
+
+def flash_attn_supports_fp8() -> bool:
+    from vllm.platforms import current_platform
+    return get_flash_attn_version() == 3 and \
+        current_platform.get_device_capability().major == 9
