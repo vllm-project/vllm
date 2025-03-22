@@ -901,7 +901,7 @@ def initialize_model_parallel(
     from vllm.config import get_current_vllm_config
     config = get_current_vllm_config()
     if config is not None:
-        if config.parallel_config.world_size != world_size:
+        if config.parallel_config.world_size_across_dp != world_size:
             # detect external data parallelism.
             # dp in vllm means all dp instances need to run together.
             # if the world size does not match, it means this dp is external,
