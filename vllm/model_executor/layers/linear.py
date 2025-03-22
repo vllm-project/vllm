@@ -13,7 +13,9 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
-                              tensor_model_parallel_all_reduce)
+                              tensor_model_parallel_all_reduce,
+                              tensor_model_parallel_reduce_scatter)
+from vllm.forward_context import try_get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -468,6 +470,11 @@ class ColumnParallelLinear(LinearBase):
         self, input_
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
+
+        forward_context = try_get_forward_context()
+        if (forward_context is not None
+                and forward_context.enable_sequence_parallel):
+            input_ = tensor_model_parallel_all_gather(input_, 0)
 
         # Matrix multiply.
         assert self.quant_method is not None
@@ -1258,8 +1265,15 @@ class RowParallelLinear(LinearBase):
         output_parallel = self.quant_method.apply(self,
                                                   input_parallel,
                                                   bias=bias_)
+
         if self.reduce_results and self.tp_size > 1:
-            output = tensor_model_parallel_all_reduce(output_parallel)
+            forward_context = try_get_forward_context()
+            if (forward_context is not None
+                    and forward_context.enable_sequence_parallel):
+                output = tensor_model_parallel_reduce_scatter(output_parallel,
+                                                              dim=0)
+            else:
+                output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output = output_parallel
 

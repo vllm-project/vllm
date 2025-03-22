@@ -1358,6 +1358,8 @@ class ParallelConfig:
     tensor_parallel_size: int = 1  # Number of tensor parallel groups.
     data_parallel_size: int = 1  # Number of data parallel groups.
     data_parallel_rank: int = 0  # Rank of the data parallel group.
+    enable_sequence_parallel: bool = False  # Enable sequence parallelism.
+
     # IP of the data parallel master.
     data_parallel_master_ip: str = "127.0.0.1"
     data_parallel_master_port: int = 29500  # Port of the data parallel master.
@@ -2150,6 +2152,8 @@ class SpeculativeConfig:
             pipeline_parallel_size=target_parallel_config.
             pipeline_parallel_size,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
+            enable_sequence_parallel=target_parallel_config.
+            enable_sequence_parallel,
             distributed_executor_backend=target_parallel_config.
             distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.

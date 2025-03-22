@@ -13,6 +13,12 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     return get_tp_group().all_reduce(input_)
 
 
+def tensor_model_parallel_reduce_scatter(input_: torch.Tensor,
+                                         dim: int) -> torch.Tensor:
+    """Reduce-scatter the input tensor across model parallel group."""
+    return get_tp_group().reduce_scatter(input_, dim)
+
+
 def tensor_model_parallel_all_gather(input_: torch.Tensor,
                                      dim: int = -1) -> torch.Tensor:
     """All-gather the input tensor across model parallel group."""
