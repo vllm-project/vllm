@@ -28,6 +28,8 @@ from functools import cached_property, partial
 from typing import (Callable, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
 
+from numba import jit
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -482,6 +484,10 @@ class Qwen2_5_VisionRotaryEmbedding(nn.Module):
         self.update_freqs_cache(seqlen)
         return self._freqs_cached[:seqlen]
 
+@jit(nopython=True, inline="always")
+def cdiv(a, b):
+    """ceiling division"""
+    return -(-a // b)
 
 class Qwen2_5_VisionTransformer(nn.Module):
 
@@ -548,7 +554,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
     def device(self) -> torch.device:
         return self.patch_embed.proj.weight.device
 
-    def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
+    def compute_rot_pos_torch(self, grid_thw: torch.Tensor) -> torch.Tensor:
         pos_ids = []
         for t, h, w in grid_thw:
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
@@ -567,13 +573,70 @@ class Qwen2_5_VisionTransformer(nn.Module):
             ).permute(0, 2, 1, 3).flatten()
             pos_ids.append(
                 torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
-        pos_ids = torch.cat(pos_ids, dim=0)
-        max_grid_size = grid_thw[:, 1:].max()
+        
+        # avoid copy when there is only one tensor
+        if len(pos_ids) == 1:
+            return pos_ids[0]
+        
+        return torch.cat(pos_ids, dim=0)
+    
+    @staticmethod
+    @jit(nopython=True)
+    def compute_rot_pos_numba(grid_thw, spatial_merge_size):
+        l = 0
+        for i in range(len(grid_thw)):
+            l += grid_thw[i, 0] * grid_thw[i, 1] * grid_thw[i, 2]
+        
+        arr = np.empty((l, 2), dtype=np.int64)
+        pos = 0
+        if spatial_merge_size == 2:
+            for i in range(len(grid_thw)):
+                for _ in range(grid_thw[i, 0]):
+                    for h in range(0, grid_thw[i, 1], 2):
+                        for w in range(0, grid_thw[i, 2], 2):
+                            arr[pos, 0] = h
+                            arr[pos, 1] = w
+                            pos += 1
+                            arr[pos, 0] = h
+                            arr[pos, 1] = w + 1
+                            pos += 1
+                            arr[pos, 0] = h + 1
+                            arr[pos, 1] = w
+                            pos += 1
+                            arr[pos, 0] = h + 1
+                            arr[pos, 1] = w + 1
+                            pos += 1
+        else:
+            for i in range(len(grid_thw)):
+                for _ in range(grid_thw[i, 0]):
+                    for h in range(0, grid_thw[i, 1], spatial_merge_size):
+                        for w in range(0, grid_thw[i, 2], spatial_merge_size):
+                            for m_x in range(spatial_merge_size):
+                                for m_y in range(spatial_merge_size):
+                                    arr[pos, 0] = h + m_x
+                                    arr[pos, 1] = w + m_y
+                                    pos += 1
+        return arr
+    
+    def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
+        pos_ids = torch.from_numpy(
+            self.compute_rot_pos_numba(
+                grid_thw.numpy(),
+                self.spatial_merge_size,
+            )
+        )
+        pos_ids = pos_ids.to(self.device, non_blocking=True)
+        
+        max_grid_size = grid_thw[:, 1:].max().item()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
-    def get_window_index(self, grid_thw):
+    def get_window_index_torch(
+        self,
+        grid_thw: torch.Tensor,
+    ) -> tuple[torch.Tensor, list[int]]:
         window_index: list = []
         cu_window_seqlens: list = [0]
         window_index_id = 0
@@ -608,16 +671,119 @@ class Qwen2_5_VisionTransformer(nn.Module):
         window_index = torch.cat(window_index, dim=0)
         return window_index, cu_window_seqlens
 
+    @staticmethod
+    @jit(nopython=True)
+    def get_window_index_numba(
+        grid_thw: np.ndarray,
+        window_size: int,
+        spatial_merge_size: int,
+        patch_size: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        numba optimized version of get_window_index_torch
+
+        NOTE:
+        - instead of returning tuple[window_indices, cu_window_seqlens],
+            it returns tuple[window_indices, reverse_indices, window_seqlens, cu_window_seqlens]
+        - it prevents zero in `window_seqlens`, so there is no need to call 
+            `torch.unique_consecutive` on cumsum of window_seqlens
+        """
+        spatial_merge_unit = spatial_merge_size * spatial_merge_size
+        vit_merger_window_size = window_size // spatial_merge_size // patch_size
+
+        total_cell_count = 0
+        total_window_count = 0
+
+        # first pass: compute total sizes
+        for i in range(grid_thw.shape[0]):
+            temporal = grid_thw[i, 0]
+
+            merged_height = grid_thw[i, 1] // spatial_merge_size
+            merged_width = grid_thw[i, 2] // spatial_merge_size
+
+            total_cell_count += temporal * merged_height * merged_width
+
+            num_blocks_height = cdiv(merged_height, vit_merger_window_size)
+            num_blocks_width = cdiv(merged_width, vit_merger_window_size)
+
+            total_window_count += temporal * num_blocks_height * num_blocks_width
+
+        window_indices = np.empty(total_cell_count, dtype=np.int64)
+        reverse_indices = np.empty(total_cell_count, dtype=np.int64)
+        window_seqlens = np.empty(total_window_count, dtype=np.int64)
+        cu_window_seqlens = np.empty(1 + total_window_count, dtype=np.int32)
+        cu_window_seqlens[0] = 0
+
+        # second pass: fill arrays
+        current_index_offset = 0
+        window_index_ptr = 0
+        seqlen_ptr = 0
+        for i in range(grid_thw.shape[0]):
+            temporal = grid_thw[i, 0]
+            height = grid_thw[i, 1]
+            width = grid_thw[i, 2]
+
+            merged_height = height // spatial_merge_size
+            merged_width = width // spatial_merge_size
+
+            num_blocks_height = cdiv(merged_height, vit_merger_window_size)
+            num_blocks_width  = cdiv(merged_width, vit_merger_window_size)
+
+            block_area = merged_height * merged_width
+
+            for temporal_offset in range(0, temporal * block_area, block_area):
+                for block_offset_y in range(0, merged_height, vit_merger_window_size):
+                    for block_offset_x in range(0, merged_width, vit_merger_window_size):
+                        cell_counter = 0
+
+                        for grid_y in range(
+                            block_offset_y, 
+                            min(block_offset_y + vit_merger_window_size, merged_height),
+                        ):
+                            row_offset = temporal_offset + grid_y * merged_width
+
+                            for grid_x in range(
+                                block_offset_x, 
+                                min(block_offset_x + vit_merger_window_size, merged_width),
+                            ):
+                                local_index = row_offset + grid_x
+                                idx = window_index_ptr + cell_counter
+                                window_index = local_index + current_index_offset
+                                window_indices[idx] = window_index
+                                reverse_indices[window_index] = idx
+                                cell_counter += 1
+
+                        window_index_ptr += cell_counter
+                        cur_seqlen = cell_counter * spatial_merge_unit
+                        window_seqlens[seqlen_ptr] = cur_seqlen
+                        cu_window_seqlens[seqlen_ptr + 1] = cu_window_seqlens[seqlen_ptr] + cur_seqlen
+                        seqlen_ptr += 1
+
+            current_index_offset += temporal * merged_height * merged_width
+
+        return window_indices, reverse_indices, window_seqlens, cu_window_seqlens
+
     def compute_attn_mask_seqlen(
-        self,
-        cu_seqlens: torch.Tensor,
+        self, seqlens: torch.Tensor
     ) -> tuple[Optional[int], Optional[list[int]]]:
-        max_seqlen, seqlens = None, None
+        max_seqlen, seqlens_list = None, None
         if self.attn_backend == _Backend.FLASH_ATTN:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+            max_seqlen = seqlens.max().item()
         elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-        return max_seqlen, seqlens
+            seqlens_list = seqlens.tolist()
+        return max_seqlen, seqlens_list
+    
+    @staticmethod
+    def compute_cu_seqlens(seqlens: torch.Tensor) -> torch.Tensor:
+        return F.pad(
+            seqlens.cumsum(
+                dim=0,
+                dtype=torch.int64 if torch.jit.is_tracing() else torch.int32,
+            ),
+            (1, 0),
+            "constant",
+            0,
+        )
 
     def forward(
         self,
@@ -631,45 +797,70 @@ class Qwen2_5_VisionTransformer(nn.Module):
         # compute position embedding
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        # windows attention
-        window_index, cu_window_seqlens = self.get_window_index(grid_thw)
-        cu_window_seqlens = torch.tensor(
-            cu_window_seqlens,
-            device=hidden_states.device,
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32)
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        # full attention parameters
+        seqlens_full = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
+                                               grid_thw[:, 0])
+        cu_seqlens_full = seqlens_full.cumsum(
+            dim=0,
+            dtype=torch.int64 if torch.jit.is_tracing() else torch.int32,
+        )
+        cu_seqlens_full = F.pad(cu_seqlens_full, (1, 0), "constant", 0).to(
+            device=self.device,
+            non_blocking=True,
+        )
+
+        # window attention parameters
+        window_indices, reverse_indices, window_seqlens, cu_seqlens_window = self.get_window_index_numba(
+            grid_thw=grid_thw.numpy(),
+            window_size=self.window_size,
+            spatial_merge_size=self.spatial_merge_size,
+            patch_size=self.patch_size,
+        )
+        if torch.jit.is_tracing():
+            cu_seqlens_window = cu_seqlens_window.astype(np.int64)
+        
+        window_indices = torch.from_numpy(window_indices).to(
+            device=self.device,
+            non_blocking=True,
+        )
+        reverse_indices = torch.from_numpy(reverse_indices).to(
+            device=self.device,
+            non_blocking=True,
+        )
+        cu_seqlens_window = torch.from_numpy(cu_seqlens_window).to(
+            device=self.device,
+            non_blocking=True,
+        )
+
+        # reshape
         seq_len, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        hidden_states = hidden_states[window_index, :, :]
+        hidden_states = hidden_states[window_indices, :, :]
         hidden_states = hidden_states.reshape(seq_len, -1)
         rotary_pos_emb = rotary_pos_emb.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
-        rotary_pos_emb = rotary_pos_emb[window_index, :, :]
+        rotary_pos_emb = rotary_pos_emb[window_indices, :, :]
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-        # compute cu_seqlens
-        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
-                                             grid_thw[:, 0]).cumsum(
-                                                 dim=0, dtype=torch.int32)
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
         # transformers
         hidden_states = hidden_states.unsqueeze(1)
 
         # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
-        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(
-            cu_seqlens)
-        max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
-            cu_window_seqlens)
+        max_seqlen_full, seqlens_list_full = self.compute_attn_mask_seqlen(
+            seqlens_full)
+        max_seqlen_window, seqlens_list_window = self.compute_attn_mask_seqlen(
+            window_seqlens)
+
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
-                cu_seqlens_now = cu_seqlens
+                cu_seqlens_now = cu_seqlens_full
                 max_seqlen_now = max_seqlen_full
-                seqlens_now = seqlens_full
+                seqlens_now = seqlens_list_full
             else:
-                cu_seqlens_now = cu_window_seqlens
+                cu_seqlens_now = cu_seqlens_window
                 max_seqlen_now = max_seqlen_window
-                seqlens_now = seqlens_window
+                seqlens_now = seqlens_list_window
 
             hidden_states = blk(
                 hidden_states,
@@ -686,7 +877,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         # adapter
         hidden_states = self.merger(hidden_states)
-        reverse_indices = torch.argsort(window_index)
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 

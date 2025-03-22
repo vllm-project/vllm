@@ -338,34 +338,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 lora_request=new_req_data.lora_request,
             )
 
-            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            if self.uses_mrope:
-                image_grid_thw = []
-                video_grid_thw = []
-                second_per_grid_ts = []
-                for mm_input in self.requests[req_id].mm_inputs:
-                    if mm_input.get("image_grid_thw") is not None:
-                        image_grid_thw.extend(
-                            mm_input["image_grid_thw"].tolist())
-                    if mm_input.get("video_grid_thw") is not None:
-                        video_grid_thw.extend(
-                            mm_input["video_grid_thw"].tolist())
-                    if mm_input.get("second_per_grid_ts") is not None:
-                        second_per_grid_ts.extend(
-                            mm_input["second_per_grid_ts"])
-
-                hf_config = self.model_config.hf_config
-
-                self.requests[req_id].mrope_positions, \
-                    self.requests[req_id].mrope_position_delta = \
-                    MRotaryEmbedding.get_input_positions_tensor(
-                        self.requests[req_id].prompt_token_ids,
-                        hf_config=hf_config,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
-                    )
-
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
@@ -699,13 +671,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         mrope_pos_ptr = 0
         for index, req_id in enumerate(self.input_batch.req_ids):
             req = self.requests[req_id]
-            assert req.mrope_positions is not None
-
             num_computed_tokens = \
                 self.input_batch.num_computed_tokens_cpu[index]
             num_scheduled_tokens = \
                 scheduler_output.num_scheduled_tokens[req_id]
             num_prompt_tokens = len(req.prompt_token_ids)
+
+            if req.mrope_positions is None:
+                image_grid_thw = []
+                video_grid_thw = []
+                second_per_grid_ts = []
+                for mm_input in req.mm_inputs:
+                    if mm_input.get("image_grid_thw") is not None:
+                        image_grid_thw.extend(
+                            mm_input["image_grid_thw"].tolist())
+                    if mm_input.get("video_grid_thw") is not None:
+                        video_grid_thw.extend(
+                            mm_input["video_grid_thw"].tolist())
+                    if mm_input.get("second_per_grid_ts") is not None:
+                        second_per_grid_ts.extend(
+                            mm_input["second_per_grid_ts"])
+
+                req.mrope_positions, \
+                    req.mrope_position_delta = \
+                    MRotaryEmbedding.get_input_positions_and_delta(
+                        input_tokens=self.input_batch.token_ids_cpu[
+                            index, :num_prompt_tokens],
+                        hf_config=self.model_config.hf_config,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        second_per_grid_ts=second_per_grid_ts,
+                    )
 
             if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
                 prompt_part_len = max(0,

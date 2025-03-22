@@ -391,7 +391,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             token_ids = seq_data.get_token_ids()
 
             mrope_positions, mrope_position_delta = \
-                MRotaryEmbedding.get_input_positions(
+                MRotaryEmbedding.get_input_positions_and_delta(
                     token_ids,
                     hf_config=hf_config,
                     image_grid_thw=image_grid_thw,
@@ -399,6 +399,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     second_per_grid_ts=second_per_grid_ts,
                     context_len=computed_len,
                 )
+            mrope_positions = mrope_positions.tolist()
             seq_data.mrope_position_delta = mrope_position_delta
 
             for i in range(3):

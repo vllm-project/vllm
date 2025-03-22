@@ -658,10 +658,22 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     ) -> BatchedTensorInputs:
         json_inputs = cast(JSONTree[torch.Tensor], batched_inputs)
 
+        # keep image_grid_thw and video_grid_thw in cpu
+        image_grid_thw = None
+        video_grid_thw = None
+        if isinstance(json_inputs, dict):
+            image_grid_thw = json_inputs.pop("image_grid_thw", None)
+            video_grid_thw = json_inputs.pop("video_grid_thw", None)
+
         json_mapped = json_map_leaves(
             lambda x: x.to(device, non_blocking=True),
             json_inputs,
         )
+
+        if image_grid_thw is not None:
+            json_mapped["image_grid_thw"] = image_grid_thw
+        if video_grid_thw is not None:
+            json_mapped["video_grid_thw"] = video_grid_thw
 
         return cast(BatchedTensorInputs, json_mapped)
 
