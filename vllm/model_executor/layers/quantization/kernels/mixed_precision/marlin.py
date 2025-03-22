@@ -116,7 +116,7 @@ class MarlinLinearKernel(MPLinearKernel):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         # marlin requires contiguous memory layout
-        # kv/prefill caching may cause x to be non-contiguous
+        # prefix caching may cause x to be non-contiguous
         x = x.contiguous()  # no-op if already contiguous
 
         c = self.config
