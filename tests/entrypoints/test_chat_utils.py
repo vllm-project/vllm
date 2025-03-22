@@ -23,8 +23,10 @@ EXAMPLES_DIR = VLLM_PATH / "examples"
 PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 ULTRAVOX_MODEL_ID = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 QWEN2VL_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
+QWEN25VL_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
 MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 LLAMA_GUARD_MODEL_ID = "meta-llama/Llama-Guard-3-1B"
+COMMAND_R_MODEL_ID = "CohereForAI/c4ai-command-r7b-12-2024"
 
 
 @pytest.fixture(scope="function")
@@ -703,12 +705,64 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
 
     vllm_result = apply_hf_chat_template(
         tokenizer,
+        trust_remote_code=model_config.trust_remote_code,
         conversation=conversation,
         chat_template=None,
+        tools=None,
         add_generation_prompt=True,
     )
 
     assert hf_result == vllm_result
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        QWEN2VL_MODEL_ID,  # tokenizer.chat_template is of type str
+        COMMAND_R_MODEL_ID,  # tokenizer.chat_template is of type dict
+    ])
+@pytest.mark.parametrize("use_tools", [True, False])
+def test_apply_hf_chat_template(sample_json_schema, model, use_tools):
+    """checks that chat_template is a dict type for HF models."""
+
+    # Build the tokenizer group and grab the underlying tokenizer
+    tokenizer_group = TokenizerGroup(
+        model,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+    )
+    tokenizer = tokenizer_group.tokenizer
+
+    conversation = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant."
+        },
+        {
+            "role": "user",
+            "content": "Hello, how are you?"
+        },
+    ]
+
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "dummy_function_name",
+            "description": "This is a dummy function",
+            "parameters": sample_json_schema
+        }
+    }] if use_tools else None
+
+    chat_template = apply_hf_chat_template(
+        tokenizer,
+        conversation=conversation,
+        # test that chat_template is None. use default chat_template.
+        chat_template=None,
+        tools=tools,
+        add_generation_prompt=True,
+    )
+    assert isinstance(chat_template, str)
 
 
 # yapf: disable
@@ -716,6 +770,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     ("model", "expected_format"),
     [(PHI3V_MODEL_ID, "string"),
      (QWEN2VL_MODEL_ID, "openai"),
+     (QWEN25VL_MODEL_ID, "openai"),
      (ULTRAVOX_MODEL_ID, "string"),
      (MLLAMA_MODEL_ID, "openai"),
      (LLAMA_GUARD_MODEL_ID, "openai")],
@@ -740,8 +795,10 @@ def test_resolve_content_format_hf_defined(model, expected_format):
 
     resolved_format = resolve_chat_template_content_format(
         None,  # Test detecting the tokenizer's chat_template
+        None,
         "auto",
         tokenizer,
+        trust_remote_code=True,
     )
 
     assert resolved_format == expected_format
@@ -793,6 +850,7 @@ def test_resolve_content_format_examples(template_path, expected_format):
         chat_template,
         "auto",
         dummy_tokenizer,
+        trust_remote_code=True,
     )
 
     assert resolved_format == expected_format
