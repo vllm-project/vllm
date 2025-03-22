@@ -36,16 +36,6 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} OpenVINO
-:sync: openvino
-
-:::{include} ai_accelerator/openvino.inc.md
-:start-after: "# Installation"
-:end-before: "## Requirements"
-:::
-
-::::
-
 :::::
 
 ## Requirements
@@ -83,16 +73,6 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} OpenVINO
-:sync: openvino
-
-:::{include} ai_accelerator/openvino.inc.md
-:start-after: "## Requirements"
-:end-before: "## Set up using Python"
-:::
-
-::::
-
 :::::
 
 ## Configure a new environment
@@ -126,14 +106,6 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 :::{include} ai_accelerator/neuron.inc.md
 :start-after: "## Configure a new environment"
 :end-before: "## Set up using Python"
-:::
-
-::::
-
-::::{tab-item} OpenVINO
-:sync: openvino
-
-:::{include} python_env_setup.inc.md
 :::
 
 ::::
@@ -177,16 +149,6 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} OpenVINO
-:sync: openvino
-
-:::{include} ai_accelerator/openvino.inc.md
-:start-after: "### Pre-built wheels"
-:end-before: "### Build wheel from source"
-:::
-
-::::
-
 :::::
 
 ### Build wheel from source
@@ -218,16 +180,6 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 :sync: neuron
 
 :::{include} ai_accelerator/neuron.inc.md
-:start-after: "### Build wheel from source"
-:end-before: "## Set up using Docker"
-:::
-
-::::
-
-::::{tab-item} OpenVINO
-:sync: openvino
-
-:::{include} ai_accelerator/openvino.inc.md
 :start-after: "### Build wheel from source"
 :end-before: "## Set up using Docker"
 :::
@@ -273,16 +225,6 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} OpenVINO
-:sync: openvino
-
-:::{include} ai_accelerator/openvino.inc.md
-:start-after: "### Pre-built images"
-:end-before: "### Build image from source"
-:::
-
-::::
-
 :::::
 
 ### Build image from source
@@ -320,16 +262,6 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 
 ::::
 
-::::{tab-item} OpenVINO
-:sync: openvino
-
-:::{include} ai_accelerator/openvino.inc.md
-:start-after: "### Build image from source"
-:end-before: "## Extra information"
-:::
-
-::::
-
 :::::
 
 ## Extra information
@@ -359,15 +291,6 @@ vLLM is a Python library that supports the following AI accelerators. Select you
 :sync: neuron
 
 :::{include} ai_accelerator/neuron.inc.md
-:start-after: "## Extra information"
-:::
-
-::::
-
-::::{tab-item} OpenVINO
-:sync: openvino
-
-:::{include} ai_accelerator/openvino.inc.md
 :start-after: "## Extra information"
 :::
 
