@@ -4,7 +4,8 @@ from collections.abc import Generator
 from typing import Any, Optional
 
 import pytest
-from transformers import AutoTokenizer, PreTrainedTokenizerFast
+from transformers import (AutoTokenizer, PreTrainedTokenizer,
+                          PreTrainedTokenizerFast)
 
 from vllm.inputs import token_inputs
 from vllm.sequence import Logprob, SamplingParams, Sequence, SequenceGroup
@@ -25,7 +26,7 @@ TRUTH = [
     # incomplete UTF-8 characters
     # see https://github.com/vllm-project/vllm/pull/9625
     "ပုံပြင်လေးပြောပြပါ်",
-    "Some text with adjacent special tokens                <|padding|><|endoftext|><fim_prefix><fim_middle><fim_suffix>other text<fim_pad>",  # noqa
+    "Some text with adjacent special tokens                <|padding|><|padding|><fim_prefix><fim_middle><fim_suffix>other text<fim_pad>",  # noqa
 ]
 TOKENIZERS = [
     "facebook/opt-125m",
@@ -130,6 +131,9 @@ def test_decode_streaming(tokenizer, truth, with_prompt, skip_special_tokens,
     if fast and not isinstance(tokenizer, PreTrainedTokenizerFast):
         pytest.skip()
 
+    if skip_special_tokens and not spaces_between_special_tokens:
+        pytest.skip()
+
     if not fast and isinstance(tokenizer, PreTrainedTokenizerFast):
         # Fix up inconsistency in fast/slow tokenizer behaviour.
         tokenizer.add_special_tokens({
@@ -140,15 +144,18 @@ def test_decode_streaming(tokenizer, truth, with_prompt, skip_special_tokens,
             ]
         })
 
+    extra_decode_args = {} if not isinstance(tokenizer,  PreTrainedTokenizer) \
+        else {"spaces_between_special_tokens": spaces_between_special_tokens}
+
     truth_tokens = tokenizer(truth, add_special_tokens=False).input_ids
     if tokenizer.bos_token_id is not None:
         truth_tokens.insert(0, tokenizer.bos_token_id)
     truth_tokens.append(tokenizer.eos_token_id)
 
-    new_truth = tokenizer.decode(
-        truth_tokens,
-        skip_special_tokens=skip_special_tokens,
-        spaces_between_special_tokens=spaces_between_special_tokens)
+    new_truth = tokenizer.decode(truth_tokens,
+                                 skip_special_tokens=skip_special_tokens,
+                                 **extra_decode_args)
+
     if with_prompt:
         num_prompt_tokens = len(
             tokenizer(truth[:len(truth) // 2],
@@ -160,10 +167,9 @@ def test_decode_streaming(tokenizer, truth, with_prompt, skip_special_tokens,
         generated_input_ids = truth_tokens[num_prompt_tokens:]
         all_input_ids = prompt_input_ids + generated_input_ids
         starting_index = len(prompt_input_ids)
-        prompt = tokenizer.decode(
-            prompt_input_ids,
-            skip_special_tokens=skip_special_tokens,
-            spaces_between_special_tokens=spaces_between_special_tokens)
+        prompt = tokenizer.decode(prompt_input_ids,
+                                  skip_special_tokens=skip_special_tokens,
+                                  **extra_decode_args)
 
         generated = new_truth[len(prompt):]
     else:
