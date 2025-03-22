@@ -459,6 +459,15 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/decoder_only/vision_language/test_models.py -m 'split(group=1) and not core_model and not quant_model'
 
+- label: SSM and Hybrid Models Test # 12min
+  source_file_dependencies:
+      - vllm/
+      - tests/models/decoder_only/language/test_hybrid.py
+      - tests/models/decoder_only/language/test_mamba.py
+  commands:
+      - pytest -v -s models/decoder_only/language/test_hybrid.py
+      - pytest -v -s models/decoder_only/language/test_mamba.py
+
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test
   optional: true
