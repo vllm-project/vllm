@@ -48,6 +48,8 @@ LONG_LORA_INFOS: list[ContextIDInfo] = [{
 }]
 
 
+
+
 @pytest.fixture()
 def should_do_global_cleanup_after_test(request) -> bool:
     """Allow subdirectories to skip global cleanup by overriding this fixture.
@@ -161,6 +163,11 @@ def dummy_model_gate_up() -> nn.Module:
     model.embedding_modules = {"lm_head": "lm_head"}
     return model
 
+def print_info(path):
+    print (f"LoRA Module - download path {path}")
+    import os
+    print (f"ls {path} => {os.listdir(path)}")
+    return path
 
 @pytest.fixture(scope="session")
 def sql_lora_huggingface_id():
@@ -170,85 +177,85 @@ def sql_lora_huggingface_id():
 
 @pytest.fixture(scope="session")
 def sql_lora_files(sql_lora_huggingface_id):
-    return snapshot_download(repo_id=sql_lora_huggingface_id)
+    return print_info(snapshot_download(repo_id=sql_lora_huggingface_id))
 
 
 @pytest.fixture(scope="session")
 def mixtral_lora_files():
     # Note: this module has incorrect adapter_config.json to test
     # https://github.com/vllm-project/vllm/pull/5909/files.
-    return snapshot_download(repo_id="SangBinCho/mixtral-lora")
+    return print_info(snapshot_download(repo_id="SangBinCho/mixtral-lora"))
 
 
 @pytest.fixture(scope="session")
 def gemma_lora_files():
-    return snapshot_download(repo_id="wskwon/gemma-7b-test-lora")
+    return print_info(snapshot_download(repo_id="wskwon/gemma-7b-test-lora"))
 
 
 @pytest.fixture(scope="session")
 def chatglm3_lora_files():
-    return snapshot_download(repo_id="jeeejeee/chatglm3-text2sql-spider")
+    return print_info(snapshot_download(repo_id="jeeejeee/chatglm3-text2sql-spider"))
 
 
 @pytest.fixture(scope="session")
 def baichuan_lora_files():
-    return snapshot_download(repo_id="jeeejeee/baichuan7b-text2sql-spider")
+    return print_info(snapshot_download(repo_id="jeeejeee/baichuan7b-text2sql-spider"))
 
 
 @pytest.fixture(scope="session")
 def baichuan_zero_lora_files():
     # all the lora_B weights are initialized to zero.
-    return snapshot_download(repo_id="jeeejeee/baichuan7b-zero-init")
+    return print_info(snapshot_download(repo_id="jeeejeee/baichuan7b-zero-init"))
 
 
 @pytest.fixture(scope="session")
 def baichuan_regex_lora_files():
-    return snapshot_download(repo_id="jeeejeee/baichuan-7b-lora-zero-regex")
+    return print_info(snapshot_download(repo_id="jeeejeee/baichuan-7b-lora-zero-regex"))
 
 
 @pytest.fixture(scope="session")
 def ilama_lora_files():
-    return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")
+    return print_info(snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider"))
 
 
 @pytest.fixture(scope="session")
 def minicpmv_lora_files():
-    return snapshot_download(repo_id="jeeejeee/minicpmv25-lora-pokemon")
+    return print_info(snapshot_download(repo_id="jeeejeee/minicpmv25-lora-pokemon"))
 
 
 @pytest.fixture(scope="session")
 def qwen2vl_lora_files():
-    return snapshot_download(repo_id="jeeejeee/qwen2-vl-lora-pokemon")
+    return print_info(snapshot_download(repo_id="jeeejeee/qwen2-vl-lora-pokemon"))
 
 
 @pytest.fixture(scope="session")
 def qwen25vl_lora_files():
-    return snapshot_download(repo_id="jeeejeee/qwen25-vl-lora-pokemon")
+    return print_info(snapshot_download(repo_id="jeeejeee/qwen25-vl-lora-pokemon"))
 
 
 @pytest.fixture(scope="session")
 def tinyllama_lora_files():
-    return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
+    return print_info(snapshot_download(repo_id="jashing/tinyllama-colorist-lora"))
 
 
 @pytest.fixture(scope="session")
 def phi2_lora_files():
-    return snapshot_download(repo_id="isotr0py/phi-2-test-sql-lora")
+    return print_info(snapshot_download(repo_id="isotr0py/phi-2-test-sql-lora"))
 
 
 @pytest.fixture(scope="session")
 def long_context_lora_files_16k_1():
-    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_1")
+    return print_info(snapshot_download(repo_id="SangBinCho/long_context_16k_testing_1"))
 
 
 @pytest.fixture(scope="session")
 def long_context_lora_files_16k_2():
-    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_2")
+    return print_info(snapshot_download(repo_id="SangBinCho/long_context_16k_testing_2"))
 
 
 @pytest.fixture(scope="session")
 def long_context_lora_files_32k():
-    return snapshot_download(repo_id="SangBinCho/long_context_32k_testing")
+    return print_info(snapshot_download(repo_id="SangBinCho/long_context_32k_testing"))
 
 
 @pytest.fixture(scope="session")
