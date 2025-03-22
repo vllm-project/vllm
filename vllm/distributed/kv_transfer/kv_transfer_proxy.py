@@ -79,7 +79,6 @@ async def proxy_request(request: Request):
 
         async with cond:
             while kv_cache_counter.get(request_id) < tp_size:
-                print(f"________ {kv_cache_counter.get(request_id)} {tp_size}")
                 await asyncio.wait_for(cond.wait(), timeout=60)
 
         # Send request to decode worker and stream response
@@ -106,7 +105,6 @@ async def kv_cache_ready(request: Request):
     """Handle notification that KV cache is ready and trigger decode request."""
 
     req_data = await request.json()
-    print(f"~~~~~~ recved {req_data}")
     request_id = req_data.get("request_id")
     request_tp_size = req_data.get("world_size")
     assert request_tp_size == tp_size
@@ -117,15 +115,8 @@ async def kv_cache_ready(request: Request):
     request_id = request_id.removeprefix("chatcmpl-")
     print(f"--- Received KV cache ready for request ID: {request_id}")
 
-    # Print out the contents of both dictionaries
-    # print("===== request_store Contents =====")
-    # print(json.dumps(request_store, indent=4, default=str))
-
     print("===== kv_cache_counter Contents =====")
     print(json.dumps(kv_cache_counter, indent=4, default=str))
-
-    # if request_id not in request_store:
-    #     return JSONResponse(status_code=404, content={"error": "Request not found"})
 
     # Decrement the KV cache counter instead of setting to True
     async with cond:
