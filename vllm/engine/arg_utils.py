@@ -19,7 +19,6 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          ParallelConfig, PoolerConfig, PromptAdapterConfig,
                          SchedulerConfig, SpeculativeConfig, TaskOption,
                          TokenizerPoolConfig, VllmConfig)
-from vllm.utils import FlexibleArgumentParser
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -27,7 +26,7 @@ from vllm.plugins import load_general_plugins
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import StoreBoolean
+from vllm.utils import FlexibleArgumentParser, StoreBoolean
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
