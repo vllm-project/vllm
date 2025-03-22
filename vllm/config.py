@@ -1294,6 +1294,12 @@ class LoadConfig:
             "tensorizer" will use CoreWeave's tensorizer library for
                 fast weight loading.
             "bitsandbytes" will load nf4 type weights.
+            "sharded_state" will load weights from pre-sharded checkpoint files,
+                supporting efficient loading of tensor-parallel models.
+            "gguf" will load weights from GGUF format files.
+            "mistral" will load weights from consolidated safetensors files used
+                by Mistral models.
+            "runai_streamer" will load weights from RunAI streamer format files.
         model_loader_extra_config: The extra config for the model loader.
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's
