@@ -158,3 +158,25 @@ def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
 
         # cmp output
         assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+        # test sleep level 3 here.
+        llm.sleep(level=3)
+
+        # the memory usage is mostly cudagraph memory pool, similar to level 1
+        free_gpu_bytes_after_sleep, total = torch.cuda.mem_get_info()
+        used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
+        # NOTE: In V1, the memory buffer for logits (max_num_reqs x vocab_size)
+        # is captured but cannot be releasesd from PyTorch due to a known bug,
+        # therefore high memory usage after `llm.sleep` is called is expected.
+        # FIXME(youkaichao & ywang96): Fix memory buffer issue with sleep mode
+        # in V1.
+        if use_v1:
+            assert used_bytes < 7 * GiB_bytes
+        else:
+            assert used_bytes < 2 * GiB_bytes
+
+        llm.wake_up()
+        output2 = llm.generate(prompt, sampling_params)
+
+        # cmp output
+        assert output[0].outputs[0].text == output2[0].outputs[0].text
