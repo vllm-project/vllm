@@ -1906,13 +1906,15 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     return getattr(module, obj_name)
 
 
-def kill_process_tree(pid: int):
+def kill_process_tree(pid: int | None):
     """
     Kills all descendant processes of the given pid by sending SIGKILL.
 
     Args:
         pid (int): Process ID of the parent process
     """
+    if pid is None:
+        pid = os.getpid()
     try:
         parent = psutil.Process(pid)
     except psutil.NoSuchProcess:

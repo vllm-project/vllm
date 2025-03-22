@@ -144,7 +144,7 @@ def shutdown(proc: multiprocessing.Process, input_path: str, output_path: str):
     ipc_sockets = [output_path, input_path]
     for ipc_socket in ipc_sockets:
         socket_file = ipc_socket.replace("ipc://", "")
-        if os and os.path.exists(socket_file):
+        if os.path.exists(socket_file):
             os.remove(socket_file)
 
 
