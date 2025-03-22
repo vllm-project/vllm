@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import os
 import platform
 
 if platform.system() == "Windows":
     import winloop as uvloop_impl
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"  # Windows does not support fork
-    os.environ["USE_LIBUV"] = os.environ.get("USE_LIBUV", "0")  # Disable libuv on Windows by default if no USE_LIBUV is defined previously
+    # Windows does not support fork
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+    # Disable libuv on Windows by default
+    os.environ["USE_LIBUV"] = os.environ.get("USE_LIBUV", "0")
 else:
     import uvloop as uvloop_impl
 
