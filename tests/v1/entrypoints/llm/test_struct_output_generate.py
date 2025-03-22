@@ -61,6 +61,50 @@ def test_guided_json_completion(
 @pytest.mark.parametrize("guided_decoding_backend",
                          GUIDED_DECODING_BACKENDS_V1)
 @pytest.mark.parametrize("model_name", MODELS_TO_TEST)
+def test_guided_json_completion_disable_any_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_json_schema: dict[str, Any],
+    guided_decoding_backend: str,
+    model_name: str,
+):
+    if guided_decoding_backend != "xgrammar":
+        pytest.skip("disable-any-whitespace is only supported for xgrammar.")
+    guided_decoding_backend = 'xgrammar:disable-any-whitespace'
+
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    llm = LLM(model=model_name,
+              max_model_len=1024,
+              guided_decoding_backend=guided_decoding_backend)
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        max_tokens=1000,
+        guided_decoding=GuidedDecodingParams(json=sample_json_schema))
+    outputs = llm.generate(prompts=[
+        f"Give an example JSON for an employee profile "
+        f"that fits this schema: {sample_json_schema}"
+    ] * 2,
+                           sampling_params=sampling_params,
+                           use_tqdm=True)
+
+    assert outputs is not None
+
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        assert "\n" not in generated_text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        output_json = json.loads(generated_text)
+        jsonschema.validate(instance=output_json, schema=sample_json_schema)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("guided_decoding_backend",
+                         GUIDED_DECODING_BACKENDS_V1)
+@pytest.mark.parametrize("model_name", MODELS_TO_TEST)
 def test_guided_json_object(
     monkeypatch: pytest.MonkeyPatch,
     guided_decoding_backend: str,
@@ -301,7 +345,6 @@ def test_guided_choice_completion(
         prompts="The best language for type-safe systems programming is ",
         sampling_params=sampling_params,
         use_tqdm=True)
-
     assert outputs is not None
     for output in outputs:
         assert output is not None
