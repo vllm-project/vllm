@@ -677,8 +677,6 @@ def compute_hash() -> str:
     #     factorize(key)
     environment_variables_to_hash = [
         "VLLM_PP_LAYER_PARTITION",
-        "VLLM_ATTENTION_BACKEND",
-        "VLLM_USE_FLASHINFER_SAMPLER",
         "VLLM_MLA_DISABLE",
         "VLLM_USE_TRITON_FLASH_ATTN",
         "VLLM_USE_TRITON_AWQ",
