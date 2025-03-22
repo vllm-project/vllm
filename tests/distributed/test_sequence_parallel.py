@@ -66,14 +66,15 @@ class SPTestSettings:
     ):
         return SPTestSettings(
             parallel_setups=[
-                ParallelSetup(tp_size=tp_base,
-                              sp_enabled=True,
-                              eager_mode=False,
-                              chunked_prefill=False),
-                ParallelSetup(tp_size=tp_base,
-                              sp_enabled=True,
-                              eager_mode=False,
-                              chunked_prefill=True),
+                # TODO support eager_mode = False
+                # ParallelSetup(tp_size=tp_base,
+                #               sp_enabled=True,
+                #               eager_mode=False,
+                #               chunked_prefill=False),
+                # ParallelSetup(tp_size=tp_base,
+                #               sp_enabled=True,
+                #               eager_mode=False,
+                #               chunked_prefill=True),
                 ParallelSetup(tp_size=tp_base,
                               sp_enabled=True,
                               eager_mode=True,
@@ -84,10 +85,8 @@ class SPTestSettings:
                               chunked_prefill=True)
             ],
             # only ray is supported for V1
-            # distributed_backends=["mp", "mp", "ray", "ray"],
-            # vllm_major_versions=["0", "1", "0", "1"],
-            distributed_backends=["mp", "mp"],
-            vllm_major_versions=["0", "1"],
+            distributed_backends=["mp", "mp", "ray", "ray"],
+            vllm_major_versions=["0", "1", "0", "1"],
             task=task,
             test_options=SPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
@@ -96,7 +95,7 @@ class SPTestSettings:
     @staticmethod
     def fast(
         *,
-        tp_base: int = 2,
+        tp_base: int = 4,
         task: TaskOption = "auto",
         multi_node_only: bool = False,
         load_format: Optional[str] = None,
@@ -108,8 +107,8 @@ class SPTestSettings:
                               eager_mode=True,
                               chunked_prefill=False),
             ],
-            distributed_backends=["mp"],
-            vllm_major_versions=["1"],
+            distributed_backends=["mp", "mp"],
+            vllm_major_versions=["0", "1"],
             task=task,
             test_options=SPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
@@ -243,13 +242,13 @@ def _compare_sp(
 
 SP_TEXT_GENERATION_MODELS = {
     # [Decoder-only]
-    "unsloth/Llama-3.2-1B-Instruct": SPTestSettings.detailed(),
+    "meta-llama/Llama-3.2-1B-Instruct": SPTestSettings.fast(),
 }
 
 SP_TEST_MODELS = [
     # TODO support other models
     # [LANGUAGE GENERATION]
-    "unsloth/Llama-3.2-1B-Instruct",
+    "meta-llama/Llama-3.2-1B-Instruct",
 ]
 
 

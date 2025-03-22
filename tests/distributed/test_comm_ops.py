@@ -72,7 +72,7 @@ def reduce_scatter_test_worker(monkeypatch: pytest.MonkeyPatch, tp_size: int,
     all_reduce = torch.sum(torch.stack(all_tensors, dim=0), dim=0)
     expected = all_reduce[index * partition_size:(index + 1) * partition_size]
     t = all_tensors[index]
-    t = tensor_model_parallel_reduce_scatter(t)
+    t = tensor_model_parallel_reduce_scatter(t, 0)
     torch.testing.assert_close(t, expected)
 
 

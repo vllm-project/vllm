@@ -422,7 +422,8 @@ class VocabParallelEmbedding(torch.nn.Module):
         forward_context = try_get_forward_context()
         if (forward_context is not None
                 and forward_context.enable_sequence_parallel):
-            output = tensor_model_parallel_reduce_scatter(output_parallel)
+            output = tensor_model_parallel_reduce_scatter(output_parallel,
+                                                          dim=0)
         else:
             output = tensor_model_parallel_all_reduce(output_parallel)
         return output
