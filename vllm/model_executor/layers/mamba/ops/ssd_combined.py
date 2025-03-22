@@ -6,7 +6,12 @@
 # ruff: noqa: E501
 
 import torch
-import triton
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+
 from einops import rearrange
 from packaging import version
 

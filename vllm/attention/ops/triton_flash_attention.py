@@ -22,30 +22,36 @@ Not currently supported:
 """
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
+
+from vllm.triton_utils import triton_autotune_decorator, triton_jit_decorator
 
 torch_dtype: tl.constexpr = torch.float16
 
 
-@triton.jit
+@triton_jit_decorator
 def cdiv_fn(x, y):
     return (x + y - 1) // y
 
 
-@triton.jit
+@triton_jit_decorator
 def max_fn(x, y):
     return tl.math.max(x, y)
 
 
-@triton.jit
+@triton_jit_decorator
 def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
     ms = tl.arange(0, m)
     ns = tl.arange(0, n)
     return philox_offset + ms[:, None] * stride + ns[None, :]
 
 
-@triton.jit
+@triton_jit_decorator
 def dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride):
     rng_offsets = dropout_offsets(philox_seed, philox_offset, dropout_p, m, n,
                                   stride).to(tl.uint32)
@@ -53,7 +59,7 @@ def dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride):
     return tl.rand(philox_seed, rng_offsets)
 
 
-@triton.jit
+@triton_jit_decorator
 def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
     rng_output = dropout_rng(philox_seed, philox_offset, dropout_p, m, n,
                              stride)
@@ -61,7 +67,7 @@ def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
     return rng_keep
 
 
-@triton.jit
+@triton_jit_decorator
 def load_fn(block_ptr, first, second, pad):
     if first and second:
         tensor = tl.load(block_ptr, boundary_check=(0, 1), padding_option=pad)
@@ -74,7 +80,7 @@ def load_fn(block_ptr, first, second, pad):
     return tensor
 
 
-@triton.jit
+@triton_jit_decorator
 def _attn_fwd_inner(
     acc,
     l_i,
@@ -208,7 +214,7 @@ def _attn_fwd_inner(
     return acc, l_i, m_i
 
 
-@triton.autotune(
+@triton_autotune_decorator(
     configs=[
         triton.Config(
             {
@@ -306,7 +312,7 @@ def _attn_fwd_inner(
     ],
     key=['IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL'],
 )
-@triton.jit
+@triton_jit_decorator
 def attn_fwd(
     Q,
     K,

@@ -3,8 +3,13 @@
 from typing import Optional, Type
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
+from vllm.triton_utils import triton_jit_decorator
 
 
 def is_weak_contiguous(x: torch.Tensor):
@@ -15,7 +20,7 @@ def is_weak_contiguous(x: torch.Tensor):
     return is_transpose or is_not_transpose
 
 
-@triton.jit
+@triton_jit_decorator
 def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
                      M, N, K, stride_am, stride_ak, stride_bk, stride_bn,
                      stride_cm, stride_cn, ACCUMULATOR_DTYPE: tl.constexpr,

@@ -10,7 +10,12 @@ from typing import Any, TypedDict
 
 import ray
 import torch
-import triton
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+
 from ray.experimental.tqdm_ray import tqdm
 from transformers import AutoConfig
 

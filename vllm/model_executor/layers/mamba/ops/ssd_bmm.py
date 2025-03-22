@@ -8,11 +8,17 @@
 import math
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
+
+from vllm.triton_utils import triton_autotune_decorator, triton_jit_decorator
 
 
-@triton.autotune(
+@triton_autotune_decorator(
     configs=[
         triton.Config(
             {
@@ -89,7 +95,7 @@ import triton.language as tl
     ],
     key=['chunk_size', 'K', 'IS_CAUSAL'],
 )
-@triton.jit
+@triton_jit_decorator
 def _bmm_chunk_fwd_kernel(
     # Pointers to matrices
     a_ptr,

@@ -6,7 +6,12 @@ import time
 # Import DeepGEMM functions
 import deep_gemm
 import torch
-import triton
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+
 from deep_gemm import calc_diff, ceil_div, get_col_major_tma_aligned_tensor
 
 # Import vLLM functions

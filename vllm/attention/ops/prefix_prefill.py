@@ -4,8 +4,12 @@
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
 
 from vllm.platforms import current_platform
 
@@ -16,7 +20,7 @@ NUM_WARPS = 4 if current_platform.is_rocm() else 8
 # To check compatibility
 IS_TURING = current_platform.get_device_capability() == (7, 5)
 
-if triton.__version__ >= "2.1.0":
+if HAS_TRITON and triton.__version__ >= "2.1.0":
 
     @triton.jit
     def _fwd_kernel(

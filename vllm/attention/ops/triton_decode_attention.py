@@ -30,10 +30,14 @@ It supports page size >= 1.
 
 import logging
 
-import triton
-import triton.language as tl
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton_jit_decorator
 
 is_hip_ = current_platform.is_rocm()
 
@@ -46,13 +50,13 @@ logger.warning(
     "can be ignored.")
 
 
-@triton.jit
+@triton_jit_decorator
 def tanh(x):
     # Tanh is just a scaled sigmoid
     return 2 * tl.sigmoid(2 * x) - 1
 
 
-@triton.jit
+@triton_jit_decorator
 def _fwd_kernel_stage1(
     Q,
     K_Buffer,
@@ -228,7 +232,7 @@ def _decode_att_m_fwd(
     )
 
 
-@triton.jit
+@triton_jit_decorator
 def _fwd_grouped_kernel_stage1(
     Q,
     K_Buffer,
@@ -468,7 +472,7 @@ def _decode_grouped_att_m_fwd(
     )
 
 
-@triton.jit
+@triton_jit_decorator
 def _fwd_kernel_stage2(
     Mid_O,
     o,

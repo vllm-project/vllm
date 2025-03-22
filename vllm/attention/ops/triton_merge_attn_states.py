@@ -2,8 +2,14 @@
 from typing import Optional
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
+
+from vllm.triton_utils import triton_jit_decorator
 
 
 # Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
@@ -35,7 +41,7 @@ def merge_attn_states(
     )
 
 
-@triton.jit
+@triton_jit_decorator
 def merge_attn_states_kernel(
     output,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
     output_lse,  # [NUM_HEADS, NUM_TOKENS]

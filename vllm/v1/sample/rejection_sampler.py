@@ -3,10 +3,15 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import triton
-import triton.language as tl
+
+from vllm.triton_utils.importing import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
 
 from vllm.logger import init_logger
+from vllm.triton_utils import triton_jit_decorator
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.utils import compiled_softmax
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -359,7 +364,7 @@ def sample_recovered_tokens(
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
-@triton.jit(do_not_specialize=["max_spec_len"])
+@triton_jit_decorator(do_not_specialize=["max_spec_len"])
 def rejection_greedy_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
@@ -407,7 +412,7 @@ def rejection_greedy_sample_kernel(
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
-@triton.jit(do_not_specialize=["max_spec_len"])
+@triton_jit_decorator(do_not_specialize=["max_spec_len"])
 def rejection_random_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
@@ -470,7 +475,7 @@ def rejection_random_sample_kernel(
 
 
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
-@triton.jit(do_not_specialize=["replace_from", "replace_to"])
+@triton_jit_decorator(do_not_specialize=["replace_from", "replace_to"])
 def expand_kernel(
     output_ptr,  # [num_tokens]
     input_ptr,  # [batch_size]
@@ -495,7 +500,7 @@ def expand_kernel(
              mask=offset < num_tokens)
 
 
-@triton.jit
+@triton_jit_decorator
 def sample_recovered_tokens_kernel(
     output_token_ids_ptr,  # [num_tokens]
     cu_num_draft_tokens_ptr,  # [batch_size]

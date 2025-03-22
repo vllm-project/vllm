@@ -4,40 +4,47 @@
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/selective_state_update.py
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
+
 from packaging import version
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.utils import PAD_SLOT_ID
+from vllm.triton_utils import triton_heuristics_decorator, triton_jit_decorator
 
-TRITON3 = version.parse(triton.__version__) >= version.parse("3.0.0")
+TRITON3 = HAS_TRITON and (version.parse(triton.__version__)
+                          >= version.parse("3.0.0"))
 
 if TRITON3:
 
-    @triton.jit
+    @triton_jit_decorator
     def softplus(dt):
         dt = tl.where(dt <= 20.0, tl.math.log(tl.math.exp(dt) + 1), dt)
         return dt
 else:
 
-    @triton.jit
+    @triton_jit_decorator
     def softplus(dt):
         dt = tl.where(dt <= 20.0, tl.math.log1p(tl.exp(dt)), dt)
         return dt
 
 
-@triton.heuristics(
+@triton_heuristics_decorator(
     {"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
-@triton.heuristics({"HAS_D": lambda args: args["D_ptr"] is not None})
-@triton.heuristics({"HAS_Z": lambda args: args["z_ptr"] is not None})
-@triton.heuristics({
+@triton_heuristics_decorator({"HAS_D": lambda args: args["D_ptr"] is not None})
+@triton_heuristics_decorator({"HAS_Z": lambda args: args["z_ptr"] is not None})
+@triton_heuristics_decorator({
     "HAS_STATE_BATCH_INDICES":
     lambda args: args["state_batch_indices_ptr"] is not None
 })
-@triton.heuristics(
+@triton_heuristics_decorator(
     {"BLOCK_SIZE_DSTATE": lambda args: triton.next_power_of_2(args["dstate"])})
-@triton.jit
+@triton_jit_decorator
 def _selective_scan_update_kernel(
     # Pointers to matrices
     state_ptr,

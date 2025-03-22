@@ -7,18 +7,23 @@
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import triton
+    import triton.language as tl
+from vllm.triton_utils import triton_jit_decorator
 
 from .prefix_prefill import context_attention_fwd
 
 
-@triton.jit
+@triton_jit_decorator
 def cdiv_fn(x, y):
     return (x + y - 1) // y
 
 
-@triton.jit
+@triton_jit_decorator
 def kernel_paged_attention_2d(
         output_ptr,  # [num_tokens, num_query_heads, head_size]
         query_ptr,  # [num_tokens, num_query_heads, head_size]
