@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from tests.utils import maybe_test_rocm_aiter
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.fp8 import (Fp8KVCacheMethod,
                                                          Fp8LinearMethod)
@@ -23,6 +24,7 @@ MODELS = [
                     reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_id", MODELS)
 @pytest.mark.parametrize("force_marlin", [False, True])
+@maybe_test_rocm_aiter
 def test_model_load_and_run(vllm_runner, model_id: str, force_marlin: bool,
                             monkeypatch) -> None:
     if force_marlin:
@@ -47,6 +49,7 @@ KV_CACHE_MODELS = [
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_id", KV_CACHE_MODELS)
+@maybe_test_rocm_aiter
 def test_kv_cache_model_load_and_run(vllm_runner, model_id: str, monkeypatch):
     # vllm_runner.apply_model() relies on V0 internals.
     monkeypatch.setenv("VLLM_USE_V1", "0")
@@ -86,6 +89,7 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str, monkeypatch):
                     reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("force_marlin", [False, True])
+@maybe_test_rocm_aiter
 def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
                          monkeypatch) -> None:
     # vllm_runner.apply_model() relies on V0 internals.
