@@ -18,6 +18,14 @@ EXPECTED_LORA_OUTPUT = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     prompts = [
         PROMPT_TEMPLATE.format(query="How many singers do we have?"),
@@ -46,15 +54,6 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
-
-
-@pytest.mark.skip_v1
 @create_new_process_for_each_test()
 def test_ilama_lora(ilama_lora_files):
     llm = vllm.LLM(MODEL_PATH,
@@ -74,7 +73,6 @@ def test_ilama_lora(ilama_lora_files):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
-@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @create_new_process_for_each_test()
 def test_ilama_lora_tp4(ilama_lora_files):
@@ -96,7 +94,6 @@ def test_ilama_lora_tp4(ilama_lora_files):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
-@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @create_new_process_for_each_test()
 def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
