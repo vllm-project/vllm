@@ -15,6 +15,43 @@ from vllm.platforms import current_platform
 from vllm.utils import LazyDict
 
 
+@CustomOp.register("xielu")
+class XIELU(CustomOp):
+    """
+    Applies the xIELU activation function
+
+    Shapes:
+        x: (num_tokens, d) or (batch_size, seq_len, d)
+        return: (num_tokens, d) or (batch_size, seq_len, d)
+    """
+
+    def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6):
+        super().__init__()
+        self.alpha_p = nn.Parameter(torch.log(torch.exp(torch.tensor(alpha_p_init)) - 1.0).unsqueeze(0))
+        self.alpha_n = nn.Parameter(torch.log(torch.exp(torch.tensor(alpha_n_init - beta)) - 1.0).unsqueeze(0))
+        self.beta = beta
+        self.eps = torch.tensor(eps, dtype=torch.bfloat16, device='cuda')
+
+        if current_platform.is_cuda_alike():
+            # TODO CUDA implementation under development, using forward_native for now
+            self._forward_method = self.forward_native
+        elif current_platform.is_cpu():
+            self._forward_method = self.forward_native
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        # TODO optimize to precompute
+        alpha_p = F.softplus(self.alpha_p)
+        alpha_n = self.beta + F.softplus(self.alpha_n)
+        return torch.where(
+            x > 0,
+            alpha_p * x * x + self.beta * x,
+            alpha_n * torch.expm1(torch.min(x, self.eps)) - alpha_n * x + self.beta * x
+        )
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return
+
+
 @CustomOp.register("fatrelu_and_mul")
 class FatreluAndMul(CustomOp):
     """An activation function for FATReLU.
