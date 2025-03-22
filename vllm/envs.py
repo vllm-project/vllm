@@ -656,7 +656,11 @@ def compute_hash() -> str:
     """
     WARNING: Whenever a new key is added to this environment
     variables, ensure that it is included in the factors list if
-    it affects the computation graph.
+    it affects the computation graph. For example, different values
+    of VLLM_PP_LAYER_PARTITION will generate different computation
+    graphs, so it is included in the factors list. The env vars that 
+    affect the choice of different kernels or attention backends should
+    also be included in the factors list.
     """
     factors: list[Any] = []
 
@@ -667,13 +671,26 @@ def compute_hash() -> str:
         else:
             factors.append("None")
 
-    # The values of VLLM_PP_LAYER_PARTITION will
-    # affects the computation graph.
-    factorize("VLLM_PP_LAYER_PARTITION")
-
+    # The values of envs may affects the computation graph.
     # TODO(DefTruth): hash all environment variables?
     # for key in environment_variables:
     #     factorize(key)
+    environment_variables_to_hash = [
+        "VLLM_PP_LAYER_PARTITION",
+        "VLLM_ATTENTION_BACKEND",
+        "VLLM_USE_FLASHINFER_SAMPLER",
+        "VLLM_USE_FLASHINFER_REJECTION_SAMPLER",
+        "VLLM_FLASHINFER_FORCE_TENSOR_CORES",
+        "VLLM_MARLIN_USE_ATOMIC_ADD",
+        "VLLM_MLA_DISABLE",
+        "VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON",
+        "VLLM_USE_TRITON_FLASH_ATTN",
+        "VLLM_USE_TRITON_AWQ",
+        "VLLM_DP_RANK",
+        "VLLM_DP_SIZE",
+    ]
+    for key in environment_variables_to_hash:
+        factorize(key)
 
     hash_str = hashlib.md5(str(factors).encode()).hexdigest()
 
