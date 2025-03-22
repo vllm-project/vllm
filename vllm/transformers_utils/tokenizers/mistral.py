@@ -137,8 +137,8 @@ def find_tokenizer_file(files: List[str]):
 
 def make_mistral_chat_completion_request(
         messages: List["ChatCompletionMessageParam"],
-        tools: Optional[List[Dict[str,
-                                  Any]]] = None) -> "ChatCompletionRequest":
+        tools: Optional[List[Dict[str, Any]]] = None,
+        truncate_for_context_length: bool = False) -> "ChatCompletionRequest":
     last_message = cast(Dict[str, Any], messages[-1])
     if last_message["role"] == "assistant":
         last_message["prefix"] = True
@@ -165,7 +165,8 @@ def make_mistral_chat_completion_request(
 
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     return ChatCompletionRequest(messages=messages,
-                                 tools=tools)  # type: ignore[type-var]
+                                 tools=tools,
+                                 truncate_for_context_length=truncate_for_context_length)  # type: ignore[type-var]
 
 
 class MistralTokenizer(TokenizerBase):
@@ -364,10 +365,12 @@ class MistralTokenizer(TokenizerBase):
     def apply_chat_template(self,
                             messages: List["ChatCompletionMessageParam"],
                             tools: Optional[List[Dict[str, Any]]] = None,
+                            truncate_for_context_length: bool = False,
+                            max_model_input_len: Optional[int] = None,
                             **kwargs) -> List[int]:
 
-        request = make_mistral_chat_completion_request(messages, tools)
-        encoded = self.mistral.encode_chat_completion(request)
+        request = make_mistral_chat_completion_request(messages, tools, truncate_for_context_length=truncate_for_context_length)
+        encoded = self.mistral.encode_chat_completion(request, max_model_input_len=max_model_input_len)
 
         # encode-decode to get clean prompt
         return encoded.tokens
