@@ -32,8 +32,7 @@ from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (LoggingStatLogger, PrometheusStatLogger,
-                                     StatLoggerBase)
+from vllm.v1.metrics.loggers import StatLoggerBase, setup_default_loggers
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
@@ -51,6 +50,7 @@ class AsyncLLM(EngineClient):
         use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
     ) -> None:
         if not envs.VLLM_USE_V1:
             raise ValueError(
@@ -65,11 +65,9 @@ class AsyncLLM(EngineClient):
 
         self.log_requests = log_requests
         self.log_stats = log_stats
-        self.stat_loggers: list[StatLoggerBase] = []
-        if self.log_stats:
-            if logger.isEnabledFor(logging.INFO):
-                self.stat_loggers.append(LoggingStatLogger())
-            self.stat_loggers.append(PrometheusStatLogger(vllm_config))
+        self.stat_loggers = setup_default_loggers(
+            vllm_config, self.log_stats, logger.isEnabledFor(logging.INFO),
+            stat_loggers)
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -140,6 +138,7 @@ class AsyncLLM(EngineClient):
         engine_args: AsyncEngineArgs,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
     ) -> "AsyncLLM":
         """Create an AsyncLLM from the EngineArgs."""
 
@@ -155,6 +154,7 @@ class AsyncLLM(EngineClient):
             log_stats=not engine_args.disable_log_stats,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
+            stat_loggers=stat_loggers,
         )
 
     def shutdown(self):
@@ -361,7 +361,7 @@ class AsyncLLM(EngineClient):
             return
 
         assert scheduler_stats is not None
-        for stat_logger in self.stat_loggers:
+        for stat_logger in self.stat_loggers.values():
             stat_logger.record(scheduler_stats=scheduler_stats,
                                iteration_stats=iteration_stats)
 
@@ -399,7 +399,7 @@ class AsyncLLM(EngineClient):
         scheduler_outputs=None,
         model_output=None,
     ) -> None:
-        for stat_logger in self.stat_loggers:
+        for stat_logger in self.stat_loggers.values():
             stat_logger.log()
 
     async def check_health(self) -> None:
