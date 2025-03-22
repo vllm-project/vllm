@@ -48,6 +48,8 @@ logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
 
+from vllm.core.cpen511_optimize import *
+
 
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
@@ -1382,6 +1384,9 @@ class LLM:
                          f"output: {0:.2f} toks/s"),
             )
 
+        with open('config.txt', 'r') as f:
+            set_factor(float(f.read()))
+        reset_counts()
         # Run the engine.
         outputs: List[Union[RequestOutput, PoolingRequestOutput]] = []
         total_in_toks = 0
@@ -1404,8 +1409,15 @@ class LLM:
                             pbar.postfix = (
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
+                            last_speed_report = (in_spd, out_spd)
                         pbar.update(1)
 
+        print(f'process speed input: {last_speed_report[0]:.2f} toks/s, output: {last_speed_report[1]:.2f} toks')
+        factor, in_count, out_count, in_spd, out_spd, swap_in_count, swap_out_count = get_stats()
+        with open('debug.log', 'r') as d, open('stats.log', 'a') as f:
+            in_spd, out_spd = last_speed_report
+            f.write(f'{factor:.1f},{in_count},{out_count},{swap_in_count},{swap_out_count},{in_spd:.2f},{out_spd:.2f}\n')
+    
         if use_tqdm:
             pbar.close()
         # Sort the outputs by request ID.

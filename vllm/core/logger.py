@@ -3,7 +3,8 @@ import os
 
 # initialize logger
 logger = logging.getLogger('vllm_logger')
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.CRITICAL)
+# logger.setLevel(logging.DEBUG)
 
 # Create a file handler
 file_handler = logging.FileHandler('debug.log')
