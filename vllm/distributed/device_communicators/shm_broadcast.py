@@ -357,8 +357,10 @@ class MessageQueue:
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.debug(
-                            "No available shared memory broadcast block found in %s second.",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                            ("No available shared memory broadcast block found"
+                             " in %s second."),
+                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                        )
                         n_warning += 1
 
                     # if we time out, raise an exception
@@ -416,8 +418,10 @@ class MessageQueue:
                     if (time.monotonic() - start_time
                             > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.debug(
-                            "No available shared memory broadcast block found in %s second.",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                            ("No available shared memory broadcast block found"
+                             "in %s second."),
+                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                        )
                         n_warning += 1
 
                     # if we time out, raise an exception
