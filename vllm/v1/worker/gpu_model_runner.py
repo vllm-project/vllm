@@ -1211,20 +1211,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if not logprobs_tensors:
                 # Create empty logprobs CPU tensors for the entire prompt.
                 # If chunked, we'll copy in slice by slice.
-                logprob_token_ids = torch.empty(
-                    (num_prompt_tokens - 1, num_prompt_logprobs + 1),
-                    dtype=torch.int32,
-                    device="cpu")
-                logprobs = torch.empty_like(logprob_token_ids,
-                                            dtype=torch.float32)
-                selected_token_ranks = torch.empty(num_prompt_tokens - 1,
-                                                   dtype=torch.int32,
-                                                   device="cpu")
-                in_progress_dict[req_id] = logprobs_tensors = LogprobsTensors(
-                    logprob_token_ids=logprob_token_ids,
-                    logprobs=logprobs,
-                    selected_token_ranks=selected_token_ranks,
-                )
+                logprobs_tensors = LogprobsTensors.empty_cpu(
+                    num_prompt_tokens - 1, num_prompt_logprobs + 1)
+                in_progress_dict[req_id] = logprobs_tensors
 
             # Determine number of logits to retrieve.
             start_idx = request.num_computed_tokens
