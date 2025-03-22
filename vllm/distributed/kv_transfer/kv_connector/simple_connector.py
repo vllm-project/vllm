@@ -361,7 +361,7 @@ class SimpleConnector(KVConnectorBase):
             hidden_or_intermediate_states = None
 
         else:
-            logger.debug(
+            logger.info(
                 "[rank%d]: Successfully received all KVs and hidden "
                 "states, skip model forwarding.", torch.distributed.get_rank())
             hidden_or_intermediate_states = torch.cat(

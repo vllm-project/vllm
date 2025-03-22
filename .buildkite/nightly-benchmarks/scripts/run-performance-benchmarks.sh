@@ -121,9 +121,12 @@ upload_to_buildkite() {
 run_latency_tests() {
   # run latency tests using `benchmark_latency.py`
   # $1: a json file specifying latency test cases
+  # $2: version of vllm to use
 
   local latency_test_file
   latency_test_file=$1
+
+  vllm_version=$2
 
   # Iterate over latency tests
   jq -c '.[]' "$latency_test_file" | while read -r params; do
@@ -151,9 +154,15 @@ run_latency_tests() {
       continue
     fi
 
-    latency_command="python3 benchmark_latency.py \
-      --output-json $RESULTS_FOLDER/${test_name}.json \
-      $latency_args"
+    if [[ $vllm_version -eq 0 ]]; then
+      latency_command="python3 benchmark_latency.py \
+        --output-json $RESULTS_FOLDER/${test_name}.json \
+        $latency_args"
+    else
+      latency_command="VLLM_USE_V1=1 python3 benchmark_latency.py \
+        --output-json $RESULTS_FOLDER/${test_name}_v1.json \
+        $latency_args"
+    fi
 
     echo "Running test case $test_name"
     echo "Latency command: $latency_command"
@@ -166,7 +175,12 @@ run_latency_tests() {
         latency_command: $latency,
         gpu_type: $gpu
       }')
-    echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
+
+    if [[ $vllm_version -eq 0 ]]; then
+      echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
+    else
+      echo "$jq_output" >"$RESULTS_FOLDER/${test_name}_v1.commands"
+    fi
 
     # run the benchmark
     eval "$latency_command"
@@ -179,9 +193,12 @@ run_latency_tests() {
 run_throughput_tests() {
   # run throughput tests using `benchmark_throughput.py`
   # $1: a json file specifying throughput test cases
+  # $2: version of vllm to use
 
   local throughput_test_file
   throughput_test_file=$1
+
+  vllm_version=$2
 
   # Iterate over throughput tests
   jq -c '.[]' "$throughput_test_file" | while read -r params; do
@@ -209,9 +226,15 @@ run_throughput_tests() {
       continue
     fi
 
-    throughput_command="python3 benchmark_throughput.py \
-      --output-json $RESULTS_FOLDER/${test_name}.json \
-      $throughput_args"
+    if [[ $vllm_version -eq 0 ]]; then
+      throughput_command="python3 benchmark_throughput.py \
+        --output-json $RESULTS_FOLDER/${test_name}.json \
+        $throughput_args"
+    else
+      throughput_command="VLLM_USE_V1=1 python3 benchmark_throughput.py \
+        --output-json $RESULTS_FOLDER/${test_name}_v1.json \
+        $throughput_args"
+    fi
 
     echo "Running test case $test_name"
     echo "Throughput command: $throughput_command"
@@ -223,7 +246,12 @@ run_throughput_tests() {
         throughput_command: $command,
         gpu_type: $gpu
       }')
-    echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
+
+    if [[ $vllm_version -eq 0 ]]; then
+      echo "$jq_output" >"$RESULTS_FOLDER/$test_name.commands"
+    else
+      echo "$jq_output" >"$RESULTS_FOLDER/${test_name}_v1.commands"
+    fi
 
     # run the benchmark
     eval "$throughput_command"
@@ -236,9 +264,12 @@ run_throughput_tests() {
 run_serving_tests() {
   # run serving tests using `benchmark_serving.py`
   # $1: a json file specifying serving test cases
+  # $2: version of vllm to use
 
   local serving_test_file
   serving_test_file=$1
+
+  vllm_version=$2
 
   # Iterate over serving tests
   jq -c '.[]' "$serving_test_file" | while read -r params; do
@@ -286,7 +317,11 @@ run_serving_tests() {
     # run the server
     echo "Running test case $test_name"
     echo "Server command: $server_command"
-    bash -c "$server_command" &
+    if [[ $vllm_version -eq 0 ]]; then
+      bash -c "$server_command" &
+    else
+      VLLM_USE_V1=1 bash -c "$server_command" &
+    fi
     server_pid=$!
 
     # wait until the server is alive
@@ -307,7 +342,11 @@ run_serving_tests() {
         echo "now qps is $qps"
       fi
 
-      new_test_name=$test_name"_qps_"$qps
+      if [[ $vllm_version -eq 0 ]]; then
+        new_test_name=$test_name"_qps_"$qps
+      else
+        new_test_name=$test_name"_qps_"$qps"_v1"
+      fi
 
       # pass the tensor parallel size to the client so that it can be displayed
       # on the benchmark dashboard
@@ -322,7 +361,11 @@ run_serving_tests() {
       echo "Running test case $test_name with qps $qps"
       echo "Client command: $client_command"
 
-      bash -c "$client_command"
+      if [[ $vllm_version -eq 0 ]]; then
+        bash -c "$client_command"
+      else
+        VLLM_USE_V1=1 bash -c "$client_command"
+      fi
 
       # record the benchmarking commands
       jq_output=$(jq -n \
@@ -370,14 +413,20 @@ main() {
   mkdir -p $RESULTS_FOLDER
   QUICK_BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
-  # benchmarking
-  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/serving-tests.json
-  run_latency_tests $QUICK_BENCHMARK_ROOT/tests/latency-tests.json
-  run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/throughput-tests.json
+  # benchmarking for v0
+  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/serving-tests.json 0
+  run_latency_tests $QUICK_BENCHMARK_ROOT/tests/latency-tests.json 0
+  run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/throughput-tests.json 0
+
+  # benchmarking for v1
+  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/serving-tests.json 1
+  run_latency_tests $QUICK_BENCHMARK_ROOT/tests/latency-tests.json 1
+  run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/throughput-tests.json 1
 
   # postprocess benchmarking results
   pip install tabulate pandas
-  python3 $QUICK_BENCHMARK_ROOT/scripts/convert-results-json-to-markdown.py
+  python3 $QUICK_BENCHMARK_ROOT/scripts/convert-results-json-to-markdown.py --version 0
+  python3 $QUICK_BENCHMARK_ROOT/scripts/convert-results-json-to-markdown.py --version 1
 
   upload_to_buildkite
 }
