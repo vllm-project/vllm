@@ -131,6 +131,7 @@ class EngineArgs:
     long_prefill_token_threshold: Optional[int] = 0
     max_num_seqs: Optional[int] = None
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
+    tpu_bucket_padding_gap: Optional[int] = None
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
@@ -231,6 +232,11 @@ class EngineArgs:
         if isinstance(self.compilation_config, (int, dict)):
             self.compilation_config = CompilationConfig.from_cli(
                 str(self.compilation_config))
+        if self.compilation_config is None:
+            self.compilation_config = CompilationConfig()
+        if self.tpu_bucket_padding_gap is not None:
+            self.compilation_config.tpu_bucket_padding_gap = \
+                self.tpu_bucket_padding_gap
 
         # Setup plugins
         from vllm.plugins import load_general_plugins
@@ -578,6 +584,13 @@ class EngineArgs:
             default=EngineArgs.max_logprobs,
             help=('Max number of log probs to return logprobs is specified in'
                   ' SamplingParams.'))
+        parser.add_argument(
+            '--tpu-bucket-padding-gap',
+            type=int,
+            default=EngineArgs.tpu_bucket_padding_gap,
+            help='The gap between each bucket for padding. '
+            'For example, the bucket padding is (16, 24, 32, 40, 48, ..., 512),'
+            'then its tpu_bucket_padding_gap is 8.')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
@@ -1350,8 +1363,7 @@ class EngineArgs:
             scheduler_cls=self.scheduler_cls,
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
-            long_prefill_token_threshold=self.long_prefill_token_threshold,
-        )
+            long_prefill_token_threshold=self.long_prefill_token_threshold)
 
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,

@@ -31,6 +31,8 @@ docker run --privileged --net host --shm-size=16G -it \
     && pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py \
     && echo TEST_5 \
     && python3 /workspace/vllm/examples/offline_inference/tpu.py" \
+    && echo TEST_6 \
+    && pytest -v -s /workspace/vllm/tests/v1/tpu/test_tpu_model_runner.py \
 
 
 # TODO: This test fails because it uses RANDOM_SEED sampling
