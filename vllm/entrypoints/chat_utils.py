@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Iterable
 from functools import cache, lru_cache, partial
 from pathlib import Path
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
-                    cast)
+                    cast, TYPE_CHECKING)
 
 import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils
@@ -39,6 +39,9 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+
+if TYPE_CHECKING:
+    from vllm.transformers_utils.tokenizer import MistralTokenizer
 
 logger = init_logger(__name__)
 

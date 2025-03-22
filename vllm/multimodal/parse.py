@@ -9,6 +9,7 @@ from typing import (TYPE_CHECKING, Any, Generic, NamedTuple, Optional, TypeVar,
 import numpy as np
 import torch
 from PIL.Image import Image
+from transformers import BatchFeature
 from typing_extensions import TypeAlias, TypeGuard, assert_never
 
 from vllm.utils import is_list_of
@@ -148,7 +149,7 @@ class DictEmbeddingItems(ModalityDataItems[Mapping[str, torch.Tensor],
 
         self.fields_config = fields_config
         self.required_fields = required_fields
-        from transformers import BatchFeature
+
         self._kwargs = MultiModalKwargs.from_hf_inputs(
             BatchFeature(dict(data)),
             fields_config,
@@ -429,3 +430,4 @@ class MultiModalDataParser:
             mm_items[k] = subparsers[k](v)
 
         return mm_items
+
