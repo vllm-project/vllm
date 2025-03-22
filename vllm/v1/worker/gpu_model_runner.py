@@ -25,7 +25,7 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, LazyLoader, cdiv,
+                        LayerBlockType, LazyLoader, cdiv, check_use_alibi,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
@@ -223,18 +223,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 pin_memory=self.pin_memory)
 
         # Only relevant for models using ALiBi (e.g, MPT)
-        self.use_alibi = (
-            (hasattr(model_config.hf_text_config, "alibi")
-             and model_config.hf_text_config.alibi)  # Falcon
-            or (hasattr(model_config.hf_text_config, "architectures")  # Bloom
-                and "BloomForCausalLM"
-                in model_config.hf_text_config.architectures) or
-            (hasattr(model_config.hf_text_config,
-                     "position_encoding_type")  # codellm_1b_alibi
-             and model_config.hf_text_config.position_encoding_type == "alibi")
-            or
-            (hasattr(model_config.hf_text_config, "attn_config")  # MPT
-             and model_config.hf_text_config.attn_config.get("alibi", False)))
+        self.use_alibi = check_use_alibi(model_config)
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
