@@ -161,6 +161,11 @@ def _initialize_model(
 def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
                                    target_device: torch.device) -> None:
     for _, module in model.named_modules():
+        if isinstance(module, QKVCrossParallelLinear):
+            # NOTE(Isotr0py): special case for cross QKV layer because
+            # q and kv proj aren't registered as submodules intentionally
+            module.process_weights_after_loading()
+            continue
         quant_method = getattr(module, "quant_method", None)
         if isinstance(quant_method, QuantizeMethodBase):
             # When quant methods need to process weights after loading
@@ -171,19 +176,15 @@ def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
 
+    # Currently only used by MLA.
     # NOTE: This intentionally happens after other modules so we can easily
-    # decompress the weights for MLA or deal with other special cases.
+    # decompress the weights for MLA.
     for _, module in model.named_modules():
         if isinstance(module, Attention) and \
             hasattr(module, "process_weights_after_loading"):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
-        elif isinstance(module, QKVCrossParallelLinear) and \
-            hasattr(module, "process_weights_after_loading"):
-            # NOTE(Isotr0py): special case for cross QKV layer because
-            # q and kv proj aren't registered as submodules intentionally
-            module.process_weights_after_loading()
 
 
 class BaseModelLoader(ABC):
