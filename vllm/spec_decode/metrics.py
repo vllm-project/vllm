@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 import time
 from typing import Callable, Optional, Union
 
@@ -8,7 +9,8 @@ import torch
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
-from vllm.utils import is_pin_memory_available
+from vllm.platforms import current_platform
+from vllm.utils import is_pin_memory_available, resolve_obj_by_qualname
 
 
 class SpecDecodeWorkerMetrics(
@@ -65,9 +67,9 @@ class AsyncMetricsCollector:
         self._rank: Optional[int] = None
 
         # We don't have a device set yet.
-        self._copy_stream: Optional[torch.cuda.Stream] = None
+        self._copy_stream = None
 
-        self._in_flight_copy: Optional[torch.cuda.Event] = None
+        self._in_flight_copy = None
 
         pin_memory = is_pin_memory_available()
         self._aggregate_num_accepted_tokens = torch.tensor(
@@ -79,9 +81,20 @@ class AsyncMetricsCollector:
         self._rejsample_metrics_collect_interval_s = collect_interval_s
         self._last_metrics_collect_time = self._timer()
 
+        self._stream = None
+        with contextlib.suppress(ValueError):
+            self._stream = resolve_obj_by_qualname(
+                current_platform.get_stream_cls())
+
+        self._event = None
+        with contextlib.suppress(ValueError):
+            self._event = resolve_obj_by_qualname(
+                current_platform.get_event_cls())
+
     def init_gpu_tensors(self, rank: int) -> None:
         self._rank = rank
-        self._copy_stream = torch.cuda.Stream()
+        if self._stream:
+            self._copy_stream = self._stream()
 
     def init_tensors(self,
                      rank: int,
@@ -89,14 +102,14 @@ class AsyncMetricsCollector:
         self._rank = rank
         if isinstance(device_type, torch.device):
             device_type = device_type.type
-        if device_type == 'cuda':
-            self._copy_stream = torch.cuda.Stream()
+        if self._stream:
+            self._copy_stream = self._stream()
 
     def maybe_collect_rejsample_metrics(
             self, k: int) -> Optional[SpecDecodeWorkerMetrics]:
-        # currently using cuda.Event, skip for any non_cuda_alike platform
-        from vllm.platforms import current_platform
-        if not current_platform.is_cuda_alike():
+        # currently using device Event, skip for platforms which don't have
+        # device Event
+        if self._event is None:
             return None
 
         # If a copy was initiated in the previous call, collect and return.
@@ -121,16 +134,18 @@ class AsyncMetricsCollector:
 
         return now - self._last_metrics_collect_time >= self._rejsample_metrics_collect_interval_s  # noqa: E501
 
-    def _copy_rejsample_metrics_async(self) -> torch.cuda.Event:
+    def _copy_rejsample_metrics_async(self):
         """Copy rejection/typical-acceptance sampling metrics
         (number of accepted tokens, etc) to CPU asynchronously.
 
         Returns a CUDA event recording when the copy is complete.
         """
         assert self._copy_stream is not None
-        self._copy_stream.wait_stream(torch.cuda.current_stream())
+        with contextlib.suppress(NotImplementedError):
+            self._copy_stream.wait_stream(
+                current_platform.get_current_stream())
 
-        with torch.cuda.stream(self._copy_stream):
+        with self._stream(self._copy_stream):
             self._aggregate_num_accepted_tokens.copy_(
                 self.spec_decode_sampler.num_accepted_tokens,
                 non_blocking=True)
@@ -141,20 +156,19 @@ class AsyncMetricsCollector:
             self._aggregate_num_draft_tokens = (
                 self.spec_decode_sampler.num_draft_tokens)
 
-        aggregate_metrics_ready = torch.cuda.Event()
+        aggregate_metrics_ready = self._event()
         aggregate_metrics_ready.record(self._copy_stream)
 
         return aggregate_metrics_ready
 
-    def _collect_rejsample_metrics(
-            self, k: int,
-            ready_event: torch.cuda.Event) -> SpecDecodeWorkerMetrics:
+    def _collect_rejsample_metrics(self, k: int,
+                                   ready_event) -> SpecDecodeWorkerMetrics:
         """Create metrics object from statistics copied asynchronously.
 
         Args:
             k: int. The number of speculative tokens; used to determine system
                 efficiency.
-            ready_event: torch.cuda.Event. The CUDA event recording when the
+            ready_event: device specific Event. The event recording when the
                 async GPU->CPU copy is complete.
         """
 
