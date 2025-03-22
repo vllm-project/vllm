@@ -108,7 +108,7 @@ class Scheduler(SchedulerInterface):
         self.num_lookahead_slots = 0
         if self.speculative_config and self.speculative_config.type == "eagle":
             self.num_lookahead_slots = \
-             self.speculative_config.num_speculative_tokens
+                self.speculative_config.num_speculative_tokens
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
