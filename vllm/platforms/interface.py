@@ -29,6 +29,7 @@ def in_wsl() -> bool:
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
     FLASH_ATTN_VLLM_V1 = enum.auto()
+    TRITON_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
@@ -111,6 +112,8 @@ class Platform:
     simple_compile_backend: str = "inductor"
 
     supported_quantization: list[str] = []
+
+    additional_env_vars: list[str] = []
 
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
