@@ -19,4 +19,4 @@ with open('leap_output.csv', 'w') as out, open('pure_sequence.csv', 'w') as pure
             pure_out.write(f"{current_sequence}\n")
             out.write(f"{current_sequence - start}\n")
             start = current_sequence
-            
+    

@@ -1,4 +1,6 @@
-import sys, os
+import os
+import sys
+
 import pandas as pd
 
 # Get the arguments from the command line
@@ -50,22 +52,30 @@ train, test = trace_file[0:train_size], trace_file[train_size:len(trace_file)]
 print(f"train size: {len(train)}, test size: {len(test)}")
 
 from data_loader import *
+
 # prepare the data
 train_loader = load_data(train, batch_size, look_back, look_forward)
 test_loader = load_data(test, batch_size, look_back, look_forward)
 
 import torch
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
 from models import *
 from sklearn.model_selection import KFold
+
 # create the model
 model = MLP(look_back, hidden_dim, look_forward).to(device)
 
 # Prepare the optimizer
+def loss_function(output, target):
+    print(output, target)
+    return torch.nn.MSELoss()(output, target)
+
 import torch.optim as optim
-criterion = torch.nn.MSELoss()
+
+criterion =  loss_function
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 schedular = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
