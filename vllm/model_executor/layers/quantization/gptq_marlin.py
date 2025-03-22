@@ -15,7 +15,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     MPLinearLayerConfig, choose_mp_linear_kernel)
-from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_linear_quant_method)
@@ -153,12 +152,7 @@ class GPTQMarlinConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, FusedMoE):
-            if layer.local_num_experts > 32:
-                # For MoEs with many experts the moe_wna16 kernel is faster
-                return MoeWNA16Config.from_config(
-                    self.full_config).get_quant_method(layer, prefix)
-            else:
-                return GPTQMarlinMoEMethod(self)
+            return GPTQMarlinMoEMethod(self)
         return get_linear_quant_method(self, layer, prefix,
                                        GPTQMarlinLinearMethod)
 
@@ -408,7 +402,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             torch.empty(num_experts,
                         scales_size13,
                         2 * intermediate_size_per_partition,
-                        dtype=torch.half),
+                        dtype=params_dtype),
             requires_grad=False,
         )
         layer.register_parameter("w13_scales", w13_scales)
@@ -418,7 +412,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             torch.empty(num_experts,
                         scales_size2,
                         hidden_size,
-                        dtype=torch.half),
+                        dtype=params_dtype),
             requires_grad=False,
         )
         layer.register_parameter("w2_scales", w2_scales)
@@ -492,6 +486,13 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_g_idx_sort_indices",
                                  w2_g_idx_sort_indices)
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
+
+        device = layer.w13_qweight.device
+        sms = torch.cuda.get_device_properties(device).multi_processor_count
+        layer.workspace = torch.zeros((sms, ),
+                                      dtype=torch.int,
+                                      device=device,
+                                      requires_grad=False)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 
@@ -596,10 +597,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor:
         assert activation == "silu", "Only SiLU activation is supported."
 
-        # The input must currently be float16
-        orig_dtype = x.dtype
-        x = x.half()
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -621,9 +618,12 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             router_logits,
             topk_weights,
             topk_ids,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
             g_idx1=layer.w13_g_idx,
             g_idx2=layer.w2_g_idx,
             sort_indices1=layer.w13_g_idx_sort_indices,
             sort_indices2=layer.w2_g_idx_sort_indices,
             num_bits=self.quant_config.quant_type.size_bits,
-            is_k_full=self.is_k_full).to(orig_dtype)
+            workspace=layer.workspace,
+            is_k_full=self.is_k_full)
