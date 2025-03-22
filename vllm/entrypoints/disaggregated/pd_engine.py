@@ -3,10 +3,8 @@
 import asyncio
 import msgspec
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
-from typing import Dict, Mapping, Optional
+from typing import Dict, List, Mapping, Optional
 
-import uvicorn
 import uvloop
 import zmq
 import zmq.asyncio
@@ -27,6 +25,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.utils import Device, FlexibleArgumentParser, make_zmq_socket
 
 logger = init_logger(__name__)
@@ -43,7 +42,7 @@ class PDRequest(msgspec.Struct,
               omit_defaults=True,  # type: ignore[call-arg]
               gc=False):  # type: ignore[call-arg]
     request_id: str
-    prompt: str
+    prompt_token_ids: List[int]
     sampling_params: SamplingParams
     # TODO: support multimodal inputs.
 
@@ -58,12 +57,6 @@ class PDResponse(msgspec.Struct,
     stop_reason: Optional[str] = None
     logprobs = None # TODO
 
-@asynccontextmanager
-def build_pd_engine_client(prefill_addr: str, decode_addr: str,
-                            connector_addr: str):
-    engine = PDEngine(prefill_addr, decode_addr, connector_addr)
-    yield engine
-    engine.shutdown()
 
 class PDEngine:
     """
@@ -76,7 +69,13 @@ class PDEngine:
         * TODO: move under vllm/v1/engine one past prototype.
     """
 
-    def __init__(self, prefill_addr: str, decode_addr: str, connector_addr: str):
+    def __init__(
+            self,
+            prefill_addr: str,
+            decode_addr: str,
+            connector_addr: str,
+            model_name: str
+    ):
         # Request queues.
         self.queues: Dict[str, asyncio.Queue] = {}
 
@@ -94,6 +93,32 @@ class PDEngine:
         # Background loops (started on first generate()).
         self.output_handler: Optional[asyncio.Task] = None
         self.log_running: Optional[asyncio.Task] = None
+
+        # Dummy: needed for EngineClient Protocol.
+        # TODO: refactor EngineClient to avoid needing this.
+        self.model_config = ModelConfig(
+            model=model_name,
+            tokenizer=model_name,
+            tokenizer_mode="auto",
+            trust_remote_code=False,
+            dtype="auto",
+            seed=42
+        )
+
+        # Dummy: needed for EngineClient Protocol.
+        # TODO: refactor EngineClient to avoid needing this.
+        init_kwargs = dict(
+            tokenizer_id=self.model_config.tokenizer,
+            enable_lora=False,
+            max_num_seqs=1024,
+            max_loras=0,
+            max_input_length=None,
+            tokenizer_mode=self.model_config.tokenizer_mode,
+            trust_remote_code=self.model_config.trust_remote_code,
+            revision=self.model_config.tokenizer_revision,
+            truncation_side=self.model_config.truncation_side)
+        self.tokenizer = TokenizerGroup(**init_kwargs)
+            
 
     def shutdown(self):
         if (ctx := self.ctx) is not None:
@@ -178,9 +203,22 @@ class PDEngine:
             self.output_handler = asyncio.create_task(self._run_output_handler())
             self.log_running = asyncio.create_task(self._run_log_running())
 
-        # TODO: expand to suppo
+        # TODO: Expand to support the full matrix.
         if not isinstance(prompt, str):
-            raise ValueError("We currently only support text inputs!")
+            raise NotImplementedError(
+                "We currently only support text for P/D!")
+        if lora_request is not None:
+            raise NotImplementedError(
+                "We currently do not suppport LoRA for P/D!")
+        if trace_headers is not None:
+            raise NotImplementedError(
+                "We currently do not suppport tracing for P/D!")
+        if prompt_adapter_request is not None:
+            raise NotImplementedError(
+                "We currently do not suppport prompt adapter for P/D!")
+        if priority != 0:
+            raise NotImplementedError(
+                "We currently do not support priority for P/D!")
         if request_id in self.queues:
             raise ValueError(f"Found duplicate request_id: {request_id}!")
         
@@ -188,14 +226,14 @@ class PDEngine:
         q: asyncio.Queue[PDResponse] = asyncio.Queue()
         self.queues[request_id] = q
 
-        # (1) Perform the prefill (max_tokens=1).
+        # (1) Perform the Prefill.
         original_max_tokens = sampling_params.max_tokens
         request = PDRequest(request_id, prompt, sampling_params)
         request.sampling_params.max_tokens = 1
         response = await self._prefill(request, q)
         yield response
 
-        # (2) Perform the decodes (original tokens).
+        # (2) Perform the Decodes.
         request.sampling_params.max_tokens = original_max_tokens
         async for response in self._decode(request, q):
             yield response
@@ -223,7 +261,7 @@ class PDEngine:
         raise NotImplementedError
 
     async def get_model_config(self) -> ModelConfig:
-        raise NotImplementedError
+        return self.model_config
 
     async def get_decoding_config(self) -> DecodingConfig:
         raise NotImplementedError
@@ -235,7 +273,10 @@ class PDEngine:
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
-        raise NotImplementedError
+        if lora_request is not None:
+            raise NotImplementedError(
+                "LoRA is not yet supported in the PDEngine.")
+        return self.tokenizer.get_lora_tokenizer(None)
 
     async def is_tracing_enabled(self) -> bool:
         return False
@@ -271,23 +312,6 @@ class PDEngine:
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
         raise NotImplementedError
-    
-
-async def run_disagg_connector(args, **uvicorn_kwargs):
-    logger.info("vLLM Connector Start: %s %s", args, uvicorn_kwargs)
-
-    # NOTE FOR DEVELOPERS: when we shift this to TCP, we must
-    # ensure that the serialization is not pickle based to
-    # avoid RCE issues from untrusted users!!!
-    app.state.port = args.port
-    app.state.connector_addr = f"ipc://{args.connector_addr}"
-    app.state.decode_addr = f"ipc://{args.decode_addr}"
-    app.state.prefill_addr = f"ipc://{args.prefill_addr}"
-
-    # init uvicorn server
-    config = uvicorn.Config(app, host=args.post, port=args.port)
-    server = uvicorn.Server(config)
-    await server.serve()
 
 
 if __name__ == "__main__":

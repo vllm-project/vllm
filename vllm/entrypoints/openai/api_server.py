@@ -36,7 +36,6 @@ from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
-from vllm.entrypoints.disaggregated.engine import build_pd_engine_client
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
@@ -135,30 +134,18 @@ async def lifespan(app: FastAPI):
 async def build_async_engine_client(
         args: Namespace) -> AsyncIterator[EngineClient]:
 
-    # Case 1: We are running a P/D Connector.
-    if hasattr(args, "connector_addr"):
-        async with build_pd_engine_client(
-            prefill_addr=args.prefill_addr,
-            decode_addr=args.decode_addr,
-            connector_addr=args.connector_addr) as engine:
-            yield engine
-        engine.shutdown()
-
-    # Case 2: We are running a normal instance of vLLM.
-    else:
-        # Context manager to handle engine_client lifecycle
-        # Ensures everything is shutdown and cleaned up on error/exit
-        engine_args = AsyncEngineArgs.from_cli_args(args)
-        async with build_async_engine_client_from_engine_args(
-            engine_args, args.disable_frontend_multiprocessing) as engine:
-            yield engine
+    # Context manager to handle engine_client lifecycle
+    # Ensures everything is shutdown and cleaned up on error/exit
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    async with build_async_engine_client_from_engine_args(
+        engine_args, args.disable_frontend_multiprocessing) as engine:
+        yield engine
 
 
 @asynccontextmanager
 async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     disable_frontend_multiprocessing: bool = False,
-    deploy_disagg_connector: bool = False,
 ) -> AsyncIterator[EngineClient]:
     """
     Create EngineClient, either:
