@@ -1,40 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import time
-
-
-def log_import(module_name):
-    print(
-        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Importing {module_name} ...",
-        end=" ",
-        flush=True)
-    start_time = time.time()
-    return start_time
-
-
-def log_import_end(start_time):
-    end_time = time.time()
-    print(f"Done in {end_time - start_time:.6f} sec")
-
-
-start = log_import("vllm.beam_search")
-from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
-                              BeamSearchSequence, get_beam_search_score)
-
-log_import_end(start)
-
-start = log_import("vllm.config")
-from vllm.config import CompilationConfig
-
-log_import_end(start)
-
-start = log_import("vllm.engine.arg_utils")
-from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
-                                   TaskOption)
-
-log_import_end(start)
-
-start = log_import("vllm.entrypoints.chat_utils")
 import itertools
 import warnings
 from collections.abc import Sequence

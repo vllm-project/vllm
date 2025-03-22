@@ -1,29 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import time
-
-
-def log_import(module_name):
-    print(
-        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Importing {module_name} ...",
-        end=" ",
-        flush=True)
-    start_time = time.time()
-    return start_time
-
-
-def log_import_end(start_time):
-    end_time = time.time()
-    print(f"Done in {end_time - start_time:.6f} sec")
-
-
-start = log_import("vllm.transformers_utils.tokenizer")
-
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               cached_tokenizer_from_config)
-
-log_import_end(start)
 import functools
 from collections import UserDict
 from collections.abc import Mapping
