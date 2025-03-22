@@ -153,6 +153,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8": torch.uint8,
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
+    "int8": torch.int8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -2147,20 +2148,48 @@ def zmq_socket_ctx(path: str, socket_type: Any) -> Iterator[zmq.Socket]:
         ctx.destroy(linger=0)
 
 
-def _check_multiproc_method():
-    if (cuda_is_initialized()
-            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
-        logger.warning("CUDA was previously initialized. We must use "
-                       "the `spawn` multiprocessing start method. Setting "
-                       "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
-                       "See https://docs.vllm.ai/en/latest/getting_started/"
-                       "troubleshooting.html#python-multiprocessing "
-                       "for more information.")
+def is_in_ray_actor():
+    """Check if we are in a Ray actor."""
+
+    try:
+        import ray
+        return (ray.is_initialized()
+                and ray.get_runtime_context().get_actor_id() is not None)
+    except ImportError:
+        return False
+
+
+def _maybe_force_spawn():
+    """Check if we need to force the use of the `spawn` multiprocessing start
+    method.
+    """
+    if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
+        return
+
+    reason = None
+    if cuda_is_initialized():
+        reason = "CUDA is initialized"
+    elif is_in_ray_actor():
+        reason = "In a Ray actor and can only be spawned"
+
+    if reason is not None:
+        logger.warning(
+            "We must use the `spawn` multiprocessing start method. "
+            "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
+            "See https://docs.vllm.ai/en/latest/getting_started/"
+            "troubleshooting.html#python-multiprocessing "
+            "for more information. Reason: %s", reason)
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def get_mp_context():
-    _check_multiproc_method()
+    """Get a multiprocessing context with a particular method (spawn or fork).
+    By default we follow the value of the VLLM_WORKER_MULTIPROC_METHOD to
+    determine the multiprocessing method (default is fork). However, under
+    certain conditions, we may enforce spawn and override the value of
+    VLLM_WORKER_MULTIPROC_METHOD.
+    """
+    _maybe_force_spawn()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
     return multiprocessing.get_context(mp_method)
 
@@ -2360,3 +2389,51 @@ def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
         obj[key1] = v2
     else:
         obj.pop(key1, None)
+
+
+@contextlib.contextmanager
+def cprofile_context(save_file: Optional[str] = None):
+    """Run a cprofile
+
+    Args:
+        save_file: path to save the profile result. "1" or
+          None will result in printing to stdout.
+    """
+    import cProfile
+
+    prof = cProfile.Profile()
+    prof.enable()
+
+    try:
+        yield
+    finally:
+        prof.disable()
+        if save_file and save_file != "1":
+            prof.dump_stats(save_file)
+        else:
+            prof.print_stats(sort="cumtime")
+
+
+def cprofile(save_file: Optional[str] = None, enabled: bool = True):
+    """Decorator to profile a Python method using cProfile.
+
+    Args:
+        save_file: Path to save the profile result.
+            If "1", None, or "", results will be printed to stdout.
+        enabled: Set to false to turn this into a no-op
+    """
+
+    def decorator(func: Callable):
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            if not enabled:
+                # If profiling is disabled, just call the function directly.
+                return func(*args, **kwargs)
+
+            with cprofile_context(save_file):
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator

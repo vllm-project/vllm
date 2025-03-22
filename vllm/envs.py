@@ -40,11 +40,8 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_CPU_MOE_PREPACK: bool = True
-    VLLM_OPENVINO_DEVICE: str = "CPU"
-    VLLM_OPENVINO_KVCACHE_SPACE: int = 0
-    VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
-    VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
+    VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
@@ -74,6 +71,8 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_V1: bool = True
+    VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
@@ -95,6 +94,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
+    VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
 
 
 def get_default_cache_root():
@@ -127,7 +127,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ================== Installation Time Env Vars ==================
 
     # Target device of vLLM, supporting [cuda (by default),
-    # rocm, neuron, cpu, openvino]
+    # rocm, neuron, cpu]
     "VLLM_TARGET_DEVICE":
     lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
 
@@ -354,28 +354,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CPU_MOE_PREPACK":
     lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
 
-    # OpenVINO device selection
-    # default is CPU
-    "VLLM_OPENVINO_DEVICE":
-    lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
-
-    # OpenVINO key-value cache space
-    # default is 4GB
-    "VLLM_OPENVINO_KVCACHE_SPACE":
-    lambda: int(os.getenv("VLLM_OPENVINO_KVCACHE_SPACE", "0")),
-
-    # OpenVINO KV cache precision
-    # default is bf16 if natively supported by platform, otherwise f16
-    # To enable KV cache compression, please, explicitly specify u8
-    "VLLM_OPENVINO_CPU_KV_CACHE_PRECISION":
-    lambda: os.getenv("VLLM_OPENVINO_CPU_KV_CACHE_PRECISION", None),
-
-    # Enables weights compression during model export via HF Optimum
-    # default is False
-    "VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS":
-    lambda:
-    (os.environ.get("VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS", "0").lower() in
-     ("on", "true", "1")),
     # If the env var is set, then all workers will execute as separate
     # processes from the engine, and we use the same mechanism to trigger
     # execution on all workers.
@@ -445,6 +423,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "VLLM_XLA_CACHE_PATH",
             os.path.join(get_default_cache_root(), "vllm", "xla_cache"),
         )),
+
+    # If set, assert on XLA recompilation after each execution step.
+    "VLLM_XLA_CHECK_RECOMPILATION":
+    lambda: bool(int(os.getenv("VLLM_XLA_CHECK_RECOMPILATION", "0"))),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
 
@@ -521,6 +503,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, use the V1 code path.
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
+
+    # Disable aiter ops unless specifically enabled.
+    # Acts as a parent switch to enable the rest of the other operations.
+    "VLLM_ROCM_USE_AITER":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in
+             ("true", "1")),
+
+    # use aiter rms norm op if aiter ops are enabled.
+    "VLLM_ROCM_USE_AITER_RMSNORM":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in
+             ("true", "1")),
 
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING":
@@ -623,6 +616,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # an environment with potentially malicious users.
     "VLLM_V0_USE_OUTLINES_CACHE":
     lambda: os.environ.get("VLLM_V0_USE_OUTLINES_CACHE", "0") == "1",
+
+    # If set, disables TPU-specific optimization for top-k & top-p sampling
+    "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION":
+    lambda: bool(int(os.environ["VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION"]))
+    if "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION" in os.environ else None,
 }
 
 # end-env-vars-definition
