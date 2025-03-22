@@ -16,6 +16,7 @@ class EAGLEConfig(PretrainedConfig):
                  truncated_vocab_size: Optional[int] = None,
                  **kwargs):
 
+        model_config: Union[PretrainedConfig, DeepseekV2Config, None]
         if isinstance(model, dict) and model.get("architectures") in \
             [["DeepseekV2ForCausalLM"], ["DeepseekV3ForCausalLM"]]:
             # AutoConfig does not support DeepSeek MoE models yet
