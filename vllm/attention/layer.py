@@ -53,6 +53,7 @@ class Attention(nn.Module):
         `self.kv_cache`.
         """
         super().__init__()
+        sliding_window: Optional[int]
         if per_layer_sliding_window is not None:
             # per-layer sliding window
             sliding_window = per_layer_sliding_window
@@ -87,6 +88,8 @@ class Attention(nn.Module):
         # FlashAttn doesn't support quantizing the kv-cache only
         # but requires q to be quantized as well.
         self._q_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._fp8_out_scale = torch.tensor(1.0, dtype=torch.float32)
 
         # We also keep the float32 versions of k/v_scale for attention
         # backends that don't support tensors (Flashinfer)
