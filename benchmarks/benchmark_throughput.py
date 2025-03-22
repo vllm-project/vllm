@@ -13,7 +13,7 @@ import torch
 import uvloop
 from benchmark_dataset import (BurstGPTDataset, HuggingFaceDataset,
                                RandomDataset, SampleRequest, ShareGPTDataset,
-                               SonnetDataset, VisionArenaDataset)
+                               SonnetDataset, VisionArenaDataset, InstructCoderDataset)
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
@@ -300,6 +300,7 @@ def get_requests(args, tokenizer):
         "input_len": args.input_len,
         "output_len": args.output_len,
     }
+
     if args.dataset_path is None or args.dataset_name == "random":
         sample_kwargs["range_ratio"] = args.random_range_ratio
         sample_kwargs["prefix_len"] = args.prefix_len
@@ -328,6 +329,10 @@ def get_requests(args, tokenizer):
         common_kwargs['dataset_subset'] = args.hf_subset
         common_kwargs['dataset_split'] = args.hf_split
         sample_kwargs["enable_multimodal_chat"] = True
+    elif args.dataset_name == "instructcoder":
+        dataset_cls = InstructCoderDataset
+        common_kwargs['dataset_subset'] = "unused"
+        common_kwargs['dataset_split'] = "unused"
 
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
@@ -446,6 +451,10 @@ def validate_args(args):
         raise ValueError(f"Unsupported backend: {args.backend}")
 
     # === Dataset Configuration ===
+    if args.dataset_name == "instructcoder":
+        args.dataset = "unused"
+        args.dataset_path = "unused"
+
     if not args.dataset and not args.dataset_path:
         print(
             "When dataset path is not set, it will default to random dataset")
@@ -515,7 +524,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset-name",
         type=str,
-        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
+        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf", "instructcoder"],
         help="Name of the dataset to benchmark on.",
         default="sharegpt")
     parser.add_argument(
