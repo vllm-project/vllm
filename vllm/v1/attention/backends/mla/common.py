@@ -195,6 +195,8 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
+
+from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -206,7 +208,8 @@ from vllm.utils import cdiv, round_down
 from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
+    from vllm.vllm_flash_attn import (flash_attn_varlen_func,
+                                      get_scheduler_metadata)
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
@@ -355,6 +358,9 @@ class MLACommonMetadataBuilder(Generic[M]):
         model_config = runner.model_config
         cache_config = runner.cache_config
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+        self.num_heads = model_config.get_num_attention_heads(
+            runner.parallel_config)
+        self.mla_dims = get_mla_dims(model_config)
 
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
@@ -471,7 +477,9 @@ class MLACommonMetadataBuilder(Generic[M]):
 
         seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
         seq_lens = seq_lens_cpu.to(device, non_blocking=True)
-        max_query_len = seq_lens_cpu.max().item()
+        max_seq_len = seq_lens_cpu.max().item()
+
+        aot_schedule = (get_flash_attn_version() == 3)
 
         prefill_metadata = None
         if self._num_prefills > 0:
@@ -482,6 +490,25 @@ class MLACommonMetadataBuilder(Generic[M]):
                 num_computed_tokens_cpu_tensor[reqs_start:num_reqs]
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
+            prefill_query_start_loc = query_start_loc[
+                reqs_start:] - query_start_loc[reqs_start]
+
+            scheduler_metadata = None
+            if aot_schedule:
+                scheduler_metadata = get_scheduler_metadata(
+                    batch_size=self._num_prefills,
+                    max_seqlen_q=max_query_len,
+                    max_seqlen_k=max_seq_len,
+                    cache_seqlens=seq_lens,
+                    num_heads_q=self.num_heads,
+                    num_heads_kv=self.num_heads,
+                    headdim=self.mla_dims.qk_nope_head_dim +
+                    self.mla_dims.qk_rope_head_dim,
+                    headdim_v=self.mla_dims.v_head_dim,
+                    page_size=self.page_size,
+                    cu_seqlens_q=prefill_query_start_loc,
+                    causal=True,
+                )
 
             chunked_context_metadata = None
             if self.chunked_prefill_enabled and self._num_prefills > 0 \
@@ -519,6 +546,7 @@ class MLACommonMetadataBuilder(Generic[M]):
                 chunk_ends = torch.min(context_lens_cpu.unsqueeze(0),
                                        chunk_starts + max_context_chunk)
                 chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
+                max_chunk_seq_lens = chunk_seq_lens.max(dim=1)
 
                 cu_seq_lens_cpu = torch.zeros(num_chunks,
                                               self._num_prefills + 1,
@@ -529,6 +557,26 @@ class MLACommonMetadataBuilder(Generic[M]):
                              out=cu_seq_lens_cpu[:, 1:],
                              dtype=torch.int32)
 
+                scheduler_metadatas = None
+                if aot_schedule:
+                    scheduler_metadatas = []
+                    for i in range(num_chunks):
+                        scheduler_metadatas.append(
+                            get_scheduler_metadata(
+                                batch_size=self._num_prefills,
+                                max_seqlen_q=max_query_len,
+                                max_seqlen_k=max_chunk_seq_lens[i],
+                                cache_seqlens=chunk_seq_lens[i],
+                                num_heads_q=self.num_heads,
+                                num_heads_kv=self.num_heads,
+                                headdim=self.mla_dims.qk_nope_head_dim +
+                                self.mla_dims.qk_rope_head_dim,
+                                headdim_v=self.mla_dims.v_head_dim,
+                                page_size=self.page_size,
+                                cu_seqlens_q=prefill_query_start_loc,
+                                causal=False,
+                            ))
+
                 chunked_context_metadata = \
                     MLACommonPrefillMetadata.ChunkedContextMetadata(
                     cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
@@ -536,6 +584,7 @@ class MLACommonMetadataBuilder(Generic[M]):
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                     workspace=self.chunked_prefill_workspace,
+                    scheduler_metadatas=scheduler_metadatas,
                 )
 
                 assert max(chunked_context_metadata.max_seq_lens) <= \
@@ -544,10 +593,10 @@ class MLACommonMetadataBuilder(Generic[M]):
             prefill_metadata = MLACommonPrefillMetadata(
                 input_positions=input_positions[tokens_start:],
                 block_table=block_table[reqs_start:, ...],
-                query_start_loc=query_start_loc[reqs_start:] -
-                query_start_loc[reqs_start],
+                query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
+                scheduler_metadata=scheduler_metadata,
             )
 
         decode_metadata = None
