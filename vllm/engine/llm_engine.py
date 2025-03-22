@@ -2092,7 +2092,7 @@ class LLMEngine:
                 tokenizer=tokenizer,
                 model_config=self.model_config,
                 reasoning_backend=self.decoding_config.reasoning_backend,
-            )
+                speculative_config=self.speculative_config)
             if processor:
                 logits_processors.append(processor)
 

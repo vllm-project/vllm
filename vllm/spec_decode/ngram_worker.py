@@ -86,8 +86,16 @@ class NGramWorker(NonLLMProposerWorkerBase):
         token_prob_list: List[Optional[torch.Tensor]] = []
         for idx, seq_group_metadata in enumerate(
                 execute_model_req.seq_group_metadata_list):
-            seq_data = next(iter(seq_group_metadata.seq_data.values()))
 
+            # Turn off NGram speculative proposals when guided output is turned
+            # on because they propose non-structured tokens, which lead to
+            # complex logic and negatively affect performance.
+            if seq_group_metadata.sampling_params.logits_processors is not None:
+                token_id_list.append(None)
+                token_prob_list.append(None)
+                continue
+
+            seq_data = next(iter(seq_group_metadata.seq_data.values()))
             seq_len = seq_data.get_len()
             # When seq_len is less than 3072 (3K), we use CPU to perform
             # the ngram match. Otherwise, we use the device specified in

@@ -54,8 +54,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
         self.indices_of_seq_with_bonus_tokens = None
 
-    def _update_sampling_metadata(self, sampling_metadata, num_seqs,
-                                  num_queries):
+    def _update_sampling_metadata(self, sampling_metadata, sampled_token_ids,
+                                  num_seqs, num_queries):
 
         assert sampling_metadata.num_prompts == 0
         assert len(sampling_metadata.seq_groups) == num_queries
@@ -70,6 +70,15 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             assert seq_group.is_prompt is False  # No prompt
             assert seq_group.prompt_logprob_indices == []  # No prompt
             assert seq_group.sample_indices == [i]  # Simple
+
+            # Add draft tokens to the output for structural output only
+            logits_processors = seq_group.sampling_params.logits_processors
+            for seq_id in seq_group.seq_ids:
+                if logits_processors is not None:
+                    seq_group.seq_data[seq_id].output_token_ids = (
+                        *seq_group.seq_data[seq_id].output_token_ids,
+                        sampled_token_ids[i],
+                    )
 
     def _gpu_advance_step(self, model_input: ModelRunnerInputBase,
                           last_output: SamplerOutput) -> ModelRunnerInputBase:
@@ -93,8 +102,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
         # Update sampling_metadata
         sampling_metadata = model_input.sampling_metadata
-        self._update_sampling_metadata(sampling_metadata, num_seqs,
-                                       num_queries)
+        self._update_sampling_metadata(sampling_metadata, sampled_token_ids,
+                                       num_seqs, num_queries)
 
         # Create new input
         new_model_input = self._model_input_cls(

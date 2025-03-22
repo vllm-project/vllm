@@ -36,6 +36,7 @@ class GuidanceLogitsProcessor:
         self.tokenizer_name = tokenizer.name_or_path
         self.new_sampling = False
         self.initialized = False
+        self.num_processed_tokens = 0
 
     def _initialize(self):
         if self.initialized:
@@ -69,7 +70,17 @@ class GuidanceLogitsProcessor:
         # to avoid pickling ll_tokenizer and ll_interpreter
         self._initialize()
 
+        if self.num_processed_tokens > 0 and self.num_processed_tokens >= len(
+                input_ids):
+            diff = self.num_processed_tokens - len(input_ids) + 1
+            self.ll_matcher.rollback(diff)
+            self.num_processed_tokens -= diff
+
         if self.new_sampling and len(input_ids) > 0:
+            # The tokens are not truly consumed when the matcher is stopped,
+            # despite consume_token returning True. This is a workaround.
+            self.num_processed_tokens += 1 if not self.ll_matcher.is_stopped(
+            ) else 0
             self.ll_matcher.consume_token(input_ids[-1])
             err = self.ll_matcher.get_error()
             if err:
