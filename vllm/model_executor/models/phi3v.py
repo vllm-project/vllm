@@ -18,6 +18,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from typing import Any, List, Literal, Optional, Set, Tuple, TypedDict, Union
 
+import re
+
 import torch
 import torch.nn as nn
 from transformers import (BatchFeature, CLIPVisionConfig, PretrainedConfig,
@@ -386,6 +388,19 @@ class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
 
 class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 
+    # https://huggingface.co/TIGER-Lab/VLM2Vec-Full/blob/897742d/processing_phi3_v.py#L435
+    def _apply_hf_processor_text_only(self, prompt_text: str) -> list[int]:
+        pattern = r"(<\|image_\d+\|>)"
+        prompt_chunks = re.split(pattern, prompt_text)
+        chunk_ids = [self._apply_hf_processor_text_mm(
+            prompt_text=chunk,
+            mm_items=MultiModalDataItems({}),
+            hf_processor_mm_kwargs={},)[0]
+        for chunk in prompt_chunks if len(chunk.strip())]
+        prompt_ids = [token_id for token_ids in chunk_ids for token_id in token_ids]
+
+        return prompt_ids
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -449,7 +464,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
             image_tokens = [_IMAGE_TOKEN_ID] * num_image_tokens
 
             return PromptUpdateDetails(
-                full=image_tokens + [bos_token_id],
+                full=image_tokens,
                 features=image_tokens,
             )
 
