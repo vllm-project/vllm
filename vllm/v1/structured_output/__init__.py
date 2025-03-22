@@ -70,8 +70,7 @@ class StructuredOutputManager:
         # though it should be unlikely as we test that up front as well.
         request_type, grammar_spec = key
 
-        assert self.backend is not None
-        return self.backend.compile_grammar(request_type, grammar_spec)
+        return backend.compile_grammar(request_type, grammar_spec)
 
     def grammar_bitmask(
         self,
