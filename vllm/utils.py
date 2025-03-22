@@ -2170,6 +2170,10 @@ def _maybe_force_spawn():
     if cuda_is_initialized():
         reason = "CUDA is initialized"
     elif is_in_ray_actor():
+        # even we choose to spawn, we need to pass to the subprocess
+        # the ray address, so that it knows to connect to the ray cluster.
+        import ray
+        os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
         reason = "In a Ray actor and can only be spawned"
 
     if reason is not None:
