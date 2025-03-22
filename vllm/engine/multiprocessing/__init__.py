@@ -7,7 +7,7 @@ from typing import List, Mapping, Optional, Union, overload
 
 from typing_extensions import deprecated
 
-from vllm import PoolingParams
+from vllm.pooling_params import PoolingParams
 from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
