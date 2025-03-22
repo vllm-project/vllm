@@ -300,7 +300,7 @@ def test_decode_sequence_logprobs(complete_sequence: str,
 def test_decode_prompt_logprobs(complete_sequence_token_ids: list[int],
                                 detokenizer: Detokenizer):
     """Verify Detokenizer decodes prompt logprobs correctly."""
-    sampling_params = SamplingParams(skip_special_tokens=True,
+    sampling_params = SamplingParams(skip_special_tokens=False,
                                      prompt_logprobs=1)
 
     # Run sequentially.
@@ -320,8 +320,8 @@ def test_decode_prompt_logprobs(complete_sequence_token_ids: list[int],
     # decoded_prompt_logprobs doesn't contain the first token.
     token_ids = complete_sequence_token_ids
     tokenizer = detokenizer.get_tokenizer_for_seq(seq)
-    text_full = tokenizer.decode(token_ids, skip_special_tokens=True)
-    text_first = tokenizer.decode(token_ids[0], skip_special_tokens=True)
+    text_full = tokenizer.decode(token_ids, skip_special_tokens=False)
+    text_first = tokenizer.decode(token_ids[0], skip_special_tokens=False)
     text = text_full[len(text_first):]
 
     # Text for logprobs for the chosen token should be the same as the
