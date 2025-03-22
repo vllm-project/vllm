@@ -233,6 +233,7 @@ class MessageQueue:
             if is_valid_ipv6_address(connect_ip):
                 self.remote_socket.setsockopt(IPV6, 1)
                 remote_addr_ipv6 = True
+                connect_ip = f"[{connect_ip}]"
             socket_addr = f"tcp://*:{remote_subscribe_port}"
             self.remote_socket.bind(socket_addr)
             remote_subscribe_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
