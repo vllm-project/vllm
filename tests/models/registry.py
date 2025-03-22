@@ -294,6 +294,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
     "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct",  # noqa: E501
                                                           min_transformers_version="4.49"),  # noqa: E501
+    "Qwen2_5OmniThinkerForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B",  # noqa: E501
+                                                                  is_available_online=False),  # noqa: E501
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
                                      trust_remote_code=True),
     # [Encoder-decoder]

@@ -921,6 +921,13 @@ See [this page](#generative-models) for more information on how to use generativ
   * ✅︎
   * ✅︎
   * ✅︎
+- * `Qwen2_5OmniThinkerForConditionalGeneration`
+  * Qwen2.5-Omni
+  * T + I<sup>E+</sup> + V<sup>E+</sup> + A<sup>+</sup>
+  * `Qwen/Qwen2.5-Omni-7B`
+  *
+  * ✅︎
+  * ✅︎
 - * `UltravoxModel`
   * Ultravox
   * T + A<sup>E+</sup>
