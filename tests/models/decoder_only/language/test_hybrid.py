@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
+import site
+
+import pip
 import pytest
 
 from tests.utils import multi_gpu_test
@@ -8,8 +12,15 @@ from vllm.sampling_params import SamplingParams
 
 from ...utils import check_outputs_equal
 
+# Install causal-conv1d here, as it is not compatible with pip-compile.
+pip.main(['install', 'causal-conv1d'])
+importlib.reload(site)
+
 # This test is for the hybrid models
-MODELS = ["ai21labs/Jamba-tiny-dev", "Zyphra/Zamba2-1.2B-instruct"]
+MODELS = [
+    "ai21labs/Jamba-tiny-dev", "Zyphra/Zamba2-1.2B-instruct",
+    "pfnet/plamo-2-1b"
+]
 # Bamba at Fp32 is too big for the CI (L4 GPU).
 # MODELS = ["ai21labs/Jamba-tiny-dev", "ibm-ai-platform/Bamba-9B"]
 
@@ -25,7 +36,6 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
-
     # numeric error produces different generation
     if "Bamba" in model:
         example_prompts.pop(3)
@@ -34,7 +44,7 @@ def test_models(
         "use_mamba_kernels": False,  # mamba kernels are not installed so HF 
         # don't use them
     }
-    if "Zamba2" in model:
+    if "Zamba2" in model or "plamo" in model:
         # Zamba2 HF implementation automatically checks if mamba kernels are
         # installed
         model_kwargs = {}
@@ -94,6 +104,10 @@ def test_mamba_prefill_chunking_with_parallel_sampling(
     # correctly for n > 1 decoding steps inside a
     # chunked prefill forward pass (where we have both prefills
     # and decoding together )
+
+    if 'plamo' in model:
+        dtype = "float"  # use a different dtype for plamo
+
     sampling_params = SamplingParams(n=3,
                                      temperature=1,
                                      seed=0,
@@ -125,15 +139,18 @@ def test_mamba_prefill_chunking(hf_runner, vllm_runner, example_prompts,
         example_prompts.pop(3)
         example_prompts.pop(2)
         dtype = "half"  # use a different dtype for Bamba
+
     elif "Zamba2" in model:
         example_prompts.pop(7)
         dtype = "half"
+    elif "plamo" in model:
+        example_prompts.pop(7)
 
     model_kwargs = {
         "use_mamba_kernels": False,  # mamba kernels are not installed so HF 
         # don't use them
     }
-    if "Zamba2" in model:
+    if "Zamba2" in model or "plamo" in model:
         # Zamba2 HF implementation automatically checks if mamba kernels are
         # installed
         model_kwargs = {}
@@ -208,7 +225,8 @@ def test_mamba_cache_cg_padding(
     # This test is for verifying that mamba cache is padded to CG captured
     # batch size. If it's not, a torch RuntimeError will be raised because
     # tensor dimensions aren't compatible
-    vllm_config = EngineArgs(model=model).create_engine_config()
+    vllm_config = EngineArgs(model=model,
+                             trust_remote_code=True).create_engine_config()
     while len(example_prompts) == vllm_config.pad_for_cudagraph(
             len(example_prompts)):
         example_prompts.append(example_prompts[0])
