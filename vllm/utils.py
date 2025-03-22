@@ -49,7 +49,6 @@ import torch.types
 import yaml
 import zmq
 import zmq.asyncio
-from packaging.version import Version
 from torch.library import Library
 from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
@@ -1481,12 +1480,24 @@ def get_allowed_kwarg_only_overrides(
     return filtered_overrides
 
 
+def torch_major_minor_version():
+    """
+    Torch major / minor version that does not interfere
+    with nightly builds / torch source compilations
+    """
+    torch_major_version = "0"
+    torch_minor_version = "0"
+    if torch.__version__ and re.match(r"\d+\.\d+\.\.?", torch.__version__):
+        torch_major_version = torch.__version__.split(".")[0]
+        torch_minor_version = torch.__version__.split(".")[1]
+    return torch_major_version + "." + torch_minor_version
+
+
 # Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
 # In particular, the FakeScalarType is not supported for earlier versions of
 # PyTorch which breaks dynamo for any ops registered using ScalarType.
 def supports_dynamo() -> bool:
-    base_torch_version = Version(Version(torch.__version__).base_version)
-    return base_torch_version >= Version("2.4.0")
+    return torch_major_minor_version() >= "2.4"
 
 
 # Some backends use pytorch version < 2.4.0 which doesn't

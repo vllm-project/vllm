@@ -38,7 +38,8 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3
 from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, random_uuid, resolve_obj_by_qualname)
+                        get_cpu_memory, random_uuid, resolve_obj_by_qualname,
+                        torch_major_minor_version)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -3158,7 +3159,7 @@ class CompilationConfig(BaseModel):
         #    and it is not yet a priority. RFC here:
         #    https://github.com/vllm-project/vllm/issues/14703
 
-        if Version(torch.__version__) >= Version("2.6"):
+        if Version(torch_major_minor_version()) >= Version("2.6"):
             KEY = 'enable_auto_functionalized_v2'
             if KEY not in self.inductor_compile_config:
                 self.inductor_compile_config[KEY] = False

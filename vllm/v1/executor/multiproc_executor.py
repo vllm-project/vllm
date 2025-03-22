@@ -2,6 +2,7 @@
 
 import os
 import pickle
+import platform
 import signal
 import sys
 import time
@@ -54,7 +55,8 @@ class MultiprocExecutor(Executor):
             parent_process.send_signal(signal.SIGUSR1)
             self.shutdown()
 
-        signal.signal(signal.SIGUSR1, sigusr1_handler)
+        if platform.system() != "Windows":
+            signal.signal(signal.SIGUSR1, sigusr1_handler)
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -325,7 +327,10 @@ class WorkerProc:
             # worker_busy_loop sends exceptions exceptons to Executor
             # for shutdown, but if there is an error in startup or an
             # error with IPC itself, we need to alert the parent.
-            psutil.Process().parent().send_signal(signal.SIGUSR1)
+            if platform.system() == "Windows":
+                psutil.Process().parent().send_signal(signal.SIGTERM)
+            else:
+                psutil.Process().parent().send_signal(signal.SIGUSR1)
             raise
 
         finally:

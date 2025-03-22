@@ -9,6 +9,7 @@
 # the only successful approach is to call cuda driver API in C.
 import dataclasses
 import os
+import platform
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
@@ -24,22 +25,26 @@ def find_loaded_library(lib_name) -> Optional[str]:
     shared libraries loaded by the process. We can use this file to find the path of the
     a loaded library.
     """ # noqa
-    found_line = None
-    with open("/proc/self/maps") as f:
-        for line in f:
-            if lib_name in line:
-                found_line = line
-                break
-    if found_line is None:
-        # the library is not loaded in the current process
-        return None
-    # if lib_name is libcudart, we need to match a line with:
-    # address /path/to/libcudart-hash.so.11.0
-    start = found_line.index("/")
-    path = found_line[start:].strip()
-    filename = path.split("/")[-1]
-    assert filename.rpartition(".so")[0].startswith(lib_name), \
-        f"Unexpected filename: {filename} for library {lib_name}"
+    if platform.system() != 'Windows':
+        found_line = None
+        with open("/proc/self/maps") as f:
+            for line in f:
+                if lib_name in line:
+                    found_line = line
+                    break
+        if found_line is None:
+            # the library is not loaded in the current process
+            return None
+        # if lib_name is libcudart, we need to match a line with:
+        # address /path/to/libcudart-hash.so.11.0
+        start = found_line.index("/")
+        path = found_line[start:].strip()
+        filename = path.split("/")[-1]
+        assert filename.rpartition(".so")[0].startswith(lib_name), \
+            f"Unexpected filename: {filename} for library {lib_name}"
+    else:
+        path = os.path.join(os.path.dirname(__file__), '..',
+                            'cumem_allocator.pyd')
     return path
 
 

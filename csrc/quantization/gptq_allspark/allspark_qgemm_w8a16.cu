@@ -1,6 +1,9 @@
 #include "allspark_utils.cuh"
 #include <torch/all.h>
 #include "core/registration.h"
+#ifdef _WIN32
+  #include <cublas_api.h>
+#endif
 #include <cublas_v2.h>
 
 at::Tensor as_g_workspace;
@@ -210,7 +213,7 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
   static constexpr int WARP_CNT = BLOCK / WARP_SIZE;
   static constexpr int WARP_NTILE = Ntile / WARP_CNT;
   static constexpr int WARP_NITER = WARP_NTILE / 8;  // hmma16816
-  static_assert(WARP_NTILE == 32 or WARP_NTILE == 64,
+  static_assert(WARP_NTILE == 32 || WARP_NTILE == 64,
                 "now only support WARP_NTILE = 32 or 64!");
 
   __device__ ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK(

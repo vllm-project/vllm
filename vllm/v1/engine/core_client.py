@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import platform
 import queue
 import signal
 import threading
@@ -271,7 +272,10 @@ class MPClient(EngineCoreClient):
             kill_process_tree(os.getpid())
 
         if threading.current_thread() == threading.main_thread():
-            signal.signal(signal.SIGUSR1, sigusr1_handler)
+            if platform.system() == "Windows":
+                signal.signal(signal.SIGTERM, sigusr1_handler)
+            else:
+                signal.signal(signal.SIGUSR1, sigusr1_handler)
         else:
             logger.warning("SIGUSR1 handler not installed because we are not "
                            "running in the main thread. In this case the "

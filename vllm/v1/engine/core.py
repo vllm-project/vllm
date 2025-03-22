@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import platform
 import queue
 import signal
 import threading
@@ -341,7 +342,10 @@ class EngineCoreProc(EngineCore):
         except Exception:
             traceback = get_exception_traceback()
             logger.error("EngineCore hit an exception: %s", traceback)
-            parent_process.send_signal(signal.SIGUSR1)
+            if platform.system() == "Windows":
+                parent_process.send_signal(signal.SIGTERM)
+            else:
+                parent_process.send_signal(signal.SIGUSR1)
 
         finally:
             if engine_core is not None:

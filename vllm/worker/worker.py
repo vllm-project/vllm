@@ -2,6 +2,7 @@
 """A GPU worker class."""
 import gc
 import os
+import platform
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
@@ -502,8 +503,13 @@ def init_worker_distributed_environment(
     parallel_config = vllm_config.parallel_config
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
-    init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank)
+    init_distributed_environment(
+        parallel_config.world_size,
+        rank,
+        distributed_init_method,
+        local_rank,
+        backend="gloo" if platform.system() == "Windows" else "nccl")
+
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 

@@ -249,6 +249,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
   # Please keep this in sync with FetchContent_Declare line below.
   set(CUTLASS_REVISION "v3.8.0" CACHE STRING "CUTLASS revision to use")
+  set(CUTLASS_ENABLE_CUBLAS ON CACHE BOOL "cuBLAS enabled for Cutlass")
+  set(CUBLAS_ENABLED ON CACHE BOOL "cuBLAS enabled")
+  if (WIN32)
+	list(APPEND VLLM_GPU_FLAGS "-O2")
+	list(APPEND VLLM_GPU_FLAGS "-Xptxas=-O2")
+	list(APPEND VLLM_GPU_FLAGS "-Xcompiler=/O2")
+	set(CMAKE_CUDA_FLAGS_DEBUG "")
+  endif()
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -262,18 +270,34 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
     FetchContent_Declare(cutlass SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
   else()
-    FetchContent_Declare(
-        cutlass
-        GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        # Please keep this in sync with CUTLASS_REVISION line above.
-        GIT_TAG v3.8.0
-        GIT_PROGRESS TRUE
+    if (WIN32)
+	  FetchContent_Declare(
+          cutlass
+		  # For Windows, use fixed v3.8.0 fix-sm100gemm custom branch until Nvidia the fixes into official repo. More info https://github.com/NVIDIA/cutlass/pull/2167
+          GIT_REPOSITORY https://github.com/SystemPanic/cutlass.git
+          # Please keep this in sync with CUTLASS_REVISION line above.
+          GIT_TAG fix-sm100gemm
+          GIT_PROGRESS TRUE
 
-        # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
-        # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
-        # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-        GIT_SHALLOW TRUE
-    )
+          # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
+          # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
+          # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
+          GIT_SHALLOW TRUE
+      )
+	else()
+	  FetchContent_Declare(
+          cutlass
+          GIT_REPOSITORY https://github.com/nvidia/cutlass.git
+          # Please keep this in sync with CUTLASS_REVISION line above.
+          GIT_TAG v3.8.0
+          GIT_PROGRESS TRUE
+
+          # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
+          # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
+          # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
+          GIT_SHALLOW TRUE
+      )
+	endif()
   endif()
   FetchContent_MakeAvailable(cutlass)
 
@@ -534,17 +558,33 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 message(STATUS "Enabling C extension.")
-define_gpu_extension_target(
-  _C
-  DESTINATION vllm
-  LANGUAGE ${VLLM_GPU_LANG}
-  SOURCES ${VLLM_EXT_SRC}
-  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-  ARCHITECTURES ${VLLM_GPU_ARCHES}
-  INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
-  INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
-  USE_SABI 3
-  WITH_SOABI)
+if (DEFINED _CUBLAS_LIBRARY)
+  define_gpu_extension_target(
+    _C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+    INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+    LIBRARIES ${_CUBLAS_LIBRARY}
+    USE_SABI 3
+    WITH_SOABI)
+else()
+  define_gpu_extension_target(
+    _C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+    INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+    USE_SABI 3
+    WITH_SOABI)
+endif()
+
 
 # If CUTLASS is compiled on NVCC >= 12.5, it by default uses
 # cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the

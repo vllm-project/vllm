@@ -2069,6 +2069,206 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
     __CALL_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, true, 4, NUM_THREADS, true)
 
 template <typename scalar_t>
+bool gptq_marlin_mm_u4b8_256(
+    vllm::ScalarType const& q_type, int thread_m_blocks, int thread_n_blocks,
+    int thread_k_blocks, int num_threads, bool has_zp, int group_blocks,
+    bool has_act_order, bool is_zp_float, const int4* A_ptr, const int4* B_ptr,
+    int4* C_ptr, int4* C_tmp_ptr, const int4* s_ptr, const int4* zp_ptr,
+    const int* g_idx_ptr, int max_shared_mem, cudaStream_t stream, int blocks,
+    int num_groups, int prob_m, int prob_n, int prob_k, int* locks,
+    bool use_fp32_reduce, bool use_atomic_add) {
+  bool skipped = false;
+  if (false) {
+  }
+  GPTQ_CALL_IF(vllm::kU4B8, 16, 4, 256)
+  GPTQ_CALL_IF(vllm::kU4B8, 8, 8, 256)
+  else {
+    skipped = true;
+  }
+  return skipped;
+}
+
+template <typename scalar_t>
+bool gptq_marlin_mm_u4b8_128(
+    vllm::ScalarType const& q_type, int thread_m_blocks, int thread_n_blocks,
+    int thread_k_blocks, int num_threads, bool has_zp, int group_blocks,
+    bool has_act_order, bool is_zp_float, const int4* A_ptr, const int4* B_ptr,
+    int4* C_ptr, int4* C_tmp_ptr, const int4* s_ptr, const int4* zp_ptr,
+    const int* g_idx_ptr, int max_shared_mem, cudaStream_t stream, int blocks,
+    int num_groups, int prob_m, int prob_n, int prob_k, int* locks,
+    bool use_fp32_reduce, bool use_atomic_add) {
+  bool skipped = false;
+  if (false) {
+  }
+  GPTQ_CALL_IF(vllm::kU4B8, 8, 4, 128)
+  GPTQ_CALL_IF(vllm::kU4B8, 4, 8, 128)
+  else {
+    skipped = true;
+  }
+  return skipped;
+}
+
+template <typename scalar_t>
+bool gptq_marlin_mm_u8b128_256(
+    vllm::ScalarType const& q_type, int thread_m_blocks, int thread_n_blocks,
+    int thread_k_blocks, int num_threads, bool has_zp, int group_blocks,
+    bool has_act_order, bool is_zp_float, const int4* A_ptr, const int4* B_ptr,
+    int4* C_ptr, int4* C_tmp_ptr, const int4* s_ptr, const int4* zp_ptr,
+    const int* g_idx_ptr, int max_shared_mem, cudaStream_t stream, int blocks,
+    int num_groups, int prob_m, int prob_n, int prob_k, int* locks,
+    bool use_fp32_reduce, bool use_atomic_add) {
+  bool skipped = false;
+  if (false) {
+  }
+  GPTQ_CALL_IF(vllm::kU8B128, 8, 4, 128)
+  GPTQ_CALL_IF(vllm::kU8B128, 4, 8, 128)
+  else {
+    skipped = true;
+  }
+  return skipped;
+}
+
+template <typename scalar_t>
+bool gptq_marlin_mm_u8b128_128(
+    vllm::ScalarType const& q_type, int thread_m_blocks, int thread_n_blocks,
+    int thread_k_blocks, int num_threads, bool has_zp, int group_blocks,
+    bool has_act_order, bool is_zp_float, const int4* A_ptr, const int4* B_ptr,
+    int4* C_ptr, int4* C_tmp_ptr, const int4* s_ptr, const int4* zp_ptr,
+    const int* g_idx_ptr, int max_shared_mem, cudaStream_t stream, int blocks,
+    int num_groups, int prob_m, int prob_n, int prob_k, int* locks,
+    bool use_fp32_reduce, bool use_atomic_add) {
+  bool skipped = false;
+  if (false) {
+  }
+  GPTQ_CALL_IF(vllm::kU8B128, 8, 4, 128)
+  GPTQ_CALL_IF(vllm::kU8B128, 4, 8, 128)
+  else {
+    skipped = true;
+  }
+  return skipped;
+}
+
+template <typename scalar_t>
+bool awq_marlin_mm_u4_256(
+    vllm::ScalarType const& q_type, int thread_m_blocks, int thread_n_blocks,
+    int thread_k_blocks, int num_threads, bool has_zp, int group_blocks,
+    bool has_act_order, bool is_zp_float, const int4* A_ptr, const int4* B_ptr,
+    int4* C_ptr, int4* C_tmp_ptr, const int4* s_ptr, const int4* zp_ptr,
+    const int* g_idx_ptr, int max_shared_mem, cudaStream_t stream, int blocks,
+    int num_groups, int prob_m, int prob_n, int prob_k, int* locks,
+    bool use_fp32_reduce, bool use_atomic_add) {
+  bool skipped = false;
+  if (false) {
+  }
+  AWQ_CALL_IF(vllm::kU4, 16, 4, 256)
+  AWQ_CALL_IF(vllm::kU4, 8, 8, 256)
+  else {
+    skipped = true;
+  }
+  return skipped;
+}
+
+template <typename scalar_t>
+bool awq_marlin_mm_u4_128(
+    vllm::ScalarType const& q_type, int thread_m_blocks, int thread_n_blocks,
+    int thread_k_blocks, int num_threads, bool has_zp, int group_blocks,
+    bool has_act_order, bool is_zp_float, const int4* A_ptr, const int4* B_ptr,
+    int4* C_ptr, int4* C_tmp_ptr, const int4* s_ptr, const int4* zp_ptr,
+    const int* g_idx_ptr, int max_shared_mem, cudaStream_t stream, int blocks,
+    int num_groups, int prob_m, int prob_n, int prob_k, int* locks,
+    bool use_fp32_reduce, bool use_atomic_add) {
+  bool skipped = false;
+  if (false) {
+  }
+  AWQ_CALL_IF(vllm::kU4, 8, 4, 128)
+  AWQ_CALL_IF(vllm::kU4, 4, 8, 128)
+  else {
+    skipped = true;
+  }
+  return skipped;
+}
+
+template <typename scalar_t>
+bool awq_marlin_mm_u8_256(
+    vllm::ScalarType const& q_type, int thread_m_blocks, int thread_n_blocks,
+    int thread_k_blocks, int num_threads, bool has_zp, int group_blocks,
+    bool has_act_order, bool is_zp_float, const int4* A_ptr, const int4* B_ptr,
+    int4* C_ptr, int4* C_tmp_ptr, const int4* s_ptr, const int4* zp_ptr,
+    const int* g_idx_ptr, int max_shared_mem, cudaStream_t stream, int blocks,
+    int num_groups, int prob_m, int prob_n, int prob_k, int* locks,
+    bool use_fp32_reduce, bool use_atomic_add) {
+  bool skipped = false;
+  if (false) {
+  }
+  AWQ_CALL_IF(vllm::kU8, 16, 4, 256)
+  AWQ_CALL_IF(vllm::kU8, 8, 8, 256)
+  else {
+    skipped = true;
+  }
+  return skipped;
+}
+
+template <typename scalar_t>
+bool awq_marlin_mm_u8_128(
+    vllm::ScalarType const& q_type, int thread_m_blocks, int thread_n_blocks,
+    int thread_k_blocks, int num_threads, bool has_zp, int group_blocks,
+    bool has_act_order, bool is_zp_float, const int4* A_ptr, const int4* B_ptr,
+    int4* C_ptr, int4* C_tmp_ptr, const int4* s_ptr, const int4* zp_ptr,
+    const int* g_idx_ptr, int max_shared_mem, cudaStream_t stream, int blocks,
+    int num_groups, int prob_m, int prob_n, int prob_k, int* locks,
+    bool use_fp32_reduce, bool use_atomic_add) {
+  bool skipped = false;
+  if (false) {
+  }
+  AWQ_CALL_IF(vllm::kU8, 8, 4, 128)
+  AWQ_CALL_IF(vllm::kU8, 4, 8, 128)
+  else {
+    skipped = true;
+  }
+  return skipped;
+}
+
+template <typename scalar_t>
+bool hqq_marlin_mm_u4_256(
+    vllm::ScalarType const& q_type, int thread_m_blocks, int thread_n_blocks,
+    int thread_k_blocks, int num_threads, bool has_zp, int group_blocks,
+    bool has_act_order, bool is_zp_float, const int4* A_ptr, const int4* B_ptr,
+    int4* C_ptr, int4* C_tmp_ptr, const int4* s_ptr, const int4* zp_ptr,
+    const int* g_idx_ptr, int max_shared_mem, cudaStream_t stream, int blocks,
+    int num_groups, int prob_m, int prob_n, int prob_k, int* locks,
+    bool use_fp32_reduce, bool use_atomic_add) {
+  bool skipped = false;
+  if (false) {
+  }
+  HQQ_CALL_IF(vllm::kU4, 16, 4, 256)
+  HQQ_CALL_IF(vllm::kU4, 8, 8, 256)
+  else {
+    skipped = true;
+  }
+  return skipped;
+}
+
+template <typename scalar_t>
+bool hqq_marlin_mm_u4_128(
+    vllm::ScalarType const& q_type, int thread_m_blocks, int thread_n_blocks,
+    int thread_k_blocks, int num_threads, bool has_zp, int group_blocks,
+    bool has_act_order, bool is_zp_float, const int4* A_ptr, const int4* B_ptr,
+    int4* C_ptr, int4* C_tmp_ptr, const int4* s_ptr, const int4* zp_ptr,
+    const int* g_idx_ptr, int max_shared_mem, cudaStream_t stream, int blocks,
+    int num_groups, int prob_m, int prob_n, int prob_k, int* locks,
+    bool use_fp32_reduce, bool use_atomic_add) {
+  bool skipped = false;
+  if (false) {
+  }
+  HQQ_CALL_IF(vllm::kU4, 8, 4, 128)
+  HQQ_CALL_IF(vllm::kU4, 4, 8, 128)
+  else {
+    skipped = true;
+  }
+  return skipped;
+}
+
+template <typename scalar_t>
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
                void* zp, void* g_idx, void* perm, void* a_tmp, int prob_m,
                int prob_n, int prob_k, void* workspace,
@@ -2210,31 +2410,66 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
       thread_m_blocks = exec_cfg.max_m_blocks;
     }
 
-    if (false) {
-    }
-    GPTQ_CALL_IF(vllm::kU4B8, 16, 4, 256)
-    GPTQ_CALL_IF(vllm::kU4B8, 8, 8, 256)
-    GPTQ_CALL_IF(vllm::kU4B8, 8, 4, 128)
-    GPTQ_CALL_IF(vllm::kU4B8, 4, 8, 128)
-    GPTQ_CALL_IF(vllm::kU8B128, 16, 4, 256)
-    GPTQ_CALL_IF(vllm::kU8B128, 8, 8, 256)
-    GPTQ_CALL_IF(vllm::kU8B128, 8, 4, 128)
-    GPTQ_CALL_IF(vllm::kU8B128, 4, 8, 128)
-
-    AWQ_CALL_IF(vllm::kU4, 16, 4, 256)
-    AWQ_CALL_IF(vllm::kU4, 8, 8, 256)
-    AWQ_CALL_IF(vllm::kU4, 8, 4, 128)
-    AWQ_CALL_IF(vllm::kU4, 4, 8, 128)
-    AWQ_CALL_IF(vllm::kU8, 16, 4, 256)
-    AWQ_CALL_IF(vllm::kU8, 8, 8, 256)
-    AWQ_CALL_IF(vllm::kU8, 8, 4, 128)
-    AWQ_CALL_IF(vllm::kU8, 4, 8, 128)
-
-    HQQ_CALL_IF(vllm::kU4, 16, 4, 256)
-    HQQ_CALL_IF(vllm::kU4, 8, 8, 256)
-    HQQ_CALL_IF(vllm::kU4, 8, 4, 128)
-    HQQ_CALL_IF(vllm::kU4, 4, 8, 128)
-    else {
+    if (gptq_marlin_mm_u4b8_256<scalar_t>(
+            q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,
+            num_threads, has_zp, group_blocks, has_act_order, is_zp_float,
+            A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
+            max_shared_mem, stream, blocks, num_groups, prob_m, prob_n, prob_k,
+            locks, use_fp32_reduce, use_atomic_add) &&
+        gptq_marlin_mm_u4b8_128<scalar_t>(
+            q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,
+            num_threads, has_zp, group_blocks, has_act_order, is_zp_float,
+            A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
+            max_shared_mem, stream, blocks, num_groups, prob_m, prob_n, prob_k,
+            locks, use_fp32_reduce, use_atomic_add) &&
+        gptq_marlin_mm_u8b128_256<scalar_t>(
+            q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,
+            num_threads, has_zp, group_blocks, has_act_order, is_zp_float,
+            A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
+            max_shared_mem, stream, blocks, num_groups, prob_m, prob_n, prob_k,
+            locks, use_fp32_reduce, use_atomic_add) &&
+        gptq_marlin_mm_u8b128_128<scalar_t>(
+            q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,
+            num_threads, has_zp, group_blocks, has_act_order, is_zp_float,
+            A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
+            max_shared_mem, stream, blocks, num_groups, prob_m, prob_n, prob_k,
+            locks, use_fp32_reduce, use_atomic_add) &&
+        awq_marlin_mm_u4_256<scalar_t>(
+            q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,
+            num_threads, has_zp, group_blocks, has_act_order, is_zp_float,
+            A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
+            max_shared_mem, stream, blocks, num_groups, prob_m, prob_n, prob_k,
+            locks, use_fp32_reduce, use_atomic_add) &&
+        awq_marlin_mm_u4_128<scalar_t>(
+            q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,
+            num_threads, has_zp, group_blocks, has_act_order, is_zp_float,
+            A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
+            max_shared_mem, stream, blocks, num_groups, prob_m, prob_n, prob_k,
+            locks, use_fp32_reduce, use_atomic_add) &&
+        awq_marlin_mm_u8_256<scalar_t>(
+            q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,
+            num_threads, has_zp, group_blocks, has_act_order, is_zp_float,
+            A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
+            max_shared_mem, stream, blocks, num_groups, prob_m, prob_n, prob_k,
+            locks, use_fp32_reduce, use_atomic_add) &&
+        awq_marlin_mm_u8_128<scalar_t>(
+            q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,
+            num_threads, has_zp, group_blocks, has_act_order, is_zp_float,
+            A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
+            max_shared_mem, stream, blocks, num_groups, prob_m, prob_n, prob_k,
+            locks, use_fp32_reduce, use_atomic_add) &&
+        hqq_marlin_mm_u4_256<scalar_t>(
+            q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,
+            num_threads, has_zp, group_blocks, has_act_order, is_zp_float,
+            A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
+            max_shared_mem, stream, blocks, num_groups, prob_m, prob_n, prob_k,
+            locks, use_fp32_reduce, use_atomic_add) &&
+        hqq_marlin_mm_u4_128<scalar_t>(
+            q_type, thread_m_blocks, thread_n_blocks, thread_k_blocks,
+            num_threads, has_zp, group_blocks, has_act_order, is_zp_float,
+            A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,
+            max_shared_mem, stream, blocks, num_groups, prob_m, prob_n, prob_k,
+            locks, use_fp32_reduce, use_atomic_add)) {
       TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
                   ", ", prob_k, "]", ", has_act_order = ", has_act_order,
                   ", num_groups = ", num_groups, ", group_size = ", group_size,

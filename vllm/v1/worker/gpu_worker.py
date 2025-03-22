@@ -2,6 +2,7 @@
 """A GPU worker class."""
 import gc
 import os
+import platform
 from typing import TYPE_CHECKING, Optional
 
 import torch
@@ -137,7 +138,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
-        """Profiles the peak memory usage of the model to determine how much 
+        """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
@@ -279,8 +280,12 @@ def init_worker_distributed_environment(
     """Initialize the distributed environment."""
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
-    init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank)
+    init_distributed_environment(
+        parallel_config.world_size,
+        rank,
+        distributed_init_method,
+        local_rank,
+        backend="gloo" if platform.system() == "Windows" else "nccl")
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)

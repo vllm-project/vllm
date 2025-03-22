@@ -31,7 +31,7 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
     scalar_t const* __restrict__ input, float const* __restrict__ scale_ub,
     const int hidden_size) {
   float const min_scaling_factor =
-      1.0f / (fp8_e4m3_adjusted_max_v<fp8_type> * 512.f);
+      1.0f / (fp8_e4m3_adjusted_max<fp8_type>::val() * 512.f);
 
   int const tid = threadIdx.x;
   int const token_idx = blockIdx.x;
@@ -67,7 +67,7 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
       token_scale = block_absmax_val_maybe;
     }
     // token scale computation
-    token_scale = max(token_scale / fp8_e4m3_adjusted_max_v<fp8_type>,
+    token_scale = max(token_scale / fp8_e4m3_adjusted_max<fp8_type>::val(),
                       min_scaling_factor);
     scale[token_idx] = token_scale;
   }

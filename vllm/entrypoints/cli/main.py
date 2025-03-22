@@ -2,6 +2,7 @@
 
 # The CLI entrypoint to vLLM.
 import os
+import platform
 import signal
 import sys
 
@@ -27,7 +28,10 @@ def register_signal_handlers():
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTSTP, signal_handler)
+    if platform.system() == "Windows":
+        signal.signal(signal.SIGTERM, signal_handler)
+    else:
+        signal.signal(signal.SIGTSTP, signal_handler)
 
 
 def env_setup():
