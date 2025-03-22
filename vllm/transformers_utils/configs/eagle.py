@@ -5,6 +5,8 @@ from typing import Optional, Union
 
 from transformers import AutoConfig, PretrainedConfig
 
+from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
+
 
 class EAGLEConfig(PretrainedConfig):
     model_type = "eagle"
@@ -14,8 +16,15 @@ class EAGLEConfig(PretrainedConfig):
                  truncated_vocab_size: Optional[int] = None,
                  **kwargs):
 
-        model_config = None if model is None else (AutoConfig.for_model(
-            **model) if isinstance(model, dict) else model)
+        model_config: Union[PretrainedConfig, DeepseekV2Config, None]
+        if isinstance(model, dict) and model.get("architectures") in \
+            [["DeepseekV2ForCausalLM"], ["DeepseekV3ForCausalLM"]]:
+            # AutoConfig does not support DeepSeek MoE models yet
+            model_config = DeepseekV2Config(**model)
+        elif isinstance(model, dict):
+            model_config = AutoConfig.for_model(**model)
+        else:
+            model_config = model
 
         for k, v in kwargs.items():
             if k != "architectures" and k != "model_type" and hasattr(

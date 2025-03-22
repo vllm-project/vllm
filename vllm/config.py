@@ -799,8 +799,13 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return (hasattr(self.hf_text_config, "model_type")) \
                 and (self.hf_text_config.model_type in \
-                    ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp'))\
-                and (self.hf_text_config.kv_lora_rank is not None)
+                    ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp')) \
+                and (self.hf_text_config.kv_lora_rank is not None) or \
+                (hasattr(self.hf_text_config, "model_type") \
+                and self.hf_text_config.model_type == 'eagle' \
+                and self.hf_text_config.model.model_type in \
+                    ('deepseek_v2', 'deepseek_v3') \
+                and self.hf_text_config.kv_lora_rank is not None)
 
     def get_head_size(self) -> int:
         # TODO remove hard code
