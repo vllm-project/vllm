@@ -23,6 +23,7 @@ RUN apt-get update -y \
 ENV PATH="/root/.local/bin:$PATH"
 # Create venv with specified Python and activate by placing at the front of path
 ENV VIRTUAL_ENV="/opt/venv"
+ENV UV_PYTHON_INSTALL_DIR="/usr/local/share/uv/python"
 RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
@@ -181,6 +182,7 @@ RUN apt-get update -y \
 ENV PATH="/root/.local/bin:$PATH"
 # Create venv with specified Python and activate by placing at the front of path
 ENV VIRTUAL_ENV="/opt/venv"
+ENV UV_PYTHON_INSTALL_DIR="/usr/local/share/uv/python"
 RUN uv venv --python ${PYTHON_VERSION} --seed ${VIRTUAL_ENV}
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
