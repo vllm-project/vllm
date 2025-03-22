@@ -1367,7 +1367,8 @@ class QKVCrossParallelLinear(LinearBase):
 
     def process_weights_after_loading(self):
         for layer in self.proj.values():
-            self.quant_method.process_weights_after_loading(layer)
+            if self.quant_method is not None:
+                self.quant_method.process_weights_after_loading(layer)
 
     @property
     def q_proj_decoder(self) -> ColumnParallelLinear:
