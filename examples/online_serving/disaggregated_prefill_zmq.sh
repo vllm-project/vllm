@@ -47,11 +47,10 @@ wait_for_disagg_server() {
 MODEL=meta-llama/Llama-3.1-8B-Instruct
 CONNECTOR_ADDR=connectoripc
 PREFILL_WORKER_ADDR=prefillipc
-DECODE_WORKER_ADDR=prefillipc
-PORT=8000
+DECODE_WORKER_ADDR=decodeipc
 
 # prefilling instance, which is the KV producer
-CUDA_VISIBLE_DEVICES=0 python3 -m vllm.entrypoints.disaggregated.worker \
+CUDA_VISIBLE_DEVICES=0 python3 ../vllm/entrypoints/disaggregated/worker.py \
     --model $MODEL \
     --connector-addr $CONNECTOR_ADDR \
     --worker-addr $PREFILL_WORKER_ADDR \
@@ -61,7 +60,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m vllm.entrypoints.disaggregated.worker \
     '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}' > vllm_disagg_prefill.log 2>&1 &
 
 # decoding instance, which is the KV consumer
-CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.disaggregated.worker \
+CUDA_VISIBLE_DEVICES=1 python3 ../vllm/entrypoints/disaggregated/worker.py \
     --model $MODEL \
     --connector-addr $CONNECTOR_ADDR \
     --worker-addr $DECODE_WORKER_ADDR \
@@ -74,7 +73,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m vllm.entrypoints.disaggregated.worker \
 # the workflow of this proxy:
 # - Send req to prefill instance, wait until complete.
 # - Send req to decode instance, streaming tokens.
-python3 -m vllm.entrypoints.disaggregated.connector \
+python3 ../vllm/entrypoints/disaggregated/connector.py \
     --port $PORT \
     --model $MODEL \
     --connector-addr $CONNECTOR_ADDR \
@@ -82,21 +81,21 @@ python3 -m vllm.entrypoints.disaggregated.connector \
     --decode-addr $DECODE_WORKER_ADDR
 
 # wait until prefill, decode instances and proxy are ready
-wait_for_server $PORT
+wait_for_server 8001
 wait_for_disagg_server vllm_disagg_prefill.log
 wait_for_disagg_server vllm_disagg_decode.log 
 
 # serve two example requests
-output1=$(curl -X POST -s http://localhost:8000/v1/completions \
+output1=$(curl -X POST -s http://localhost:8001/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
-"model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+"model": "meta-llama/Llama-3.1-8B-Instruct",
 "prompt": "San Francisco is a",
 "max_tokens": 10,
 "temperature": 0
 }')
 
-output2=$(curl -X POST -s http://localhost:8000/v1/completions \
+output2=$(curl -X POST -s http://localhost:8001/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
 "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
