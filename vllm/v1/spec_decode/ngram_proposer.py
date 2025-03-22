@@ -4,8 +4,61 @@ from typing import Optional
 import numpy as np
 from numba import jit
 
+from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.interface import ProposerInterface
+from vllm.v1.spec_decode.utils import is_spec_decode_supported
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
-class NgramProposer:
+
+class NgramProposer(ProposerInterface):
+
+    def __init__(self, n, k):
+        self.n = n
+        self.k = k
+        # Trigger Numba JIT compilation for N-gram proposer.
+        # This usually takes less than 1 second.
+        self.propose(
+            np.zeros(1024, dtype=np.int32),
+            self.n,
+            self.k,
+        )
+
+    def generate_draft_token_ids(
+            self, input_batch: InputBatch, sampled_token_ids: list[list[int]],
+            sampling_metadata: SamplingMetadata) -> list[list[int]]:
+        '''
+        Propose tokens based on input_batch and sampled_token_ids.
+        NOTE: This function will change the input_batch by writing 
+        proposed tokens to token_ids_cpu.
+        '''
+        draft_token_ids: list[list[int]] = []
+        for i, sampled_ids in enumerate(sampled_token_ids):
+            num_sampled_ids = len(sampled_ids)
+            if not num_sampled_ids:
+                # Skip speculative decoding.
+                draft_token_ids.append([])
+                continue
+
+            # Skip requests that require top-p, top-k, etc.
+            req_id = input_batch.req_ids[i]
+            if not is_spec_decode_supported(req_id, input_batch):
+                draft_token_ids.append([])
+                continue
+
+            # Add sampled_token_ids to token_ids_cpu.
+            start_idx = input_batch.num_tokens_no_spec[i]
+            end_idx = start_idx + num_sampled_ids
+            input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
+            drafter_output = self.propose(
+                input_batch.token_ids_cpu[i, :end_idx],
+                self.n,
+                self.k,
+            )
+            if drafter_output is None or len(drafter_output) == 0:
+                draft_token_ids.append([])
+            else:
+                draft_token_ids.append(drafter_output.tolist())
+        return draft_token_ids
 
     def propose(
         self,
