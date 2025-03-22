@@ -786,7 +786,7 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
     without enough resources, or called when filtering tests to run directly.
     """
     try:
-        if current_platform.is_cpu() or current_platform.is_openvino():
+        if current_platform.is_cpu():
             memory_gb = 0
         else:
             memory_gb = current_platform.get_device_total_memory() / GB_bytes

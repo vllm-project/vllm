@@ -2,7 +2,6 @@
 
 import logging
 import traceback
-from contextlib import suppress
 from itertools import chain
 from typing import TYPE_CHECKING, Optional
 
@@ -191,21 +190,6 @@ def neuron_platform_plugin() -> Optional[str]:
     return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
 
 
-def openvino_platform_plugin() -> Optional[str]:
-    is_openvino = False
-    logger.debug("Checking if OpenVINO platform is available.")
-    with suppress(Exception):
-        is_openvino = vllm_version_matches_substr("openvino")
-        if is_openvino:
-            logger.debug("Confirmed OpenVINO platform is available"
-                         " because vLLM is built with OpenVINO.")
-    if not is_openvino:
-        logger.debug("OpenVINO platform is not available because"
-                     " vLLM is not built with OpenVINO.")
-
-    return "vllm.platforms.openvino.OpenVinoPlatform" if is_openvino else None
-
-
 builtin_platform_plugins = {
     'tpu': tpu_platform_plugin,
     'cuda': cuda_platform_plugin,
@@ -214,7 +198,6 @@ builtin_platform_plugins = {
     'xpu': xpu_platform_plugin,
     'cpu': cpu_platform_plugin,
     'neuron': neuron_platform_plugin,
-    'openvino': openvino_platform_plugin,
 }
 
 

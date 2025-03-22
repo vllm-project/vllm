@@ -40,7 +40,6 @@ DEVICE_OPTIONS = [
     "cuda",
     "neuron",
     "cpu",
-    "openvino",
     "tpu",
     "xpu",
     "hpu",
