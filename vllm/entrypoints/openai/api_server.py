@@ -36,6 +36,7 @@ from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.disaggregated.engine import PDEngine
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
@@ -134,19 +135,31 @@ async def lifespan(app: FastAPI):
 async def build_async_engine_client(
         args: Namespace) -> AsyncIterator[EngineClient]:
 
-    # Context manager to handle engine_client lifecycle
-    # Ensures everything is shutdown and cleaned up on error/exit
-    engine_args = AsyncEngineArgs.from_cli_args(args)
+    # Case 1: We are running a P/D Connector.
+    # The Engines may be running on another node.
+    if hasattr(args, "connector_addr"):
+        async with PDEngine(
+            prefill_addr=args.prefill_addr,
+            decode_addr=args.decode_addr,
+            connector_addr=args.connector_addr) as engine:
+            yield engine
+        engine.shutdown()
 
-    async with build_async_engine_client_from_engine_args(
+    # Case 2: We are running an actual Engine from this process.
+    else:
+        # Context manager to handle engine_client lifecycle
+        # Ensures everything is shutdown and cleaned up on error/exit
+        engine_args = AsyncEngineArgs.from_cli_args(args)
+        async with build_async_engine_client_from_engine_args(
             engine_args, args.disable_frontend_multiprocessing) as engine:
-        yield engine
+            yield engine
 
 
 @asynccontextmanager
 async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     disable_frontend_multiprocessing: bool = False,
+    deploy_disagg_connector: bool = False,
 ) -> AsyncIterator[EngineClient]:
     """
     Create EngineClient, either:
@@ -160,7 +173,6 @@ async def build_async_engine_client_from_engine_args(
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    # V1 AsyncLLM.
     if envs.VLLM_USE_V1:
         if disable_frontend_multiprocessing:
             logger.warning(

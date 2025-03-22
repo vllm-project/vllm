@@ -298,7 +298,6 @@ if __name__ == "__main__":
                         required=True,
                         help="The zmq ipc decode address")
     parser = make_arg_parser(parser)
-
     args = parser.parse_args()
     validate_parsed_serve_args(args)
 
