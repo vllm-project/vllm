@@ -1,225 +1,126 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
-import os
+import msgpack
 import signal
-import traceback
-from argparse import Namespace
-from http import HTTPStatus
+import uvloop
+from typing import Optional
 
 import zmq
 import zmq.asyncio
 
-from vllm.config import ModelConfig
+from vllm.engine.async_llm_engine import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.disaggregated.types import PDRequest, PDResponse
 from vllm.entrypoints.openai.api_server import build_async_engine_client
-from vllm.entrypoints.openai.protocol import (CompletionRequest,
-                                              CompletionResponse,
-                                              ErrorResponse, ZmqMsgRequest,
-                                              ZmqMsgResponse)
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import (BaseModelPath,
-                                                    OpenAIServingModels)
 from vllm.logger import init_logger
-from vllm.utils import set_ulimit
+from vllm.utils import FlexibleArgumentParser, set_ulimit, make_zmq_socket
 from vllm.version import __version__ as VLLM_VERSION
 
-logger = init_logger('vllm.entrypoints.openai.zmq_server')
+logger = init_logger(__name__)
 
-openai_serving_completion: OpenAIServingCompletion
-openai_serving_models: OpenAIServingModels
-
-
-async def log_stats(running_requests: set[asyncio.Task]):
-    while True:
-        logger.info("Running requests: %d", len(running_requests))
-        await asyncio.sleep(10)
-
-
-def _cleanup_ipc_path(server_addr: str):
-    socket_path = server_addr.replace("ipc://", "")
-    logger.info("cleaning up local IPC socket file %s", socket_path)
-    if os.path.exists(socket_path):
-        os.remove(socket_path)
-
-
-async def serve_zmq(arg) -> None:
-    """Server routine"""
-    logger.info("zmq Server start arg: %s, zmq_server_addr: %s", arg,
-                arg.zmq_server_addr)
-    # different zmq context can't communicate use inproc
-    server_addr = f"ipc://{arg.zmq_server_addr}"
+async def handle_request(
+    request: PDRequest,
+    engine: EngineClient,                     
+    socket: zmq.asyncio.Socket,
+    encoder: msgpack.Encoder,
+) -> None:
+    request_id = request.request_id
     try:
-        # Prepare our context and sockets
-        context = zmq.asyncio.Context()
-        socket = context.socket(zmq.ROUTER)
-        # unlimited HWM
-        hwm_limit = 0
+        # 1) Generate RequestOutputs.
+        async for request_output in engine.generate(
+            prompt=request.prompt_token_ids,
+            sampling_params=request.sampling_params,
+            request_id=request_id):
 
-        socket.bind(server_addr)
-        socket.setsockopt(zmq.SNDHWM, hwm_limit)
-        socket.setsockopt(zmq.RCVHWM, hwm_limit)
+            assert len(request_output.outputs) == 0, "Only support N=1 right now."
+            out = request_output.outputs[0]
 
-        running_requests: set[asyncio.Task] = set()
-        logger.info("zmq Server started at %s", server_addr)
-        asyncio.create_task(log_stats(running_requests))
+            # 2) Convert RequestOutput --> PDResponse.
+            response = PDResponse(
+                request_id=request_id,
+                success=True,
+                text=out.text,
+                token_ids=out.token_ids,
+                finish_reasons=out.finish_reason,
+                stop_reason=out.stop_reason,
+            )
+            response_bytes = encoder(response)
 
+            # 3) Send to Connector.
+            await socket.send(response_bytes, copy=False)
+            
+    except Exception as e:
+        # TODO: actual error handling.
+        logger.error("Exception in Worker Routine: %s request_id: %s", e,
+                     request_id)
+        response = PDResponse(request_id=request_id, success=False)
+        response_bytes = encoder(response)
+        await socket.send(response, copy=False)
+
+async def run_server(args, engine: EngineClient):
+    """Get Requests and Handle Them."""
+    running_requests: set[asyncio.Task] = set()
+    decoder = msgpack.Decoder(PDRequest)
+    encoder = msgpack.Encoder()
+    
+    ctx: Optional[zmq.asyncio.Context] = None
+    try:
+        # IPC Setup.
+        ctx = zmq.asyncio.Context()
+        from_connector = make_zmq_socket(
+            ctx, f"ipc://{args.server_addr}", zmq.constants.PULL)
+        to_connector = make_zmq_socket(
+            ctx, f"ipc://{args.connector_addr}", zmq.constants.PUSH)
+
+        # Main Loop.
         while True:
-            try:
-                logger.debug("zmq Server waiting for request")
-                # get new request from the client
-                message_parts = await socket.recv_multipart()
-                logger.debug("received request: %s", message_parts)
-                logger.debug("received len: %d", len(message_parts))
-                identity, body = message_parts[0], message_parts[1]
-                zmq_msg_request = ZmqMsgRequest.model_validate_json(body)
-                # launch request handler coroutine
-                task = asyncio.create_task(
-                    worker_routine(identity, zmq_msg_request, socket))
-                running_requests.add(task)
-                task.add_done_callback(running_requests.discard)
-            except zmq.ZMQError as e:
-                logger.error(traceback.format_exc())
-                logger.error("ZMQError: %s", e)
-                break
-            except Exception as e:
-                logger.error(traceback.format_exc())
-                logger.error("Unexpected error: %s", e)
-                break
+            # 1) Get request from the Connector.
+            pd_request_bytes = await from_connector.recv().buffer
+            pd_request = decoder(pd_request_bytes)
+            
+            # 2) Launch a coroutine to handle the request.
+            task = asyncio.create_task(handle_request(
+                pd_request, engine, to_connector, encoder))
+            running_requests.add(task)
+            task.add_done_callback(running_requests.discard)
+
     except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt received, exiting")
+        logger.debug("Worker server loop interrupted.")
+
     finally:
-        # Clean up resources
         for task in running_requests:
             task.cancel()
-        await asyncio.gather(*running_requests, return_exceptions=True)
-        socket.close()
-        context.destroy(linger=0)
-        _cleanup_ipc_path(server_addr)
+        if ctx is not None:
+            ctx.destroy(linger=0)
 
 
-async def run_zmq_server(args) -> None:
-    logger.info("vLLM zmq server version %s", VLLM_VERSION)
+async def main(args) -> None:
+    logger.info("vLLM P/D Worker Server %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
-    # workaround to avoid footguns where uvicorn drops requests with too
-    # many concurrent requests active
+    # Workaround to avoid footguns where uvicorn drops requests
+    # with too many concurrent requests active due to ulimit.
     set_ulimit()
 
+    # Interrupt on sigterm during initialization.
     def signal_handler(*_) -> None:
-        # Interrupt server on sigterm while initializing
         raise KeyboardInterrupt("terminated")
-
     signal.signal(signal.SIGTERM, signal_handler)
 
-    async with build_async_engine_client(args) as engine_client:
+    async with build_async_engine_client(args) as engine:
+        await run_server(args, engine)
 
-        model_config = await engine_client.get_model_config()
-        await init_state(engine_client, model_config, args)
-        logger.info("init_state successful")
-        await serve_zmq(args)
-
-
-async def init_state(
-    engine_client: EngineClient,
-    model_config: ModelConfig,
-    args: Namespace,
-) -> None:
-    if args.served_model_name is not None:
-        served_model_names = args.served_model_name
-    else:
-        served_model_names = [args.model]
-
-    base_model_paths = [
-        BaseModelPath(name=name, model_path=args.model)
-        for name in served_model_names
-    ]
-
-    global openai_serving_models
-    openai_serving_models = OpenAIServingModels(
-        engine_client=engine_client,
-        model_config=model_config,
-        base_model_paths=base_model_paths,
-        lora_modules=args.lora_modules,
-        prompt_adapters=args.prompt_adapters,
-    )
-    await openai_serving_models.init_static_loras()
-
-    global openai_serving_completion
-    openai_serving_completion = OpenAIServingCompletion(
-        engine_client,
-        model_config,
-        openai_serving_models,
-        request_logger=None,
-        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-    )
-
-
-async def worker_routine(identity: bytes, zmq_msg_request: ZmqMsgRequest,
-                         socket: zmq.asyncio.Socket):
-    """Worker routine"""
-    try:
-        request_id = zmq_msg_request.request_id
-        logger.debug("receive request: %s from %s, request_id: %s",
-                     zmq_msg_request.model_dump_json(), identity.decode(),
-                     request_id)
-        if isinstance(zmq_msg_request.body, CompletionRequest):
-            await create_completion(identity, zmq_msg_request, socket)
-        else:
-            logger.error("Error in worker routine: %s request_id: %s",
-                         "unsupported request type", request_id)
-            raise Exception("unsupported request type")
-
-    except Exception as e:
-        logger.error("Error in worker routine: %s request_id: %s", e,
-                     request_id)
-        logger.error(traceback.format_exc())
-        logger.debug("send ErrorResponse %s", str(e))
-        await socket.send_multipart([
-            identity,
-            ZmqMsgResponse(request_id=request_id,
-                           type=zmq_msg_request.type,
-                           body=json.dumps({
-                               "content":
-                               "unsupported request type",
-                               "status_code":
-                               HTTPStatus.INTERNAL_SERVER_ERROR
-                           })).model_dump_json().encode(),
-        ])
-
-
-async def create_completion(identity: bytes, zmq_msg_request: ZmqMsgRequest,
-                            socket: zmq.asyncio.Socket):
-    request: CompletionRequest = zmq_msg_request.body
-    logger.debug("zmq request post: %s", request.model_dump_json())
-    generator = await openai_serving_completion.create_completion(request)
-    logger.debug("zmq request end post")
-    request_id = zmq_msg_request.request_id
-    if isinstance(generator, (ErrorResponse, CompletionResponse)):
-        logger.debug("send response %s", generator.model_dump_json())
-        if isinstance(generator, ErrorResponse):
-            body = json.dumps({
-                "content": generator.model_dump(),
-                "status_code": generator.code
-            })
-        elif isinstance(generator, CompletionResponse):
-            body = json.dumps({"content": generator.model_dump()})
-        zmq_msg_response = ZmqMsgResponse(request_id=request_id,
-                                          type=zmq_msg_request.type,
-                                          body_type="response",
-                                          body=body)
-        await socket.send_multipart(
-            [identity, zmq_msg_response.model_dump_json().encode()])
-    else:
-        async for chunk in generator:
-            zmq_msg_response = ZmqMsgResponse(request_id=request_id,
-                                              type=zmq_msg_request.type,
-                                              body=chunk)
-            if "data: [DONE]" not in chunk:
-                zmq_msg_response.stop = False
-            logger.debug("send chunk identity: %s, request_id: %s, chunk: %s",
-                         identity.decode(), request_id, chunk)
-            await socket.send_multipart(
-                [identity,
-                 zmq_msg_response.model_dump_json().encode()])
+if __name__ == "__main__":
+    parser = FlexibleArgumentParser()
+    parser.add_argument('--connector-addr',
+                        type=str,
+                        required=True,
+                        help='The address of the connector.')
+    parser.add_argument('--worker-addr',
+                        type=str,
+                        required=True,
+                        help='The address of the worker.')
+    AsyncEngineArgs.add_cli_args(parser)
+    args = parser.parse_args()
+    uvloop.run(main(args))

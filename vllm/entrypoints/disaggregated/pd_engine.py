@@ -2,6 +2,7 @@
 
 import asyncio
 import msgspec
+import os
 from collections.abc import AsyncGenerator
 from typing import Dict, List, Mapping, Optional
 
@@ -12,9 +13,7 @@ import zmq.asyncio
 from vllm import SamplingParams
 from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
-from vllm.entrypoints.openai.api_server import run_server
-from vllm.entrypoints.openai.cli_args import (make_arg_parser,
-                                              validate_parsed_serve_args)
+from vllm.entrypoints.disaggregated.types import PDRequest, PDResponse
 from vllm.inputs.data import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -26,37 +25,11 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
-from vllm.utils import Device, FlexibleArgumentParser, make_zmq_socket
+from vllm.utils import Device, make_zmq_socket
 
 logger = init_logger(__name__)
 
 DEFAULT_MAX_TOKENS = 32000
-
-# NOTE FOR DEVELOPERS:
-# DO NOT USE PICKLE FOR THESE CLASSES. IN A MULTI NODE
-# SETUP WE WILL USE TCP. WE CANNOT USE PICKLE OTHERWISE
-# WE RISK REMOTE CODE EXECUTION FROM UNSTRUSTED USERS.
-
-class PDRequest(msgspec.Struct,
-              array_like=True,  # type: ignore[call-arg]
-              omit_defaults=True,  # type: ignore[call-arg]
-              gc=False):  # type: ignore[call-arg]
-    request_id: str
-    prompt_token_ids: List[int]
-    sampling_params: SamplingParams
-    # TODO: support multimodal inputs.
-
-class PDResponse(msgspec.Struct,
-              array_like=True,  # type: ignore[call-arg]
-              omit_defaults=True,  # type: ignore[call-arg]
-              gc=False):  # type: ignore[call-arg]
-    request_id: str
-    success: bool
-    delta_text: Optional[str] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Optional[str] = None
-    logprobs = None # TODO
-
 
 class PDEngine:
     """
@@ -89,6 +62,8 @@ class PDEngine:
         self.to_prefill = make_zmq_socket(
             self.ctx, f"{prefill_addr}", zmq.constants.PUSH)
         self.connector_addr = connector_addr
+        self.decode_addr = decode_addr
+        self.prefill_addr = prefill_addr
         
         # Background loops (started on first generate()).
         self.output_handler: Optional[asyncio.Task] = None
@@ -118,7 +93,6 @@ class PDEngine:
             revision=self.model_config.tokenizer_revision,
             truncation_side=self.model_config.truncation_side)
         self.tokenizer = TokenizerGroup(**init_kwargs)
-            
 
     def shutdown(self):
         if (ctx := self.ctx) is not None:
@@ -127,6 +101,14 @@ class PDEngine:
             task.cancel()
         if (task := self.output_handler) is not None:
             task.cancel()
+
+        ipc_paths = [
+            self.connector_addr, self.decode_addr, self.prefill_addr
+        ]
+        for path in ipc_paths:
+            socket_path = path.replace("ipc://", "")
+            if os.path.exists(socket_path):
+                os.remove(socket_path)
 
     async def _run_log_running(self):
         logger.info("Running requests: %d", len(self.queues))
@@ -312,25 +294,3 @@ class PDEngine:
 
     async def add_lora(self, lora_request: LoRARequest) -> None:
         raise NotImplementedError
-
-
-if __name__ == "__main__":
-    parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible RESTful API server.")
-    parser.add_argument("--connector-addr",
-                        type=str,
-                        required=True,
-                        help="The zmq ipc connector address")
-    parser.add_argument("--prefill-addr",
-                        type=str,
-                        required=True,
-                        help="The zmq ipc prefill address")
-    parser.add_argument("--decode-addr",
-                        type=str,
-                        required=True,
-                        help="The zmq ipc decode address")
-    parser = make_arg_parser(parser)
-    args = parser.parse_args()
-    validate_parsed_serve_args(args)
-
-    uvloop.run(run_server(args))

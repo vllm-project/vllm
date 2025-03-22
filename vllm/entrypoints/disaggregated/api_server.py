@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.protocol import CompletionRequest
 from vllm.logger import init_logger
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser, set_ulimit, make_zmq_socket
 from vllm.entrypoints.openai.protocol import (
     CompletionResponse, ErrorResponse)
 
@@ -55,16 +55,22 @@ async def main(args, **uvicorn_kwargs):
     logger.info("vLLM Disaggregate Connector Start %s %s", args,
                 uvicorn_kwargs)
     
+    # Avoid dropping requests under high concurrency.
+    set_ulimit()
+    
+    # IPC Paths.
+    # NOTE FOR DEVELOPERS: when shifting to TCP, ensure you
+    # are not using pickle to avoid RCE security flaw.
     prefill_addr = f"ipc://{args.prefill_addr}"
     decode_addr = f"ipc://{args.decode_addr}"
     connector_addr = f"ipc://{args.connector_addr}"
 
+    # Start Engine.
     with pd_engine_client_ctx_manager(
         args.model, prefill_addr, decode_addr, connector_addr) as engine_client:
 
+        # Initialize App State.
         model_config = await engine_client.get_model_config()
-
-        # Models.
         app.state.openai_serving_models = OpenAIServingModels(
             engine_client=engine_client,
             model_config=model_config,
@@ -73,8 +79,6 @@ async def main(args, **uvicorn_kwargs):
                 model_path=args.model)
             ],
         )
-
-        # Completions.
         app.state.openai_serving_completion = OpenAIServingCompletion(
             engine_client=engine_client,
             model_config=model_config,
@@ -82,10 +86,10 @@ async def main(args, **uvicorn_kwargs):
             request_logger=None,
         )
 
-    # Init Uvicorn Server. Server.
-    config = uvicorn.Config(app, host="0.0.0.0", port=args.port)
-    server = uvicorn.Server(config)
-    await server.serve()
+        # Run Server.
+        config = uvicorn.Config(app, host="0.0.0.0", port=args.port)
+        server = uvicorn.Server(config)
+        await server.serve()
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
