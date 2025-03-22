@@ -38,6 +38,8 @@ function cpu_tests() {
     set -e
     pip install -r vllm/requirements/test.txt
     pip install -r vllm/requirements/cpu.txt
+    pytest -v -s tests/kernels/test_cache.py -m cpu_model
+    pytest -v -s tests/kernels/test_mla_decode_cpu.py -m cpu_model
     pytest -v -s tests/models/decoder_only/language -m cpu_model
     pytest -v -s tests/models/embedding/language -m cpu_model
     pytest -v -s tests/models/encoder_decoder/language -m cpu_model
