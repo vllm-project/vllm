@@ -686,7 +686,8 @@ def compute_hash() -> str:
         "VLLM_DP_SIZE",
     ]
     for key in environment_variables_to_hash:
-        factorize(key)
+        if key in environment_variables:
+            factorize(key)
 
     hash_str = hashlib.md5(str(factors).encode()).hexdigest()
 
