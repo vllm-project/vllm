@@ -137,8 +137,9 @@ async def build_async_engine_client(
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
+
     async with build_async_engine_client_from_engine_args(
-        engine_args, args.disable_frontend_multiprocessing) as engine:
+            engine_args, args.disable_frontend_multiprocessing) as engine:
         yield engine
 
 
@@ -159,6 +160,7 @@ async def build_async_engine_client_from_engine_args(
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
+    # V1 AsyncLLM.
     if envs.VLLM_USE_V1:
         if disable_frontend_multiprocessing:
             logger.warning(
