@@ -33,11 +33,15 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.model_executor.layers.linear import (LinearBase,
                                                MergedColumnParallelLinear,
+                                               QKVCrossParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+# yapf: enable
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase)
 from vllm.model_executor.model_loader.tensorizer import (
@@ -167,15 +171,19 @@ def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
 
-    # Currently only used by MLA.
     # NOTE: This intentionally happens after other modules so we can easily
-    # decompress the weights for MLA.
+    # decompress the weights for MLA or deal with other special cases.
     for _, module in model.named_modules():
         if isinstance(module, Attention) and \
             hasattr(module, "process_weights_after_loading"):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
+        elif isinstance(module, QKVCrossParallelLinear) and \
+            hasattr(module, "process_weights_after_loading"):
+            # NOTE(Isotr0py): special case for cross QKV layer because
+            # q and kv proj aren't registered as submodules intentionally
+            module.process_weights_after_loading()
 
 
 class BaseModelLoader(ABC):

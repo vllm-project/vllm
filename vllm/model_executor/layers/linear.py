@@ -1364,6 +1364,10 @@ class QKVCrossParallelLinear(LinearBase):
         else:
             self.bias = None
 
+    def process_weights_after_loading(self):
+        for layer in self.proj.values():
+            self.quant_method.process_weights_after_loading(layer)
+
     @property
     def q_proj_decoder(self) -> ColumnParallelLinear:
         layer = self.proj["q_proj_decoder"]
