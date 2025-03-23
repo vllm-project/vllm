@@ -21,7 +21,7 @@ class PDWorker:
         self,
         engine: EngineClient,
         worker_addr: str,
-        client_addr: str,
+        controller_addr: str,
     ):
         """
         PDWorker
@@ -35,12 +35,12 @@ class PDWorker:
 
         # ZMQ IPC.
         self.worker_addr = worker_addr
-        self.client_addr = client_addr
+        self.controller_addr = controller_addr
         self.ctx = zmq.asyncio.Context()
         self.from_client = self.ctx.socket(zmq.constants.PULL)
         self.from_client.connect(f"ipc://{self.worker_addr}")
         self.to_client = self.ctx.socket(zmq.constants.PUSH)
-        self.to_client.connect(f"ipc://{self.client_addr}")
+        self.to_client.connect(f"ipc://{self.controller_addr}")
         self.decode_generation = msgspec.msgpack.Decoder(PDGenerationRequest)
         self.decode_abort = msgspec.msgpack.Decoder(PDAbortRequest)
         self.encoder = msgspec.msgpack.Encoder()
@@ -56,8 +56,8 @@ class PDWorker:
             for running_request in self.running_requests:
                 running_request.cancel()
 
-        if hasattr(self, "client_addr"):
-            ipc_paths = [self.worker_addr, self.client_addr]
+        if hasattr(self, "controller_addr"):
+            ipc_paths = [self.worker_addr, self.controller_addr]
             for ipc_path in ipc_paths:
                 socket_path = ipc_path.replace("ipc://", "")
                 if os.path.exists(socket_path):

@@ -50,9 +50,9 @@ PREFILL_WORKER_ADDR=prefillipc
 DECODE_WORKER_ADDR=decodeipc
 
 # prefilling instance, which is the KV producer
-CUDA_VISIBLE_DEVICES=0 python3 ../vllm/entrypoints/disaggregated/worker.py \
+CUDA_VISIBLE_DEVICES=0 python3 ../../vllm/entrypoints/disaggregated/worker.py \
     --model $MODEL \
-    --connector-addr $controller_addr \
+    --controller-addr $CONTROLLER_ADDR \
     --worker-addr $PREFILL_WORKER_ADDR \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
@@ -60,9 +60,9 @@ CUDA_VISIBLE_DEVICES=0 python3 ../vllm/entrypoints/disaggregated/worker.py \
     '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}' > vllm_disagg_prefill.log 2>&1 &
 
 # decoding instance, which is the KV consumer
-CUDA_VISIBLE_DEVICES=1 python3 ../vllm/entrypoints/disaggregated/worker.py \
+CUDA_VISIBLE_DEVICES=1 python3 ../../vllm/entrypoints/disaggregated/worker.py \
     --model $MODEL \
-    --connector-addr $controller_addr \
+    --controller-addr $CONTROLLER_ADDR \
     --worker-addr $DECODE_WORKER_ADDR \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
@@ -73,10 +73,10 @@ CUDA_VISIBLE_DEVICES=1 python3 ../vllm/entrypoints/disaggregated/worker.py \
 # the workflow of this proxy:
 # - Send req to prefill instance, wait until complete.
 # - Send req to decode instance, streaming tokens.
-python3 ../vllm/entrypoints/disaggregated/connector.py \
+python3 ../../vllm/entrypoints/disaggregated/api_server.py \
     --port $PORT \
     --model $MODEL \
-    --connector-addr $controller_addr \
+    --controller-addr $CONTROLLER_ADDR \
     --prefill-addr $PREFILL_WORKER_ADDR \
     --decode-addr $DECODE_WORKER_ADDR
 

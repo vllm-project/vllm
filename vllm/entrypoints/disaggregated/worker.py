@@ -15,7 +15,7 @@ logger = init_logger(__name__)
 
 async def run(args, engine: EngineClient):
     try:
-        worker = PDWorker(engine, args.worker_addr, args.client_addr)
+        worker = PDWorker(engine, args.worker_addr, args.controller_addr)
         await worker.run_busy_loop()
     finally:
         worker.shutdown()
@@ -32,10 +32,10 @@ async def main(args) -> None:
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser()
-    parser.add_argument('--client-addr',
+    parser.add_argument('--controller-addr',
                         type=str,
                         required=True,
-                        help='The address of the connector.')
+                        help='The address of the controller.')
     parser.add_argument('--worker-addr',
                         type=str,
                         required=True,
