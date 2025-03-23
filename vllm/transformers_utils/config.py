@@ -18,11 +18,6 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
 
-if VLLM_USE_MODELSCOPE:
-    from modelscope import AutoConfig
-else:
-    from transformers import AutoConfig
-
 MISTRAL_CONFIG_NAME = "params.json"
 HF_TOKEN = os.getenv('HF_TOKEN', None)
 
@@ -294,6 +289,10 @@ def get_config(
             )
         else:
             try:
+                if VLLM_USE_MODELSCOPE:
+                    from modelscope import AutoConfig
+                else:
+                    from transformers import AutoConfig
                 config = AutoConfig.from_pretrained(
                     model,
                     trust_remote_code=trust_remote_code,
