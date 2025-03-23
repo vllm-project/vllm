@@ -3,6 +3,7 @@
 import argparse
 import dataclasses
 import json
+import threading
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
                     Tuple, Type, Union, cast, get_args)
@@ -25,7 +26,7 @@ from vllm.plugins import load_general_plugins
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, StoreBoolean
+from vllm.utils import FlexibleArgumentParser, StoreBoolean, is_in_ray_actor
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -39,7 +40,6 @@ DEVICE_OPTIONS = [
     "cuda",
     "neuron",
     "cpu",
-    "openvino",
     "tpu",
     "xpu",
     "hpu",
@@ -119,6 +119,7 @@ class EngineArgs:
     block_size: Optional[int] = None
     enable_prefix_caching: Optional[bool] = None
     disable_sliding_window: bool = False
+    disable_cascade_attn: bool = False
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
     cpu_offload_gb: float = 0  # GiB
@@ -337,9 +338,15 @@ class EngineArgs:
             'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
             '* "runai_streamer" will load the Safetensors weights using Run:ai'
-            'Model Streamer \n'
+            'Model Streamer.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
-            'quantization.\n')
+            'quantization.\n'
+            '* "sharded_state" will load weights from pre-sharded checkpoint '
+            'files, supporting efficient loading of tensor-parallel models\n'
+            '* "gguf" will load weights from GGUF format files (details '
+            'specified in https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n'
+            '* "mistral" will load weights from consolidated safetensors files '
+            'used by Mistral models.\n')
         parser.add_argument(
             '--config-format',
             default=EngineArgs.config_format,
@@ -1095,6 +1102,16 @@ class EngineArgs:
             "using. This is used to parse the reasoning content into OpenAI "
             "API format. Required for ``--enable-reasoning``.")
 
+        parser.add_argument(
+            "--disable-cascade-attn",
+            action="store_true",
+            default=False,
+            help="Disable cascade attention for V1. While cascade attention "
+            "does not change the mathematical correctness, disabling it "
+            "could be useful for preventing potential numerical issues. "
+            "Note that even if this is set to False, cascade attention will be "
+            "only used when the heuristic tells that it's beneficial.")
+
         return parser
 
     @classmethod
@@ -1140,6 +1157,7 @@ class EngineArgs:
             max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
             disable_sliding_window=self.disable_sliding_window,
+            disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
@@ -1157,22 +1175,15 @@ class EngineArgs:
         )
 
     def create_load_config(self) -> LoadConfig:
-        # bitsandbytes quantization needs a specific model loader
-        # so we make sure the quant method and the load format are consistent
-        if (self.quantization == "bitsandbytes" or
-           self.qlora_adapter_name_or_path is not None) and \
-           self.load_format != "bitsandbytes":
-            raise ValueError(
-                "BitsAndBytes quantization and QLoRA adapter only support "
-                f"'bitsandbytes' load format, but got {self.load_format}")
 
-        if (self.load_format == "bitsandbytes" or
-            self.qlora_adapter_name_or_path is not None) and \
+        if(self.qlora_adapter_name_or_path is not None) and \
             self.quantization != "bitsandbytes":
             raise ValueError(
-                "BitsAndBytes load format and QLoRA adapter only support "
+                "QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
 
+        if self.quantization == "bitsandbytes":
+            self.load_format = "bitsandbytes"
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
@@ -1191,7 +1202,7 @@ class EngineArgs:
         NOTE: for autoselection of V0 vs V1 engine, we need to
         create the ModelConfig first, since ModelConfig's attrs
         (e.g. the model arch) are needed to make the decision.
-        
+
         This function set VLLM_USE_V1=X if VLLM_USE_V1 is
         unspecified by the user.
 
@@ -1239,6 +1250,18 @@ class EngineArgs:
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
         )
+
+        # Get the current placement group if Ray is initialized and
+        # we are in a Ray actor. If so, then the placement group will be
+        # passed to spawned processes.
+        placement_group = None
+        if is_in_ray_actor():
+            import ray
+
+            # This call initializes Ray automatically if it is not initialized,
+            # but we should not do this here.
+            placement_group = ray.util.get_current_placement_group()
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1251,6 +1274,7 @@ class EngineArgs:
                 self.tokenizer_pool_extra_config,
             ),
             ray_workers_use_nsight=self.ray_workers_use_nsight,
+            placement_group=placement_group,
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
@@ -1461,15 +1485,21 @@ class EngineArgs:
             return False
 
         # Only support Xgrammar for guided decoding so far.
-        SUPPORTED_GUIDED_DECODING = ["xgrammar", "xgrammar:nofallback"]
+        SUPPORTED_GUIDED_DECODING = [
+            "xgrammar", "xgrammar:disable-any-whitespace"
+        ]
         if self.guided_decoding_backend not in SUPPORTED_GUIDED_DECODING:
             _raise_or_fallback(feature_name="--guided-decoding-backend",
                                recommend_to_remove=False)
             return False
 
         # Need at least Ampere for now (FA support required).
+        # Skip this check if we are running on a non-GPU platform,
+        # or if the device capability is not available
+        # (e.g. in a Ray actor without GPUs).
         from vllm.platforms import current_platform
         if (current_platform.is_cuda()
+                and current_platform.get_device_capability()
                 and current_platform.get_device_capability().major < 8):
             _raise_or_fallback(feature_name="Compute Capability < 8.0",
                                recommend_to_remove=False)
@@ -1565,7 +1595,7 @@ class EngineArgs:
         # No FlashInfer or XFormers so far.
         V1_BACKENDS = [
             "FLASH_ATTN_VLLM_V1", "FLASH_ATTN", "PALLAS", "PALLAS_VLLM_V1",
-            "TRITON_MLA", "FLASHMLA"
+            "TRITON_ATTN_VLLM_V1", "TRITON_MLA", "FLASHMLA"
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):
@@ -1573,11 +1603,19 @@ class EngineArgs:
             _raise_or_fallback(feature_name=name, recommend_to_remove=True)
             return False
 
+        # No support for device type other than CUDA, AMD (experiemntal) or
+        # TPU (experimental) so far.
+        if not (current_platform.is_cuda_alike() or current_platform.is_tpu()):
+            _raise_or_fallback(
+                feature_name=f"device type={current_platform.device_type}",
+                recommend_to_remove=False)
+            return False
         #############################################################
         # Experimental Features - allow users to opt in.
 
-        # MLA is is supported on V1, but off by default for now.
-        if model_config.use_mla and _warn_or_fallback("MLA"):
+        # Signal Handlers requires running in main thread.
+        if (threading.current_thread() != threading.main_thread()
+                and _warn_or_fallback("Engine in background thread")):
             return False
 
         # LoRA is supported on V1, but off by default for now.
@@ -1670,7 +1708,7 @@ class EngineArgs:
         # V1 should use the new scheduler by default.
         # Swap it only if this arg is set to the original V0 default
         if self.scheduler_cls == EngineArgs.scheduler_cls:
-            self.scheduler_cls = "vllm.v1.core.scheduler.Scheduler"
+            self.scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
 
         # When no user override, set the default values based on the usage
         # context.
