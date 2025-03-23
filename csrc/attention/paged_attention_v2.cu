@@ -40,8 +40,8 @@
           kv_block_stride, kv_head_stride, k_scale_ptr, v_scale_ptr, tp_rank,  \
           blocksparse_local_blocks, blocksparse_vert_stride,                   \
           blocksparse_block_size, blocksparse_head_sliding_step);              \
-  vllm::paged_attention_v2_reduce_kernel<T, HEAD_SIZE, NUM_THREADS,            \
-                                         PARTITION_SIZE>                       \
+  vllm::paged_attention_partitions_reduce_kernel<T, HEAD_SIZE, NUM_THREADS,    \
+                                                 PARTITION_SIZE>               \
       <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(                \
           out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr,    \
           max_num_partitions);

@@ -80,7 +80,7 @@ def main(
 
     # Prepare for the paged attention kernel.
     output = torch.empty_like(query)
-    if version == "v2":
+    if version == "v2" or version == "v3":
         if current_platform.is_rocm():
             global PARTITION_SIZE
             if not args.custom_paged_attn:
@@ -170,6 +170,27 @@ def main(
                         k_scale,
                         v_scale,
                     )
+            elif version == "v3":
+                if not args.custom_paged_attn:
+                    ops.paged_attention_v3(
+                        output,
+                        exp_sums,
+                        max_logits,
+                        tmp_output,
+                        query,
+                        key_cache,
+                        value_cache,
+                        num_kv_heads,
+                        scale,
+                        block_tables,
+                        seq_lens,
+                        block_size,
+                        max_seq_len,
+                        alibi_slopes,
+                        kv_cache_dtype,
+                        k_scale,
+                        v_scale,
+                    )
             else:
                 raise ValueError(f"Invalid version: {version}")
         torch.cuda.synchronize()
@@ -197,7 +218,7 @@ if __name__ == '__main__':
         description="Benchmark the paged attention kernel.")
     parser.add_argument("--version",
                         type=str,
-                        choices=["v1", "v2"],
+                        choices=["v1", "v2", "v3"],
                         default="v2")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--seq-len", type=int, default=4096)

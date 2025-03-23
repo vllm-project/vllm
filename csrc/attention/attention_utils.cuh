@@ -54,4 +54,31 @@ struct Qk_dot {
   }
 };
 
+template <int THREAD_GROUP_SIZE, int N, typename Vec>
+inline __device__ float qk_dot_ptr_(const Vec* q, const Vec* k) {
+  using A_vec = typename FloatVec<Vec>::Type;
+  // Compute the parallel products for Q*K^T (treat vector lanes separately).
+  A_vec qk_vec = mul<A_vec, Vec, Vec>(*q, *k);
+#pragma unroll
+  for (int ii = 1; ii < N; ++ii) {
+    qk_vec = vllm::fma(*(q + ii), *(k + ii), qk_vec);
+  }
+
+  // Finalize the reduction across lanes.
+  float qk = sum(qk_vec);
+#pragma unroll
+  for (int mask = THREAD_GROUP_SIZE / 2; mask >= 1; mask /= 2) {
+    qk += VLLM_SHFL_XOR_SYNC(qk, mask);
+  }
+  return qk;
+}
+
+template <typename T, int THREAD_GROUP_SIZE, int N>
+struct Qk_dot_ptr {
+  template <typename Vec>
+  static inline __device__ float dot(const Vec* q, const Vec* k) {
+    return qk_dot_ptr_<THREAD_GROUP_SIZE, N>(q, k);
+  }
+};
+
 }  // namespace vllm

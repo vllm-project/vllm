@@ -13,6 +13,7 @@ if HAS_TRITON:
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
+V3_Q_HEAD_PER_KV = [8]
 
 
 @dataclass
@@ -152,7 +153,7 @@ class PagedAttention:
                 blocksparse_head_sliding_step,
             )
         else:
-            # Run PagedAttention V2.
+            # Run PagedAttention V2 or V3.
             assert _PARTITION_SIZE % block_size == 0
             tmp_output = torch.empty(
                 size=(num_seqs, num_heads, max_num_partitions, head_size),
@@ -165,7 +166,12 @@ class PagedAttention:
                 device=output.device,
             )
             max_logits = torch.empty_like(exp_sums)
-            ops.paged_attention_v2(
+            q_heads_per_kv = num_heads // num_kv_heads
+            paged_attetion_method = ops.paged_attention_v2
+            if (num_heads % num_kv_heads == 0
+                    and q_heads_per_kv in V3_Q_HEAD_PER_KV):
+                paged_attetion_method = ops.paged_attention_v3
+            paged_attetion_method(
                 output,
                 exp_sums,
                 max_logits,

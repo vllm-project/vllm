@@ -35,6 +35,7 @@ DTYPES = [
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
+V3_Q_HEAD_PER_KV = [8]
 
 # This should be sync with get_supported_head_sizes() in
 # vllm.attention.ops.paged_attn.PagedAttention
@@ -120,9 +121,9 @@ def ref_single_query_cached_kv_attention(
         output[i].copy_(out, non_blocking=True)
 
 
-@pytest.mark.parametrize(
-    "version",
-    ["v1", "v2"] if not current_platform.is_rocm() else ["v1", "v2", "rocm"])
+@pytest.mark.parametrize("version",
+                         ["v1", "v2", "v3"] if not current_platform.is_rocm()
+                         else ["v1", "v2", "v3", "rocm"])
 @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -160,6 +161,10 @@ def test_paged_attention(
 
     assert num_query_heads % num_kv_heads == 0
     num_queries_per_kv = num_query_heads // num_kv_heads
+
+    if version == "v3" and num_queries_per_kv not in V3_Q_HEAD_PER_KV:
+        pytest.skip()
+
     alibi_slopes = None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
@@ -218,7 +223,7 @@ def test_paged_attention(
                 cond=(head_size == HEAD_SIZES[0]
                       and block_size == BLOCK_SIZES[0]))
 
-    elif version in ("v2", "rocm"):
+    elif version in ("v2", "v3", "rocm"):
         if current_platform.is_rocm() and version == "rocm":
             PARTITION_SIZE = PARTITION_SIZE_ROCM
 
@@ -236,6 +241,35 @@ def test_paged_attention(
         max_logits = torch.empty_like(exp_sums)
         if version == "v2":
             ops.paged_attention_v2(
+                output,
+                exp_sums,
+                max_logits,
+                tmp_output,
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                scale,
+                block_tables,
+                seq_lens,
+                block_size,
+                max_seq_len,
+                alibi_slopes,
+                kv_cache_dtype,
+                k_scale,
+                v_scale,
+            )
+
+            opcheck(torch.ops._C.paged_attention_v2,
+                    (output, exp_sums, max_logits, tmp_output, query,
+                     key_cache, value_cache, num_kv_heads, scale, block_tables,
+                     seq_lens, block_size, max_seq_len, alibi_slopes,
+                     kv_cache_dtype, k_scale, v_scale, 0, 0, 0, 64, 0),
+                    cond=(head_size == HEAD_SIZES[0]
+                          and block_size == BLOCK_SIZES[0]))
+
+        elif version == "v3":
+            ops.paged_attention_v3(
                 output,
                 exp_sums,
                 max_logits,

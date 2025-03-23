@@ -495,6 +495,520 @@ __device__ void paged_attention_kernel(
   }
 }
 
+template <typename scalar_t, typename cache_t, int HEAD_SIZE, int BLOCK_SIZE,
+          vllm::Fp8KVCacheDataType KV_DTYPE, bool IS_BLOCK_SPARSE,
+          int NUM_Q_HEADS_PER_KV, int NUM_QUERY_THREADS,
+          int PARTITION_SIZE>
+__global__ void paged_attention_v3_kernel(
+    float* __restrict__ exp_sums,  // [num_seqs, num_heads, max_num_partitions]
+    float* __restrict__ max_logits,  // [num_seqs, num_heads,
+                                     // max_num_partitions]
+    scalar_t* __restrict__ out,  // [num_seqs, num_heads, max_num_partitions,
+                                 // head_size]
+    const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
+    const cache_t* __restrict__ k_cache,  // [num_blocks, num_kv_heads,
+                                          // head_size/x, block_size, x]
+    const cache_t* __restrict__ v_cache,  // [num_blocks, num_kv_heads,
+                                          // head_size, block_size]
+    const int num_kv_heads,               // [num_heads]
+    const float scale,
+    const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
+    const int* __restrict__ seq_lens,      // [num_seqs]
+    const int max_num_blocks_per_seq,
+    const float* __restrict__ alibi_slopes,  // [num_heads]
+    const int q_stride, const int kv_block_stride, const int kv_head_stride,
+    const float* k_scale, const float* v_scale, const int tp_rank,
+    const int blocksparse_local_blocks, const int blocksparse_vert_stride,
+    const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
+  const int seq_idx = blockIdx.y;
+  const int partition_idx = blockIdx.z;
+  const int max_num_partitions = gridDim.z;  // 8
+  constexpr bool USE_PARTITIONING = PARTITION_SIZE > 0;
+  const int seq_len = seq_lens[seq_idx];
+  if (USE_PARTITIONING && partition_idx * PARTITION_SIZE >= seq_len) {
+    // No work to do. Terminate the thread block.
+    return;
+  }
+
+  const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);  // 256
+  const int num_blocks_per_partition =                              // 16
+      USE_PARTITIONING ? PARTITION_SIZE / BLOCK_SIZE : num_seq_blocks;
+
+  // [start_block_idx, end_block_idx) is the range of blocks to process.
+  const int start_block_idx =
+      USE_PARTITIONING ? partition_idx * num_blocks_per_partition : 0;
+  const int end_block_idx =
+      MIN(start_block_idx + num_blocks_per_partition, num_seq_blocks);
+  const int num_blocks = end_block_idx - start_block_idx;  // 16
+
+  // [start_token_idx, end_token_idx) is the range of tokens to process.
+  const int start_token_idx = start_block_idx * BLOCK_SIZE;
+  const int end_token_idx =
+      MIN(start_token_idx + num_blocks * BLOCK_SIZE, seq_len);
+  const int num_tokens = end_token_idx - start_token_idx;  // 256
+
+  assert(NUM_Q_HEADS_PER_KV == blockDim.y);                          // 8
+  constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);  // 2
+  constexpr int NUM_THREAD_GROUPS_PER_QUERY =                        // 16
+      NUM_QUERY_THREADS / THREAD_GROUP_SIZE;
+
+  assert(NUM_QUERY_THREADS % THREAD_GROUP_SIZE == 0);
+  constexpr int NUM_TOKENS_PER_THREAD_GROUP =  // 1
+      DIVIDE_ROUND_UP(BLOCK_SIZE, WARP_SIZE);
+  constexpr int NUM_WARPS_PER_QUERY = NUM_QUERY_THREADS / WARP_SIZE;  // 1
+  // constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE; // 32
+  // The thread id inside one query, because we will use different group warps
+  // to process different query, so this idx is the index inside the group
+  // warps.
+  const int query_thread_idx = threadIdx.x;  // range(0, 32)
+  const int query_warp_idx =
+      query_thread_idx / WARP_SIZE;  // 0, in the current implement just 1 warps
+                                     // for a query, so only 0 here.
+  const int query_lane = query_thread_idx % WARP_SIZE;  // range(0, 32)
+
+  const int kv_head_idx = blockIdx.x;  // range(0, 8)
+  const int start_head_idx = kv_head_idx * NUM_Q_HEADS_PER_KV;
+  const int head_idx = start_head_idx + threadIdx.y;
+  const int head_offset = head_idx - start_head_idx;     // range(0, 8)
+  const int num_heads = gridDim.x * NUM_Q_HEADS_PER_KV;  // 64
+  const float alibi_slope =
+      alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
+
+  // A vector type to store a part of a key or a query.
+  // The vector size is configured in such a way that the threads in a thread
+  // group fetch or compute 16 bytes at a time. For example, if the size of a
+  // thread group is 4 and the data type is half, then the vector size is 16 /
+  // (4 * sizeof(half)) == 2.
+  constexpr int VEC_SIZE =
+      MAX(16 / (THREAD_GROUP_SIZE * sizeof(scalar_t)), 1);  // 4
+  using K_vec = typename Vec<scalar_t, VEC_SIZE>::Type;
+  using Q_vec = typename Vec<scalar_t, VEC_SIZE>::Type;
+  using Quant_vec = typename Vec<cache_t, VEC_SIZE>::Type;
+
+  const int query_thread_group_idx =
+      query_thread_idx / THREAD_GROUP_SIZE;  // range(0, 16)
+  const int query_thread_group_offset =
+      query_thread_idx % THREAD_GROUP_SIZE;  // range(0, 2)
+
+  constexpr int NUM_Q_ELEMS_PER_THREAD = HEAD_SIZE / THREAD_GROUP_SIZE;  // 64
+  constexpr int NUM_Q_VECS_PER_THREAD =
+      NUM_Q_ELEMS_PER_THREAD / VEC_SIZE;  // 16
+  const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
+  __shared__ Q_vec q_vecs[NUM_Q_HEADS_PER_KV][THREAD_GROUP_SIZE]
+                         [NUM_Q_VECS_PER_THREAD];  // 8 * 2 * 16 * 8 = 2 kb
+#pragma unroll
+  for (int i = query_thread_group_idx; i < NUM_Q_VECS_PER_THREAD;
+       i += NUM_THREAD_GROUPS_PER_QUERY) {
+    const int vec_idx = query_thread_group_offset + i * THREAD_GROUP_SIZE;
+    q_vecs[head_offset][query_thread_group_offset][i] =
+        *reinterpret_cast<const Q_vec*>(q_ptr + vec_idx * VEC_SIZE);
+  }
+  __syncthreads();  // TODO(naed90): possible speedup if this is replaced with a
+                    // memory wall right before we use q_vecs
+
+  // TODO(Wenqin): try use register for query, but each thread should load half
+  // of a query's head size. Load the query to registers. Each warp will load
+  // NUM_Q_HEADS_PER_KV heads of query into regs. constexpr int
+  // NUM_Q_ELEMS_PER_GROUP = HEAD_SIZE / NUM_THREAD_GROUPS_PER_QUERY; // 8
+  // constexpr int NUM_Q_ELEMS_PER_THREAD = NUM_Q_ELEMS_PER_GROUP /
+  // THREAD_GROUP_SIZE; // 4 constexpr int NUM_Q_VECS_PER_THREAD =
+  // NUM_Q_ELEMS_PER_THREAD / VEC_SIZE; // 1
+  //   const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
+  //   Q_vec q_vecs[NUM_Q_VECS_PER_THREAD];
+  // #pragma unroll
+  //   for (int i = 0; i < NUM_Q_VECS_PER_THREAD; i ++) {
+  //     const int vec_base_idx = query_thread_group_idx * THREAD_GROUP_SIZE +
+  //     query_thread_group_offset;
+  //     // in each iteration, one therad will load one vec into its registers,
+  //     so we should advanced by WARP_SIZE. const int vec_idx = vec_base_idx +
+  //     i * WARP_SIZE; q_vecs[i] = *reinterpret_cast<const Q_vec*>(q_ptr +
+  //     vec_idx * VEC_SIZE);
+  //   }
+
+  // Memory planning.
+  extern __shared__ char shared_mem[];  // 8kb
+  // NOTE(woosuk): We use FP32 for the softmax logits for better accuracy.
+  float* logits = reinterpret_cast<float*>(shared_mem);
+  // Workspace for reduction.
+  __shared__ float red_smem[NUM_Q_HEADS_PER_KV]
+                           [NUM_WARPS_PER_QUERY];  // 32 bytes.
+
+  // x == THREAD_GROUP_SIZE * VEC_SIZE
+  // Each thread group fetches x elements from the key at a time.
+  constexpr int x = 16 / sizeof(cache_t);  // 8
+  float qk_max = -FLT_MAX;
+
+  // Iterate over the key blocks.
+  // Each warp fetches a block of keys for each iteration.
+  // Each thread group in a warp fetches a key from the block, and computes
+  // dot product with the query.
+  const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
+
+  // blocksparse specific vars
+  int bs_block_offset;
+  int q_bs_block_id;
+  if constexpr (IS_BLOCK_SPARSE) {
+    // const int num_blocksparse_blocks = DIVIDE_ROUND_UP(seq_len,
+    // blocksparse_block_size);
+    q_bs_block_id = (seq_len - 1) / blocksparse_block_size;
+    if (blocksparse_head_sliding_step >= 0)
+      // sliding on q heads
+      bs_block_offset =
+          (tp_rank * num_heads + head_idx) * blocksparse_head_sliding_step + 1;
+    else
+      // sliding on kv heads
+      bs_block_offset = (tp_rank * num_kv_heads + kv_head_idx) *
+                            (-blocksparse_head_sliding_step) +
+                        1;
+  }
+
+  for (int block_idx = start_block_idx + query_warp_idx;
+       block_idx < end_block_idx; block_idx += NUM_WARPS_PER_QUERY) {
+    // NOTE(woosuk): The block number is stored in int32. However, we cast it to
+    // int64 because int32 can lead to overflow when this variable is multiplied
+    // by large numbers (e.g., kv_block_stride).
+    // For blocksparse attention: skip computation on blocks that are not
+    // attended
+    if constexpr (IS_BLOCK_SPARSE) {
+      const int k_bs_block_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
+      const bool is_remote =
+          ((k_bs_block_id + bs_block_offset) % blocksparse_vert_stride == 0);
+      const bool is_local =
+          (k_bs_block_id > q_bs_block_id - blocksparse_local_blocks);
+      if (!is_remote && !is_local) {
+        for (int i = 0; i < NUM_TOKENS_PER_THREAD_GROUP; i++) {
+          const int physical_block_offset =
+              (query_thread_group_idx + i * WARP_SIZE) % BLOCK_SIZE;
+          const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
+
+          if (query_thread_group_offset == 0) {
+            // NOTE(linxihui): assign very large number to skipped tokens to
+            // avoid contribution to the sumexp softmax normalizer. This will
+            // not be used at computing sum(softmax*v) as the blocks will be
+            // skipped.
+            logits[token_idx - start_token_idx] = -FLT_MAX;
+          }
+        }
+        continue;
+      }
+    }
+    const int64_t physical_block_number =
+        static_cast<int64_t>(block_table[block_idx]);
+    constexpr int NUM_K_ELEMS_PER_THREAD = HEAD_SIZE / THREAD_GROUP_SIZE;  // 64
+    constexpr int NUM_K_VECS_PER_THREAD =
+        NUM_K_ELEMS_PER_THREAD / VEC_SIZE;  // 16
+
+    // Load a key to registers.
+    // Each thread in a thread group has a different part of the key.
+    // For example, if the the thread group size is 4, then the first thread in
+    // the group has 0, 4, 8, ... th vectors of the key, and the second thread
+    // has 1, 5, 9, ... th vectors of the key, and so on.
+
+    // Note(Wenqin): loading k is different with loading q!!
+    for (int i = 0; i < NUM_TOKENS_PER_THREAD_GROUP; i++) {
+      const int physical_block_offset =
+          (query_thread_group_idx + i * WARP_SIZE) % BLOCK_SIZE;
+      const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
+      // Note(Wenqin): we should try to avoid bank conflict if each thread read
+      // data is multiple of 128 bytes. Why we add THREAD_GROUP_SIZE is to make
+      // pointer be aligned with 16 bytes, to do vectorized load.
+      const int k_vecs_last_dim =
+          NUM_K_ELEMS_PER_THREAD * sizeof(scalar_t) % 128 == 0
+              ? NUM_K_VECS_PER_THREAD + THREAD_GROUP_SIZE
+              : NUM_K_VECS_PER_THREAD;
+      __shared__ K_vec
+          k_vecs[NUM_WARPS_PER_QUERY][BLOCK_SIZE][THREAD_GROUP_SIZE]
+                [k_vecs_last_dim];  // 1 * 16 * 2 * 16 * 8 = 4 kb
+
+      // TODO(Wenqin): here we just use threads which process the first head for
+      // query to load data for key into shared memory, try to optimize later.
+      if (head_offset == 0) {
+#pragma unroll
+        for (int j = 0; j < NUM_K_VECS_PER_THREAD; j++) {
+          const cache_t* k_ptr =
+              k_cache + physical_block_number * kv_block_stride +
+              kv_head_idx * kv_head_stride + physical_block_offset * x;
+          const int vec_idx = query_thread_group_offset + j * THREAD_GROUP_SIZE;
+          const int offset1 = (vec_idx * VEC_SIZE) / x;
+          const int offset2 = (vec_idx * VEC_SIZE) % x;
+
+          if constexpr (KV_DTYPE == Fp8KVCacheDataType::kAuto) {
+            k_vecs[query_warp_idx][physical_block_offset]
+                  [query_thread_group_offset][j] =
+                      *reinterpret_cast<const K_vec*>(
+                          k_ptr + offset1 * BLOCK_SIZE * x + offset2);
+          } else {
+            // Vector conversion from Quant_vec to K_vec.
+            Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(
+                k_ptr + offset1 * BLOCK_SIZE * x + offset2);
+            k_vecs[query_warp_idx][physical_block_offset]
+                  [query_thread_group_offset][j] =
+                      fp8::scaled_convert<K_vec, Quant_vec, KV_DTYPE>(
+                          k_vec_quant, *k_scale);
+          }
+        }
+      }
+      __syncthreads();
+
+      // Compute dot product.
+      // This includes a reduction across the threads in the same thread group.
+      Q_vec* q_vecs_ptr = &q_vecs[head_offset][query_thread_group_offset][0];
+      K_vec* k_vecs_ptr = &k_vecs[query_warp_idx][physical_block_offset]
+                                 [query_thread_group_offset][0];
+      float qk =
+          scale *
+          Qk_dot_ptr<scalar_t, THREAD_GROUP_SIZE, NUM_K_VECS_PER_THREAD>::dot(
+              q_vecs_ptr, k_vecs_ptr);
+      // Add the ALiBi bias if slopes are given.
+      qk += (alibi_slope != 0) ? alibi_slope * (token_idx - seq_len + 1) : 0;
+
+      if (query_thread_group_offset == 0) {
+        // Store the partial reductions to shared memory.
+        // NOTE(woosuk): It is required to zero out the masked logits.
+        const bool mask = token_idx >= seq_len;
+        const int logits_offset =
+            (PARTITION_SIZE * head_offset) + (token_idx - start_token_idx);
+        logits[logits_offset] = mask ? 0.f : qk;
+        // Update the max value.
+        qk_max = mask ? qk_max : fmaxf(qk_max, qk);
+      }
+    }
+  }
+
+  // Perform reduction across the threads in the same warp to get the
+  // max qk value for each "warp" (not across the thread block yet).
+  // The 0-th thread of each thread group already has its max qk value.
+#pragma unroll
+  for (int mask = WARP_SIZE / 2; mask >= THREAD_GROUP_SIZE; mask /= 2) {
+    qk_max = fmaxf(qk_max, VLLM_SHFL_XOR_SYNC(qk_max, mask));
+  }
+  if (query_lane == 0) {
+    red_smem[head_offset][query_warp_idx] = qk_max;
+  }
+  __syncthreads();
+
+  // TODO(woosuk): Refactor this part.
+  // Get the max qk value for the sequence.
+  qk_max = query_lane < NUM_WARPS_PER_QUERY ? red_smem[head_offset][query_lane]
+                                            : -FLT_MAX;
+#pragma unroll
+  for (int mask = NUM_WARPS_PER_QUERY / 2; mask >= 1; mask /= 2) {
+    qk_max = fmaxf(qk_max, VLLM_SHFL_XOR_SYNC(qk_max, mask));
+  }
+  // Broadcast the max qk value to all threads.
+  qk_max = VLLM_SHFL_SYNC(qk_max, 0);
+
+  // Get the sum of the exp values.
+  float exp_sum = 0.f;
+  for (int i = query_thread_idx; i < num_tokens; i += NUM_QUERY_THREADS) {
+    const int logits_offset = (PARTITION_SIZE * head_offset) + i;
+    float val = __expf(logits[logits_offset] - qk_max);
+    logits[logits_offset] = val;
+    exp_sum += val;
+  }
+
+  // reduce for sum start.
+  // warp reduce
+#pragma unroll
+  for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+    exp_sum += VLLM_SHFL_XOR_SYNC(exp_sum, mask);
+  }
+  // Warp leaders store the data to shared memory.
+  if (query_lane == 0) {
+    // TODO(Wenqin): maybe we should use a max method for red_smem size???
+    red_smem[head_offset][query_warp_idx] = exp_sum;
+  }
+  __syncthreads();
+
+  // query head reduce and broat casting
+  if (query_lane < NUM_WARPS_PER_QUERY) {
+    exp_sum = red_smem[head_offset][query_lane];
+  }
+
+  // Parallel reduction inside the warp.
+#pragma unroll
+  for (int mask = NUM_WARPS_PER_QUERY / 2; mask >= 1; mask /= 2) {
+    exp_sum += VLLM_SHFL_XOR_SYNC(exp_sum, mask);
+  }
+
+  // Broadcast to other threads.
+  exp_sum = VLLM_SHFL_SYNC(exp_sum, 0);
+  // reduce for sum end.
+
+  // Compute softmax.
+  const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
+  for (int i = query_thread_idx; i < num_tokens; i += NUM_QUERY_THREADS) {
+    const int logits_offset = (PARTITION_SIZE * head_offset) + i;
+    logits[logits_offset] *= inv_sum;
+  }
+  __syncthreads();
+
+  // If partitioning is enabled, store the max logit and exp_sum.
+  if (USE_PARTITIONING && query_thread_idx == 0) {
+    // the reduce didn't need change
+    float* max_logits_ptr = max_logits +
+                            seq_idx * num_heads * max_num_partitions +
+                            head_idx * max_num_partitions + partition_idx;
+    *max_logits_ptr = qk_max;
+    float* exp_sums_ptr = exp_sums + seq_idx * num_heads * max_num_partitions +
+                          head_idx * max_num_partitions + partition_idx;
+    *exp_sums_ptr = exp_sum;
+  }
+
+  // Each thread will fetch 16 bytes from the value cache at a time.
+  constexpr int V_VEC_SIZE = MIN(16 / sizeof(scalar_t), BLOCK_SIZE);  // 8
+  using V_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
+  using L_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
+  using V_quant_vec = typename Vec<cache_t, V_VEC_SIZE>::Type;
+  using Float_L_vec = typename FloatVec<L_vec>::Type;
+
+  constexpr int NUM_V_VECS_PER_ROW = BLOCK_SIZE / V_VEC_SIZE;        // 2
+  constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW;  // 16
+  constexpr int NUM_ROWS_PER_THREAD =                                // 8
+      DIVIDE_ROUND_UP(HEAD_SIZE, NUM_ROWS_PER_ITER);
+
+  // NOTE(woosuk): We use FP32 for the accumulator for better accuracy.
+  float accs[NUM_ROWS_PER_THREAD];
+#pragma unroll
+  for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+    accs[i] = 0.f;
+  }
+
+  scalar_t zero_value;
+  zero(zero_value);
+  for (int block_idx = start_block_idx + query_warp_idx;
+       block_idx < end_block_idx; block_idx += NUM_WARPS_PER_QUERY) {
+    // NOTE(woosuk): The block number is stored in int32. However, we cast it to
+    // int64 because int32 can lead to overflow when this variable is multiplied
+    // by large numbers (e.g., kv_block_stride).
+    // For blocksparse attention: skip computation on blocks that are not
+    // attended
+    if constexpr (IS_BLOCK_SPARSE) {
+      int v_bs_block_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
+      if (!((v_bs_block_id + bs_block_offset) % blocksparse_vert_stride == 0) &&
+          !((v_bs_block_id > q_bs_block_id - blocksparse_local_blocks))) {
+        continue;
+      }
+    }
+    const int64_t physical_block_number =
+        static_cast<int64_t>(block_table[block_idx]);
+    const int physical_block_offset =
+        (query_lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
+    const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
+    // now the logits store the softmax attention score for different heads.
+    L_vec logits_vec;
+    const int logits_offset =
+        (PARTITION_SIZE * head_offset) + token_idx - start_token_idx;
+    from_float(logits_vec,
+               *reinterpret_cast<Float_L_vec*>(logits + logits_offset));
+
+    // TODO(Wenqin): use shared memory for v also.
+    const cache_t* v_ptr = v_cache + physical_block_number * kv_block_stride +
+                           kv_head_idx * kv_head_stride;
+#pragma unroll
+    for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+      const int row_idx =
+          query_lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
+      if (row_idx < HEAD_SIZE) {
+        const int offset = row_idx * BLOCK_SIZE + physical_block_offset;
+        V_vec v_vec;
+
+        if constexpr (KV_DTYPE == Fp8KVCacheDataType::kAuto) {
+          v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
+        } else {
+          V_quant_vec v_quant_vec =
+              *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
+          // Vector conversion from V_quant_vec to V_vec.
+          v_vec = fp8::scaled_convert<V_vec, V_quant_vec, KV_DTYPE>(v_quant_vec,
+                                                                    *v_scale);
+        }
+        if (block_idx == num_seq_blocks - 1) {
+          // NOTE(woosuk): When v_vec contains the tokens that are out of the
+          // context, we should explicitly zero out the values since they may
+          // contain NaNs. See
+          // https://github.com/vllm-project/vllm/issues/641#issuecomment-1682544472
+          scalar_t* v_vec_ptr = reinterpret_cast<scalar_t*>(&v_vec);
+#pragma unroll
+          for (int j = 0; j < V_VEC_SIZE; j++) {
+            v_vec_ptr[j] = token_idx + j < seq_len ? v_vec_ptr[j] : zero_value;
+          }
+        }
+        // TODO(Wenqin): why not use `=` but `+=` here? I guess we just add it
+        // once.
+        accs[i] += dot(logits_vec, v_vec);
+      }
+    }
+  }
+
+  // Perform reduction within each warp.
+#pragma unroll
+  for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+    float acc = accs[i];
+#pragma unroll
+    for (int mask = NUM_V_VECS_PER_ROW / 2; mask >= 1; mask /= 2) {
+      acc += VLLM_SHFL_XOR_SYNC(acc, mask);
+    }
+    accs[i] = acc;
+  }
+
+  // NOTE(woosuk): A barrier is required because the shared memory space for
+  // logits is reused for the output.
+  __syncthreads();
+
+  // Perform reduction across warps.
+  float* out_smem = reinterpret_cast<float*>(shared_mem);
+#pragma unroll
+  for (int i = NUM_WARPS_PER_QUERY; i > 1; i /= 2) {
+    int mid = i / 2;
+    // Upper warps write to shared memory.
+    if (query_warp_idx >= mid && query_warp_idx < i) {
+      const int smem_offset =
+          (PARTITION_SIZE * head_offset) + (query_warp_idx - mid) * HEAD_SIZE;
+      float* dst = &out_smem[smem_offset];
+#pragma unroll
+      for (int j = 0; j < NUM_ROWS_PER_THREAD; j++) {
+        const int row_idx =
+            query_lane / NUM_V_VECS_PER_ROW + j * NUM_ROWS_PER_ITER;
+        if (row_idx < HEAD_SIZE && query_lane % NUM_V_VECS_PER_ROW == 0) {
+          dst[row_idx] = accs[i];
+        }
+      }
+    }
+    __syncthreads();
+
+    // Lower warps update the output.
+    if (query_warp_idx < mid) {
+      const int smem_offset =
+          (PARTITION_SIZE * head_offset) + query_warp_idx * HEAD_SIZE;
+      const float* src = &out_smem[smem_offset];
+#pragma unroll
+      for (int j = 0; j < NUM_ROWS_PER_THREAD; j++) {
+        const int row_idx =
+            query_lane / NUM_V_VECS_PER_ROW + j * NUM_ROWS_PER_ITER;
+        if (row_idx < HEAD_SIZE && query_lane % NUM_V_VECS_PER_ROW == 0) {
+          accs[i] += src[row_idx];
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  // Write the final output.
+  if (query_warp_idx == 0) {
+    scalar_t* out_ptr =
+        out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
+        head_idx * max_num_partitions * HEAD_SIZE + partition_idx * HEAD_SIZE;
+#pragma unroll
+    for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+      const int row_idx =
+          query_lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
+      if (row_idx < HEAD_SIZE && query_lane % NUM_V_VECS_PER_ROW == 0) {
+        from_float(*(out_ptr + row_idx), accs[i]);
+      }
+    }
+  }
+}
+
 // Grid: (num_heads, num_seqs, 1).
 template <typename scalar_t, typename cache_t, int HEAD_SIZE, int BLOCK_SIZE,
           int NUM_THREADS, vllm::Fp8KVCacheDataType KV_DTYPE,
@@ -564,7 +1078,7 @@ __global__ void paged_attention_v2_kernel(
 // Grid: (num_heads, num_seqs).
 template <typename scalar_t, int HEAD_SIZE, int NUM_THREADS,
           int PARTITION_SIZE>
-__global__ void paged_attention_v2_reduce_kernel(
+__global__ void paged_attention_partitions_reduce_kernel(
     scalar_t* __restrict__ out,            // [num_seqs, num_heads, head_size]
     const float* __restrict__ exp_sums,    // [num_seqs, num_heads,
                                            // max_num_partitions]
