@@ -2013,17 +2013,28 @@ class SpeculativeConfig:
             # Unified to "ngram" internally
             self.method = "ngram"
             if self.prompt_lookup_min is None:
-                self.prompt_lookup_min = 1
-            if self.prompt_lookup_max is None or self.prompt_lookup_max < 1:
-                raise ValueError("prompt_lookup_max="
-                                 f"{self.prompt_lookup_max} must be > 0")
-            if self.prompt_lookup_min < 1:
-                raise ValueError("prompt_lookup_min="
-                                 f"{self.prompt_lookup_min} must be > 0")
-            if self.prompt_lookup_min > self.prompt_lookup_max:
-                raise ValueError(f"prompt_lookup_min={self.prompt_lookup_min} "
-                                 "cannot be larger than prompt_lookup_max="
-                                 f"{self.prompt_lookup_max}")
+                if self.prompt_lookup_max is None:
+                    self.prompt_lookup_min = 5
+                    self.prompt_lookup_max = 5
+                else:
+                    if self.prompt_lookup_max < 1:
+                        raise ValueError(
+                            f"prompt_lookup_max={self.prompt_lookup_max} "
+                            "must be > 0")
+                    self.prompt_lookup_min = self.prompt_lookup_max
+            else:
+                if self.prompt_lookup_min < 1:
+                    raise ValueError(
+                        f"prompt_lookup_min={self.prompt_lookup_min} "
+                        "must be > 0")
+                if self.prompt_lookup_max is None:
+                    self.prompt_lookup_max = self.prompt_lookup_min
+                else:
+                    if self.prompt_lookup_min > self.prompt_lookup_max:
+                        raise ValueError(
+                            f"prompt_lookup_min={self.prompt_lookup_min} must "
+                            f"be <= prompt_lookup_max={self.prompt_lookup_max}"
+                        )
 
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
