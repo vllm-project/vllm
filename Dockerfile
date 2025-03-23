@@ -52,7 +52,8 @@ WORKDIR /workspace
 # after this step
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --index-url https://download.pytorch.org/whl/nightly/cu126 "torch==2.7.0.dev20250121+cu126" "torchvision==0.22.0.dev20250121";  \
+        uv pip install --index-url https://download.pytorch.org/whl/nightly/cu128 "torch==2.8.0.dev20250318+cu128" "torchvision==0.22.0.dev20250319";  \
+        uv pip install --index-url https://download.pytorch.org/whl/nightly/cu128 --pre pytorch_triton==3.3.0+gitab727c40; \
     fi
 
 COPY requirements/common.txt requirements/common.txt
