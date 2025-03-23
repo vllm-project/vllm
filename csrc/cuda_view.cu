@@ -1,5 +1,6 @@
 #include <torch/all.h>
 #include <torch/cuda.h>
+#include <cuda_runtime.h>
 
 // This function assumes that `cpu_tensor` is a CPU tensor allocated with pinned
 // memory, and that UVA (Unified Virtual Addressing) is enabled.
