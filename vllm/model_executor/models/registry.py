@@ -104,7 +104,9 @@ _TEXT_GENERATION_MODELS = {
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
+    "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
+    "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
     # [Encoder-decoder]
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
@@ -417,11 +419,13 @@ class _ModelRegistry:
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        normalized_arch = []
-        for model in architectures:
-            if model not in self.models:
-                model = "TransformersModel"
-            normalized_arch.append(model)
+        # filter out support architectures
+        normalized_arch = list(
+            filter(lambda model: model in self.models, architectures))
+
+        # make sure Transformers fallback are put at the last
+        if len(normalized_arch) != len(architectures):
+            normalized_arch.append("TransformersModel")
         return normalized_arch
 
     def inspect_model_cls(
