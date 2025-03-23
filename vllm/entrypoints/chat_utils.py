@@ -29,7 +29,8 @@ from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
 # yapf: enable
 # pydantic needs the TypedDict from typing_extensions
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
+                          ProcessorMixin)
 from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
@@ -321,6 +322,8 @@ def _resolve_hf_chat_template(
         try:
             processor = cached_get_processor(
                 tokenizer.name_or_path,
+                processor_cls=(PreTrainedTokenizer, PreTrainedTokenizerFast,
+                               ProcessorMixin),
                 trust_remote_code=trust_remote_code,
             )
             if processor.chat_template is not None:
