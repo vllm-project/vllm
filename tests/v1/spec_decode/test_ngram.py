@@ -68,11 +68,21 @@ def test_ngram_proposer():
     )
     assert np.array_equal(result, np.array([4, 1]))
 
-    # Match for 4-gram.
+    # Match for both 4-gram and 3-gram.
+    # In this case, the proposer should return the 4-gram match.
     result = proposer.propose(
-        context_token_ids=np.array([1, 2, 3, 4, 1, 2, 3, 4]),
+        context_token_ids=np.array([2, 3, 4, 5, 1, 2, 3, 4, 1, 2, 3, 4]),
         min_n=3,
         max_n=4,
         k=2,
     )
-    assert np.array_equal(result, np.array([1, 2]))
+    assert np.array_equal(result, np.array([1, 2]))  # Not [5, 1]
+
+    # Match for 2-gram and 3-gram, but not 4-gram.
+    result = proposer.propose(
+        context_token_ids=np.array([3, 4, 5, 2, 3, 4, 1, 2, 3, 4]),
+        min_n=2,
+        max_n=4,
+        k=2,
+    )
+    assert np.array_equal(result, np.array([1, 2]))  # Not [5, 2]
