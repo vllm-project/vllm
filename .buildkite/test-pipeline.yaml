@@ -515,7 +515,7 @@ steps:
   - vllm/worker/model_runner.py
   - entrypoints/llm/test_collective_rpc.py
   commands:
-  - pytest -v -s entrypoints/llm/test_collective_rpc.py
+  - VLLM_ENABLE_V1_MULTIPROCESSING=0 pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
