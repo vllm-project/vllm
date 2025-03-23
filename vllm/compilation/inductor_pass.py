@@ -5,7 +5,6 @@ import importlib.metadata
 import inspect
 import json
 import types
-from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Optional, Union
 
 import torch
@@ -15,36 +14,9 @@ from torch import fx
 if Version(importlib.metadata.version('torch')) >= Version("2.6"):
     from torch._inductor.custom_graph_pass import CustomGraphPass
 else:
-    # CustomGraphPass is not present in 2.5 or lower,
-    # and custom passes are pickled when determining the caching key.
-    # Declare CustomGraphPass from 2.6 and add pickling support.
-    class CustomGraphPass(ABC):  # noqa (redefinition)
-        """
-        This class conforms to the 2.6 interface but also supports pickling,
-        as that's what the inductor code cache uses to determine the cache key.
-        Subclasses can just "pretend" that uuid is used.
-        """
-
-        @abstractmethod
-        def __call__(self, graph: torch.fx.graph.Graph) -> None:
-            """
-            Implementation of the custom pass.
-            """
-
-        @abstractmethod
-        def uuid(self) -> Optional[Any]:
-            """
-            Return an ID to uniquely identify your custom pass implementation.
-            Return None to skip inductor code caching entirely.
-            """
-
-        def __getstate__(self):
-            return self.uuid()
-
-        def __setstate__(self, state):
-            raise ValueError("Cannot unpickle CustomGraphPass because pickling"
-                             " is used for cache key uuid. Use torch>=2.6 with"
-                             " native uuid support for custom passes.")
+    # CustomGraphPass is not present in 2.5 or lower, import our version
+    from .torch25_custom_graph_pass import (  # noqa: E501
+        Torch25CustomGraphPass as CustomGraphPass)
 
 
 class InductorPass(CustomGraphPass):
