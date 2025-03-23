@@ -621,7 +621,6 @@ def test_marlin_gemm_subset_input():
         b_weight, quant_type, group_size, False)
 
     marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
-
     workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
                                 GPTQ_MARLIN_MAX_PARALLEL)
 
