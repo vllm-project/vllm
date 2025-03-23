@@ -10,6 +10,7 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.outputs import SamplerOutput
 
 
 class EagleProposer:
@@ -94,7 +95,7 @@ class EagleProposer:
             completed_prefill_mask, partial_prefill_mask,
             zero_position_mask, accepted_token_ids)
 
-        eagle_metadata = self._construct_eagle_prefill_attn_metadata(
+        eagle_prefill_attn_metadata = self._construct_eagle_prefill_attn_metadata(
             attention_metadata,
             eagle_num_tokens,
             target_model_start_locs,
@@ -107,26 +108,30 @@ class EagleProposer:
         )
         # We will sample everything except partial prefills
         eagle_hidden_states = None
-        with set_forward_context(eagle_metadata, self._vllm_config):
+        sampled_mask = ~partial_prefill_mask
+        with set_forward_context(eagle_prefill_attn_metadata, self._vllm_config):
             eagle_hidden_states = self._model(
                 input_ids=eagle_input_ids,
                 positions=eagle_positions,
                 previous_hidden_states=eagle_previous_hidden_state,
             )
             logits_indices = \
-                eagle_start_locs[~partial_prefill_mask] + \
-                    eagle_seq_lens[~partial_prefill_mask] - 1            
+                eagle_start_locs[sampled_mask] + eagle_seq_lens[sampled_mask] - 1          
             sample_hidden_states = eagle_hidden_states[logits_indices]
             logits = self._model.compute_logits(sample_hidden_states, None)
             sampler_output = self._model.sample(
                 logits=logits,
-                sampling_metadata=self._sampling_metadata,
-            
+                sampling_metadata=self._sampling_metadata,            
             )
         
-
-
-            eagle_previous_hidden_state = eagle_hidden_states
+        eagle_speculation_attn_metadata = self._construct_eagle_speculate_attn_metadata(
+            eagle_prefill_attn_metadata, sampled_mask, eagle_start_locs, eagle_seq_lens
+        )
+        eagle_input_ids = sampler_output.sampled_token_ids.squeeze(1)
+        eagle_positions = torch.arange(0, sampled_mask.sum() + 1)
+        eagle_previous_hidden_state = eagle_hidden_states
+        with set_forward_context(eagle_speculation_attn_metadata, self._vllm_config):
+            
             for _ in range(0, num_lookahead_slots):
                 eagle_hidden_states = self._model(
                     input_ids=eagle_input_ids,
@@ -134,16 +139,33 @@ class EagleProposer:
                     previous_hidden_states=eagle_previous_hidden_state,
                 )
                 eagle_previous_hidden_state = eagle_hidden_states
-                logits = self._model.compute_logits(sample_hidden_states, None)
-
-            
-
-
+                logits = self._model.compute_logits(eagle_hidden_states, None)
+                sampler_output = self._model.sample(
+                    logits=logits,
+                    sampling_metadata=self._sampling_metadata,                
+                )
+                eagle_input_ids = sampler_output.sampled_token_ids.squeeze(1)
+                eagle_speculation_attn_metadata = \
+                    self._update_eagle_speculate_attn_metadata(
+                        eagle_speculation_attn_metadata)
 
         print('eagle_input_ids ' + str(eagle_input_ids))
 
         return target_model_input_ids, target_model_input_ids
 
+    def _update_eagle_speculate_attn_metadata(
+        self,
+        eagle_prefill_attention_metadata: FlashAttentionMetadata,
+    ) -> FlashAttentionMetadata:
+        eagle_prefill_attention_metadata.seq_lens = \
+            eagle_prefill_attention_metadata.seq_lens + 1
+        eagle_prefill_attention_metadata.max_seq_len = \
+            eagle_prefill_attention_metadata.seq_lens.max().item()
+        eagle_prefill_attention_metadata.slot_mapping =\
+            eagle_prefill_attention_metadata.slot_mapping + 1 
+        return eagle_prefill_attention_metadata
+
+    
     def _construct_eagle_speculate_attn_metadata(
         self,
         eagle_prefill_attention_metadata: FlashAttentionMetadata,
@@ -164,14 +186,6 @@ class EagleProposer:
         eagle_speculate_attn_metadata.slot_mapping =\
             eagle_speculate_attn_metadata.slot_mapping[last_slot_indices] + 1 
         return eagle_speculate_attn_metadata
-
-    def _construct_input_from_sampled_output(
-        self,
-        sampler_output: SamplerOutput
-    ) -> Tensor
-        return 
-
-
 
     
     def _construct_eagle_prefill_attn_metadata(
