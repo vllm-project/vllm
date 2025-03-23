@@ -247,6 +247,13 @@ class Worker:
         # worker will always be healthy as long as it's running.
         return
 
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        self.model_runner.save_sharded_state(path, pattern, max_size)
 
 def init_worker_distributed_environment(
     parallel_config: ParallelConfig,
