@@ -1,21 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
-from vllm.attention.backends.utils import get_flash_attn_version
+                                              AttentionMetadata, AttentionType,
+                                              is_quantized_kv_cache)
 from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
+from vllm.fa_utils import get_flash_attn_version
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -30,7 +32,7 @@ class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
 
     @staticmethod
@@ -38,15 +40,15 @@ class FlashAttentionBackend(AttentionBackend):
         return "FLASH_ATTN_VLLM_V1"
 
     @staticmethod
-    def get_impl_cls() -> Type["FlashAttentionImpl"]:
+    def get_impl_cls() -> type["FlashAttentionImpl"]:
         return FlashAttentionImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["AttentionMetadata"]:
         return FlashAttentionMetadata
 
     @staticmethod
-    def get_builder_cls() -> Type["FlashAttentionMetadataBuilder"]:
+    def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
         return FlashAttentionMetadataBuilder
 
     @staticmethod
@@ -55,7 +57,7 @@ class FlashAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
@@ -100,8 +102,8 @@ class FlashAttentionMetadataBuilder:
         self.runner = runner
 
     def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput"):
-        pass
+                      scheduler_output: "SchedulerOutput") -> bool:
+        return False
 
     def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
               common_prefix_len: int):
@@ -158,10 +160,10 @@ class FlashAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
+        alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> None:
@@ -180,6 +182,9 @@ class FlashAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError(
+                "FlashAttention V1 with FP8 KV cache not yet supported")
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -192,7 +197,8 @@ class FlashAttentionImpl(AttentionImpl):
         if head_size not in support_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
-                f"Supported head sizes are: {support_head_sizes}.")
+                f"Supported head sizes are: {support_head_sizes}. "
+                "Set VLLM_USE_V1=0 to use another attention backend.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
@@ -221,6 +227,9 @@ class FlashAttentionImpl(AttentionImpl):
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
+        NOTE: FP8 quantization, flash-attn expect the size of
+              {q,k,v}_descale to be (num_sequences, num_kv_heads).
+              We use torch's .expand() to avoid duplicating values
         """
         assert output is not None, "Output tensor must be provided."
 
@@ -254,6 +263,17 @@ class FlashAttentionImpl(AttentionImpl):
             layer._k_scale,
             layer._v_scale,
         )
+        descale_shape = (attn_metadata.query_start_loc.shape[0] - 1,
+                         key.shape[1])
+        if self.kv_cache_dtype.startswith("fp8"):
+            key_cache = key_cache.view(torch.float8_e4m3fn)
+            value_cache = value_cache.view(torch.float8_e4m3fn)
+            num_tokens, num_heads, head_size = query.shape
+            query, _ = ops.scaled_fp8_quant(
+                query.reshape(
+                    (num_tokens, num_heads * head_size)).contiguous(),
+                layer._q_scale)
+            query = query.reshape((num_tokens, num_heads, head_size))
 
         # Compute attention and update output up to `num_actual_tokens`.
         if not attn_metadata.use_cascade:
@@ -274,6 +294,9 @@ class FlashAttentionImpl(AttentionImpl):
                 block_table=attn_metadata.block_table,
                 softcap=self.logits_soft_cap,
                 fa_version=self.vllm_flash_attn_version,
+                q_descale=layer._q_scale.expand(descale_shape),
+                k_descale=layer._k_scale.expand(descale_shape),
+                v_descale=layer._v_scale.expand(descale_shape),
             )
             return output
 
@@ -296,6 +319,9 @@ class FlashAttentionImpl(AttentionImpl):
             block_table=attn_metadata.block_table,
             common_prefix_len=attn_metadata.common_prefix_len,
             fa_version=self.vllm_flash_attn_version,
+            q_descale=layer._q_scale,
+            k_descale=layer._k_scale,
+            v_descale=layer._v_scale,
         )
         return output
 
@@ -381,11 +407,14 @@ def cascade_attention(
     max_kv_len: int,
     softmax_scale: float,
     alibi_slopes: Optional[torch.Tensor],
-    sliding_window: Tuple[int, int],
+    sliding_window: tuple[int, int],
     logits_soft_cap: float,
     block_table: torch.Tensor,
     common_prefix_len: int,
     fa_version: int,
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     assert alibi_slopes is None, ("Cascade attention does not support ALiBi.")
     # TODO: Support sliding window.
@@ -397,6 +426,7 @@ def cascade_attention(
     assert common_prefix_len % block_size == 0
     num_common_kv_blocks = common_prefix_len // block_size
     assert num_common_kv_blocks > 0
+    descale_shape = (cu_prefix_query_lens.shape[0] - 1, key_cache.shape[-2])
 
     # Process shared prefix.
     prefix_output, prefix_lse = flash_attn_varlen_func(
@@ -414,7 +444,15 @@ def cascade_attention(
         softcap=logits_soft_cap,
         return_softmax_lse=True,
         fa_version=fa_version,
+        q_descale=q_descale.expand(descale_shape)
+        if q_descale is not None else None,
+        k_descale=k_descale.expand(descale_shape)
+        if k_descale is not None else None,
+        v_descale=v_descale.expand(descale_shape)
+        if v_descale is not None else None,
     )
+
+    descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
 
     # Process suffix per query.
     suffix_output, suffix_lse = flash_attn_varlen_func(
@@ -432,6 +470,12 @@ def cascade_attention(
         softcap=logits_soft_cap,
         return_softmax_lse=True,
         fa_version=fa_version,
+        q_descale=q_descale.expand(descale_shape)
+        if q_descale is not None else None,
+        k_descale=k_descale.expand(descale_shape)
+        if k_descale is not None else None,
+        v_descale=v_descale.expand(descale_shape)
+        if v_descale is not None else None,
     )
 
     # Merge prefix and suffix outputs, and store the result in output.

@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import List, Type
-
 import pytest
 import torch.nn.functional as F
 
@@ -29,9 +27,9 @@ MODELS = ["TIGER-Lab/VLM2Vec-Full"]
 
 
 def _run_test(
-    hf_runner: Type[HfRunner],
-    vllm_runner: Type[VllmRunner],
-    input_texts: List[str],
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    input_texts: list[str],
     input_images: PromptImageInput,
     model: str,
     *,
@@ -55,8 +53,7 @@ def _run_test(
         for inputs in all_inputs:
             # Based on: https://github.com/TIGER-AI-Lab/VLM2Vec/blob/db3b951bccabba220c1f53ab46a734e50dd2fc08/src/model.py
             outputs = hf_model.model(
-                **hf_model.wrap_device(inputs,
-                                       device=hf_model.model.device.type),
+                **hf_model.wrap_device(inputs),
                 return_dict=True,
                 output_hidden_states=True,
             )

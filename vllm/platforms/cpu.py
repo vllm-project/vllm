@@ -60,15 +60,31 @@ class CpuPlatform(Platform):
         # Reminder: Please update docs/source/features/compatibility_matrix.md
         # If the feature combo become valid
         if not model_config.enforce_eager:
-            logger.warning(
-                "CUDA graph is not supported on CPU, fallback to the eager "
-                "mode.")
             model_config.enforce_eager = True
 
         cache_config = vllm_config.cache_config
 
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
+
+        scheduler_config = vllm_config.scheduler_config
+        if ((scheduler_config.chunked_prefill_enabled
+             or cache_config.enable_prefix_caching)
+                and cache_config.cache_dtype != "auto"):
+            raise RuntimeError("Chunked-prefill and prefix-cache on the CPU "
+                               "backend is not compatible with FP8 KV cache.")
+
+        if cache_config.cache_dtype == "fp8_e4m3":
+            cache_config.cache_dtype = "fp8_e5m2"
+            logger.warning(
+                "CPU backend doesn't support fp8_e4m3 KV cache type, "
+                "cast to fp8_e5m2.")
+
+        if (cache_config.cache_dtype != "auto"
+                and model_config.dtype == torch.half):
+            logger.warning("FP8 KV cache on the CPU backend only does not"
+                           " support fp16 for now, cast to bf16.")
+            model_config.dtype = torch.bfloat16
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
 
@@ -84,14 +100,6 @@ class CpuPlatform(Platform):
             raise RuntimeError(
                 "Invalid environment variable VLLM_CPU_KVCACHE_SPACE"
                 f" {kv_cache_space}, expect a positive integer value.")
-
-        scheduler_config = vllm_config.scheduler_config
-        if ((scheduler_config.chunked_prefill_enabled
-             or cache_config.enable_prefix_caching)
-                and model_config.dtype == torch.half):
-            logger.warning("Chunked-prefill on the CPU backend only does not"
-                           " support fp16 for now, cast to bf16.")
-            model_config.dtype = torch.bfloat16
 
         parallel_config = vllm_config.parallel_config
         if (parallel_config.distributed_executor_backend is not None
@@ -120,6 +128,9 @@ class CpuPlatform(Platform):
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+
+        # MLA attention is not supported
+        os.environ["VLLM_MLA_DISABLE"] = "1"
 
         # Intel OpenMP setting
         ld_prealod_str = os.getenv("LD_PRELOAD", "")

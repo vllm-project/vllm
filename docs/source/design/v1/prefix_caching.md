@@ -183,7 +183,7 @@ When a request is finished, we free all its blocks if no other requests are usin
 
 When the head block (least recently used block) of the free queue is cached, we have to evict the block to prevent it from being used by other requests. Specifically, eviction involves the following steps:
 
-1. Pop the block from the head of the free queue. This is the LRU black to be evicted.  
+1. Pop the block from the head of the free queue. This is the LRU block to be evicted.  
 2. Remove the block ID from the Cache Block.  
 3. Remove the block hash.
 
@@ -191,7 +191,7 @@ When the head block (least recently used block) of the free queue is cached, we 
 
 In this example, we assume the block size is 4 (each block can cache 4 tokens), and we have 10 blocks in the KV-cache manager in total.
 
-**Time 1: The cache is empty and a new request comes in.** We allocate 4 blocks. 3 of them are already full and cached. The fourth block is partially full with 2 of 4 tokens.
+**Time 1: The cache is empty and a new request comes in.** We allocate 4 blocks. 3 of them are already full and cached. The fourth block is partially full with 3 of 4 tokens.
 
 :::{image} /assets/design/v1/prefix_caching/example-time-1.png
 :alt: Example Time 1
@@ -203,7 +203,7 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 :alt: Example Time 3
 :::
 
-**Time 4: Request 1 comes in with the 14 prompt tokens, where the first 11 tokens are the same as request 0.** We can see that only 2 blocks (11 tokens) hit the cache, because the 3rd block only matches 3 of 4 tokens.
+**Time 4: Request 1 comes in with the 14 prompt tokens, where the first 10 tokens are the same as request 0.** We can see that only the first 2 blocks (8 tokens) hit the cache, because the 3rd block only matches 2 of 4 tokens.
 
 :::{image} /assets/design/v1/prefix_caching/example-time-4.png
 :alt: Example Time 4
@@ -221,7 +221,7 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 :alt: Example Time 6
 :::
 
-**Time 7: Request 2 comes in with the 33 prompt tokens, where the first 16 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
+**Time 7: Request 2 comes in with the 29 prompt tokens, where the first 12 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
 
 :::{image} /assets/design/v1/prefix_caching/example-time-7.png
 :alt: Example Time 7

@@ -3,12 +3,11 @@
 import asyncio
 import time
 import uuid
-from typing import Dict, List, Optional
+from typing import Optional
 
 import pytest
 from transformers import AutoTokenizer
 
-from tests.utils import fork_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -18,6 +17,8 @@ from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
                                         SyncMPClient)
 from vllm.v1.executor.abstract import Executor
+
+from ...utils import create_new_process_for_each_test
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
@@ -44,13 +45,13 @@ def make_request(params: SamplingParams) -> EngineCoreRequest:
     )
 
 
-def loop_until_done(client: EngineCoreClient, outputs: Dict):
+def loop_until_done(client: EngineCoreClient, outputs: dict):
 
     while True:
         engine_core_outputs = client.get_output().outputs
 
         if len(engine_core_outputs) == 0:
-            break
+            continue
 
         all_finished = True
         for out in engine_core_outputs:
@@ -62,13 +63,13 @@ def loop_until_done(client: EngineCoreClient, outputs: Dict):
             break
 
 
-async def loop_until_done_async(client: EngineCoreClient, outputs: Dict):
+async def loop_until_done_async(client: EngineCoreClient, outputs: dict):
 
     while True:
         engine_core_outputs = (await client.get_output_async()).outputs
 
         if len(engine_core_outputs) == 0:
-            break
+            continue
 
         all_finished = True
         for out in engine_core_outputs:
@@ -88,9 +89,10 @@ def echo(self, msg: str, err_msg: Optional[str] = None) -> str:
     return msg
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
-def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
+def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
+                            multiprocessing_mode: bool):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
@@ -121,7 +123,7 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
             client.add_request(request)
             time.sleep(0.01)
 
-        outputs: Dict[str, List] = {req_id: [] for req_id in request_ids}
+        outputs: dict[str, list] = {req_id: [] for req_id in request_ids}
         loop_until_done(client, outputs)
 
         for req_id in request_ids:
@@ -175,7 +177,7 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
 
 @pytest.mark.asyncio(loop_scope="function")
-async def test_engine_core_client_asyncio(monkeypatch):
+async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
@@ -207,7 +209,7 @@ async def test_engine_core_client_asyncio(monkeypatch):
             await client.add_request_async(request)
             await asyncio.sleep(0.01)
 
-        outputs: Dict[str, List] = {req_id: [] for req_id in request_ids}
+        outputs: dict[str, list] = {req_id: [] for req_id in request_ids}
         await loop_until_done_async(client, outputs)
 
         for req_id in request_ids:
