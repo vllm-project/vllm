@@ -4,7 +4,7 @@ from typing import Callable, Union
 
 import torch
 
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 
 LogitsProcessor = Union[Callable[[list[int], torch.Tensor], torch.Tensor],
                         Callable[[list[int], list[int], torch.Tensor],
@@ -28,7 +28,7 @@ def get_bad_words_logits_processors(
         for add_prefix_space in [False, True]:
             prefix = " " if add_prefix_space else ""
             prompt = prefix + bad_word.lstrip()
-            from vllm.transformers_utils.tokenizers import MistralTokenizer
+
             if isinstance(tokenizer, MistralTokenizer):
                 # Mistral tokenizers should not add special tokens
                 prompt_token_ids = tokenizer.encode(text=prompt)
