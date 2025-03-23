@@ -15,7 +15,7 @@ if Version(importlib.metadata.version('torch')) >= Version("2.6"):
     from torch._inductor.custom_graph_pass import CustomGraphPass
 else:
     # CustomGraphPass is not present in 2.5 or lower, import our version
-    from .torch25_custom_graph_pass import (  # noqa: E501
+    from .torch25_custom_graph_pass import (  # noqa: yapf
         Torch25CustomGraphPass as CustomGraphPass)
 
 
@@ -73,9 +73,7 @@ class CallableInductorPass(InductorPass):
                  callable: Callable[[fx.Graph], None],
                  uuid: Optional[Any] = None):
         self.callable = callable
-        if uuid is None:
-            uuid = InductorPass.hash_source(callable)
-        self._uuid = uuid
+        self._uuid = self.hash_source(callable) if uuid is None else uuid
 
     def __call__(self, graph: torch.fx.Graph):
         self.callable(graph)
