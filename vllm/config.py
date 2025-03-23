@@ -2018,8 +2018,10 @@ class SpeculativeConfig:
                 self.prompt_lookup_min = 5
                 self.prompt_lookup_max = 5
             elif self.prompt_lookup_min is None:
+                assert self.prompt_lookup_max is not None
                 self.prompt_lookup_min = self.prompt_lookup_max
             elif self.prompt_lookup_max is None:
+                assert self.prompt_lookup_min is not None
                 self.prompt_lookup_max = self.prompt_lookup_min
 
             # Validate values
