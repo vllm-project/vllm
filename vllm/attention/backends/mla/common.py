@@ -205,7 +205,6 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.attention.ops.triton_merge_attn_states import merge_attn_states
-from vllm.fa_utils import get_flash_attn_version
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
@@ -214,6 +213,7 @@ from vllm.model_executor.layers.rotary_embedding import (
 from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.platforms import current_platform
 from vllm.utils import async_tensor_h2d, cdiv, make_tensor_with_pad, round_down
+from vllm.vllm_flash_attn.fa_utils import get_flash_attn_version
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func

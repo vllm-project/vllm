@@ -1157,10 +1157,6 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
-            if envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "V1 does not yet support fp8 KV cache. "
-                    "Set VLLM_USE_V1=0 to enable fp8 kv cache.")
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
