@@ -519,7 +519,7 @@ class Plamo2AttentionDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class PlamoDecoder(torch.nn.Module):
+class Plamo2Decoder(torch.nn.Module):
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -583,7 +583,7 @@ class Plamo2Model(PlamoPreTrainedModel):
             org_num_embeddings=config.vocab_size,
             prefix=f"{prefix}.embed_tokens",
         )
-        self.layers = PlamoDecoder(vllm_config, prefix=f"{prefix}.layers")
+        self.layers = Plamo2Decoder(vllm_config, prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_init()
 
