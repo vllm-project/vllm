@@ -61,7 +61,7 @@ The next section defines a list of input prompts and sampling parameters for tex
 :::{important}
 By default, vLLM will use sampling parameters recommended by model creator by applying the `generation_config.json` from the huggingface model repository if it exists. In most cases, this will provide you with the best results by default if {class}`~vllm.SamplingParams` is not specified.
 
-However, if vLLM's default sampling parameters are preferred, please pass `generation_config vllm` when creating the {class}`~vllm.LLM` instance.
+However, if vLLM's default sampling parameters are preferred, please pass `generation_config="vllm"` when creating the {class}`~vllm.LLM` instance.
 :::
 ```python
 prompts = [
