@@ -65,9 +65,9 @@ class PDWorker:
 
     async def run_busy_loop(self):
         """
-        Main execution loop for the PDWorker:
-            * 1) Wait for a request from the PDClient.
-            * 2) Handle the request.
+        main loop:
+            1) wait for a request from the PDClient
+            2) handle the request
         """
         logger.info("PDWorker is ready To handle requests.")
 
@@ -76,10 +76,14 @@ class PDWorker:
             req_type, req_data = await self.from_client.recv_multipart()
 
             # 2) Handle the request.
-            await self._handle_request(req_type, req_data.buffer)
+            await self._handle_request(req_type, req_data)
 
     async def _handle_request(self, req_type: bytes, req_data: bytes):
-        """Parse the request type and call the appropriate handler."""
+        """
+        request handler:
+            1) parse the request type
+            2) call the appropriate handler for the request type
+        """
         if req_type == PDRequestType.GENERATION:
             req = self.decode_generation(req_data)
             await self._generation_handler(req)
@@ -88,13 +92,18 @@ class PDWorker:
             await self._abort_handler(req)
 
     async def _generation_handler(self, req: PDGenerationRequest):
-        """Launch generation in a background task."""
+        """
+        Handle a PDGenerationRequest by launching a task.
+        """
         task = asyncio.create_task(self._generate(req))
         self.running_requests.add(task)
         task.add_done_callback(self.running_requests.discard)
 
     async def _abort_handler(self, req: PDGenerationRequest):
-        """Abort the request in the engine."""
+        """
+        Handle a PDAbortRequest by cancelling the running task.
+        The _generate coro aborts in the Engine.
+        """
         # Convert running_requests set() into a dict(), keyed
         # by request_id. Cancel the task when an abort comes in.
         # Then update the _generate coroutine to handle a
@@ -103,11 +112,11 @@ class PDWorker:
 
     async def _generate(self, req: PDGenerationRequest):
         """
-        Handle a single PDRequest:
+        Handle a single PDGenerationRequest:
             * 1) submit request to AsyncLLM
             * 2) iterate the RequestOutputs
             * 3) convert RequestOutput --> PDResponse
-            * 4) serialize and send to Connector.
+            * 4) serialize and send to PDClient
         """
         request_id = req.request_id
 

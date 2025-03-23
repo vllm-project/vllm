@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Toy Server For Prototyping."""
+"""
+Toy connector for prototyping.
+
+When PDClient supports the protocol and we clean up the
+OpenAI Server, we can drop this in favor of vllm serve.
+"""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -9,7 +14,7 @@ import uvloop
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from vllm.entrypoints.disaggregated.engine import PDEngine
+from vllm.disaggregated.pd_client import PDClient
 from vllm.entrypoints.openai.protocol import (CompletionRequest,
                                               CompletionResponse,
                                               ErrorResponse)
@@ -46,34 +51,31 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 
 @asynccontextmanager
-async def pd_engine_client_ctx_manager(
-        prefill_addr: str, decode_addr: str, connector_addr: str,
-        model_name: str) -> AsyncIterator[PDEngine]:
-    engine = PDEngine(prefill_addr, decode_addr, connector_addr, model_name)
-    yield engine
-    engine.shutdown()
+async def pd_client_ctx(prefill_addr: str, decode_addr: str,
+                        connector_addr: str,
+                        model_name: str) -> AsyncIterator[PDClient]:
+    client = PDClient(prefill_addr, decode_addr, connector_addr, model_name)
+    yield client
+    client.shutdown()
 
 
 async def main(args, **uvicorn_kwargs):
-    logger.info("vLLM Disaggregate Connector Start %s %s", args,
+    logger.info("vLLM Disaggregated Connector Start %s %s", args,
                 uvicorn_kwargs)
 
     # Avoid dropping requests under high concurrency.
     set_ulimit()
 
     # IPC Paths.
-    # NOTE FOR DEVELOPERS: when shifting to TCP, ensure you
-    # are not using pickle to avoid RCE security flaw.
     prefill_addr = f"ipc://{args.prefill_addr}"
     decode_addr = f"ipc://{args.decode_addr}"
     connector_addr = f"ipc://{args.connector_addr}"
 
     # Start Engine.
-    async with pd_engine_client_ctx_manager(
-        prefill_addr=prefill_addr,
-        decode_addr=decode_addr,
-        connector_addr=connector_addr,
-        model_name=args.model) as engine_client:
+    async with pd_client_ctx(prefill_addr=prefill_addr,
+                             decode_addr=decode_addr,
+                             connector_addr=connector_addr,
+                             model_name=args.model) as engine_client:
 
         # Initialize App State.
         model_config = await engine_client.get_model_config()
@@ -93,7 +95,7 @@ async def main(args, **uvicorn_kwargs):
         )
 
         # Run Server.
-        config = uvicorn.Config(app, host="0.0.0.0", port=args.port)
+        config = uvicorn.Config(app, host=args.host, port=args.port)
         server = uvicorn.Server(config)
         await server.serve()
 

@@ -55,9 +55,3 @@ class PDGenerationResponse(msgspec.Struct):
             finish_reason=out.finish_reason,
             stop_reason=out.stop_reason,
         )
-
-
-class PDGenerationFailure(msgspec.Struct):
-    request_id: str
-    error_message: str
-    engine_dead: bool
