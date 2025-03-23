@@ -1151,6 +1151,7 @@ def apply_hf_chat_template(
 
     return tokenizer.apply_chat_template(
         conversation=conversation,  # type: ignore[arg-type]
+        tools=tools,  # type: ignore[arg-type]
         chat_template=hf_chat_template,
         tokenize=tokenize,
         **kwargs,
