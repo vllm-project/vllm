@@ -19,10 +19,9 @@ from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import make_async
 
 if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+
     from vllm.config import ModelConfig
-    from transformers import (AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerFast)
-    from vllm.transformers_utils.tokenizers import MistralTokenizer
 
 logger = init_logger(__name__)
 

@@ -237,7 +237,8 @@ def resolve_current_platform_cls_qualname() -> str:
         set(activated_plugins) & set(builtin_platform_plugins.keys()))
     activated_oot_plugins = list(
         set(activated_plugins) & set(platform_plugins.keys()))
-
+    import traceback
+    traceback.print_stack()
     if len(activated_oot_plugins) >= 2:
         raise RuntimeError(
             "Only one platform plugin can be activated, but got: "

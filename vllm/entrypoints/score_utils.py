@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 from torch.nn import CosineSimilarity
 
 from vllm.outputs import PoolingRequestOutput
+
+if TYPE_CHECKING:
+    from vllm.transformers_utils.tokenizer import (PreTrainedTokenizer,
+                                                   PreTrainedTokenizerFast)
 
 
 def _cosine_similarity(

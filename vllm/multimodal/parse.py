@@ -18,6 +18,9 @@ from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
                      ImageItem, ModalityData, MultiModalDataDict,
                      MultiModalFieldConfig, MultiModalKwargs, VideoItem)
 
+if TYPE_CHECKING:
+    pass
+
 _T = TypeVar("_T")
 _I = TypeVar("_I")
 

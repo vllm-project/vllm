@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-from __future__ import annotations
 
 import functools
 from collections import UserDict
@@ -9,11 +8,9 @@ from typing import (TYPE_CHECKING, Any, Callable, NamedTuple, Optional,
                     Protocol, Union)
 
 from torch import nn
-# Removed: from transformers import ProcessorMixin
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils import (ClassRegistry, get_allowed_kwarg_only_overrides,
                         resolve_mm_processor_kwargs)
 
@@ -21,17 +18,19 @@ from .data import ProcessorInputs, SingletonInputs
 from .parse import is_encoder_decoder_inputs
 
 if TYPE_CHECKING:
+    from transformers import BatchFeature, PretrainedConfig, ProcessorMixin
+
     from vllm.config import ModelConfig
     from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
                                  MultiModalRegistry)
     from vllm.sequence import SequenceData
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 
 _T = TypeVar("_T")
 _C = TypeVar("_C", bound="PretrainedConfig", default="PretrainedConfig")
-# Bind _P lazily by using a string reference:
-_P = TypeVar("_P", bound="ProcessorMixin")
+_P = TypeVar("_P", bound="ProcessorMixin", default="ProcessorMixin")
 
 
 @dataclass(frozen=True)
@@ -41,25 +40,27 @@ class InputContext:
     modify the inputs.
     """
 
-    model_config: ModelConfig
+    model_config: "ModelConfig"
     """The configuration of the model."""
 
     def get_hf_config(
         self,
-        typ: Union[type[_C], tuple[type[_C], ...]] = "PretrainedConfig",
+        typ: Union[type[_C], tuple[type[_C], ...], None] = None,
         /,
     ) -> _C:
         """
         Get the HuggingFace configuration
-        (:class:`transformers."PretrainedConfig"`) of the model,
+        (:class:`transformers.PretrainedConfig`) of the model,
         additionally checking its type.
 
         Raises:
             TypeError: If the configuration is not of the specified type.
         """
+
         if typ is None:
-            from transformers import PretrainedConfig  # 懒加载 PretrainedConfig
+            from transformers import PretrainedConfig
             typ = PretrainedConfig
+
         hf_config = self.model_config.hf_config
         if not isinstance(hf_config, typ):
             raise TypeError("Invalid type of HuggingFace config. "
@@ -89,20 +90,24 @@ class InputContext:
 
     def get_hf_processor(
         self,
-        typ: Optional[Union[type[_P], tuple[type[_P], ...]]] = None,
+        typ: Union[type[_P], tuple[type[_P], ...], None] = None,
         /,
         **kwargs: object,
     ) -> _P:
         """
-        Get the HuggingFace processor (:class:`transformers.ProcessorMixin`)
-        of the model, additionally checking its type.
+        Get the HuggingFace processor
+        (:class:`transformers.ProcessorMixin`) of the model,
+        additionally checking its type.
 
         Raises:
             TypeError: If the processor is not of the specified type.
         """
+
         if typ is None:
-            from transformers import ProcessorMixin  # lazy import
+            from transformers import ProcessorMixin
             typ = ProcessorMixin
+        from vllm.transformers_utils.processor import (
+            cached_processor_from_config)
         return cached_processor_from_config(
             self.model_config,
             processor_cls=typ,
@@ -130,15 +135,19 @@ class InputContext:
 
 @dataclass(frozen=True)
 class InputProcessingContext(InputContext):
-    tokenizer: AnyTokenizer
+    tokenizer: "AnyTokenizer"
     """The tokenizer used to tokenize the inputs."""
 
     def get_hf_processor(
         self,
-        typ: Optional[Union[type[_P], tuple[type[_P], ...]]] = None,
+        typ: Union[type[_P], tuple[type[_P], ...], None] = None,
         /,
         **kwargs: object,
     ) -> _P:
+
+        if typ is None:
+            from transformers import ProcessorMixin
+            typ = ProcessorMixin
         return super().get_hf_processor(
             typ,
             tokenizer=self.tokenizer,
@@ -147,13 +156,13 @@ class InputProcessingContext(InputContext):
 
     def call_hf_processor(
         self,
-        hf_processor: Callable,  # expected to behave like ProcessorMixin
+        hf_processor: "ProcessorMixin",
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
-    ) -> BatchFeature:
+    ) -> "BatchFeature":
         """
-        Call `hf_processor` on the prompt `data` (text, image, audio...)
-        with configurable options `kwargs`.
+        Call :code:`hf_processor` on the prompt :code:`data`
+        (text, image, audio...) with configurable options :code:`kwargs`.
         """
         assert callable(hf_processor)
 
@@ -174,6 +183,7 @@ class InputProcessingContext(InputContext):
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
                    f"on data={data} with kwargs={merged_kwargs}")
+
             raise RuntimeError(msg) from exc
 
 
@@ -183,9 +193,9 @@ N = TypeVar("N", bound=type[nn.Module])
 class DummyData(NamedTuple):
     """Dummy data used for profiling."""
 
-    seq_data: SequenceData
-    multi_modal_data: Optional[MultiModalDataDict] = None
-    multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
+    seq_data: "SequenceData"
+    multi_modal_data: Optional["MultiModalDataDict"] = None
+    multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None
 
 
 class DummyDataFactory(Protocol):
@@ -315,9 +325,9 @@ class InputRegistry:
 
     def dummy_data_for_profiling(
         self,
-        model_config: ModelConfig,
+        model_config: "ModelConfig",
         seq_len: int,
-        mm_registry: MultiModalRegistry,
+        mm_registry: "MultiModalRegistry",
         is_encoder_data: bool = False,
     ) -> DummyData:
         """
@@ -335,6 +345,8 @@ class InputRegistry:
         from vllm.multimodal.profiling import MultiModalProfiler
 
         if mm_registry.has_processor(model_config):
+            from vllm.transformers_utils.tokenizer import (
+                cached_tokenizer_from_config)
             tokenizer = cached_tokenizer_from_config(model_config)
             processor = mm_registry.create_processor(model_config,
                                                      tokenizer,
@@ -436,7 +448,7 @@ class InputRegistry:
         else:
             assert_never(inputs["type"])  # type: ignore[arg-type]
 
-    def process_input(self, model_config: ModelConfig,
+    def process_input(self, model_config: "ModelConfig",
                       inputs: ProcessorInputs) -> ProcessorInputs:
         """
         Apply an input processor to an instance of model inputs.
@@ -476,7 +488,7 @@ class InputRegistry:
 
         return processed_inputs
 
-    def create_input_processor(self, model_config: ModelConfig):
+    def create_input_processor(self, model_config: "ModelConfig"):
         """
         Create an input processor (see :meth:`_process_input`) for a
         specific model.

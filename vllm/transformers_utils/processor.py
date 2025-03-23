@@ -1,18 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-from __future__ import annotations
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Union, cast
 
-# Removed the eager import of ProcessorMixin
-# from transformers.processing_utils import ProcessorMixin
 from typing_extensions import TypeVar
 
 if TYPE_CHECKING:
+    from transformers.processing_utils import ProcessorMixin
+
     from vllm.config import ModelConfig
 
-# Bind _P lazily using a string reference.
-_P = TypeVar("_P", bound="ProcessorMixin")
+_P = TypeVar("_P", bound="ProcessorMixin", default="ProcessorMixin")
 
 
 class HashableDict(dict):
@@ -35,7 +33,7 @@ class HashableList(list):
         return hash(tuple(self))
 
 
-def _merge_mm_kwargs(model_config: ModelConfig, **kwargs):
+def _merge_mm_kwargs(model_config: "ModelConfig", **kwargs):
     base_kwargs = model_config.mm_processor_kwargs
     if base_kwargs is None:
         base_kwargs = {}
@@ -57,18 +55,16 @@ def get_processor(
     processor_name: str,
     *args: Any,
     trust_remote_code: bool = False,
-    processor_cls: Optional[Union[type[_P], tuple[type[_P], ...]]] = None,
+    processor_cls: Union[type[_P], tuple[type[_P], ...], None] = None,
     **kwargs: Any,
 ) -> _P:
     """Load a processor for the given model name via HuggingFace."""
     # don't put this import at the top level
     # it will call torch.cuda.device_count()
     from transformers import AutoProcessor
-
-    # Lazily import ProcessorMixin if not provided.
     if processor_cls is None:
         from transformers.processing_utils import ProcessorMixin
-        processor_cls = ProcessorMixin
+        processor_cls = processor_cls
 
     processor_factory = (AutoProcessor if processor_cls == ProcessorMixin or
                          isinstance(processor_cls, tuple) else processor_cls)
@@ -83,7 +79,7 @@ def get_processor(
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
-        # Unlike AutoTokenizer, AutoProcessor does not separate such errors.
+        # Unlike AutoTokenizer, AutoProcessor does not separate such errors
         if not trust_remote_code:
             err_msg = (
                 "Failed to load the processor. If the processor is "
@@ -107,14 +103,18 @@ cached_get_processor = lru_cache(get_processor)
 
 
 def cached_processor_from_config(
-    model_config: ModelConfig,
-    processor_cls: Optional[Union[type[_P], tuple[type[_P], ...]]] = None,
+    model_config: "ModelConfig",
+    processor_cls: Union[type[_P], tuple[type[_P], ...], None] = None,
     **kwargs: Any,
 ) -> _P:
+
+    if processor_cls is None:
+        processor_cls = processor_cls
+
     return cached_get_processor(
         model_config.model,
         trust_remote_code=model_config.trust_remote_code,
-        processor_cls=processor_cls,
+        processor_cls=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, **kwargs),
     )
 
@@ -140,7 +140,7 @@ def get_image_processor(
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
-        # Unlike AutoTokenizer, AutoImageProcessor does not separate such errors.
+        # Unlike AutoTokenizer, AutoImageProcessor does not separate such errors
         if not trust_remote_code:
             err_msg = (
                 "Failed to load the image processor. If the image processor is "
@@ -159,7 +159,7 @@ cached_get_image_processor = lru_cache(get_image_processor)
 
 
 def cached_image_processor_from_config(
-    model_config: ModelConfig,
+    model_config: "ModelConfig",
     **kwargs: Any,
 ):
     return cached_get_image_processor(
@@ -194,7 +194,7 @@ cached_get_video_processor = lru_cache(get_video_processor)
 
 
 def cached_video_processor_from_config(
-    model_config: ModelConfig,
+    model_config: "ModelConfig",
     **kwargs: Any,
 ):
     return cached_get_video_processor(

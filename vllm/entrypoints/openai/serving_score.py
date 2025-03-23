@@ -2,7 +2,7 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from fastapi import Request
 
@@ -23,10 +23,12 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
-                                               PreTrainedTokenizer,
-                                               PreTrainedTokenizerFast)
+from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import make_async, merge_async_iterators
+
+if TYPE_CHECKING:
+    from vllm.transformers_utils.tokenizer import (PreTrainedTokenizer,
+                                                   PreTrainedTokenizerFast)
 
 logger = init_logger(__name__)
 
@@ -48,7 +50,7 @@ class ServingScores(OpenAIServing):
 
     async def _embedding_score(
         self,
-        tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+        tokenizer: Union["PreTrainedTokenizer", "PreTrainedTokenizerFast"],
         texts_1: list[str],
         texts_2: list[str],
         request: Union[RerankRequest, ScoreRequest],

@@ -19,6 +19,8 @@ from vllm.jsontree import JSONTree, json_map_leaves
 from vllm.utils import full_groupby, is_list_of
 
 if TYPE_CHECKING:
+    from transformers import BatchFeature
+
     from .hasher import MultiModalHashDict
 
 _T = TypeVar("_T")
