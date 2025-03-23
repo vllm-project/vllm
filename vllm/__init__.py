@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """vLLM: a high-throughput and memory-efficient inference engine for LLMs"""
-
+# The version.py should be independent library, and we always import the
+# version library first.  Such assumption is critical for some customization.
 from .version import __version__, __version_tuple__  # isort:skip
 
+import os
 import torch
 import importlib
-import os
 
 # see https://github.com/NVIDIA/nccl/issues/1234
 os.environ['NCCL_CUMEM_ENABLE'] = '0'
@@ -68,7 +69,6 @@ _lazy_modules = {
 
 
 def __getattr__(name):
-
     if name in _lazy_modules:
         module_spec = _lazy_modules[name]
         module_path, attr_name = module_spec.split(":")
