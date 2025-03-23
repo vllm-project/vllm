@@ -1,20 +1,29 @@
 from typing import Optional
 import torch
+from torch import nn
 from torch import Tensor
 import numpy as np
 from typing import List
 from collections import defaultdict
 from typing import Tuple
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.config import VllmConfig
+from vllm.forward_context import set_forward_context
+from vllm.v1.sample.metadata import SamplingMetadata
 
 
 class EagleProposer:
 
-    def __init__(self):
-        self.partial_prefill_last_token_hidden_states = defaultdict(
+    def __init__(
+        self, vllm_config: VllmConfig,
+        model:nn.Module, sampling_metadata:SamplingMetadata):
+        self._partial_prefill_last_token_hidden_states = defaultdict(
             lambda: torch.zeros(256, dtype=torch.float32)
         )
-        #self._model = model
+        self._vllm_config = vllm_config
+        self._model = model
+        self._sampling_metadata = sampling_metadata
+
 
     def propose(
         self,
@@ -84,36 +93,110 @@ class EagleProposer:
             eagle_seq_lens, eagle_num_tokens,
             completed_prefill_mask, partial_prefill_mask,
             zero_position_mask, accepted_token_ids)
+
+        eagle_metadata = self._construct_eagle_prefill_attn_metadata(
+            attention_metadata,
+            eagle_num_tokens,
+            target_model_start_locs,
+            target_model_seq_lens,
+            eagle_start_locs,
+            eagle_seq_lens,
+            partial_prefill_mask,
+            completed_prefill_mask,
+            zero_position_mask            
+        )
+        # We will sample everything except partial prefills
+        eagle_hidden_states = None
+        with set_forward_context(eagle_metadata, self._vllm_config):
+            eagle_hidden_states = self._model(
+                input_ids=eagle_input_ids,
+                positions=eagle_positions,
+                previous_hidden_states=eagle_previous_hidden_state,
+            )
+            logits_indices = \
+                eagle_start_locs[~partial_prefill_mask] + \
+                    eagle_seq_lens[~partial_prefill_mask] - 1            
+            sample_hidden_states = eagle_hidden_states[logits_indices]
+            logits = self._model.compute_logits(sample_hidden_states, None)
+            sampler_output = self._model.sample(
+                logits=logits,
+                sampling_metadata=self._sampling_metadata,
+            
+            )
+        
+
+
+            eagle_previous_hidden_state = eagle_hidden_states
+            for _ in range(0, num_lookahead_slots):
+                eagle_hidden_states = self._model(
+                    input_ids=eagle_input_ids,
+                    positions=eagle_positions,
+                    previous_hidden_states=eagle_previous_hidden_state,
+                )
+                eagle_previous_hidden_state = eagle_hidden_states
+                logits = self._model.compute_logits(sample_hidden_states, None)
+
+            
+
+
+
         print('eagle_input_ids ' + str(eagle_input_ids))
 
         return target_model_input_ids, target_model_input_ids
+
+    def _construct_eagle_speculate_attn_metadata(
+        self,
+        eagle_prefill_attention_metadata: FlashAttentionMetadata,
+        sampled_mask: Tensor,
+        eagle_start_locs: Tensor,
+        eagle_seq_lens: Tensor,
+    ) -> FlashAttentionMetadata:
+        eagle_speculate_attn_metadata = eagle_prefill_attention_metadata
+        eagle_speculate_attn_metadata.num_actual_tokens =  sampled_mask.sum().item()
+        eagle_speculate_attn_metadata.max_query_len = 1
+        eagle_speculate_attn_metadata.query_start_loc = torch.arange(
+            0, eagle_speculate_attn_metadata.num_actual_tokens + 1)
+        eagle_speculate_attn_metadata.seq_lens = \
+            eagle_speculate_attn_metadata.seq_lens[sampled_mask] + 1
+        eagle_speculate_attn_metadata.max_seq_len = \
+            eagle_speculate_attn_metadata.seq_lens.max().item()
+        last_slot_indices =  eagle_start_locs[sampled_mask] + eagle_seq_lens[sampled_mask] - 1
+        eagle_speculate_attn_metadata.slot_mapping =\
+            eagle_speculate_attn_metadata.slot_mapping[last_slot_indices] + 1 
+        return eagle_speculate_attn_metadata
+
+    def _construct_input_from_sampled_output(
+        self,
+        sampler_output: SamplerOutput
+    ) -> Tensor
+        return 
+
+
+
     
-    def _updateAttentionMetadata(
+    def _construct_eagle_prefill_attn_metadata(
         self,
         attention_metadata: FlashAttentionMetadata,
         num_eagle_tokens: int,
+        target_model_start_locs: Tensor,
         target_model_seq_lens: Tensor,
         eagle_start_locs: Tensor,
         eagle_seq_lens: Tensor,
         partial_prefill_mask: Tensor,
-        completed_prefill_mask: Tensor) -> FlashAttentionMetadata:
+        completed_prefill_mask: Tensor,
+        zero_position_mask: Tensor) -> FlashAttentionMetadata:
         eagle_seq_lens = attention_metadata.seq_lens - \
             target_model_seq_lens + eagle_seq_lens
-        eagle_slot_mapping = torch.zeros(
-            (num_eagle_tokens), dtype=attention_metadata.slot_mapping.dtype)
-        prefill_mask = partial_prefill_mask | completed_prefill_mask
-        start_indices =  eagle_start_locs[prefill_mask]
-        end_indices = start_indices + eagle_seq_lens[prefill_mask]
-        range_lengths = end_indices - start_indices
-        start_pos = attention_metadata.slot_mapping[start_indices]
-        eagle_slot_mapping = self._populate_positions(
-            eagle_slot_mapping, start_indices, range_lengths, start_pos)
-        start_indices =  eagle_start_locs[~prefill_mask]
-        end_indices = start_indices + eagle_seq_lens[~prefill_mask]
-        range_lengths = end_indices - start_indices
-        start_pos = attention_metadata.slot_mapping[~start_indices] + 1
-        eagle_slot_mapping = self._populate_positions(
-            eagle_slot_mapping, start_indices, range_lengths, start_pos)
+        eagle_slot_mapping = self._update_attention_metadata_slot_mappings(
+            attention_metadata.slot_mapping,
+            num_eagle_tokens,
+            target_model_start_locs,
+            eagle_start_locs,
+            eagle_seq_lens,
+            partial_prefill_mask,
+            completed_prefill_mask,
+            zero_position_mask
+        )
         eagle_attention_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_eagle_tokens,
             max_query_len=int(eagle_seq_lens.max().item()),
@@ -132,6 +215,40 @@ class EagleProposer:
         )
         return eagle_attention_metadata
 
+    def _update_attention_metadata_slot_mappings(
+        self,
+        target_model_slot_mapping: Tensor,
+        num_eagle_tokens: int,
+        target_model_start_locs: Tensor,
+        eagle_start_locs: Tensor,
+        eagle_seq_lens: Tensor,
+        partial_prefill_mask: Tensor,
+        completed_prefill_mask: Tensor,
+        zero_position_mask: Tensor) -> Tensor:
+        eagle_slot_mapping = torch.zeros(
+            (num_eagle_tokens), dtype=target_model_slot_mapping.dtype)
+        prefill_mask = partial_prefill_mask | completed_prefill_mask
+        # Handle prefill and zero positions first.
+        non_prefill_zero_start_mask = ~prefill_mask & zero_position_mask
+        start_indices =  eagle_start_locs[non_prefill_zero_start_mask]
+        end_indices = start_indices + eagle_seq_lens[non_prefill_zero_start_mask]
+        range_lengths = end_indices - start_indices
+        start_pos = target_model_slot_mapping[
+            target_model_start_locs[non_prefill_zero_start_mask]]
+        eagle_slot_mapping = self._populate_positions(
+            eagle_slot_mapping, start_indices, range_lengths, start_pos)
+
+        # Prefill with non zero mask
+        non_zero_prefill_mask = ~zero_position_mask & prefill_mask
+        start_indices =  eagle_start_locs[non_zero_prefill_mask]
+        end_indices = start_indices + eagle_seq_lens[non_zero_prefill_mask]
+        range_lengths = end_indices - start_indices
+        start_pos = target_model_slot_mapping[
+            target_model_start_locs[non_zero_prefill_mask]]
+        eagle_slot_mapping = self._populate_positions(
+            eagle_slot_mapping, start_indices, range_lengths, start_pos)
+        
+        return eagle_slot_mapping
 
     
     def _expand_indices(self, starts: Tensor, ends: Tensor):
@@ -223,7 +340,7 @@ class EagleProposer:
         target_indices = eagle_start_locs[prefill_mask & ~zero_position_mask]
         for req_id, target_index in zip(req_ids_from_prev_step, target_indices) :
             eagle_prev_hidden_states[target_index] = \
-                self.partial_prefill_last_token_hidden_states[req_id]
+                self._partial_prefill_last_token_hidden_states[req_id]
 
         # For the partial prefills we need to copy over the last token hidden
         # states into partial_prefill_last_token_hidden_states.
@@ -233,7 +350,7 @@ class EagleProposer:
             target_model_start_locs[partial_prefill_mask] + \
             target_model_seq_lens[partial_prefill_mask]
         for req_id, target_index in zip(req_ids_from_prev_step, target_indices) :
-            self.partial_prefill_last_token_hidden_states[req_id] = \
+            self._partial_prefill_last_token_hidden_states[req_id] = \
                 target_model_hidden_state[target_index]
         
         # Remove the completed prefill req_ids from 
@@ -241,7 +358,7 @@ class EagleProposer:
         indices = (completed_prefill_mask).nonzero(as_tuple=True)[0].tolist()
         req_ids_for_completed_prefill = [req_ids[i] for i in indices]
         for req_id in req_ids_for_completed_prefill:
-            self.partial_prefill_last_token_hidden_states.pop(req_id, None)
+            self._partial_prefill_last_token_hidden_states.pop(req_id, None)
 
         return eagle_prev_hidden_states
 
