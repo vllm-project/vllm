@@ -58,7 +58,11 @@ from vllm import LLM, SamplingParams
 ```
 
 The next section defines a list of input prompts and sampling parameters for text generation. The [sampling temperature](https://arxiv.org/html/2402.05201v1) is set to `0.8` and the [nucleus sampling probability](https://en.wikipedia.org/wiki/Top-p_sampling) is set to `0.95`. You can find more information about the sampling parameters [here](#sampling-params).
+:::{important}
+By default, vLLM will use sampling parameters recommended by model creator by applying the `generation_config.json` from the huggingface model repository if it exists. In most cases, this will provide you with the best results by default if {class}`~vllm.SamplingParams` is not specified.
 
+However, if vLLM's default sampling parameters are preferred, please pass `generation_config vllm` when creating the {class}`~vllm.LLM` instance.
+:::
 ```python
 prompts = [
     "Hello, my name is",
