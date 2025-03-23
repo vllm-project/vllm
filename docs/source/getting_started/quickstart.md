@@ -112,7 +112,7 @@ By default, the server uses a predefined chat template stored in the tokenizer.
 You can learn about overriding it [here](#chat-template).
 :::
 :::{important}
-By default, the server applies `generation_config.json` from the huggingface model repository if it exists. This means the default values of certain sampling parameters can be different from the ones specified in the {class}`~vllm.SamplingParams` class.
+By default, the server applies `generation_config.json` from the huggingface model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
 
 To disable this behavior, please pass `--generation-config vllm` when launching the server.
 :::
