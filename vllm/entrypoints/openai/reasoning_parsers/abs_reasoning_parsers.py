@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from abc import abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
 from typing import Callable, Optional, Union
@@ -75,6 +76,40 @@ class ReasoningParser:
         raise NotImplementedError(
             "AbstractReasoningParser.extract_reasoning_content_streaming "
             "has not been implemented!")
+
+    # TODO: need to rebase by PR #14428
+    @abstractmethod
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        """
+        Check if the reasoning content ends in the input_ids.
+        Parameters:
+        input_ids: list[int]
+            The input_ids of the model output.
+        Returns:
+        bool
+            True if the reasoning content ends in the input_ids.
+        """
+
+        raise NotImplementedError(
+            "AbstractReasoningParser.is_reasoning_end has"
+            "not been implemented!")
+
+    # TODO: need to rebase by PR #14428
+    @abstractmethod
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        """
+        Extract content token ids from the input_ids.
+        Parameters:
+        input_ids: list[int]
+            The input_ids of the model output.
+        Returns:
+        list[int]
+            The extracted content from the input_ids.
+        """
+
+        raise NotImplementedError(
+            "AbstractReasoningParser.extract_content_ids has"
+            " not been implemented!")
 
 
 class ReasoningParserManager:
