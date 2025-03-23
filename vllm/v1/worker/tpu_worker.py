@@ -17,7 +17,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.scheduler import SchedulerOutput
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
@@ -75,6 +75,9 @@ class TPUWorker:
                         self.profile_dir)
             self.profiler = xp.start_server(9012)
 
+        if self.model_config.seed is None:
+            self.model_config.seed = 0
+
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
         torch.set_grad_enabled(False)
@@ -93,7 +96,8 @@ class TPUWorker:
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        xm.set_rng_state(self.model_config.seed, self.device)
+        if self.model_config.seed is not None:
+            xm.set_rng_state(self.model_config.seed, self.device)
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
@@ -185,7 +189,7 @@ class TPUWorker:
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
-    def get_kv_cache_spec(self) -> KVCacheSpec:
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
