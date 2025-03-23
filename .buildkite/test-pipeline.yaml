@@ -136,6 +136,10 @@ steps:
   - examples/offline_inference/rlhf_colocate.py
   - tests/examples/offline_inference/data_parallel.py
   commands:
+  # test with tp=2 and external_dp=2
+  - VLLM_USE_V1=0 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
+  - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
+  # test with internal dp
   - python3 ../examples/offline_inference/data_parallel.py
   - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
@@ -144,8 +148,8 @@ steps:
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - pushd ../examples/offline_inference
-  - python3 rlhf.py
-  - RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
+  - VLLM_ENABLE_V1_MULTIPROCESSING=0 python3 rlhf.py
+  - VLLM_ENABLE_V1_MULTIPROCESSING=0 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
 
 - label: Metrics, Tracing Test # 10min
@@ -198,7 +202,9 @@ steps:
   commands:
     # split the test to avoid interference
     - pytest -v -s v1/core
+    - pytest -v -s v1/entrypoints
     - pytest -v -s v1/engine
+    - pytest -v -s v1/entrypoints
     - pytest -v -s v1/sample
     - pytest -v -s v1/worker
     - pytest -v -s v1/structured_output
@@ -225,10 +231,13 @@ steps:
     - python3 offline_inference/basic/chat.py
     - python3 offline_inference/prefix_caching.py
     - python3 offline_inference/llm_engine_example.py
-    - python3 offline_inference/vision_language.py
-    - python3 offline_inference/vision_language_multi_image.py
+    - python3 offline_inference/audio_language.py --seed 0
+    - python3 offline_inference/vision_language.py --seed 0
+    - python3 offline_inference/vision_language_embedding.py --seed 0
+    - python3 offline_inference/vision_language_multi_image.py --seed 0
     - VLLM_USE_V1=0 python3 other/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 other/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference/encoder_decoder.py
+    - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
     - python3 offline_inference/basic/classify.py
     - python3 offline_inference/basic/embed.py
     - python3 offline_inference/basic/score.py
@@ -290,6 +299,7 @@ steps:
   # these tests need to be separated, cannot combine
   - pytest -v -s compile/piecewise/test_simple.py
   - pytest -v -s compile/piecewise/test_toy_llama.py
+  - pytest -v -s compile/test_pass_manager.py
 
 - label: PyTorch Fullgraph Test # 18min
   source_file_dependencies:
@@ -505,9 +515,7 @@ steps:
   - vllm/worker/model_runner.py
   - entrypoints/llm/test_collective_rpc.py
   commands:
-  - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - VLLM_USE_V1=1 torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
-  - torchrun --nproc-per-node=2 distributed/test_torchrun_example.py
+  - VLLM_ENABLE_V1_MULTIPROCESSING=0 pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
@@ -521,7 +529,7 @@ steps:
   # TODO: investigate and fix
   # - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
-  - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s kv_transfer/disagg_test.py
+  - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s kv_transfer/test_disagg.py
 
 - label: Plugin Tests (2 GPUs) # 40min
   working_dir: "/vllm-workspace/tests"
