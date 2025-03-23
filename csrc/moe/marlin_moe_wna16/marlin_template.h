@@ -1667,9 +1667,11 @@ __global__ void Marlin(
       int row = c_gl_wr / c_gl_stride;
       int64_t sorted_row = block_sorted_ids[row];
       int64_t true_idx = sorted_row * c_gl_stride + c_gl_wr % c_gl_stride;
-      scalar_t2 topk_weight_score =
-          Dtype::num2num2(Dtype::float2num(block_topk_weights[row]));
       if (row < block_num_valid_tokens) {
+        scalar_t2 topk_weight_score;
+        if (mul_topk_weights) 
+          topk_weight_score =
+            Dtype::num2num2(Dtype::float2num(block_topk_weights[row]));
         if (use_atomic_add && slice_count > 1 || mul_topk_weights) {
           scalar_t2* C_half2 = reinterpret_cast<scalar_t2*>(&C[true_idx]);
           scalar_t2* sh_red_half2 =
