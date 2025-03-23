@@ -193,12 +193,9 @@ class Plamo2MambaMixer(nn.Module):
         # The activation function is fixed to SiLU.
         self.activation = "silu"
 
-        self.dt_layernorm = RMSNorm(self.time_step_rank,
-                                    eps=config.rms_norm_eps)
-        self.b_layernorm = RMSNorm(self.ssm_state_size,
-                                   eps=config.rms_norm_eps)
-        self.c_layernorm = RMSNorm(self.ssm_state_size,
-                                   eps=config.rms_norm_eps)
+        self.dt_norm = RMSNorm(self.time_step_rank, eps=config.rms_norm_eps)
+        self.B_norm = RMSNorm(self.ssm_state_size, eps=config.rms_norm_eps)
+        self.C_norm = RMSNorm(self.ssm_state_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -262,9 +259,9 @@ class Plamo2MambaMixer(nn.Module):
             [self.ssm_state_size, self.ssm_state_size, self.time_step_rank],
             dim=-1,
         )
-        time_step = self.dt_layernorm(time_step.contiguous())
-        B = self.b_layernorm(B.contiguous())
-        C = self.c_layernorm(C.contiguous())
+        time_step = self.dt_norm(time_step.contiguous())
+        B = self.B_norm(B.contiguous())
+        C = self.C_norm(C.contiguous())
 
         discrete_time_step = self.dt_proj(time_step)[0].transpose(-2, -1)
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
@@ -707,9 +704,9 @@ class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
             replacements = {
                 # Rename incompatible weight names.
                 ".A_log": ".A",
-                ".B_norm_weight": ".b_layernorm.weight",
-                ".C_norm_weight": ".c_layernorm.weight",
-                ".dt_norm_weight": ".dt_layernorm.weight",
+                ".B_norm_weight": ".B_norm.weight",
+                ".C_norm_weight": ".C_norm.weight",
+                ".dt_norm_weight": ".dt_norm.weight",
             }
             # Apply replacements based on the defined mappings
             for old, new in replacements.items():
