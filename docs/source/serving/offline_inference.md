@@ -97,6 +97,18 @@ llm = LLM(model="adept/fuyu-8b",
           max_num_seqs=2)
 ```
 
+:::{important}
+The default `max_num_seqs` has been raised from `256` in V0 to `1024` in V1.
+If you encounter OOM only when using V1 engine, try setting a lower value of `max_num_seqs`.
+:::
+
+#### Adjust cache size
+
+If you run out of CPU RAM, try the following options:
+
+- (Multi-modal models only) you can set the size of multi-modal input cache using `VLLM_MM_INPUT_CACHE_GIB` environment variable (default 4 GiB).
+- (CPU backend only) you can set the size of KV cache using `VLLM_CPU_KVCACHE_SPACE` environment variable (default 4 GiB).
+
 ### Performance optimization and tuning
 
 You can potentially improve the performance of vLLM by finetuning various options.
