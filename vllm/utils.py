@@ -744,6 +744,14 @@ def is_pin_memory_available() -> bool:
     return current_platform.is_pin_memory_available()
 
 
+@cache
+def is_uva_available() -> bool:
+    """Check if Unified Virtual Addressing (UVA) is available."""
+    # UVA requires pinned memory.
+    # TODO: Add more requirements for UVA if needed.
+    return is_pin_memory_available()
+
+
 class DeviceMemoryProfiler:
 
     def __init__(self, device: Optional[torch.types.Device] = None):
