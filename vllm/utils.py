@@ -1591,6 +1591,14 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
+def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Get a CUDA view of a CPU tensor using Unified Virtual Addressing (UVA).
+    """
+    assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
+    return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+
+
 def is_in_doc_build() -> bool:
     try:
         from sphinx.ext.autodoc.mock import _MockModule
