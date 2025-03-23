@@ -392,6 +392,8 @@ steps:
   - tests/models/embedding/language
   - tests/models/encoder_decoder/language
   commands:
+    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
+    - pip install causal-conv1d
     - pytest -v -s models/decoder_only/language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/language -m core_model
 
@@ -403,6 +405,8 @@ steps:
   - tests/models/embedding/language
   - tests/models/encoder_decoder/language
   commands:
+    # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
+    - pip install causal-conv1d
     - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
     - pytest -v -s models/embedding/language -m 'not core_model'
 

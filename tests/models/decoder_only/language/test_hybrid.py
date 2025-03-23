@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib
-import site
-
-import pip
 import pytest
 
 from tests.utils import multi_gpu_test
@@ -12,10 +8,6 @@ from vllm.sampling_params import SamplingParams
 
 from ...utils import check_outputs_equal
 
-# Install causal-conv1d here, as it is not compatible with pip-compile.
-pip.main(['install', 'causal-conv1d'])
-importlib.reload(site)
-
 # This test is for the hybrid models
 MODELS = [
     "ai21labs/Jamba-tiny-dev", "Zyphra/Zamba2-1.2B-instruct",
@@ -23,6 +15,9 @@ MODELS = [
 ]
 # Bamba at Fp32 is too big for the CI (L4 GPU).
 # MODELS = ["ai21labs/Jamba-tiny-dev", "ibm-ai-platform/Bamba-9B"]
+# Note: Running Plamo2 in transformers implementation requires to install
+# causal-conv1d package, which is not listed as a test dependency as it's
+# not compatible with pip-compile.
 
 
 @pytest.mark.parametrize("model", MODELS)
