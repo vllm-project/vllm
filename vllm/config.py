@@ -1023,6 +1023,13 @@ class ModelConfig:
                     "max_new_tokens")
         else:
             diff_sampling_param = {}
+
+        if diff_sampling_param:
+            logger.warning_once(
+                "Default sampling parameters have been overridden by the "
+                "model's Hugging Face generation config recommended from the "
+                "model creator. If this is not intended, please relaunch "
+                "vLLM instance with `--generation-config vllm`.")
         return diff_sampling_param
 
     @property
