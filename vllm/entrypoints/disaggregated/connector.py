@@ -2,7 +2,7 @@
 """
 Toy connector for prototyping.
 
-When PDClient supports the protocol and we clean up the
+When PDConroller supports the protocol and we clean up the
 OpenAI Server, we can drop this in favor of vllm serve.
 """
 
@@ -14,7 +14,7 @@ import uvloop
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from vllm.disaggregated.pd_client import PDClient
+from vllm.disaggregated.pd_contoller import PDController
 from vllm.entrypoints.openai.protocol import (CompletionRequest,
                                               CompletionResponse,
                                               ErrorResponse)
@@ -51,12 +51,12 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 
 @asynccontextmanager
-async def pd_client_ctx(prefill_addr: str, decode_addr: str,
-                        connector_addr: str,
-                        model_name: str) -> AsyncIterator[PDClient]:
-    client = PDClient(prefill_addr, decode_addr, connector_addr, model_name)
-    yield client
-    client.shutdown()
+async def contoller_ctx(prefill_addr: str, decode_addr: str,
+                        contoller_addr: str,
+                        model_name: str) -> AsyncIterator[PDController]:
+    c = PDController(prefill_addr, decode_addr, contoller_addr, model_name)
+    yield c
+    c.shutdown()
 
 
 async def main(args, **uvicorn_kwargs):
@@ -69,12 +69,12 @@ async def main(args, **uvicorn_kwargs):
     # IPC Paths.
     prefill_addr = f"ipc://{args.prefill_addr}"
     decode_addr = f"ipc://{args.decode_addr}"
-    connector_addr = f"ipc://{args.connector_addr}"
+    contoller_addr = f"ipc://{args.contoller_addr}"
 
     # Start Engine.
-    async with pd_client_ctx(prefill_addr=prefill_addr,
+    async with contoller_ctx(prefill_addr=prefill_addr,
                              decode_addr=decode_addr,
-                             connector_addr=connector_addr,
+                             contoller_addr=contoller_addr,
                              model_name=args.model) as engine_client:
 
         # Initialize App State.

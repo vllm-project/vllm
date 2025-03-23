@@ -45,14 +45,14 @@ wait_for_disagg_server() {
 
 # You can also adjust --kv-ip and --kv-port for distributed inference.
 MODEL=meta-llama/Llama-3.1-8B-Instruct
-CONNECTOR_ADDR=connectoripc
+contoller_addr=connectoripc
 PREFILL_WORKER_ADDR=prefillipc
 DECODE_WORKER_ADDR=decodeipc
 
 # prefilling instance, which is the KV producer
 CUDA_VISIBLE_DEVICES=0 python3 ../vllm/entrypoints/disaggregated/worker.py \
     --model $MODEL \
-    --connector-addr $CONNECTOR_ADDR \
+    --connector-addr $contoller_addr \
     --worker-addr $PREFILL_WORKER_ADDR \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
@@ -62,7 +62,7 @@ CUDA_VISIBLE_DEVICES=0 python3 ../vllm/entrypoints/disaggregated/worker.py \
 # decoding instance, which is the KV consumer
 CUDA_VISIBLE_DEVICES=1 python3 ../vllm/entrypoints/disaggregated/worker.py \
     --model $MODEL \
-    --connector-addr $CONNECTOR_ADDR \
+    --connector-addr $contoller_addr \
     --worker-addr $DECODE_WORKER_ADDR \
     --max-model-len 100 \
     --gpu-memory-utilization 0.8 \
@@ -76,7 +76,7 @@ CUDA_VISIBLE_DEVICES=1 python3 ../vllm/entrypoints/disaggregated/worker.py \
 python3 ../vllm/entrypoints/disaggregated/connector.py \
     --port $PORT \
     --model $MODEL \
-    --connector-addr $CONNECTOR_ADDR \
+    --connector-addr $contoller_addr \
     --prefill-addr $PREFILL_WORKER_ADDR \
     --decode-addr $DECODE_WORKER_ADDR
 

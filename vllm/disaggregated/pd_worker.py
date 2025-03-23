@@ -26,8 +26,8 @@ class PDWorker:
         """
         PDWorker
             * Wrapper around AsyncLLM to handle converting PRRequests
-              to PDResponse and sending back to the PDClient.
-            * Leverages ZMQ for communication with PDClient. We may
+              to PDResponse and sending back to the PDConroller.
+            * Leverages ZMQ for communication with PDConroller. We may
               expand this in the future.
         """
         # Engine.
@@ -66,7 +66,7 @@ class PDWorker:
     async def run_busy_loop(self):
         """
         main loop:
-            1) wait for a request from the PDClient
+            1) wait for a request from the PDConroller
             2) handle the request
         """
         logger.info("PDWorker is ready To handle requests.")
@@ -116,7 +116,7 @@ class PDWorker:
             * 1) submit request to AsyncLLM
             * 2) iterate the RequestOutputs
             * 3) convert RequestOutput --> PDResponse
-            * 4) serialize and send to PDClient
+            * 4) serialize and send to PDConroller
         """
         request_id = req.request_id
 
@@ -131,8 +131,9 @@ class PDWorker:
             # 3) Convert RequestOutput --> PDResponse.
             response = PDGenerationResponse.from_request_output(request_output)
 
-            # 4) Serialize and send to PDClient.
+            # 4) Serialize and send to PDConroller.
             response_bytes = self.encoder.encode(response)
+            msg = [PDGenerationResponse.SUCCE, response_bytes]
             logger.debug("Sending: %s", request_id)
-            await self.to_client.send(response_bytes, copy=False)
+            await self.to_client.send_multipart(msg, copy=False)
             logger.debug("Sent: %s", request_id)

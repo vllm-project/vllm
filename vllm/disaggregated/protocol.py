@@ -14,8 +14,8 @@ from vllm.outputs import RequestOutput
 
 
 class PDRequestType:
-    GENERATION = b"generation"
-    ABORT = b"abort"
+    GENERATION = b'\x00'
+    ABORT = b'\x01'
 
 
 class PDGenerationRequest(msgspec.Struct):
@@ -30,8 +30,8 @@ class PDAbortRequest(msgspec.Struct):
 
 
 class PDResponseType:
-    GENERATION = b"generation"
-    FAILURE = b"failure"
+    GENERATION = b'\x00'
+    FAILURE = b'\x01'
 
 
 class PDGenerationResponse(msgspec.Struct):
