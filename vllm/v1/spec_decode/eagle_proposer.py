@@ -291,28 +291,6 @@ class EagleProposer:
         eagle_positions = self._populate_positions(
             eagle_positions, start_indices, range_lengths, start_pos)
 
-        #ranges = torch.cat([torch.arange(0, length, dtype=torch.long, device=eagle_positions.device)\
-        #     for length in range_lengths])
-        #start_indices_expanded = prefill_zero_position_start_indices.repeat_interleave(range_lengths)
-        #eagle_positions[start_indices_expanded + ranges] = ranges
-
-        # Handle prefills starting at non zero positions.
-        #prefill_non_zero_position_start_indices =  eagle_seq_start_locs[
-        #    prefill_mask & ~zero_position_mask]
-        #prefill_non_zero_position_end_indices = \
-        #    prefill_non_zero_position_start_indices + \
-        #        eagle_seq_lens[prefill_mask & ~zero_position_mask]
-        #prefill_non_zero_target_model_start_positions = \
-        #    target_model_positions[
-        #        target_model_seq_start_locs[prefill_mask & ~zero_position_mask]]
-        #range_lengths = prefill_non_zero_position_end_indices - prefill_non_zero_position_start_indices
-        #ranges = torch.cat([
-        #    torch.arange(start - 1, start + length - 1, dtype=torch.long, device=eagle_positions.device) 
-        #    for start, length in zip(prefill_non_zero_target_model_start_positions, range_lengths)
-        #])
-        #start_indices_expanded = prefill_non_zero_position_start_indices.repeat_interleave(range_lengths)
-        #eagle_positions[start_indices_expanded + ranges] = ranges               
-
         # Handle non prefills.
         start_indices =  eagle_start_locs[~prefill_mask]
         end_indices = start_indices + eagle_seq_lens[~prefill_mask]
@@ -321,13 +299,6 @@ class EagleProposer:
         eagle_positions = self._populate_positions(
             eagle_positions, start_indices, range_lengths, start_pos)
         
-        #ranges = torch.cat([
-        #    torch.arange(start - 1, start + length - 1, dtype=torch.long, device=eagle_positions.device) 
-        #    for start, length in zip(start_positions, range_lengths)
-        #])
-        #start_indices_expanded = start_indices.repeat_interleave(range_lengths)
-        #eagle_positions[start_indices_expanded + ranges] = ranges               
-
         return eagle_positions
 
     def _get_input_ids_for_proposer(
@@ -389,156 +360,6 @@ class EagleProposer:
             eagle_input_ids[start_idx : start_idx + len] = accepted_token[:len]
         
         return eagle_input_ids
-        
-
-    def _get_positions_for_proposer_2(
-        self,
-        req_ids: List,
-        input_ids_of_original_model: Tensor,
-        position_of_original_model: Tensor,
-        original_seq_start_locs: Tensor,
-        original_seq_lens: Tensor,
-        proposer_seq_start_locs: Tensor,
-        proposer_seq_lens: Tensor,
-        is_prefill: Tensor,
-        accepted_token_lengths: Tensor
-    ):
-        completed_prefill_mask = is_prefill.bool() & (accepted_token_lengths > 0)
-        non_prefill_mask = ~is_prefill
-
-        position_src_starts = original_seq_start_locs
-        position_src_starts[non_prefill_mask] += 1
-        position_src_ends = torch.where(
-            non_prefill_mask,
-            proposer_seq_start_locs + accepted_token_lengths - 1,
-            proposer_seq_start_locs + original_seq_lens
-        )
-        position_tgt_starts = proposer_seq_start_locs
-        position_tgt_ends = torch.where(
-            non_prefill_mask, position_tgt_starts + accepted_token_lengths - 1,
-            torch.where(
-                completed_prefill_mask,
-                position_tgt_starts + proposer_seq_lens - 1,
-                position_tgt_starts + proposer_seq_lens)
-        )
-        total_tokens = proposer_seq_lens.sum()
-        proposer_positions = torch.zeros((total_tokens,), dtype=hidden_state.dtype)
-        src_indices = torch.cat([
-            torch.arange(start, end + 1, dtype=torch.long) 
-            for start, end in zip(position_src_starts, position_src_ends)
-        ])
-        tgt_indices = torch.cat([
-            torch.arange(start, start + (end - start) + 1)
-            for start, end in zip(position_tgt_starts, position_tgt_ends)
-        ])
-        proposer_positions[tgt_indices] = position_of_original_model[src_indices]
-        last_index_of_completed_prefill_seq = \
-            proposer_seq_start_locs[completed_prefill_mask] + \
-                 proposer_seq_lens[completed_prefill_mask]
-        last_index_of_non_prefill_seq  = \
-            proposer_seq_start_locs[non_prefill_mask] + \
-                 proposer_seq_lens[non_prefill_mask] + accepted_token_lengths[non_prefill_mask]
-        proposer_positions[last_index_of_completed_prefill_seq] = \
-            proposer_positions[last_index_of_completed_prefill_seq - 1] + 1
-        proposer_positions[last_index_of_non_prefill_seq] = \
-            proposer_positions[last_index_of_non_prefill_seq - 1] + 1
-
-    def _get_input_ids_for_proposer_1(
-        self,
-        req_ids: List,
-        input_ids_of_original_model: Tensor,
-        position_of_original_model: Tensor,
-        original_seq_start_locs: Tensor,
-        original_seq_lens: Tensor,
-        proposer_seq_start_locs: Tensor,
-        proposer_seq_lens: Tensor,
-        is_prefill: Tensor,
-        accepted_token_lengths: Tensor
-    ):
-        # Identify masks
-        completed_prefill_mask = is_prefill & (accepted_token_lengths > 0)
-        non_prefill_mask = ~is_prefill
-
-        # Compute start and end positions
-        position_src_starts = original_seq_start_locs.clone()
-        position_src_starts[non_prefill_mask] += 1
-
-        # Compute source and target ranges more efficiently
-        src_range_lengths = torch.where(
-            non_prefill_mask,
-            accepted_token_lengths,
-            original_seq_lens
-        )
-        tgt_range_lengths = torch.where(
-            non_prefill_mask,
-            accepted_token_lengths,
-            proposer_seq_lens
-        )
-
-        # Allocate memory
-        total_tokens = proposer_seq_lens.sum()
-        proposer_positions = torch.zeros(total_tokens, dtype=hidden_state.dtype)
-
-        # Efficiently generate src/tgt indices
-        src_indices = torch.repeat_interleave(position_src_starts, src_range_lengths)
-        tgt_indices = torch.repeat_interleave(proposer_seq_start_locs, tgt_range_lengths)
-
-        # Assign positions
-        proposer_positions[tgt_indices] = position_of_original_model[src_indices]
-
-        # Efficiently update final index values
-        last_indices = torch.cat([
-            proposer_seq_start_locs[completed_prefill_mask] + proposer_seq_lens[completed_prefill_mask],
-            proposer_seq_start_locs[non_prefill_mask] + proposer_seq_lens[non_prefill_mask] +
-            accepted_token_lengths[non_prefill_mask]
-        ])
-        proposer_positions[last_indices] = proposer_positions[last_indices - 1] + 1
-
-        return proposer_positions
-
-    def _get_input_ids_for_proposer_3(
-        self,
-        req_ids: List,
-        input_ids_of_original_model: Tensor,
-        position_of_original_model: Tensor,
-        original_seq_start_locs: Tensor,
-        original_seq_lens: Tensor, 
-        proposer_seq_start_locs: Tensor,
-        proposer_seq_lens: Tensor,
-        is_prefill: Tensor,
-        accepted_token_lengths: Tensor,
-        accepted_token_ids: Tensor,
-    ):
-        completed_prefill_mask = is_prefill.bool() & (accepted_token_lengths > 0)
-        non_prefill_mask = ~is_prefill
-        input_ids_prefill_src_starts = original_seq_start_locs[is_prefill]
-        zero_position_mask = position_of_original_model[input_ids_prefill_src_starts] == 0
-        input_ids_prefill_src_starts[zero_position_mask] += 1
-        input_ids_prefill_src_ends = \
-            original_seq_start_locs[is_prefill] + original_seq_lens[is_prefill]
-        input_ids_prefill_tgt_starts = proposer_seq_start_locs[is_prefill]
-        input_ids_prefill_tgt_ends = torch.where(
-            zero_position_mask, 
-            input_ids_prefill_tgt_starts + original_seq_lens[is_prefill] - 1,
-            input_ids_prefill_tgt_starts + original_seq_lens[is_prefill]
-        )
-        non_prefill_tgt_starts = proposer_seq_start_locs[non_prefill_mask]
-        non_prefill_tgt_ends = non_prefill_tgt_starts + accepted_token_lengths[non_prefill_mask] - 1
-
-        total_tokens = proposer_seq_lens.sum()
-        input_ids_proposer = torch.zeros((total_tokens,), dtype=input_ids_of_original_model.dtype)
-        for idx, (start, end, tgt_start) in enumerate(
-            zip(input_ids_prefill_src_starts, input_ids_prefill_src_ends, input_ids_prefill_tgt_starts)):
-            input_ids_proposer[tgt_start: tgt_start + (end - start)] = input_ids_of_original_model[start:end]
-
-        non_prefill_tgt_starts = proposer_seq_start_locs[non_prefill_mask]
-        for idx, (start, length) in enumerate(zip(non_prefill_tgt_starts, accepted_token_lengths[non_prefill_mask])):
-            input_ids_proposer[start : start + length] = accepted_token_ids[idx, :length]
-        for idx, (tgt_loc, src_loc) in enumerate(zip(completed_prefill_tgt_locs, completed_prefill_src_locs)):
-            input_ids_proposer[tgt_loc] = accepted_token_ids[idx, 0]
-
-        return input_ids_proposer
-
 
 
 
