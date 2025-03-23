@@ -119,7 +119,13 @@ def _swiglu(h: torch.Tensor) -> torch.Tensor:
 class Plamo2MambaMixer(nn.Module):
     # TODO(Shinichi): Rebase on Mamba2 implementation.
 
-    def __init__(self, config: PlamoConfig, prefix: str = ""):
+    def __init__(self,
+                 config: PlamoConfig,
+                 cache_config: CacheConfig,
+                 quant_config: QuantizationConfig,
+                 max_model_len: int,
+                 prefix: str = "",
+                 **kwargs) -> None:
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -150,11 +156,11 @@ class Plamo2MambaMixer(nn.Module):
             prefix=f"{prefix}.in_proj",
         )
         # selective projection used to make dt, B and C input dependent
-        self.x_proj = RowParallelLinear(
+        self.bcdt_proj = RowParallelLinear(
             self.intermediate_size,
             self.time_step_rank + self.ssm_state_size * 2,
             bias=False,
-            prefix=f"{prefix}.x_proj",
+            prefix=f"{prefix}.bcdt_proj",
         )
         # time step projection (discretization) -
         # In the forward we need to apply dt_proj without the bias,
@@ -194,8 +200,12 @@ class Plamo2MambaMixer(nn.Module):
         self.c_layernorm = RMSNorm(self.ssm_state_size,
                                    eps=config.rms_norm_eps)
 
-    def forward(self, hidden_states: torch.Tensor,
-                mamba_cache_params: MambaCacheParams):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        mamba_cache_params: MambaCacheParams,
+        **kwargs,
+    ) -> torch.Tensor:
 
         attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
 
@@ -244,7 +254,7 @@ class Plamo2MambaMixer(nn.Module):
 
         # 3. State Space Model sequence transformation
         # 3.a. input varying initialization of time_step, B and C
-        ssm_parameters = self.x_proj(hidden_states.transpose(-2, -1))[0]
+        ssm_parameters = self.bcdt_proj(hidden_states.transpose(-2, -1))[0]
 
         # Splitting the ssm_parameters as in modeling_plamo.py.
         B, C, time_step = torch.split(
@@ -349,60 +359,12 @@ class DenseMLP(Plamo2MoE):
                          quant_config=quant_config)
 
 
-class Plamo2MambaDecoderLayer(nn.Module):
+class Plamo2AttentionMixer(nn.Module):
 
     def __init__(self,
                  config: PlamoConfig,
-                 layer_idx: int,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 max_model_len: int | None = None,
-                 **kwargs) -> None:
-        super().__init__()
-        self.config = config
-        self.mamba = Plamo2MambaMixer(config)
-
-        ffn_layer_class = DenseMLP
-        self.mlp = ffn_layer_class(config, quant_config=quant_config)
-        self.pre_mixer_norm = RMSNorm(config.hidden_size,
-                                      eps=config.rms_norm_eps)
-        self.post_mixer_norm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.pre_mlp_norm = RMSNorm(config.hidden_size,
-                                    eps=config.rms_norm_eps)
-        self.post_mlp_norm = RMSNorm(config.hidden_size,
-                                     eps=config.rms_norm_eps)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        mamba_cache_params: MambaCacheParams,
-        **kwargs,
-    ):
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.pre_mixer_norm(hidden_states)
-        else:
-            hidden_states, residual = self.pre_mixer_norm(
-                hidden_states, residual)
-
-        hidden_states = self.mamba(hidden_states, mamba_cache_params)
-        hidden_states = self.post_mixer_norm(hidden_states)
-        # Fully Connected
-        hidden_states, residual = self.pre_mlp_norm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = self.post_mlp_norm(hidden_states)
-        return hidden_states, residual
-
-
-class Plamo2AttentionDecoderLayer(nn.Module):
-
-    def __init__(self,
-                 config: PlamoConfig,
-                 layer_idx: int,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
+                 cache_config: CacheConfig,
+                 quant_config: QuantizationConfig,
                  max_model_len: int | None = None,
                  prefix: str = "",
                  **kwargs) -> None:
@@ -467,21 +429,11 @@ class Plamo2AttentionDecoderLayer(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        ffn_layer_class = DenseMLP
-        self.mlp = ffn_layer_class(config, quant_config=quant_config)
-        self.pre_mixer_norm = RMSNorm(config.hidden_size,
-                                      eps=config.rms_norm_eps)
-        self.post_mixer_norm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.pre_mlp_norm = RMSNorm(config.hidden_size,
-                                    eps=config.rms_norm_eps)
-        self.post_mlp_norm = RMSNorm(config.hidden_size,
-                                     eps=config.rms_norm_eps)
-
-    def self_attention(
+    def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
         **kwargs,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
@@ -493,11 +445,52 @@ class Plamo2AttentionDecoderLayer(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
+
+class Plamo2DecoderLayer(nn.Module):
+
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 layer_idx: int,
+                 max_model_len: int | None = None,
+                 prefix: str = "",
+                 **kwargs) -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        max_model_len = vllm_config.scheduler_config.max_model_len
+
+        self.is_mamba = is_mamba(config, layer_idx)
+        if self.is_mamba:
+            self.mixer = Plamo2MambaMixer(config=config,
+                                          cache_config=cache_config,
+                                          quant_config=quant_config,
+                                          max_model_len=max_model_len,
+                                          prefix=f"{prefix}.mixer")
+        else:
+            self.mixer = Plamo2AttentionMixer(config=config,
+                                              cache_config=cache_config,
+                                              quant_config=quant_config,
+                                              max_model_len=max_model_len,
+                                              prefix=f"{prefix}.mixer")
+
+        ffn_layer_class = DenseMLP
+        self.mlp = ffn_layer_class(config, quant_config=quant_config)
+        self.pre_mixer_norm = RMSNorm(config.hidden_size,
+                                      eps=config.rms_norm_eps)
+        self.post_mixer_norm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.pre_mlp_norm = RMSNorm(config.hidden_size,
+                                    eps=config.rms_norm_eps)
+        self.post_mlp_norm = RMSNorm(config.hidden_size,
+                                     eps=config.rms_norm_eps)
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
+        mamba_cache_params: MambaCacheParams,
         **kwargs,
     ):
         if residual is None:
@@ -507,10 +500,10 @@ class Plamo2AttentionDecoderLayer(nn.Module):
             hidden_states, residual = self.pre_mixer_norm(
                 hidden_states, residual)
 
-        hidden_states = self.self_attention(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+        hidden_states = self.mixer(positions=positions,
+                                   hidden_states=hidden_states,
+                                   residual=residual,
+                                   mamba_cache_params=mamba_cache_params)
         hidden_states = self.post_mixer_norm(hidden_states)
         # Fully Connected
         hidden_states, residual = self.pre_mlp_norm(hidden_states, residual)
@@ -523,24 +516,14 @@ class Plamo2Decoder(torch.nn.Module):
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
 
-        config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-
-        decoder_layers = []
-        for i in range(config.num_hidden_layers):
-            layer_class = Plamo2MambaDecoderLayer if is_mamba(
-                config, i) else Plamo2AttentionDecoderLayer
-            decoder_layers.append(
-                layer_class(
-                    config,
-                    layer_idx=i,
-                    cache_config=cache_config,
-                    quant_config=quant_config,
-                    max_model_len=vllm_config.scheduler_config.max_model_len,
-                    prefix=f"{prefix}.decoder_layers.{i}"))
-        self.layers = nn.ModuleList(decoder_layers)
+        self.layers = nn.ModuleList([
+            Plamo2DecoderLayer(vllm_config=vllm_config,
+                               layer_idx=i,
+                               prefix=f"{prefix}.layers.{i}")
+            for i in range(num_hidden_layers)
+        ])
 
     def forward(
         self,
@@ -552,7 +535,7 @@ class Plamo2Decoder(torch.nn.Module):
         mamba_cache_index = 0
         for layer in self.layers:
             layer_mamba_cache_params = None
-            if isinstance(layer, Plamo2MambaDecoderLayer):
+            if layer.is_mamba:
                 layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
                     mamba_cache_index)
                 mamba_cache_index += 1
@@ -740,21 +723,11 @@ class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
             # of the model.
             # Do not change the order of the replacements.
             replacements = {
-                # Skip PlmoDecoderLayer.
-                ".mixer": "",
-
-                # Rename each mamba layer's components.
-                ".A_log": ".mamba.A",
-                ".B_norm_weight": ".mamba.b_layernorm.weight",
-                ".C_norm_weight": ".mamba.c_layernorm.weight",
-                ".dt_norm_weight": ".mamba.dt_layernorm.weight",
-                ".bcdt_proj.weight": ".mamba.x_proj.weight",
-                ".conv1d.weight": ".mamba.conv1d.weight",
-                ".in_proj.weight": ".mamba.in_proj.weight",
-                ".out_proj.weight": ".mamba.out_proj.weight",
-                ".D": ".mamba.D",
-                ".dt_bias": ".mamba.dt_bias",
-                ".dt_proj.weight": ".mamba.dt_proj.weight",
+                # Rename incompatible weight names.
+                ".A_log": ".A",
+                ".B_norm_weight": ".b_layernorm.weight",
+                ".C_norm_weight": ".c_layernorm.weight",
+                ".dt_norm_weight": ".dt_layernorm.weight",
             }
             # Apply replacements based on the defined mappings
             for old, new in replacements.items():
