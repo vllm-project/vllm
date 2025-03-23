@@ -319,8 +319,6 @@ class DenseMLP(nn.Module):
 
     def __init__(self,
                  config: PlamoConfig,
-                 params_dtype: Optional[torch.dtype] = None,
-                 tp_size: Optional[int] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -453,8 +451,7 @@ class Plamo2DecoderLayer(nn.Module):
                                               max_model_len=max_model_len,
                                               prefix=f"{prefix}.mixer")
 
-        ffn_layer_class = DenseMLP
-        self.mlp = ffn_layer_class(config, quant_config=quant_config)
+        self.mlp = DenseMLP(config=config, quant_config=quant_config)
         self.pre_mixer_norm = RMSNorm(config.hidden_size,
                                       eps=config.rms_norm_eps)
         self.post_mixer_norm = RMSNorm(config.hidden_size,
