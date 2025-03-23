@@ -17,6 +17,10 @@ from vllm.v1.engine.detokenizer import (FastIncrementalDetokenizer,
                                         IncrementalDetokenizer,
                                         SlowIncrementalDetokenizer)
 
+SPECIAL_TOKS_TRUTH = [
+    "Some text with adjacent special tokens                <|padding|><|padding|><fim_prefix><fim_middle><fim_suffix>other text<fim_pad>",  # noqa
+]
+
 TRUTH = [
     "Hello here, this is a simple test",
     "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be used in production environments, where inference and serving",  # noqa
@@ -26,8 +30,8 @@ TRUTH = [
     # incomplete UTF-8 characters
     # see https://github.com/vllm-project/vllm/pull/9625
     "ပုံပြင်လေးပြောပြပါ်",
-    "Some text with adjacent special tokens                <|padding|><|padding|><fim_prefix><fim_middle><fim_suffix>other text<fim_pad>",  # noqa
-]
+] + SPECIAL_TOKS_TRUTH
+
 TOKENIZERS = [
     "facebook/opt-125m",
     "gpt2",
@@ -229,8 +233,7 @@ def detokenizer(tokenizer_name: str) -> Detokenizer:
 @pytest.fixture(name="complete_sequence_token_ids")
 def create_complete_sequence_token_ids(complete_sequence: str,
                                        tokenizer) -> list[int]:
-    complete_sequence_token_ids = tokenizer(complete_sequence).input_ids
-    return complete_sequence_token_ids
+    return tokenizer(complete_sequence).input_ids
 
 
 def create_sequence(prompt_token_ids=None):
@@ -297,10 +300,23 @@ def test_decode_sequence_logprobs(complete_sequence: str,
 
 @pytest.mark.parametrize("complete_sequence", TRUTH)
 @pytest.mark.parametrize("tokenizer_name", TOKENIZERS)
-def test_decode_prompt_logprobs(complete_sequence_token_ids: list[int],
+def test_decode_prompt_logprobs(complete_sequence: str,
+                                complete_sequence_token_ids: list[int],
                                 detokenizer: Detokenizer):
+
+    # We want to use skip_special_tokens=False here but Mistral tokenizers
+    # don't support that.
+    if complete_sequence not in SPECIAL_TOKS_TRUTH:
+        skip_special_tokens = True
+    elif not isinstance(detokenizer.tokenizer_group.get_lora_tokenizer(None),
+                        MistralTokenizer):
+        skip_special_tokens = False
+    else:
+        pytest.skip("MistralTokenizers don't support "
+                    "skip_special_tokens=False")
+        return
     """Verify Detokenizer decodes prompt logprobs correctly."""
-    sampling_params = SamplingParams(skip_special_tokens=False,
+    sampling_params = SamplingParams(skip_special_tokens=skip_special_tokens,
                                      prompt_logprobs=1)
 
     # Run sequentially.
@@ -320,8 +336,10 @@ def test_decode_prompt_logprobs(complete_sequence_token_ids: list[int],
     # decoded_prompt_logprobs doesn't contain the first token.
     token_ids = complete_sequence_token_ids
     tokenizer = detokenizer.get_tokenizer_for_seq(seq)
-    text_full = tokenizer.decode(token_ids, skip_special_tokens=False)
-    text_first = tokenizer.decode(token_ids[0], skip_special_tokens=False)
+    text_full = tokenizer.decode(token_ids,
+                                 skip_special_tokens=skip_special_tokens)
+    text_first = tokenizer.decode(token_ids[0],
+                                  skip_special_tokens=skip_special_tokens)
     text = text_full[len(text_first):]
 
     # Text for logprobs for the chosen token should be the same as the
