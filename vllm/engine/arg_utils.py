@@ -1681,11 +1681,6 @@ class EngineArgs:
         if self.pipeline_parallel_size > 1 and _warn_or_fallback("PP"):
             return False
 
-        # ngram is supported on V1, but off by default for now.
-        if self.speculative_model in (
-                "ngram", "[ngram]") and _warn_or_fallback("ngram"):
-            return False
-
         # Non-CUDA is supported on V1, but off by default for now.
         not_cuda = not current_platform.is_cuda()
         if not_cuda and _warn_or_fallback(  # noqa: SIM103
