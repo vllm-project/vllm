@@ -5,11 +5,32 @@
 from .version import __version__, __version_tuple__  # isort:skip
 
 import os
+
 import torch
-import importlib
+
+from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
+from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.llm_engine import LLMEngine
+from vllm.entrypoints.llm import LLM
+from vllm.executor.ray_utils import initialize_ray_cluster
+from vllm.inputs import PromptType, TextPrompt, TokensPrompt
+from vllm.model_executor.models import ModelRegistry
+from vllm.outputs import (ClassificationOutput, ClassificationRequestOutput,
+                          CompletionOutput, EmbeddingOutput,
+                          EmbeddingRequestOutput, PoolingOutput,
+                          PoolingRequestOutput, RequestOutput, ScoringOutput,
+                          ScoringRequestOutput)
+from vllm.pooling_params import PoolingParams
+from vllm.sampling_params import SamplingParams
+
+# set some common config/environment variables that should be set
+# for all processes created by vllm and all processes
+# that interact with vllm workers.
+# they are executed whenever `import vllm` is called.
 
 # see https://github.com/NVIDIA/nccl/issues/1234
 os.environ['NCCL_CUMEM_ENABLE'] = '0'
+
 # see https://github.com/vllm-project/vllm/issues/10480
 os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
 # see https://github.com/vllm-project/vllm/issues/10619
@@ -41,43 +62,3 @@ __all__ = [
     "initialize_ray_cluster",
     "PoolingParams",
 ]
-
-_lazy_modules = {
-    "EngineArgs": "vllm.engine.arg_utils:EngineArgs",
-    "AsyncEngineArgs": "vllm.engine.arg_utils:AsyncEngineArgs",
-    "AsyncLLMEngine": "vllm.engine.async_llm_engine:AsyncLLMEngine",
-    "LLMEngine": "vllm.engine.llm_engine:LLMEngine",
-    "LLM": "vllm.entrypoints.llm:LLM",
-    "initialize_ray_cluster": "vllm.executor.ray_utils:initialize_ray_cluster",
-    "PromptType": "vllm.inputs:PromptType",
-    "TextPrompt": "vllm.inputs:TextPrompt",
-    "TokensPrompt": "vllm.inputs:TokensPrompt",
-    "ModelRegistry": "vllm.model_executor.models:ModelRegistry",
-    "ClassificationOutput": "vllm.outputs:ClassificationOutput",
-    "ClassificationRequestOutput": "vllm.outputs:ClassificationRequestOutput",
-    "CompletionOutput": "vllm.outputs:CompletionOutput",
-    "EmbeddingOutput": "vllm.outputs:EmbeddingOutput",
-    "EmbeddingRequestOutput": "vllm.outputs:EmbeddingRequestOutput",
-    "PoolingOutput": "vllm.outputs:PoolingOutput",
-    "PoolingRequestOutput": "vllm.outputs:PoolingRequestOutput",
-    "RequestOutput": "vllm.outputs:RequestOutput",
-    "ScoringOutput": "vllm.outputs:ScoringOutput",
-    "ScoringRequestOutput": "vllm.outputs:ScoringRequestOutput",
-    "SamplingParams": "vllm.sampling_params:SamplingParams",
-    "PoolingParams": "vllm.pooling_params:PoolingParams",
-}
-
-
-def __getattr__(name):
-    if name in _lazy_modules:
-        module_spec = _lazy_modules[name]
-        module_path, attr_name = module_spec.split(":")
-        module = importlib.import_module(module_path)
-        value = getattr(module, attr_name)
-        return value
-    
-    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
-
-
-def __dir__():
-    return __all__ 
