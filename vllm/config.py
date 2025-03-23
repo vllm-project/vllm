@@ -2015,6 +2015,7 @@ class SpeculativeConfig:
             # Set default values if not provided
             if (self.prompt_lookup_min is None
                     and self.prompt_lookup_max is None):
+                # TODO(woosuk): Tune these values. They are arbitrarily chosen.
                 self.prompt_lookup_min = 5
                 self.prompt_lookup_max = 5
             elif self.prompt_lookup_min is None:
