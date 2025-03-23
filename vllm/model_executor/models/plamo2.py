@@ -318,17 +318,14 @@ class Plamo2MambaMixer(nn.Module):
         return contextualized_states
 
 
-class Plamo2MoE(nn.Module):
+class DenseMLP(nn.Module):
 
     def __init__(self,
                  config: PlamoConfig,
-                 num_experts: Optional[int] = None,
-                 top_k: Optional[int] = None,
                  params_dtype: Optional[torch.dtype] = None,
                  tp_size: Optional[int] = None,
                  quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
-        assert num_experts is None or num_experts <= 1, "MoE not supported"
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.gate_up_proj = torch.nn.Linear(self.hidden_size,
@@ -342,21 +339,6 @@ class Plamo2MoE(nn.Module):
         h = self.gate_up_proj(hidden_states)
         h = _swiglu(h)
         return self.down_proj(h)  # type: ignore
-
-
-class DenseMLP(Plamo2MoE):
-
-    def __init__(self,
-                 config: PlamoConfig,
-                 params_dtype: Optional[torch.dtype] = None,
-                 tp_size: Optional[int] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
-        super().__init__(config,
-                         num_experts=1,
-                         top_k=1,
-                         params_dtype=params_dtype,
-                         tp_size=tp_size,
-                         quant_config=quant_config)
 
 
 class Plamo2AttentionMixer(nn.Module):
