@@ -242,6 +242,11 @@ class SyncMPClient(MPClient):
     def reset_prefix_cache(self) -> None:
         self._send_input(EngineCoreRequestType.RESET_PREFIX_CACHE, None)
 
+    def save_sharded_state(self, path: str, pattern: Optional[str] = None,
+                          max_size: Optional[int] = None) -> None:
+        params = {"path": path, "pattern": pattern, "max_size": max_size}
+        self._send_input(EngineCoreRequestType.SAVE_SHARDED_STATE, params)
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""

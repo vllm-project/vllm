@@ -57,10 +57,11 @@ def main(args):
     # Prepare output directory
     Path(args.output).mkdir(exist_ok=True)
     # Dump worker states to output directory
-    model_executor = llm.llm_engine.model_executor
-    model_executor.save_sharded_state(path=args.output,
-                                      pattern=args.file_pattern,
-                                      max_size=args.max_file_size)
+    # For V1 engine, we need to use engine_core.save_sharded_state
+    llm.llm_engine.engine_core.save_sharded_state(
+        path=args.output,
+        pattern=args.file_pattern,
+        max_size=args.max_file_size)
     # Copy metadata files to output directory
     for file in os.listdir(model_path):
         if os.path.splitext(file)[1] not in (".bin", ".pt", ".safetensors"):

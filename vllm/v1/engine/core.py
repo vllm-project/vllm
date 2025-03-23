@@ -257,6 +257,12 @@ class EngineCoreProc(EngineCore):
             self.reset_prefix_cache()
         elif request_type == EngineCoreRequestType.PROFILE:
             self.model_executor.profile(request)
+        elif request_type == EngineCoreRequestType.SAVE_SHARDED_STATE:
+            self.model_executor.save_sharded_state(
+                path=request["path"],
+                pattern=request["pattern"],
+                max_size=request["max_size"]
+            )
 
     def process_input_socket(self, input_path: str):
         """Input socket IO thread."""
