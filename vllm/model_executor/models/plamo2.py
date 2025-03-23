@@ -519,26 +519,14 @@ class Plamo2AttentionDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class Plamo2Model(PlamoPreTrainedModel):
+class PlamoDecoder(torch.nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config.model_config.hf_config)
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__()
 
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-
-        self.config = config
-        self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
-        self.org_vocab_size = config.vocab_size
-
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            prefix=f"{prefix}.embed_tokens",
-        )
 
         decoder_layers = []
         for i in range(config.num_hidden_layers):
@@ -553,6 +541,49 @@ class Plamo2Model(PlamoPreTrainedModel):
                     max_model_len=vllm_config.scheduler_config.max_model_len,
                     prefix=f"{prefix}.decoder_layers.{i}"))
         self.layers = nn.ModuleList(decoder_layers)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
+        mamba_cache_params: MambaCacheParams,
+    ) -> torch.Tensor:
+        mamba_cache_index = 0
+        for layer in self.layers:
+            layer_mamba_cache_params = None
+            if isinstance(layer, Plamo2MambaDecoderLayer):
+                layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
+                    mamba_cache_index)
+                mamba_cache_index += 1
+
+            hidden_states, residual = layer(
+                positions=positions,
+                hidden_states=hidden_states,
+                residual=residual,
+                mamba_cache_params=layer_mamba_cache_params)
+        return hidden_states, residual
+
+
+class Plamo2Model(PlamoPreTrainedModel):
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config.model_config.hf_config)
+
+        config = vllm_config.model_config.hf_config
+
+        self.config = config
+        self.padding_idx = config.pad_token_id
+        self.vocab_size = config.vocab_size
+        self.org_vocab_size = config.vocab_size
+
+        self.embed_tokens = VocabParallelEmbedding(
+            self.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            prefix=f"{prefix}.embed_tokens",
+        )
+        self.layers = PlamoDecoder(vllm_config, prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_init()
 
@@ -568,19 +599,11 @@ class Plamo2Model(PlamoPreTrainedModel):
         hidden_states = self.embed_tokens(input_ids)
         residual = None
 
-        mamba_cache_index = 0
-        for layer in self.layers:
-            layer_mamba_cache_params = None
-            if isinstance(layer, Plamo2MambaDecoderLayer):
-                layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
-                    mamba_cache_index)
-                mamba_cache_index += 1
-
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-                mamba_cache_params=layer_mamba_cache_params)
+        hidden_states, residual = self.layers(
+            positions=positions,
+            hidden_states=hidden_states,
+            residual=residual,
+            mamba_cache_params=mamba_cache_params)
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -717,8 +740,6 @@ class Plamo2ForCausalLM(PlamoPreTrainedModel, HasInnerState, IsHybrid,
             # of the model.
             # Do not change the order of the replacements.
             replacements = {
-                # Skip PlamoDecoderLayers.
-                ".layers.layers": ".layers",
                 # Skip PlmoDecoderLayer.
                 ".mixer": "",
 
