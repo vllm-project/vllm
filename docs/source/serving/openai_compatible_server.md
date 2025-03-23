@@ -34,7 +34,7 @@ vLLM supports some parameters that are not supported by OpenAI, `top_k` for exam
 You can pass these parameters to vLLM using the OpenAI client in the `extra_body` parameter of your requests, i.e. `extra_body={"top_k": 50}` for `top_k`.
 :::
 :::{important}
-By default, the server applies `generation_config.json` from the huggingface model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
+By default, the server applies `generation_config.json` from the Hugging Face model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
 
 To disable this behavior, please pass `--generation-config vllm` when launching the server.
 :::
