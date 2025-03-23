@@ -19,14 +19,10 @@ from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Final, Literal,
 import torch
 from pydantic import BaseModel, Field, PrivateAttr
 from torch.distributed import ProcessGroup, ReduceOp
-from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
-                                                     get_quantization_config)
-from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import CpuArchEnum
 from vllm.sampling_params import GuidedDecodingParams
 from vllm.tracing import is_otel_available, otel_import_error_traceback
@@ -42,6 +38,7 @@ from vllm.utils import (GiB_bytes, LayerBlockType, cuda_device_count_stateless,
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
+    from transformers import PretrainedConfig
 
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization.base_config import (
@@ -83,8 +80,8 @@ _TASK_RUNNER: dict[_ResolvedTask, RunnerType] = {
     for task in tasks
 }
 
-HfOverrides = Union[dict[str, Any], Callable[[PretrainedConfig],
-                                             PretrainedConfig]]
+HfOverrides = Union[dict[str, Any], Callable[["PretrainedConfig"],
+                                             "PretrainedConfig"]]
 
 
 class SupportsHash(Protocol):
@@ -428,6 +425,7 @@ class ModelConfig:
 
     @property
     def registry(self):
+        from vllm.model_executor.models import ModelRegistry
         return ModelRegistry
 
     @property
@@ -616,6 +614,8 @@ class ModelConfig:
         return quant_cfg
 
     def _verify_quantization(self) -> None:
+        from vllm.model_executor.layers.quantization import (
+            QUANTIZATION_METHODS, get_quantization_config)
         supported_quantization = QUANTIZATION_METHODS
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
@@ -1062,6 +1062,7 @@ class ModelConfig:
 
     @property
     def is_v1_compatible(self) -> bool:
+        from vllm.model_executor.models import ModelRegistry
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.is_v1_compatible(architectures)
 
@@ -1836,7 +1837,8 @@ class SpeculativeConfig:
         return hash_str
 
     @staticmethod
-    def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+    def hf_config_override(
+            hf_config: "PretrainedConfig") -> "PretrainedConfig":
         if hf_config.model_type == "deepseek_v3":
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
@@ -2111,7 +2113,7 @@ class SpeculativeConfig:
     def _verify_and_get_draft_model_tensor_parallel_size(
             target_parallel_config: ParallelConfig,
             speculative_draft_tensor_parallel_size: Optional[int],
-            draft_hf_config: PretrainedConfig) -> int:
+            draft_hf_config: "PretrainedConfig") -> int:
         """
         Verifies and adjusts the tensor parallel size for a draft model
         specified using speculative_draft_tensor_parallel_size.
@@ -2140,7 +2142,7 @@ class SpeculativeConfig:
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: int,
-        draft_hf_config: PretrainedConfig,
+        draft_hf_config: "PretrainedConfig",
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
@@ -2520,7 +2522,7 @@ _ROCM_NOT_SUPPORTED_DTYPE: list[str] = []  #
 
 
 def _get_and_verify_dtype(
-    config: PretrainedConfig,
+    config: "PretrainedConfig",
     dtype: Union[str, torch.dtype],
 ) -> torch.dtype:
     # NOTE: getattr(config, "torch_dtype", torch.float32) is not correct
@@ -2602,7 +2604,7 @@ def _get_and_verify_dtype(
 
 
 def _get_and_verify_max_len(
-    hf_config: PretrainedConfig,
+    hf_config: "PretrainedConfig",
     max_model_len: Optional[int],
     disable_sliding_window: bool,
     sliding_window_len: Optional[Union[int, list[Optional[int]]]],
@@ -3424,7 +3426,7 @@ class VllmConfig:
 
     def with_hf_config(
         self,
-        hf_config: PretrainedConfig,
+        hf_config: "PretrainedConfig",
         architectures: Optional[list[str]] = None,
     ) -> "VllmConfig":
         if architectures is not None:

@@ -4,13 +4,16 @@ import itertools
 import warnings
 from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import Any, Callable, ClassVar, Optional, Union, cast, overload, TYPE_CHECKING
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union,
+                    cast, overload)
 
 import cloudpickle
 import torch.nn as nn
 from tqdm import tqdm
 from typing_extensions import TypeVar, deprecated
 
+from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
+                              BeamSearchSequence, get_beam_search_score)
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption,
@@ -33,18 +36,15 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
 
-from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
-                              BeamSearchSequence, get_beam_search_score)
-
 if TYPE_CHECKING:
-    from vllm.engine.arg_utils import HfOverrides, PoolerConfig,TaskOption
-    
+    from vllm.engine.arg_utils import HfOverrides, PoolerConfig, TaskOption
+
 logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
@@ -192,7 +192,7 @@ class LLM:
         it defaults to False.
         '''
         from vllm.engine.arg_utils import EngineArgs
-        
+
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
 
@@ -710,7 +710,7 @@ class LLM:
             )
 
             prompt_data: Union[str, list[int]]
-            if isinstance(tokenizer, "MistralTokenizer"):
+            if isinstance(tokenizer, MistralTokenizer):
                 prompt_data = apply_mistral_chat_template(
                     tokenizer,
                     messages=msgs,
@@ -1043,7 +1043,7 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
 
-        if isinstance(tokenizer, "MistralTokenizer"):
+        if isinstance(tokenizer, MistralTokenizer):
             raise ValueError(
                 "Score API is only enabled for `--task embed or score`")
 

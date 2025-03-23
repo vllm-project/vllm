@@ -19,9 +19,7 @@ from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
                          ParallelConfig, PoolerConfig, PromptAdapterConfig,
                          SchedulerConfig, SpeculativeConfig, TaskOption,
                          TokenizerPoolConfig, VllmConfig)
-from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.plugins import load_general_plugins
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
@@ -29,6 +27,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, StoreBoolean
 
 if TYPE_CHECKING:
+    from vllm.executor.executor_base import ExecutorBase
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
 logger = init_logger(__name__)
@@ -111,7 +110,7 @@ class EngineArgs:
     # is intended for expert use only. The API may change without
     # notice.
     distributed_executor_backend: Optional[Union[str,
-                                                 Type[ExecutorBase]]] = None
+                                                 Type["ExecutorBase"]]] = None
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
@@ -575,6 +574,9 @@ class EngineArgs:
                             action='store_true',
                             help='Disable logging statistics.')
         # Quantization settings.
+        from vllm.model_executor.layers.quantization import (
+            QUANTIZATION_METHODS)
+
         parser.add_argument('--quantization',
                             '-q',
                             type=nullable_str,

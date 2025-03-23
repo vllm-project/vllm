@@ -2,13 +2,15 @@
 
 from collections.abc import Mapping, MutableMapping
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
 
 import aiohttp
-import requests
 
 from vllm.version import __version__ as VLLM_VERSION
+
+if TYPE_CHECKING:
+    import requests
 
 
 class HTTPConnection:
@@ -22,8 +24,9 @@ class HTTPConnection:
         self._sync_client: Optional[requests.Session] = None
         self._async_client: Optional[aiohttp.ClientSession] = None
 
-    def get_sync_client(self) -> requests.Session:
+    def get_sync_client(self) -> "requests.Session":
         if self._sync_client is None or not self.reuse_client:
+            import requests
             self._sync_client = requests.Session()
 
         return self._sync_client

@@ -8,11 +8,10 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Iterable
 from functools import cache, lru_cache, partial
 from pathlib import Path
-from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
-                    cast)
+from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, Optional,
+                    TypeVar, Union, cast)
 
 import jinja2.nodes
-import transformers.utils.chat_template_utils as hf_chat_utils
 # yapf conflicts with isort for this block
 # yapf: disable
 from openai.types.chat import (ChatCompletionAssistantMessageParam,
@@ -28,9 +27,6 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
-# yapf: enable
-# pydantic needs the TypedDict from typing_extensions
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
@@ -39,6 +35,14 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+
+# yapf: enable
+# pydantic needs the TypedDict from typing_extensions
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+
+    from vllm.transformers_utils.tokenizers import MistralTokenizer
 
 logger = init_logger(__name__)
 
@@ -279,6 +283,7 @@ def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
 
 def _try_extract_ast(chat_template: str) -> Optional[jinja2.nodes.Template]:
     try:
+        import transformers.utils.chat_template_utils as hf_chat_utils
         jinja_compiled = hf_chat_utils._compile_jinja_template(chat_template)
         return jinja_compiled.environment.parse(chat_template)
     except Exception:
@@ -311,6 +316,7 @@ def _resolve_chat_template_content_format(
     given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
 ) -> _ChatTemplateContentFormat:
+    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
     if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
         tokenizer_chat_template = tokenizer.chat_template
     else:
@@ -1064,7 +1070,7 @@ def parse_chat_messages_futures(
 
 
 def apply_hf_chat_template(
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    tokenizer: Union["PreTrainedTokenizer", "PreTrainedTokenizerFast"],
     conversation: list[ConversationMessage],
     chat_template: Optional[str],
     *,

@@ -6,35 +6,14 @@ import os
 import time
 from functools import cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Literal, Optional, Type, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Literal, Optional,
+                    Type, Union)
 
 import huggingface_hub
-from huggingface_hub import hf_hub_download
-from huggingface_hub import list_repo_files as hf_list_repo_files
-from huggingface_hub import try_to_load_from_cache
-from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
-                                   HFValidationError, LocalEntryNotFoundError,
-                                   RepositoryNotFoundError,
-                                   RevisionNotFoundError)
 from torch import nn
-from transformers import PretrainedConfig
-from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-# yapf conflicts with isort for this block
-# yapf: disable
-from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
-                                             DbrxConfig, DeepseekVLV2Config,
-                                             EAGLEConfig, ExaoneConfig,
-                                             H2OVLChatConfig,
-                                             InternVLChatConfig, JAISConfig,
-                                             MedusaConfig, MllamaConfig,
-                                             MLPSpeculatorConfig, MPTConfig,
-                                             NemotronConfig, NVLM_D_Config,
-                                             Olmo2Config, RWConfig,
-                                             SolarConfig, Telechat2Config,
-                                             UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import resolve_obj_by_qualname
@@ -48,35 +27,52 @@ MISTRAL_CONFIG_NAME = "params.json"
 HF_TOKEN = os.getenv('HF_TOKEN', None)
 
 logger = init_logger(__name__)
+# yapf conflicts with isort for this block
+# yapf: disable
+if TYPE_CHECKING:
+    from transformers import GenerationConfig, PretrainedConfig
 
-_CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, Type[PretrainedConfig]] = {
-    "mllama": MllamaConfig
+_CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, str] = {
+    "mllama": "MllamaConfig"
 }
 
-_CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
-    "chatglm": ChatGLMConfig,
-    "cohere2": Cohere2Config,
-    "dbrx": DbrxConfig,
-    "deepseek_vl_v2": DeepseekVLV2Config,
-    "mpt": MPTConfig,
-    "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
-    "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
-    "jais": JAISConfig,
-    "mlp_speculator": MLPSpeculatorConfig,
-    "medusa": MedusaConfig,
-    "eagle": EAGLEConfig,
-    "exaone": ExaoneConfig,
-    "h2ovl_chat": H2OVLChatConfig,
-    "internvl_chat": InternVLChatConfig,
-    "nemotron": NemotronConfig,
-    "NVLM_D": NVLM_D_Config,
-    "olmo2": Olmo2Config,
-    "solar": SolarConfig,
-    "telechat": Telechat2Config,
-    "ultravox": UltravoxConfig,
+_CONFIG_REGISTRY: Dict[str, str] = {
+    "chatglm": "ChatGLMConfig",
+    "cohere2": "Cohere2Config",
+    "dbrx": "DbrxConfig",
+    "deepseek_vl_v2": "DeepseekVLV2Config",
+    "mpt": "MPTConfig",
+    "RefinedWeb": "RWConfig",  # For tiiuae/falcon-40b(-instruct)
+    "RefinedWebModel": "RWConfig",  # For tiiuae/falcon-7b(-instruct)
+    "jais": "JAISConfig",
+    "mlp_speculator": "MLPSpeculatorConfig",
+    "medusa": "MedusaConfig",
+    "eagle": "EAGLEConfig",
+    "exaone": "ExaoneConfig",
+    "h2ovl_chat": "H2OVLChatConfig",
+    "internvl_chat": "InternVLChatConfig",
+    "nemotron": "NemotronConfig",
+    "NVLM_D": "NVLM_D_Config",
+    "olmo2": "Olmo2Config",
+    "solar": "SolarConfig",
+    "telechat": "Telechat2Config",
+    "ultravox": "UltravoxConfig",
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
+def get_config_class(key: str) -> Type:
+    config_class_name = _CONFIG_REGISTRY[key]
+    module_path = "vllm.transformers_utils.configs"
+    try:
+        module = __import__(module_path, fromlist=[config_class_name])
+        config_class = getattr(module, config_class_name)
+    except (ImportError, AttributeError) as e:
+        raise ValueError(
+            f"Failed to import config class '{config_class_name}' "
+            f"from module '{module_path}'."
+        ) from e
+
+    return config_class
 
 class ConfigFormat(str, enum.Enum):
     AUTO = "auto"
@@ -126,6 +122,7 @@ def list_repo_files(
                 return modelscope_list_repo_files(repo_id,
                                                   revision=revision,
                                                   token=token)
+            from huggingface_hub import list_repo_files as hf_list_repo_files
             return hf_list_repo_files(repo_id,
                                       revision=revision,
                                       repo_type=repo_type,
@@ -161,6 +158,7 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
         return (local_path / config_name).is_file()
 
     # Offline mode support: Check if config file is cached already
+    from huggingface_hub import try_to_load_from_cache
     cached_filepath = try_to_load_from_cache(repo_id=model,
                                              filename=config_name,
                                              revision=revision)
@@ -178,7 +176,7 @@ def file_or_path_exists(model: Union[str, Path], config_name: str,
                        token=HF_TOKEN)
 
 
-def patch_rope_scaling(config: PretrainedConfig) -> None:
+def patch_rope_scaling(config: "PretrainedConfig") -> None:
     """Provide backwards compatibility for RoPE."""
     text_config = getattr(config, "text_config", None)
     if text_config is not None:
@@ -215,7 +213,7 @@ def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
-def uses_mrope(config: PretrainedConfig) -> bool:
+def uses_mrope(config: "PretrainedConfig") -> bool:
     """Detect if the model with this config uses M-ROPE."""
     rope_scaling = getattr(config, "rope_scaling", None)
     if rope_scaling is None:
@@ -224,7 +222,7 @@ def uses_mrope(config: PretrainedConfig) -> bool:
     return "mrope_section" in rope_scaling
 
 
-def is_encoder_decoder(config: PretrainedConfig) -> bool:
+def is_encoder_decoder(config: "PretrainedConfig") -> bool:
     """Detect if the model with this config is used as an encoder/decoder."""
     text_config = getattr(config, "text_config", None)
     if text_config is not None:
@@ -240,7 +238,7 @@ def get_config(
     code_revision: Optional[str] = None,
     config_format: ConfigFormat = ConfigFormat.AUTO,
     **kwargs,
-) -> PretrainedConfig:
+) -> "PretrainedConfig":
     # Separate model folder from file path for GGUF models
 
     is_gguf = check_gguf_file(model)
@@ -250,6 +248,7 @@ def get_config(
 
     if config_format == ConfigFormat.AUTO:
         try:
+            from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
             if is_gguf or file_or_path_exists(
                     model, HF_CONFIG_NAME, revision=revision):
                 config_format = ConfigFormat.HF
@@ -273,6 +272,7 @@ def get_config(
             raise ValueError(error_message) from e
 
     if config_format == ConfigFormat.HF:
+        from transformers import PretrainedConfig
         config_dict, _ = PretrainedConfig.get_config_dict(
             model,
             revision=revision,
@@ -284,7 +284,7 @@ def get_config(
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
         if model_type in _CONFIG_REGISTRY:
-            config_class = _CONFIG_REGISTRY[model_type]
+            config_class = get_config_class(model_type)
             config = config_class.from_pretrained(
                 model,
                 revision=revision,
@@ -346,7 +346,9 @@ def try_get_local_file(model: Union[str, Path],
     if file_path.is_file():
         return file_path
     else:
+        from huggingface_hub.utils import HFValidationError
         try:
+            from huggingface_hub import try_to_load_from_cache
             cached_filepath = try_to_load_from_cache(repo_id=model,
                                                      filename=file_name,
                                                      revision=revision)
@@ -373,6 +375,10 @@ def get_hf_file_to_dict(file_name: str,
     - config_dict (dict): A dictionary containing
     the contents of the downloaded file.
     """
+    from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
+                                       LocalEntryNotFoundError,
+                                       RepositoryNotFoundError,
+                                       RevisionNotFoundError)
 
     file_path = try_get_local_file(model=model,
                                    file_name=file_name,
@@ -380,6 +386,7 @@ def get_hf_file_to_dict(file_name: str,
 
     if file_path is None:
         try:
+            from huggingface_hub import hf_hub_download
             hf_hub_file = hf_hub_download(model, file_name, revision=revision)
         except huggingface_hub.errors.OfflineModeIsEnabled:
             return None
@@ -611,7 +618,7 @@ def maybe_register_config_serialize_by_value() -> None:
 
 
 def load_params_config(model: Union[str, Path], revision: Optional[str],
-                       **kwargs) -> PretrainedConfig:
+                       **kwargs) -> "PretrainedConfig":
     # This function loads a params.json config which
     # should be used when loading models in mistral format
 
@@ -686,6 +693,7 @@ def load_params_config(model: Union[str, Path], revision: Optional[str],
     config_dict = recurse_elems(config_dict)
 
     # transform to HF config format
+    from transformers import PretrainedConfig
     if config_type == "multimodal":
         config_dict["text_config"] = PretrainedConfig(
             **config_dict["text_config"])
@@ -711,7 +719,7 @@ def get_hf_image_processor_config(
     return get_image_processor_config(model, revision=revision, **kwargs)
 
 
-def get_hf_text_config(config: PretrainedConfig):
+def get_hf_text_config(config: "PretrainedConfig"):
     """Get the "sub" config relevant to llm for multi modal models.
     No op for pure text models.
     """
@@ -748,7 +756,7 @@ def try_get_generation_config(
             return None
 
 
-def get_cross_encoder_activation_function(config: PretrainedConfig):
+def get_cross_encoder_activation_function(config: "PretrainedConfig"):
     if (hasattr(config, "sbert_ce_default_activation_function")
             and config.sbert_ce_default_activation_function is not None):
 

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 from dataclasses import dataclass
-
-from transformers import PreTrainedTokenizer
+from typing import TYPE_CHECKING
 
 from vllm.model_executor.guided_decoding.reasoner.reasoner import Reasoner
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer
 
 
 @dataclass
@@ -18,7 +20,7 @@ class DeepSeekReasoner(Reasoner):
     end_token: str = "</think>"
 
     @classmethod
-    def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
+    def from_tokenizer(cls, tokenizer: "PreTrainedTokenizer") -> Reasoner:
         return cls(start_token_id=tokenizer.encode(
             "<think>", add_special_tokens=False)[0],
                    end_token_id=tokenizer.encode("</think>",

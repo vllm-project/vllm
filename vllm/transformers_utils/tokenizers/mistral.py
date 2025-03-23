@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 import huggingface_hub
-from huggingface_hub import HfApi, hf_hub_download
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer_base import TokenizerBase
@@ -231,7 +230,9 @@ class MistralTokenizer(TokenizerBase):
     @staticmethod
     def _download_mistral_tokenizer_from_hf(tokenizer_name: str,
                                             revision: Optional[str]) -> str:
+        from huggingface_hub import HfApi, hf_hub_download
         try:
+
             hf_api = HfApi()
             files = hf_api.list_repo_files(repo_id=tokenizer_name,
                                            revision=revision)
