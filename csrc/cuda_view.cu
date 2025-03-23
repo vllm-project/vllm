@@ -15,8 +15,10 @@ torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor) {
   TORCH_CHECK(err == cudaSuccess,
               "cudaHostGetDevicePointer failed: ", cudaGetErrorString(err));
 
-  // Construct a CUDA tensor from the device pointer, only change the device to
-  // CUDA
+  // We'll use the same sizes, strides, and dtype as the CPU tensor.
+  // TODO: check if layout is respected.
+  auto sizes = cpu_tensor.sizes();
+  auto strides = cpu_tensor.strides();
   auto options = cpu_tensor.options().device(torch::kCUDA);
 
   // from_blob signature: from_blob(void *data, IntArrayRef sizes, ..., Deleter,
@@ -26,7 +28,8 @@ torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor) {
     // no-op, since the memory is owned by the original CPU tensor
   };
 
-  torch::Tensor cuda_tensor = torch::from_blob(device_ptr, deleter, options);
+  torch::Tensor cuda_tensor =
+      torch::from_blob(device_ptr, sizes, strides, deleter, options);
 
   TORCH_CHECK(cuda_tensor.device().is_cuda(),
               "Resulting tensor is not on CUDA device");
