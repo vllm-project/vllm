@@ -161,6 +161,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.drafter.propose(
                     np.zeros(1024, dtype=np.int32),
                     self.speculative_config.ngram_prompt_lookup_min,
+                    self.speculative_config.ngram_prompt_lookup_max,
                     self.speculative_config.num_speculative_tokens,
                 )
                 self.rejection_sampler = RejectionSampler()
@@ -1156,6 +1157,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             drafter_output = self.drafter.propose(
                 self.input_batch.token_ids_cpu[i, :end_idx],
                 self.speculative_config.ngram_prompt_lookup_min,
+                self.speculative_config.ngram_prompt_lookup_max,
                 self.speculative_config.num_speculative_tokens,
             )
             if drafter_output is None or len(drafter_output) == 0:
