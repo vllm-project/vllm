@@ -10,6 +10,12 @@ from tests.quantization.utils import is_quant_method_supported
 from ..utils import compare_two_settings
 
 
+@pytest.fixture(scope="function", autouse=False)
+def use_v0_only(monkeypatch):
+    # Fall back to V0 if the fixture is used
+    monkeypatch.setenv('VLLM_USE_V1', '0')
+
+
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 def test_cpu_offload_fp8():
@@ -26,7 +32,7 @@ def test_cpu_offload_fp8():
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="gptq_marlin is not supported on this GPU type.")
-def test_cpu_offload_gptq():
+def test_cpu_offload_gptq(use_v0_only):
     # Test GPTQ Marlin
     compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", [],
                          ["--cpu-offload-gb", "1"],
@@ -40,7 +46,7 @@ def test_cpu_offload_gptq():
 
 @pytest.mark.skipif(not is_quant_method_supported("awq_marlin"),
                     reason="awq_marlin is not supported on this GPU type.")
-def test_cpu_offload_awq():
+def test_cpu_offload_awq(use_v0_only):
     # Test AWQ Marlin
     compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ", [],
                          ["--cpu-offload-gb", "1"],
