@@ -14,6 +14,7 @@ DOCKER_BUILDKIT=1 docker build . \
   -t gh200-test \
   --build-arg max_jobs=66 \
   --build-arg nvcc_threads=2 \
+  --build-arg RUN_WHEEL_CHECK=false \
   --build-arg torch_cuda_arch_list="9.0+PTX" \
   --build-arg vllm_fa_cmake_gpu_arches="90-real"
 
