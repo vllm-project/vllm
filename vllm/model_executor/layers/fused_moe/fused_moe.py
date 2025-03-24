@@ -1478,45 +1478,6 @@ def _resize_cache(x, v):
     return x.flatten()[:prod(v)].view(*v)
 
 
-def _resize_caches(intermediate_cache1,
-                   intermediate_cache2,
-                   intermediate_cache3,
-                   tokens_in_chunk,
-                   N,
-                   K,
-                   top_k_num,
-                   new_M,
-                   chunked_dg,
-                   skip_dg):
-    if chunked_dg:
-        slice_size = new_M
-        slice_topk = 1
-    else:
-        slice_size = tokens_in_chunk
-        slice_topk = top_k_num
-
-    # Adjust the intermediate cache size and config for the last
-    # chunk. Note that in most cases we only have one chunk
-    # so the cache size and config are already set correctly and
-    # do not need to be adjusted.
-    if skip_dg:
-        assert tokens_in_chunk * top_k_num < intermediate_cache1.shape[0]
-        intermediate_cache1 = intermediate_cache1[:(tokens_in_chunk *
-                                                    top_k_num)].view(
-                                                        -1, top_k_num, N)
-        intermediate_cache2 = intermediate_cache2.view(-1, N // 2)
-        intermediate_cache3 = intermediate_cache3[:(tokens_in_chunk *
-                                                    top_k_num)].view(
-                                                        -1, top_k_num, K)
-    else:
-        intermediate_cache1 = intermediate_cache1[:slice_size]
-        intermediate_cache2 = intermediate_cache2[:slice_size * slice_topk]
-        intermediate_cache3 = intermediate_cache3[:slice_size]
-
-    return (intermediate_cache1, intermediate_cache2, intermediate_cache3,
-            slice_size)
-
-
 def fused_experts_impl(hidden_states: torch.Tensor,
                        w1: torch.Tensor,
                        w2: torch.Tensor,
@@ -1666,29 +1627,18 @@ def fused_experts_impl(hidden_states: torch.Tensor,
                                    expert_map, top_k_num,
                                   block_m, use_dg and not skip_dg)
 
-        # if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or (use_dg and num_chunks > 1):
-        #     (intermediate_cache1, intermediate_cache2,
-        #      intermediate_cache3, slice_size) = _resize_caches(
-        #          intermediate_cache1,
-        #          intermediate_cache2,
-        #          intermediate_cache3,
-        #          tokens_in_chunk, N, K, top_k_num,
-        #          sorted_token_ids.numel(),
-        #          use_dg and num_chunks > 1,
-        #          skip_dg)
-
-        #     config = get_config_func(slice_size)
-
+        # Adjust the intermediate cache size and config for the last chunk or
+        # when switching from DeepGemm to Triton. Note that in most cases we
+        # only have one chunk so the cache size and config are already set
+        # correctly and do not need to be adjusted.
         if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or (use_dg and num_chunks > 1):
             if use_dg and num_chunks > 1 and not skip_dg:
                 curr_M = sorted_token_ids.numel()
-                curr_top_k_num = 1
                 cache1_view = (curr_M, N)
-                cache2_view = (curr_M * curr_top_k_num, N // 2)
+                cache2_view = (curr_M, N // 2)
                 cache3_view = (curr_M, K)
             else:
                 curr_M = tokens_in_chunk
-                curr_top_k_num = top_k_num
                 cache1_view = (tokens_in_chunk, top_k_num, N)
                 cache2_view = intermediate_cache2.shape
                 cache3_view = (tokens_in_chunk, top_k_num, K)
@@ -1697,7 +1647,6 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             intermediate_cache1 = _resize_cache(intermediate_cache1, cache1_view)
             intermediate_cache2 = _resize_cache(intermediate_cache2, cache2_view)
             intermediate_cache3 = _resize_cache(intermediate_cache3, cache3_view)
-
 
         invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
