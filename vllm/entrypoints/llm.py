@@ -1384,7 +1384,7 @@ class LLM:
                          f"output: {0:.2f} toks/s"),
             )
 
-        with open('config.txt', 'r') as f:
+        with open('config.log', 'r') as f:
             set_factor(float(f.read()))
         reset_counts()
         # Run the engine.

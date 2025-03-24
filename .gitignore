@@ -205,3 +205,6 @@ shellcheck*/
 
 output/
 data/
+
+# Visuals
+playgruond/*.png
