@@ -900,7 +900,7 @@ async def test_request_output_collector():
     cumulative_logprob_expected = 1.0 * num_to_put
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
 
-    # CASE 2: 3 puts (including finished):
+    # CASE 3: Put all 3 (including a finished).
     num_to_put = 3
     outputs = make_outputs()
     for i in range(num_to_put):
