@@ -39,7 +39,10 @@ def ensure_system_prompt(messages: list[dict[str, Any]],
 
 # universal args for all models go here. also good if you need to test locally
 # and change type or KV cache quantization or something.
-ARGS: list[str] = ["--enable-auto-tool-choice", "--max-model-len", "1024"]
+ARGS: list[str] = [
+    "--enable-auto-tool-choice", "--max-model-len", "1024", "--max-num-seqs",
+    "256"
+]
 
 CONFIGS: dict[str, ServerConfig] = {
     "hermes": {

@@ -87,7 +87,7 @@ async def test_single_chat_session_video(client: openai.AsyncOpenAI,
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=6299, total_tokens=6309)
+        completion_tokens=10, prompt_tokens=6287, total_tokens=6297)
 
     message = choice.message
     message = chat_completion.choices[0].message
@@ -180,7 +180,7 @@ async def test_single_chat_session_video_base64encoded(
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=6299, total_tokens=6309)
+        completion_tokens=10, prompt_tokens=6287, total_tokens=6297)
 
     message = choice.message
     message = chat_completion.choices[0].message
