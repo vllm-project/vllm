@@ -16,7 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install minimal dependencies and uv
 RUN apt-get update -y \
-    && apt-get install -y ccache git curl wget sudo \
+    && apt-get install -y ccache git curl wget sudo tzdata \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Add uv to PATH
