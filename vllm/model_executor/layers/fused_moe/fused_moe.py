@@ -1680,21 +1680,18 @@ def fused_experts_impl(hidden_states: torch.Tensor,
         #     config = get_config_func(slice_size)
 
         if (tokens_in_chunk < CHUNK_SIZE and chunk > 0) or (use_dg and num_chunks > 1):
-            if use_dg and num_chunks > 1:
+            if use_dg and num_chunks > 1 and not skip_dg:
                 curr_M = sorted_token_ids.numel()
                 curr_top_k_num = 1
-            else:
-                curr_M = tokens_in_chunk
-                curr_top_k_num = top_k_num
-
-            if skip_dg:
-                cache1_view = (tokens_in_chunk, top_k_num, N)
-                cache2_view = intermediate_cache2.shape
-                cache3_view = (tokens_in_chunk, top_k_num, K)
-            else:
                 cache1_view = (curr_M, N)
                 cache2_view = (curr_M * curr_top_k_num, N // 2)
                 cache3_view = (curr_M, K)
+            else:
+                curr_M = tokens_in_chunk
+                curr_top_k_num = top_k_num
+                cache1_view = (tokens_in_chunk, top_k_num, N)
+                cache2_view = intermediate_cache2.shape
+                cache3_view = (tokens_in_chunk, top_k_num, K)
 
             config = get_config_func(curr_M)
             intermediate_cache1 = _resize_cache(intermediate_cache1, cache1_view)
