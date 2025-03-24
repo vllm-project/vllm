@@ -1414,7 +1414,8 @@ class EngineArgs:
             scheduler_cls=self.scheduler_cls,
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
-            long_prefill_token_threshold=self.long_prefill_token_threshold)
+            long_prefill_token_threshold=self.long_prefill_token_threshold,
+        )
 
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
