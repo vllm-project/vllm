@@ -175,7 +175,7 @@ class TPUModelRunner:
         self.num_tokens_paddings = _get_paddings(
             min_token_size=16,
             max_token_size=self.max_num_tokens,
-            padding_gap=self.compilation_config.tpu_bucket_padding_gap)
+            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler

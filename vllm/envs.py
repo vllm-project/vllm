@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION: bool = False
+    VLLM_TPU_BUCKET_PADDING_GAP: int = 64
 
 
 def get_default_cache_root():
@@ -622,6 +623,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION":
     lambda: bool(int(os.environ["VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION"]))
     if "VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION" in os.environ else None,
+
+    # Gap between buckets for 
+    "VLLM_TPU_BUCKET_PADDING_GAP":
+    lambda: int(os.environ["VLLM_TPU_BUCKET_PADDING_GAP"])
+    if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 64,
 }
 
 # end-env-vars-definition
