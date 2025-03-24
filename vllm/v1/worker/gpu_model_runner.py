@@ -1570,7 +1570,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # TODO: Support other attention modules, e.g., sliding window,
             # cross-attention
             assert isinstance(attn_module, Attention)
-            if attn_module.attn_type == AttentionType.DECODER:
+            if attn_module.attn_type in \
+                [AttentionType.DECODER, AttentionType.ENCODER]:
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,

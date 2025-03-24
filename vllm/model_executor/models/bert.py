@@ -18,15 +18,17 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.pooler import (CrossEncodingPooler, Pooler,
                                                PoolingType)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
-from .interfaces import SupportsCrossEncoding, SupportsV0Only
+from .interfaces import SupportsCrossEncoding
 from .utils import WeightsMapper, maybe_prefix
 
 
@@ -323,6 +325,7 @@ class BertModel(nn.Module):
                  add_pooling_layer: bool = False):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        self.config = config
         self.embeddings = embedding_class(config)
         self.encoder = BertEncoder(vllm_config=vllm_config,
                                    prefix=f"{prefix}.encoder")
@@ -340,12 +343,16 @@ class BertModel(nn.Module):
             hidden_states = inputs_embeds
         else:
             attn_metadata = get_forward_context().attn_metadata
-            assert hasattr(attn_metadata, "seq_lens_tensor")
-            hidden_states = self.embeddings(
-                input_ids=input_ids,
-                seq_lens=attn_metadata.seq_lens_tensor,
-                position_ids=position_ids,
-                token_type_ids=token_type_ids)
+            seq_lens = None
+            if attn_metadata is not None:  # Can be None during warmup
+                seq_lens = getattr(attn_metadata, "seq_lens_tensor",
+                                   attn_metadata.seq_lens)
+                assert seq_lens is not None
+            hidden_states = self.embeddings(input_ids=input_ids,
+                                            seq_lens=seq_lens,
+                                            position_ids=position_ids,
+                                            token_type_ids=token_type_ids)
+
         return self.encoder(hidden_states)
 
     def load_weights(self, weights: Iterable[Tuple[str,
@@ -385,7 +392,7 @@ class BertModel(nn.Module):
         return loaded_params
 
 
-class BertEmbeddingModel(nn.Module, SupportsV0Only):
+class BertEmbeddingModel(nn.Module):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -403,6 +410,8 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only):
         self.model = self._build_model(vllm_config=vllm_config,
                                        prefix=maybe_prefix(prefix, "model"))
         self._pooler = self._build_pooler(pooler_config)
+        # TODO: Remove test scaffolding after pooling is implemented
+        self.sampler = get_sampler()
 
     def forward(
         self,
@@ -411,10 +420,30 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        return self.model(input_ids=input_ids,
-                          position_ids=positions,
-                          inputs_embeds=inputs_embeds,
-                          intermediate_tensors=intermediate_tensors)
+        hidden_states = self.model(input_ids=input_ids,
+                                   position_ids=positions,
+                                   inputs_embeds=inputs_embeds,
+                                   intermediate_tensors=intermediate_tensors)
+        return hidden_states
+
+    # TODO: Remove test scaffolding after pooling is implemented
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = torch.zeros(
+            (hidden_states.shape[0], self.model.config.vocab_size),
+            dtype=torch.half)
+        logits[:, 333] = 1.0
+
+        return logits
+
+    # TODO: Remove test scaffolding after pooling is implemented
+    def sample(self, logits: torch.Tensor,
+               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
 
     def pooler(
         self,

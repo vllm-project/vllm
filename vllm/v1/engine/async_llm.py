@@ -374,7 +374,11 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
     ):
-        raise ValueError("Not Supported on V1 yet.")
+        return self.generate(prompt,
+                             SamplingParams.from_optional(temperature=0,
+                                                          max_tokens=1),
+                             request_id=request_id)
+        #raise ValueError("Not Supported on V1 yet.")
 
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
