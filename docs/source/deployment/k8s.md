@@ -19,6 +19,10 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 ## Deployment with CPUs
 
+:::{note}
+The use of CPUs here is for demonstration and testing purposes only and its performance will not be on par with GPUs.
+:::
+
 First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
 
 ```bash
