@@ -258,7 +258,12 @@ class HfRunner:
             return x
 
         if device is None:
-            device = "cpu" if current_platform.is_cpu() else "cuda"
+            if current_platform.is_hpu():
+                device = "hpu"
+            elif current_platform.is_cpu():
+                device = "cpu"
+            else:
+                device = "cuda"
 
         if isinstance(x, dict):
             return {k: self.wrap_device(v, device) for k, v in x.items()}

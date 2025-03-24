@@ -57,7 +57,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
-from vllm.platforms import _Backend
+from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 
@@ -71,6 +71,7 @@ from .utils import (AutoWeightsLoader, WeightsMapper,
 from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
+is_hpu = current_platform.is_hpu()
 
 # === Vision Inputs === #
 
@@ -312,10 +313,14 @@ class Qwen2_5_VisionAttention(nn.Module):
                 v_i = v[:, start_idx:end_idx]
                 q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
                                  for x in [q_i, k_i, v_i])
-                output_i = F.scaled_dot_product_attention(q_i,
-                                                          k_i,
-                                                          v_i,
-                                                          dropout_p=0.0)
+                if is_hpu:
+                    from habana_frameworks.torch.hpex.kernels import FusedSDPA
+                    output_i = FusedSDPA.apply(q_i, k_i, v_i, None, 0.0)
+                else:
+                    output_i = F.scaled_dot_product_attention(q_i,
+                                                              k_i,
+                                                              v_i,
+                                                              dropout_p=0.0)
                 output_i = rearrange(output_i, "b h s d -> b s h d ")
                 outputs.append(output_i)
             context_layer = torch.cat(outputs, dim=1)
@@ -612,11 +617,30 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         # windows attention
         window_index, cu_window_seqlens = self.get_window_index(grid_thw)
-        cu_window_seqlens = torch.tensor(
-            cu_window_seqlens,
-            device=hidden_states.device,
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32)
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+
+        if is_hpu:
+            # NOTE: unique_consecutive is a dynamic operation
+            # we are using `remove_duplicates_cpu` instead
+            def remove_duplicates_cpu(a):
+                return [
+                    a[i] for i in range(len(a)) if i == 0 or a[i - 1] != a[i]
+                ]
+
+            cu_window_seqlens = remove_duplicates_cpu(cu_window_seqlens)
+            cu_window_seqlens = torch.tensor(
+                cu_window_seqlens,
+                device=hidden_states.device,
+                dtype=grid_thw.dtype
+                if torch.jit.is_tracing() else torch.int32)
+
+        else:
+            cu_window_seqlens = torch.tensor(
+                cu_window_seqlens,
+                device=hidden_states.device,
+                dtype=grid_thw.dtype
+                if torch.jit.is_tracing() else torch.int32)
+            cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+
         seq_len, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)

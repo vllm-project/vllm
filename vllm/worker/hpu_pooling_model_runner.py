@@ -58,7 +58,7 @@ class HPUPoolingModelRunner(
         batch_size = input_tokens.size(0)
         seq_len = self._seq_len(attn_metadata)
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
-        super()._check_config(batch_size, seq_len, is_prompt, warmup_mode)
+        super()._check_config(batch_size, seq_len, attn_metadata, warmup_mode)
 
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         # use an empty tensor instead of `None`` to force Dynamo to pass

@@ -108,6 +108,5 @@ jobs:
                 --flavor=${{ matrix.tests.flavor}} \
                 --name="vllm-fork-${{github.event.number}}-${converted_test_name}" \
                 --namespace="framework" \
-                --priority="high" \
                 --retry \
                 --shm=10240           
