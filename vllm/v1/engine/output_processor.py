@@ -18,7 +18,13 @@ from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
 
 
 class RequestOutputCollector:
-    """Collects streamed RequestOutputs."""
+    """
+    Collects streamed RequestOutputs per individual request,
+    for hand-off to the consuming asyncio generate task.
+
+    When streaming deltas, RequestOutputs are merged if the
+    producer gets ahead of the consumer.
+    """
 
     def __init__(self, output_kind: RequestOutputKind):
         self.aggregate = output_kind == RequestOutputKind.DELTA
@@ -33,6 +39,7 @@ class RequestOutputCollector:
             # Coalesce the outputs in delta case.
             self.output.add(output)
         else:
+            # Just replace latest in non-delta case.
             self.output = output
 
     async def get(self) -> RequestOutput:
