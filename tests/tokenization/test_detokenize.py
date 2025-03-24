@@ -201,7 +201,7 @@ def test_oov_decode(tokenizer, fast):
 
     decoded_text, out_ids = _run_incremental_decode(
         tokenizer, [len(tokenizer)],
-        skip_special_tokens=False,
+        skip_special_tokens=True,
         starting_index=0,
         spaces_between_special_tokens=True,
         fast=fast)
@@ -233,14 +233,14 @@ def detokenizer(tokenizer_name: str) -> Detokenizer:
 @pytest.fixture(name="complete_sequence_token_ids")
 def create_complete_sequence_token_ids(complete_sequence: str,
                                        tokenizer) -> list[int]:
-    return tokenizer(complete_sequence).input_ids
+    return tokenizer(complete_sequence, add_special_tokens=False).input_ids
 
 
 def create_sequence(prompt_token_ids=None):
-    prompt_token_ids = prompt_token_ids or [1]
+    prompt_token_ids = prompt_token_ids or []
     return Sequence(
         seq_id=0,
-        inputs=token_inputs(prompt_token_ids, prompt="<s>"),
+        inputs=token_inputs(prompt_token_ids),
         block_size=16,
     )
 
@@ -291,7 +291,7 @@ def test_decode_sequence_logprobs(complete_sequence: str,
     assert sequential_result == "".join(sequential_logprobs_text_chosen_token)
     assert sequential_result != "".join(sequential_logprobs_text_other_token)
 
-    if skip_special_tokens:
+    if not skip_special_tokens:
         # Text for logprobs for the chosen token should be the same as the
         # generated text. Note that this will only be true if we skip
         # special tokens.
