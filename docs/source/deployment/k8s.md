@@ -17,7 +17,6 @@ Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 * [vllm-project/aibrix](https://github.com/vllm-project/aibrix)
 * [vllm-project/production-stack](integrations/production-stack.md)
 
-
 ## Deployment with CPUs
 
 First, create a Kubernetes PVC and Secret for downloading and storing Hugging Face model:
@@ -111,7 +110,6 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
-
 
 ## Deployment with GPUs
 
