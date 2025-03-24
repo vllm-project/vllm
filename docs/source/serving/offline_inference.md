@@ -99,7 +99,8 @@ llm = LLM(model="adept/fuyu-8b",
 
 :::{important}
 The default `max_num_seqs` has been raised from `256` in V0 to `1024` in V1.
-If you encounter OOM only when using V1 engine, try setting a lower value of `max_num_seqs`.
+If you encounter CUDA OOM only when using V1 engine, try setting a lower value of `max_num_seqs` or `gpu_memory_utilization`.
+On the other hand, if you get an error about insufficient memory for the cache blocks, you should increase `gpu_memory_utilization` as this indicates that your GPU has sufficient memory but you're not allocating enough of it to vLLM.
 :::
 
 #### Adjust cache size
