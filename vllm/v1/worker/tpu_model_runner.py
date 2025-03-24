@@ -714,7 +714,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
-        if self.lora_config:
+        if self.lora_config is not None:
             model = self.load_lora_model(model, self.model_config,
                                          self.scheduler_config,
                                          self.lora_config, self.device)
@@ -775,18 +775,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             torch._dynamo.mark_dynamic(input_ids, 0)
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
-        
-        punica_wrapper = self.lora_manager._adapter_manager.punica_wrapper
-        torch._dynamo.mark_dynamic(punica_wrapper._embeddings_indices, 1)
-        torch._dynamo.mark_dynamic(punica_wrapper._sampler_indices_padded, 0)
 
         with self.maybe_dummy_run_with_lora(
                 self.lora_config, np.array([num_tokens], dtype=np.int32)):
             with set_forward_context(attn_metadata, self.vllm_config, 0):
                 self.model(input_ids=input_ids,
-                        positions=position_ids,
-                        kv_caches=kv_caches,
-                        inputs_embeds=inputs_embeds)
+                           positions=position_ids,
+                           kv_caches=kv_caches,
+                           inputs_embeds=inputs_embeds)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -811,6 +807,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         num_tokens = 16
         hsize = self.model_config.get_hidden_size()
         device = self.device
+
+        if self.lora_config is not None:
+            punica_wrapper = self.lora_manager._adapter_manager.punica_wrapper
+            torch._dynamo.mark_dynamic(punica_wrapper._embeddings_indices, 1)
+            torch._dynamo.mark_dynamic(punica_wrapper._sampler_indices_padded,
+                                       0)
+
         # Compile sampling step for different model+sampler outputs in bucketed
         # n_tokens x max_num_reqs. Graph is really small so this is fine.
         while True:

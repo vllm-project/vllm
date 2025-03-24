@@ -14,7 +14,7 @@ def bgmv_expand(inputs: torch.Tensor,
                 add_inputs: bool = True):
 
     outputs = torch.ops.xla.bgmv_expand(inputs, lora_b_weights.transpose(2, 3),
-                                                lora_indices_tensor)
+                                        lora_indices_tensor)
 
     limit = output_tensor.shape[0]
     if outputs.shape[0] == 1 and output_tensor.shape[0] != 1:
@@ -37,7 +37,7 @@ def bgmv_shrink(inputs: torch.Tensor,
                 scaling: float = 1.0):
 
     return scaling * torch.ops.xla.bgmv_shrink(inputs, lora_b_weights,
-                                        lora_indices_tensor)
+                                               lora_indices_tensor)
 
 
 def bgmv_expand_slice(inputs: torch.Tensor,
@@ -47,7 +47,8 @@ def bgmv_expand_slice(inputs: torch.Tensor,
                       slice_offset: int,
                       slice_size: int,
                       add_inputs: bool = True):
-    outputs = torch.ops.xla.bgmv_expand(inputs, lora_b_weights.transpose(2, 3), lora_indices_tensor)
+    outputs = torch.ops.xla.bgmv_expand(inputs, lora_b_weights.transpose(2, 3),
+                                        lora_indices_tensor)
 
     outputs = F.pad(outputs, (slice_offset, output_tensor.shape[1] -
                               (slice_offset + slice_size), 0, 0))
