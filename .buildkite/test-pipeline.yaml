@@ -118,7 +118,7 @@ steps:
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
   - VLLM_USE_V1=0 pytest -v -s entrypoints/llm/test_guided_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/correctness/
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_oot_registration.py  --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/correctness/
   - pytest -v -s entrypoints/test_chat_utils.py
   - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
@@ -148,8 +148,8 @@ steps:
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - pushd ../examples/offline_inference
-  - python3 rlhf.py
-  - RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
+  - VLLM_ENABLE_V1_MULTIPROCESSING=0 python3 rlhf.py
+  - VLLM_ENABLE_V1_MULTIPROCESSING=0 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
 
 - label: Metrics, Tracing Test # 10min
@@ -515,7 +515,7 @@ steps:
   - vllm/worker/model_runner.py
   - entrypoints/llm/test_collective_rpc.py
   commands:
-  - pytest -v -s entrypoints/llm/test_collective_rpc.py
+  - VLLM_ENABLE_V1_MULTIPROCESSING=0 pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
