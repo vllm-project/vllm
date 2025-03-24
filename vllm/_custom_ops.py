@@ -738,6 +738,13 @@ def gptq_marlin_gemm(a: torch.Tensor,
                      use_atomic_add: bool = False,
                      use_fp32_reduce: bool = False,
                      is_zp_float: bool = False) -> torch.Tensor:
+    # FIXME(DefTruth): Remove this patch once gptq_marlin_gemm
+    # supports non-contiguous input. Currently, marlin requires
+    # contiguous memory layout, but prefix cache may cause `a`
+    # to be non-contiguous. We should lower the non-contiguous
+    # fix into the this function, since `gptq_marlin_gemm` has
+    # been used in multiple code paths, both AWQ and GPTQ.
+    a = a.contiguous()  # no-op if already contiguous
     return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, b_zeros,
                                          g_idx, perm, workspace, b_q_type.id,
                                          size_m, size_n, size_k, is_k_full,
