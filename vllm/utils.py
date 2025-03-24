@@ -172,7 +172,7 @@ U = TypeVar("U")
 
 _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
-_T = TypeVar("_T")
+_T = TypeVar('_T', bound=Optional[float])
 
 
 class _Sentinel:
@@ -218,7 +218,7 @@ class CacheInfo(NamedTuple):
         return self.hits / self.total
 
 
-class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
+class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V, _T]):
     """LRU Cache"""
 
     def __init__(self,
@@ -263,11 +263,14 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
 
     @overload
     def get(self, key: _K, /,
-            default: Optional[_V]) -> Optional[_V]:  # type: ignore
+            default: Optional[Union[_V, _T]]) -> Optional[Union[_V, _T]]:
         ...
 
-    def get(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
-        value: Optional[_V]
+    def get(self,
+            key: _K,
+            default: Optional[Union[_V,
+                                    _T]] = None) -> Optional[Union[_V, _T]]:
+        value: Optional[Union[_V, _T]]
         if key in self:
             value = self.__getitem__(key)
 
@@ -283,11 +286,13 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         ...
 
     @overload
-    def pop(self, key: _K, /,
-            default: Optional[_V]) -> Optional[_V]:  # type: ignore
+    def pop(self, key: _K, /, default: Optional[_V]) -> Optional[_V]:
         ...
 
-    def pop(self, key: _K, default: Optional[_V] = None) -> Optional[_V]:
+    def pop(self,
+            key: _K,
+            default: Optional[Union[_V,
+                                    _T]] = None) -> Optional[Union[_V, _T]]:
         if key in self:
             value = self[key]
             del self[key]
