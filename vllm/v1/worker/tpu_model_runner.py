@@ -780,11 +780,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         torch._dynamo.mark_dynamic(punica_wrapper._embeddings_indices, 1)
         torch._dynamo.mark_dynamic(punica_wrapper._sampler_indices_padded, 0)
 
-        with set_forward_context(attn_metadata, self.vllm_config, 0):
-            self.model(input_ids=input_ids,
-                       positions=position_ids,
-                       kv_caches=kv_caches,
-                       inputs_embeds=inputs_embeds)
+        with self.maybe_dummy_run_with_lora(
+                self.lora_config, np.array([num_tokens], dtype=np.int32)):
+            with set_forward_context(attn_metadata, self.vllm_config, 0):
+                self.model(input_ids=input_ids,
+                        positions=position_ids,
+                        kv_caches=kv_caches,
+                        inputs_embeds=inputs_embeds)
 
     def capture_model(self) -> None:
         """Compile the model."""
@@ -795,9 +797,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         num_tokens = 16
         while True:
             logger.info("  -- num_tokens: %d", num_tokens)
-            with self.maybe_dummy_run_with_lora(
-                    self.lora_config, np.array([num_tokens], dtype=np.int32)):
-                self._dummy_run(self.kv_caches, num_tokens)
+            self._dummy_run(self.kv_caches, num_tokens)
             xm.mark_step()
             if num_tokens >= self.max_num_tokens:
                 break
