@@ -53,9 +53,9 @@ class PDController(EngineClient):
                     |
                  [ zmq ]
                     |
-    [ PDWorker ]         [ PDWorker ]
-                    |
-    [  Engine  ]  <--->  [  Engine  ]
+    [ PDWorker ]          [ PDWorker ]
+         |                     |
+    [  Engine  ]  <-kv->  [  Engine  ]
 
     After PR #12957, we will support xPyD, so we will
     also need to implement a scheduler and service 
@@ -80,13 +80,12 @@ class PDController(EngineClient):
         # TODO: once https://github.com/vllm-project/vllm/pull/12957
         # lands, do service discovery to scale out workers.
         self.ctx = zmq.asyncio.Context()
-        self.to_decode = self.ctx.socket(zmq.constants.PUSH)
-        self.to_decode.bind(f"{decode_addr}")
         self.to_prefill = self.ctx.socket(zmq.constants.PUSH)
-        self.to_prefill.bind(f"{prefill_addr}")
+        self.to_prefill.connect(prefill_addr)
+        self.to_decode = self.ctx.socket(zmq.constants.PUSH)
+        self.to_decode.connect(decode_addr)
         self.controller_addr = controller_addr
-        self.decode_addr = decode_addr
-        self.prefill_addr = prefill_addr
+        self.ipc_paths = [prefill_addr, decode_addr, controller_addr]
 
         # Background loops (started on first generate()).
         self.output_handler: Optional[asyncio.Task] = None
@@ -123,8 +122,7 @@ class PDController(EngineClient):
         if (task := self.output_handler) is not None:
             task.cancel()
 
-        ipc_paths = [self.controller_addr, self.decode_addr, self.prefill_addr]
-        for path in ipc_paths:
+        for path in self.ipc_paths:
             socket_path = path.replace("ipc://", "")
             if os.path.exists(socket_path):
                 os.remove(socket_path)
@@ -178,7 +176,7 @@ class PDController(EngineClient):
         response = await q.get()
         if isinstance(response, Exception):
             raise response
-        logger.debug("Got Decode Response: %s", request.request_id)
+        logger.debug("Prefill Response: %s", request.request_id)
 
     async def _run_decode(
         self,
@@ -196,7 +194,7 @@ class PDController(EngineClient):
             response = await q.get()
             if isinstance(response, Exception):
                 raise response
-            logger.debug("Got Decode Response: %s", request.request_id)
+            logger.debug("Decode Response: %s", request.request_id)
             finished = response.finish_reason is not None
             yield response
 
@@ -269,11 +267,9 @@ class PDController(EngineClient):
             prompt_token_ids=prompt["prompt_token_ids"],
             sampling_params=sampling_params)
         request.sampling_params.max_tokens = 1
-        logger.debug("Sending Prefill: %s", request.request_id)
         pd_response = await self._run_prefill(request, q)
 
         # (2) Perform the Decodes.
-        logger.debug("Sending Decode: %s", request.request_id)
         request.sampling_params.max_tokens = original_max_tokens
         async for pd_response in self._run_decode(request, q):
             yield self._to_request_output(pd_response,

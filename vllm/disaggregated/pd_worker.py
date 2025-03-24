@@ -8,7 +8,8 @@ import zmq
 import zmq.asyncio
 
 from vllm.disaggregated.protocol import (PDAbortRequest, PDGenerationRequest,
-                                         PDGenerationResponse, PDRequestType)
+                                         PDGenerationResponse, PDRequestType,
+                                         PDResponseType)
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 
@@ -34,13 +35,13 @@ class PDWorker:
         self.engine = engine
 
         # ZMQ IPC.
-        self.worker_addr = worker_addr
-        self.controller_addr = controller_addr
+        self.worker_addr = f"ipc://{worker_addr}"
+        self.controller_addr = f"ipc://{controller_addr}"
         self.ctx = zmq.asyncio.Context()
-        self.from_client = self.ctx.socket(zmq.constants.PULL)
-        self.from_client.connect(f"ipc://{self.worker_addr}")
-        self.to_client = self.ctx.socket(zmq.constants.PUSH)
-        self.to_client.connect(f"ipc://{self.controller_addr}")
+        self.from_controller = self.ctx.socket(zmq.constants.PULL)
+        self.from_controller.bind(self.worker_addr)
+        self.to_controller = self.ctx.socket(zmq.constants.PUSH)
+        self.to_controller.connect(self.controller_addr)
         self.decode_generation = msgspec.msgpack.Decoder(PDGenerationRequest)
         self.decode_abort = msgspec.msgpack.Decoder(PDAbortRequest)
         self.encoder = msgspec.msgpack.Encoder()
@@ -71,9 +72,12 @@ class PDWorker:
         """
         logger.info("PDWorker is ready To handle requests.")
 
+        poller = zmq.asyncio.Poller()
+        poller.register(self.from_controller, zmq.POLLIN)
+
         while True:
             # 1) Get request from the Connector.
-            req_type, req_data = await self.from_client.recv_multipart()
+            req_type, req_data = await self.from_controller.recv_multipart()
 
             # 2) Handle the request.
             await self._handle_request(req_type, req_data)
@@ -85,11 +89,13 @@ class PDWorker:
             2) call the appropriate handler for the request type
         """
         if req_type == PDRequestType.GENERATION:
-            req = self.decode_generation(req_data)
+            req = self.decode_generation.decode(req_data)
             await self._generation_handler(req)
         elif req_type == PDRequestType.ABORT:
-            req = self.decode_abort(req_data)
+            req = self.decode_abort.decode(req_data)
             await self._abort_handler(req)
+        else:
+            raise Exception(f"Unknown Request Type: {req_type}.")
 
     async def _generation_handler(self, req: PDGenerationRequest):
         """
@@ -133,7 +139,5 @@ class PDWorker:
 
             # 4) Serialize and send to PDConroller.
             response_bytes = self.encoder.encode(response)
-            msg = [PDGenerationResponse.SUCCE, response_bytes]
-            logger.debug("Sending: %s", request_id)
-            await self.to_client.send_multipart(msg, copy=False)
-            logger.debug("Sent: %s", request_id)
+            msg = (PDResponseType.GENERATION, response_bytes)
+            await self.to_controller.send_multipart(msg, copy=False)

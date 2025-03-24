@@ -37,7 +37,7 @@ wait_for_server() {
 wait_for_disagg_server() {
   local log_file=$1
   timeout 1200 bash -c "
-    until grep -q 'zmq Server started at' $log_file; do
+    until grep -q 'PD Worker is ready' $log_file; do
       sleep 1
     done" && return 0 || return 1
 }

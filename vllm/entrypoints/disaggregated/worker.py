@@ -10,12 +10,14 @@ from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
 
-logger = init_logger(__name__)
+logger = init_logger("vllm.entrypoints.disaggregated.worker")
 
 
 async def run(args, engine: EngineClient):
     try:
-        worker = PDWorker(engine, args.worker_addr, args.controller_addr)
+        worker = PDWorker(engine=engine,
+                          worker_addr=args.worker_addr,
+                          controller_addr=args.controller_addr)
         await worker.run_busy_loop()
     finally:
         worker.shutdown()
@@ -25,7 +27,6 @@ async def main(args) -> None:
     logger.info("vLLM P/D Worker Server %s", VLLM_VERSION)
     logger.info("Args: %s", args)
 
-    args.disable_frontend_multiprocessing = False
     async with build_async_engine_client(args) as engine:
         await run(args, engine)
 
@@ -40,5 +41,8 @@ if __name__ == "__main__":
                         type=str,
                         required=True,
                         help='The address of the worker.')
+    parser.add_argument('--disable-frontend-multiprocessing',
+                        action="store_true",
+                        help='Disable MQLLMEngine for AsyncLLMEngine.')
     AsyncEngineArgs.add_cli_args(parser)
     uvloop.run(main(parser.parse_args()))

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Toy connector for prototyping.
+Toy API Server for prototyping.
 
-When PDConroller supports the protocol and we clean up the
-OpenAI Server, we can drop this in favor of vllm serve.
+Once the PDController is more mature and we clean up
+the OpenAI Server at bit, we can put the PDController
+directly inside and launch with vllm serve.
 """
 
 from collections.abc import AsyncIterator
