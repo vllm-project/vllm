@@ -192,7 +192,7 @@ __global__ void Marlin_24(
       int col_off = col_first - k_tiles * slice_col_par;
       slice_count = ceildiv(k_tiles - col_off, iters);
       if (col_off > 0) slice_count++;
-      auto delta_first = iters * blockIdx.x - col_first;
+      int delta_first = iters * blockIdx.x - col_first;
       if (delta_first < 0 || (col_off == 0 && delta_first == 0))
         slice_idx = slice_count - 1;
       else {
