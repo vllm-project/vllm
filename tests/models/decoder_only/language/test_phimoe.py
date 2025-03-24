@@ -3,7 +3,6 @@
 
 Run `pytest tests/models/test_phimoe.py`.
 """
-
 import pytest
 import torch
 
