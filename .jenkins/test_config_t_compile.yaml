@@ -4,98 +4,168 @@ stages:
     steps:
       - name: gsm8k_small_g3_tp1
         flavor: g3
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-small.txt -t 1
+        command: >
+          cd .jenkins/lm-eval-harness && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-small.txt -t 1
       - name: gsm8k_small_g3_tp2
         flavor: g3.s
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-small.txt -t 2
+        command: >
+          cd .jenkins/lm-eval-harness &&
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-small.txt -t 2
       - name: gsm8k_small_g2_tp1
         flavor: g2
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-small.txt -t 1
+        command: >
+          cd .jenkins/lm-eval-harness && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-small.txt -t 1
       - name: gsm8k_small_g2_tp2
         flavor: g2.s
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-small.txt -t 2
+        command: >
+          cd .jenkins/lm-eval-harness && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-small.txt -t 2
   - name: test_gsm8k_large_models
     steps:
       - name: gsm8k_large_g3_tp2
         flavor: g3.s
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-large.txt -t 2
+        command: >
+          cd .jenkins/lm-eval-harness && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-large.txt -t 2
       - name: gsm8k_large_g2_tp4
         flavor: g2.m
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-large.txt -t 4
+        command: >
+          cd .jenkins/lm-eval-harness && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-large.txt -t 4
   - name: test_gsm8k_fp8
     steps:
       - name: gsm8k_small_g3_tp1_fp8
         flavor: g3
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-fp8.txt -t 1
+        command: >
+          cd .jenkins/lm-eval-harness && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-fp8.txt -t 1
       - name: gsm8k_small_g3_tp2_fp8
         flavor: g3.s
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-fp8.txt -t 2
+        command: >
+          cd .jenkins/lm-eval-harness && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-fp8.txt -t 2
   - name: test_gsm8k_mss
     steps:
       - name: gsm8k_small_g3_tp1_mss
         flavor: g3
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-mss.txt -t 1
+        command: >
+          cd .jenkins/lm-eval-harness && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-mss.txt -t 1
       - name: gsm8k_small_g2_tp1_mss
         flavor: g2
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-mss.txt -t 1
+        command: >
+          cd .jenkins/lm-eval-harness && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-mss.txt -t 1
       - name: gsm8k_small_g3_tp2_mss
         flavor: g3.s
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-mss.txt -t 2
+        command: >
+          cd .jenkins/lm-eval-harness && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-mss.txt -t 2
       - name: gsm8k_small_g2_tp2_mss
         flavor: g2.s
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-mss.txt -t 2
+        command: >
+          cd .jenkins/lm-eval-harness && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-mss.txt -t 2
       - name: gsm8k_small_g2_tp1_spec_decode
         flavor: g2
-        command: cd .jenkins/lm-eval-harness && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-mss.txt -t 1
+        command: >
+          cd .jenkins/lm-eval-harness && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-mss.txt -t 1
   - name: test_gsm8k_spec_decode
     steps:
       - name: gsm8k_small_g2_tp1_mlp_spec_decode
         flavor: g2
-        command: PT_HPU_LAZY_MODE=0 TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True pytest -v tests/spec_decode/e2e/test_mlp_correctness.py::test_mlp_e2e_greedy_correctness 
+        command: > 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
+          pytest -v tests/spec_decode/e2e/test_mlp_correctness.py::test_mlp_e2e_greedy_correctness 
       - name: gsm8k_small_g2_tp1_medusa_spec_decode
         flavor: g2
-        command: PT_HPU_LAZY_MODE=0 TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True pytest -v tests/spec_decode/e2e/test_medusa_correctness.py::test_medusa_e2e_greedy_correctness
+        command: >
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
+          pytest -v tests/spec_decode/e2e/test_medusa_correctness.py::test_medusa_e2e_greedy_correctness
       - name: gsm8k_small_g2_tp1_eagle_spec_decode
         flavor: g2
-        command: PT_HPU_LAZY_MODE=0 VLLM_COS_SIN_RECOMPUTE=true TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True pytest -v tests/spec_decode/e2e/test_eagle_correctness.py::test_eagle_e2e_greedy_correctness
+        command:  >
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 VLLM_COS_SIN_RECOMPUTE=true TORCH_COMPILE_DISABLE=true VLLM_CONTIGUOUS_PA=false VLLM_SKIP_WARMUP=True 
+          pytest -v tests/spec_decode/e2e/test_eagle_correctness.py::test_eagle_e2e_greedy_correctness
   - name: tests_lora
     steps:
       - name: test_llama_lora
         flavor: g2
-        command: PT_HPU_LAZY_MODE=0 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_llama_hpu.py::test_llama_lora_1x
+        command:  >
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 VLLM_SKIP_WARMUP=true 
+          pytest -v tests/lora/test_llama_hpu.py::test_llama_lora_1x
       - name: test_multilora
         flavor: g2
-        command: PT_HPU_LAZY_MODE=0 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_multilora_hpu.py::test_llama_multilora_1x
+        command: >
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 VLLM_SKIP_WARMUP=true 
+          pytest -v tests/lora/test_multilora_hpu.py::test_llama_multilora_1x
       # - name: test_long_context
       #   flavor: g2
-      #   command: PT_HPU_LAZY_MODE=0 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_long_context_hpu.py::test_quality
+      #   command:  VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 VLLM_SKIP_WARMUP=true pytest -v tests/lora/test_long_context_hpu.py::test_quality
   - name: tests_multimodal
     steps:
       - name: multimodal_small_g3_tp1
         flavor: g3
-        command: cd .jenkins/vision && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-small.txt -t 1
+        command: >
+          cd .jenkins/vision &&
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-small.txt -t 1
       - name: multimodal_small_g3_tp2
         flavor: g3.s
-        command: cd .jenkins/vision && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-small.txt -t 2
+        command: >
+          cd .jenkins/vision && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-small.txt -t 2
       - name: multimodal_small_g3_tp1_mss
         flavor: g3
-        command: cd .jenkins/vision && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-mss.txt -t 1
+        command: >
+          cd .jenkins/vision && VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-mss.txt -t 1
       - name: multimodal_small_g3_tp2_mss
         flavor: g3.s
-        command: cd .jenkins/vision && PT_HPU_LAZY_MODE=0 bash run-tests.sh -c configs/models-mss.txt -t 2
+        command: >
+          cd .jenkins/vision && 
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+          bash run-tests.sh -c configs/models-mss.txt -t 2
   - name: tests_int4_quantization
     steps:
       - name: test_awq
         flavor: g2
-        command: PT_HPU_LAZY_MODE=0 VLLM_SKIP_WARMUP=true pytest -v tests/quantization/test_awq.py::test_awq
+        command: >
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 VLLM_SKIP_WARMUP=true 
+          pytest -v tests/quantization/test_awq.py::test_awq
       - name: test_gptq
         flavor: g2
-        command: PT_HPU_LAZY_MODE=0 VLLM_SKIP_WARMUP=true pytest -v tests/quantization/test_gptq.py::test_gptq
+        command: >
+          VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 VLLM_SKIP_WARMUP=true 
+          pytest -v tests/quantization/test_gptq.py::test_gptq
   - name: tests_guided_decode
     steps:
     - name: test_lazy_outlines
       flavor: g2
-      command: export VLLM_SKIP_WARMUP=true && pip install -e tests/vllm_test_utils && PT_HPU_LAZY_MODE=0 pytest -v tests/entrypoints/llm/test_lazy_outlines.py -s -vvv --log-cli-level=INFO 
+      command: >
+        export VLLM_SKIP_WARMUP=true && pip install -e tests/vllm_test_utils && 
+        VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+        pytest -v tests/entrypoints/llm/test_lazy_outlines.py -s -vvv --log-cli-level=INFO 
     - name: test_guided_generate
       flavor: g2
-      command: export VLLM_SKIP_WARMUP=true && pip install -e tests/vllm_test_utils && PT_HPU_LAZY_MODE=0 pytest -v tests/entrypoints/llm/test_guided_generate.py -s -vvv --log-cli-level=INFO
+      command: >
+        export VLLM_SKIP_WARMUP=true && pip install -e tests/vllm_test_utils &&
+        VLLM_T_COMPILE_FULLGRAPH=True PT_HPU_LAZY_MODE=0 
+        pytest -v tests/entrypoints/llm/test_guided_generate.py -s -vvv --log-cli-level=INFO

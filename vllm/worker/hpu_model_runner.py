@@ -247,35 +247,54 @@ class HpuModelAdapter:
             self.set_causal_option(self.model)
         if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
         ) and not enforce_eager:
+            fullgraph = os.getenv('VLLM_T_COMPILE_FULLGRAPH',
+                                  'false').strip().lower() in ("1", "true")
             if os.getenv('VLLM_REGIONAL_COMPILATION',
                          'true').lower() == 'true':
                 self.regional_compilation_layers_list = [
                     RMSNorm, VocabParallelEmbedding
                 ]
-                self._regional_compilation(self.model)
+                self._regional_compilation(self.model, fullgraph)
             else:
                 self.model = torch.compile(self.model,
                                            backend='hpu_backend',
+                                           fullgraph=fullgraph,
                                            dynamic=False)
 
     def _regional_compilation(self,
                               module,
+                              fullgraph,
                               parent_module=None,
                               module_name=None):
         if isinstance(module, torch.nn.ModuleList):
             for children_name, children_module in module.named_children():
-                self._compile_region(module, children_name, children_module)
+                self._compile_region(module, fullgraph, children_name,
+                                     children_module)
         elif any(
                 isinstance(module, layer)
                 for layer in self.regional_compilation_layers_list):
-            self._compile_region(parent_module, module_name, module)
+            self._compile_region(
+                parent_module,
+                fullgraph,
+                module_name,
+                module,
+            )
         else:
             for children_name, children_module in module.named_children():
-                self._regional_compilation(children_module, module,
+                self._regional_compilation(children_module, fullgraph, module,
                                            children_name)
 
-    def _compile_region(self, model, name, module):
-        module = torch.compile(module, backend='hpu_backend', dynamic=False)
+    def _compile_region(
+        self,
+        model,
+        fullgraph,
+        name,
+        module,
+    ):
+        module = torch.compile(module,
+                               backend='hpu_backend',
+                               fullgraph=fullgraph,
+                               dynamic=False)
         setattr(model, name, module)
 
     def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device,
