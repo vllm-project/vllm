@@ -5,8 +5,8 @@ import pytest
 
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.scheduler_output import (CachedRequestData, NewRequestData,
-                                           SchedulerOutput)
+from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
+                                       SchedulerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 
@@ -137,7 +137,7 @@ def test_update_states_new_request(model_runner):
     metadata_before = model_runner.input_batch.sampling_metadata
     model_runner._update_states(scheduler_output)
 
-    assert not _is_sampling_metadata_changed(model_runner, metadata_before)
+    assert _is_sampling_metadata_changed(model_runner, metadata_before)
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
     assert _is_req_state_block_table_match(model_runner, req_id)
@@ -170,7 +170,7 @@ def test_update_states_request_finished(model_runner):
 
     metadata_before = model_runner.input_batch.sampling_metadata
     model_runner._update_states(scheduler_output)
-    assert not _is_sampling_metadata_changed(model_runner, metadata_before)
+    assert _is_sampling_metadata_changed(model_runner, metadata_before)
     assert not _is_req_added(model_runner, req_id)
     assert not _is_req_scheduled(model_runner, req_id)
 
@@ -229,7 +229,7 @@ def test_update_states_request_resumed(model_runner):
 
     metadata_before = model_runner.input_batch.sampling_metadata
     model_runner._update_states(scheduler_output)
-    assert not _is_sampling_metadata_changed(model_runner, metadata_before)
+    assert _is_sampling_metadata_changed(model_runner, metadata_before)
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
     assert _is_req_state_block_table_match(model_runner, req_id)
