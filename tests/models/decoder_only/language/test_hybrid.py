@@ -35,16 +35,7 @@ def test_models(
     if "Bamba" in model:
         example_prompts.pop(3)
 
-    model_kwargs = {
-        "use_mamba_kernels": False,  # mamba kernels are not installed so HF 
-        # don't use them
-    }
-    if "Zamba2" in model or "plamo" in model:
-        # Zamba2 HF implementation automatically checks if mamba kernels are
-        # installed
-        model_kwargs = {}
-
-    with hf_runner(model, dtype=dtype, model_kwargs=model_kwargs) as hf_model:
+    with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
@@ -141,16 +132,7 @@ def test_mamba_prefill_chunking(hf_runner, vllm_runner, example_prompts,
     elif "plamo" in model:
         example_prompts.pop(7)
 
-    model_kwargs = {
-        "use_mamba_kernels": False,  # mamba kernels are not installed so HF 
-        # don't use them
-    }
-    if "Zamba2" in model or "plamo" in model:
-        # Zamba2 HF implementation automatically checks if mamba kernels are
-        # installed
-        model_kwargs = {}
-
-    with hf_runner(model, dtype=dtype, model_kwargs=model_kwargs) as hf_model:
+    with hf_runner(model, dtype=dtype) as hf_model:
         non_chunked = hf_model.generate_greedy(example_prompts, max_tokens)
 
     with vllm_runner(model,
