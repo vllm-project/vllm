@@ -4,6 +4,8 @@ import warnings
 from typing import Optional
 
 import pytest
+from packaging.version import Version
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
@@ -766,6 +768,10 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
 )
 # yapf: enable
 def test_resolve_content_format_hf_defined(model, expected_format):
+    if model == QWEN25VL_MODEL_ID and Version(TRANSFORMERS_VERSION) < Version(
+            "4.49.0"):
+        pytest.skip("Qwen2.5-VL requires transformers>=4.49.0")
+
     tokenizer_group = TokenizerGroup(
         model,
         enable_lora=False,
