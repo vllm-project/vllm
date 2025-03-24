@@ -22,7 +22,7 @@ docker run --privileged --net host --shm-size=16G -it \
     && export VLLM_USE_V1=1 \
     && export VLLM_XLA_CHECK_RECOMPILATION=1 \
     && echo TEST_1 \
-    && python3 /workspace/vllm/tests/tpu/test_compilation.py \
+    && pytest /workspace/vllm/tests/tpu/test_compilation.py \
     && echo TEST_2 \
     && pytest -v -s /workspace/vllm/tests/v1/tpu/test_basic.py \
     && echo TEST_3 \
